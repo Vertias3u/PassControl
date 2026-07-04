@@ -1,0 +1,32 @@
+# Local Redis for PassControl, exposed over the Upstash REST API via
+# serverless-redis-http (SRH) — because lib/state/redis.ts uses the @upstash/redis
+# REST client (Redis.fromEnv()), which cannot talk to a plain TCP Redis.
+#
+# Point the app at it with:
+#   UPSTASH_REDIS_REST_URL=http://localhost:8079
+#   UPSTASH_REDIS_REST_TOKEN=passcontrol_local_dev_token
+#
+# Bring up:   docker compose -f docker/compose.yml up -d
+# Spike:      node scripts/srh-spike.mjs
+# Tear down:  docker compose -f docker/compose.yml down -v
+#
+# NOTE: Supabase (Postgres + Vault + Auth) is NOT here — it's run via the Supabase
+# CLI (`supabase start`), the official Docker stack CI already uses. This file only
+# supplies the Redis-over-REST piece the CLI doesn't give you.
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+
+  srh:
+    image: hiett/serverless-redis-http@sha256:5b0bb9239fce53abf87b2018a7a0deb9ec7bd900c5360738fe5fbeeb426f9150
+    depends_on:
+      - redis
+    environment:
+      SRH_MODE: env
+      SRH_TOKEN: passcontrol_local_dev_token
+      SRH_CONNECTION_STRING: "redis://redis:6379"
+    ports:
+      - "8079:80"
+    restart: unless-stopped

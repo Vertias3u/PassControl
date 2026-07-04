@@ -1,0 +1,17 @@
+#!/bin/sh
+# Local enforcement of the CI gate (the $0 stand-in for GitHub branch protection,
+# which is a paid feature on private repos). Runs the fast security/correctness
+# checks before any push and aborts if they fail, so a regression can't leave this
+# machine. The full gate (build + npm audit) still runs server-side in CI.
+#
+# Active via:  git config core.hooksPath .githooks   (set up once; see README/below)
+# Bypass in an emergency with:  git push --no-verify
+set -e
+
+echo "pre-push: typecheck…"
+npm run --silent typecheck
+
+echo "pre-push: tests…"
+npm test --silent
+
+echo "pre-push: checks passed ✓"

@@ -1,0 +1,16 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env*.local
+.env.docker
+# Supabase CLI local state (from `supabase start`) — not part of the repo; our
+# local stack uses CLI defaults, not a committed config.
+supabase/
+*.tsbuildinfo
+next-env.d.ts
+.vercel
+coverage/
+.DS_Store
+**/.DS_Store

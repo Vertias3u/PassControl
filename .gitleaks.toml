@@ -1,0 +1,17 @@
+# gitleaks config for PassControl.
+# Extends the default ruleset, but does not flag the committed env TEMPLATES
+# (.env.example, .env.docker.example) — they contain only placeholder values by
+# design. Real secrets live in .env.local / .env.docker, which are gitignored and
+# never committed. This keeps `gitleaks detect` a true pass/fail gate for a
+# security-focused repo (contributors + CI won't hit a false positive on the sample).
+title = "PassControl gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Env templates hold placeholders, not secrets"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\.docker\.example$''',
+]

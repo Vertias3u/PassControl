@@ -1,0 +1,355 @@
+openapi: 3.1.0
+info:
+  title: PassControl Control-Plane API
+  version: "1.0.0"
+  description: >
+    Developer API for managing a PassControl agent fleet. Authenticated with a
+    `pc_` API key (Authorization: Bearer). All access is tenant-isolated to the
+    key's owner. Reads need a `read` key; writes need a `write` key. Mutations
+    accept an `Idempotency-Key` header. See DOCUMENTATION.md for prose docs.
+servers:
+  - url: "{gateway}/api/control/v1"
+    variables:
+      gateway:
+        default: https://your-gateway.example.com
+        description: Your PassControl deployment origin.
+security:
+  - bearerAuth: []
+
+paths:
+  /agents:
+    get:
+      summary: List agents
+      operationId: listAgents
+      parameters:
+        - { $ref: "#/components/parameters/Status" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: The caller's agents.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Agent" } }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create an agent
+      operationId: createAgent
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentCreate" }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties: { id: { type: string, format: uuid }, name: { type: string } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /agents/{id}:
+    parameters:
+      - { $ref: "#/components/parameters/AgentId" }
+    get:
+      summary: Get an agent
+      operationId: getAgent
+      responses:
+        "200":
+          description: The agent.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Agent" } }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Update an agent (name / scopes / budgets)
+      operationId: updateAgent
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentUpdate" }
+      responses:
+        "200": { $ref: "#/components/responses/AgentIdOk" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Revoke an agent (terminal)
+      operationId: revokeAgent
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { $ref: "#/components/responses/AgentStatusOk" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /agents/{id}/suspend:
+    post:
+      summary: Suspend an agent
+      operationId: suspendAgent
+      parameters:
+        - { $ref: "#/components/parameters/AgentId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { $ref: "#/components/responses/AgentStatusOk" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /agents/{id}/resume:
+    post:
+      summary: Resume a suspended agent
+      operationId: resumeAgent
+      parameters:
+        - { $ref: "#/components/parameters/AgentId" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { $ref: "#/components/responses/AgentStatusOk" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /logs:
+    get:
+      summary: List gateway call logs
+      operationId: listLogs
+      parameters:
+        - { $ref: "#/components/parameters/AgentIdQuery" }
+        - { $ref: "#/components/parameters/Status" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Recent gateway calls.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { type: array, items: { $ref: "#/components/schemas/Log" } } }
+
+  /audit:
+    get:
+      summary: List admin-action audit events
+      operationId: listAudit
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Admin-action trail.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } } }
+
+  /spend:
+    get:
+      summary: Per-agent and fleet spend
+      operationId: getSpend
+      responses:
+        "200":
+          description: Spend rollup (cost in micro-cents; USD = µ¢ / 100,000,000).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/Spend" } }
+
+  /kill-switch:
+    get:
+      summary: Get the per-tenant kill-switch state
+      operationId: getKillSwitch
+      responses:
+        "200":
+          description: Current state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/KillState" } }
+    put:
+      summary: Arm or disarm the per-tenant master kill switch
+      operationId: setKillSwitch
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [armed]
+              properties: { armed: { type: boolean } }
+      responses:
+        "200":
+          description: New state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties: { armed: { type: boolean }, affected: { type: integer } }
+        "422": { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A `pc_` developer API key.
+
+  parameters:
+    AgentId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AgentIdQuery:
+      name: agent_id
+      in: query
+      schema: { type: string, format: uuid }
+    Status:
+      name: status
+      in: query
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string, maxLength: 200 }
+      description: Retrying with the same key will not re-apply the mutation.
+
+  responses:
+    Error:
+      description: Error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    AgentIdOk:
+      description: OK.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: object
+                properties: { id: { type: string, format: uuid } }
+    AgentStatusOk:
+      description: OK.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              data:
+                type: object
+                properties: { id: { type: string, format: uuid }, status: { type: string } }
+
+  schemas:
+    Scope:
+      type: object
+      properties:
+        provider: { type: string, enum: [openai, anthropic] }
+        models: { type: array, items: { type: string } }
+    Agent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        passport_pubkey: { type: string, description: base64url Ed25519 public key }
+        status: { type: string, enum: [active, suspended, revoked] }
+        budget_tokens: { type: [integer, "null"] }
+        budget_cents: { type: [integer, "null"] }
+        spent_tokens: { type: integer }
+        spent_microcents: { type: integer }
+        allowed_scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
+        created_at: { type: string, format: date-time }
+        last_seen_at: { type: [string, "null"], format: date-time }
+    AgentCreate:
+      type: object
+      required: [name, passportPubkey, scopes]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        passportPubkey: { type: string, description: base64url Ed25519 public key (you keep the private key) }
+        scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
+        budget_tokens: { type: [integer, "null"], minimum: 0 }
+        budget_cents: { type: [integer, "null"], minimum: 0 }
+    AgentUpdate:
+      type: object
+      description: Partial — send only the fields to change.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
+        budget_tokens: { type: [integer, "null"], minimum: 0 }
+        budget_cents: { type: [integer, "null"], minimum: 0 }
+    Log:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        agent_id: { type: [string, "null"], format: uuid }
+        passport_id: { type: string }
+        jti: { type: string }
+        provider: { type: [string, "null"] }
+        model: { type: [string, "null"] }
+        input_tokens: { type: [integer, "null"] }
+        output_tokens: { type: [integer, "null"] }
+        cost_microcents: { type: [integer, "null"] }
+        status: { type: string }
+        latency_ms: { type: [integer, "null"] }
+        created_at: { type: string, format: date-time }
+    AuditEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string }
+        target_type: { type: [string, "null"] }
+        target_id: { type: [string, "null"] }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+    Spend:
+      type: object
+      properties:
+        fleet:
+          type: object
+          properties: { spent_tokens: { type: integer }, spent_microcents: { type: integer } }
+        agents:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              name: { type: string }
+              spent_tokens: { type: integer }
+              spent_microcents: { type: integer }
+    KillState:
+      type: object
+      properties:
+        armed: { type: boolean }
+        platform_kill: { type: boolean }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }

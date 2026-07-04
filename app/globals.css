@@ -1,0 +1,140 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================================
+   PassControl "Control Tower" theme — dark-first mission-control.
+   Base: Space Black / Ice Gray / Neon Cyan. Status is first-class.
+   ============================================================================ */
+:root {
+  /* shadcn token surface (dark-first; defined once, used everywhere) */
+  --background: #0f0f0f;
+  --foreground: #f5f5f5;
+  --card: #1a1a1a;
+  --card-foreground: #f5f5f5;
+  --popover: #1a1a1a;
+  --popover-foreground: #f5f5f5;
+  --primary: #00e5ff; /* neon cyan accent */
+  --primary-foreground: #0f0f0f;
+  --secondary: #242424;
+  --secondary-foreground: #f5f5f5;
+  --muted: #242424;
+  --muted-foreground: #a0a0a0;
+  --accent: #242424;
+  --accent-foreground: #f5f5f5;
+  --destructive: #ef4444;
+  --destructive-foreground: #f5f5f5;
+  --border: #333333;
+  --input: #333333;
+  --ring: #00e5ff;
+  --radius: 0.375rem; /* 6px base (design lg) */
+
+  /* semantic status (first-class) */
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --info: #06b6d4;
+  --surface-elevated: #242424;
+  --text-secondary: #a0a0a0;
+  --text-muted: #707070;
+
+  /* legacy aliases — existing (not-yet-reskinned) components reference these */
+  --bg: var(--background);
+  --panel: var(--card);
+  --text: var(--foreground);
+  --green: var(--success);
+  --red: var(--danger);
+  --amber: var(--warning);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: calc(var(--radius) - 1px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 2px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    box-sizing: border-box;
+  }
+  html {
+    /* IBM Plex Mono loaded via next/font in layout.tsx; everything inherits it */
+    font-family: var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+  }
+}
+
+/* ============================================================================
+   Legacy utility classes (kept until each component is re-skinned).
+   Re-pointed to the new token palette so the old UI degrades gracefully.
+   Wrapped in @layer base so Tailwind utilities (later layer) always win — an
+   unlayered rule like `a {}` would otherwise beat utility classes like
+   `text-primary-foreground` on a styled link/button.
+   ============================================================================ */
+@layer base {
+a { color: var(--primary); }
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.grid { display: grid; gap: 16px; }
+.row { display: flex; gap: 12px; align-items: center; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted-foreground); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+
+.pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.pill.active { background: rgba(16,185,129,.15); color: var(--success); }
+.pill.suspended { background: rgba(245,158,11,.15); color: var(--warning); }
+.pill.revoked { background: rgba(239,68,68,.15); color: var(--danger); }
+
+button {
+  background: var(--primary); color: var(--primary-foreground); border: 0; border-radius: 8px;
+  padding: 8px 14px; font-weight: 600; cursor: pointer; font-family: inherit;
+}
+button.ghost { background: transparent; border: 1px solid var(--border); color: var(--foreground); }
+button.danger { background: var(--danger); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+
+input, select, textarea {
+  background: #0e1220; border: 1px solid var(--border); color: var(--foreground);
+  border-radius: 8px; padding: 8px 10px; width: 100%; font-family: inherit;
+}
+
+code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
+.mono { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; font-size: 12px; }
+.muted { color: var(--muted-foreground); }
+}

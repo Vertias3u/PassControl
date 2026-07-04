@@ -1,0 +1,109 @@
+name: CI
+
+# The security/correctness gate. Runs on every push to main and on every PR.
+# If any step goes red, the commit/PR is flagged — this is what stops a future
+# change from silently breaking a security test or pulling in a vulnerable
+# dependency. (Enable "Require status checks to pass" in branch protection to
+# make a green run mandatory before merge.)
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-progress run if a newer commit is pushed to the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # GitHub-hosted runners on the Free plan include monthly minutes for private
+    # repos; this job is a few minutes per run, well within the $0 budget.
+    # redis+srh mirror docker/compose.yml so the budget-reserve Lua integration
+    # test (tests/reserve.redis.test.ts) runs against a real Redis in CI instead
+    # of silently skipping — the money boundary must gate here, not just locally.
+    services:
+      redis:
+        image: redis:7-alpine
+      srh:
+        image: hiett/serverless-redis-http@sha256:5b0bb9239fce53abf87b2018a7a0deb9ec7bd900c5360738fe5fbeeb426f9150
+        env:
+          SRH_MODE: env
+          SRH_TOKEN: ci_test_token
+          SRH_CONNECTION_STRING: "redis://redis:6379"
+        ports:
+          - 8079:80
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # Reproducible install straight from the committed lockfile.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+        env:
+          TEST_UPSTASH_REDIS_REST_URL: http://localhost:8079
+          TEST_UPSTASH_REDIS_REST_TOKEN: ci_test_token
+
+      - name: Build
+        run: npm run build
+        env:
+          # Build must not depend on real secrets. Provide inert placeholders so
+          # Next can compile; nothing here touches a live service.
+          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+
+      # Fail only on high/critical advisories. The 2 remaining moderates are
+      # build-time tooling bundled inside Next with no in-range fix (documented
+      # in the security pass); blocking on them would just flap the gate. A new
+      # high/critical — the kind that actually ships risk — turns this red.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+  # Spins up a real Supabase local stack (Postgres + auth/vault/roles), applies
+  # the migrations from scratch, and runs the RLS invariant test against it. This
+  # enforces trust boundary #5 (tenant isolation) on every push — if a migration
+  # ever forgets to enable RLS or weakens a policy, this job goes red. Separate
+  # from `verify` so the Docker startup doesn't slow the fast checks.
+  rls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          # Pinned (not "latest") — resolving the latest release hits an external
+          # API that has timed out transiently; a fixed version is reproducible.
+          version: 2.107.0
+
+      - name: Start Supabase (local stack)
+        run: |
+          supabase init </dev/null || true   # generate config for the installed CLI; no-op if present
+          supabase start
+
+      - name: Apply migrations (fresh DB, in order)
+        run: |
+          for f in db/migrations/*.sql; do
+            echo "── applying $f"
+            psql -v ON_ERROR_STOP=1 "$DB_URL" -f "$f"
+          done
+
+      - name: RLS invariant test
+        run: psql -v ON_ERROR_STOP=1 -f db/tests/rls_invariants.sql "$DB_URL"
+
+      - name: Stop Supabase
+        if: always()
+        run: supabase stop || true
