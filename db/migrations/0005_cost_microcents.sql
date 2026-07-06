@@ -7,9 +7,9 @@
 -- columns to micro-cents (1 cent = 1_000_000 µ¢; 1 USD = 100_000_000 µ¢) as
 -- bigint. Per-token prices are exact integers in µ¢, so totals never drift.
 --
--- budget_cents is left in cents: it is user-configured cap granularity and is not
--- enforced on the hot path (the proxy caps on tokens). Only the accumulating
--- columns needed the finer unit.
+-- budget_cents is left in cents: it is user-configured cap granularity. Hot-path
+-- enforcement is added later in 0010 using Redis micro-cent counters; only the
+-- accumulating columns need the finer DB unit here.
 -- ============================================================================
 
 -- agent_logs.cost_cents -> cost_microcents (bigint), scaling existing values.

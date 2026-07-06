@@ -86,15 +86,17 @@ visas for you.
 
 `POST /api/v1/:provider/*path`  ·  `provider` ∈ `openai | anthropic`
 
-It's drop-in: point your existing SDK's `baseURL` at `…/api/v1/<provider>` and pass the visa
-as the API key. The upstream path is preserved (`…/api/v1/anthropic/v1/messages` →
-`api.anthropic.com/v1/messages`). PassControl verifies the visa → checks kill switch → checks
-scope → reserves budget → injects your real provider key → streams the response back, and logs
-the call. The provider key is never exposed.
+It's drop-in for allowlisted endpoints (chat: `POST /v1/chat/completions`, `POST /v1/messages`;
+model listing: `GET /v1/models`): point your existing SDK's `baseURL` at
+`…/api/v1/<provider>` and pass the visa as the API key. The upstream chat path is preserved
+(`…/api/v1/anthropic/v1/messages` → `api.anthropic.com/v1/messages`). PassControl verifies
+the visa → checks kill switch → checks scope → checks endpoint allowlist → reserves budget →
+injects your real provider key → streams the response back, and logs the call. The provider
+key is never exposed.
 
 Errors: `401 missing_visa | invalid_visa`, `402 blocked_budget`, `403 blocked_suspended |
-blocked_scope`, `404 unknown_provider`, `413 payload_too_large`, `429 rate_limited`,
-`502 upstream_unreachable`.
+blocked_scope | blocked_endpoint`, `404 unknown_provider`, `413 payload_too_large`,
+`429 rate_limited`, `502 upstream_unreachable`.
 
 ---
 

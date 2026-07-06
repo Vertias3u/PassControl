@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { costMicrocents, estimateTokens } from "../lib/pricing";
+import { costMicrocents, estimateTokenUsage, estimateTokens } from "../lib/pricing";
 
 // 1 cent = 1_000_000 micro-cents; 1 USD = 100_000_000 micro-cents.
 // Per-token price in µ¢ = (USD per 1M tokens) * 100, so costs are EXACT integers.
@@ -35,6 +35,15 @@ describe("costMicrocents — sub-cent precision (no rounding to zero)", () => {
 
   it("estimateTokens still bounds a request body", () => {
     expect(estimateTokens({ max_tokens: 100, messages: [{ role: "user", content: "hi" }] })).toBeGreaterThan(0);
+  });
+
+  it("estimates OpenAI max_completion_tokens as output tokens", () => {
+    const estimate = estimateTokenUsage({
+      max_completion_tokens: 25,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(estimate.outputTokens).toBe(25);
+    expect(estimate.totalTokens).toBe(estimate.inputTokens + 25);
   });
 });
 

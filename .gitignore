@@ -6,11 +6,29 @@ out/
 .env*.local
 .env.docker
 # Supabase CLI local state (from `supabase start`) — not part of the repo; our
-# local stack uses CLI defaults, not a committed config.
-supabase/
+# local stack uses CLI defaults, not a committed config. Leading slash anchors
+# this to the repo root so it does NOT also match lib/supabase/ (the SSR clients).
+/supabase/
 *.tsbuildinfo
 next-env.d.ts
 .vercel
 coverage/
 .DS_Store
 **/.DS_Store
+
+# Private scratch — AI reviews, logs, drafts, and the scrapped landing-page shell.
+# These are internal-only (also blocked from the public tree by curate-public.sh
+# FORBIDDEN_NAMES). Gitignored so a stray `git add -A` can't sweep them into the
+# private repo either.
+/public-launch/
+/output_anth.md
+/loghhh.md
+/shit_log.md
+/hermes_compat.md
+/REDDIT_POST.md
+/FABLE_output.md
+/fable_review2.md
+/Fable_review2.md
+/fable5again.md
+/fable5output1.md
+/Fable5output1.md

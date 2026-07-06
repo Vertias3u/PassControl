@@ -11,6 +11,14 @@ interface Price {
   outputMicrocentsPerToken: number;
 }
 
+export const MICROCENTS_PER_CENT = 1_000_000;
+
+export interface TokenUsageEstimate {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 // micro-cents per token = (USD per 1M tokens) * 100. (USD/1e6 tok = 1e8 µ¢/1e6 tok.)
 const mc = (usdPerMillion: number) => Math.round(usdPerMillion * 100);
 
@@ -43,18 +51,24 @@ export function costMicrocents(model: string, inputTokens: number, outputTokens:
   return inputTokens * p.inputMicrocentsPerToken + outputTokens * p.outputMicrocentsPerToken;
 }
 
-/** Cheap pre-flight token estimate from a request body. */
-export function estimateTokens(body: unknown, fallback = 1000): number {
+/** Cheap pre-flight usage estimate from a request body. */
+export function estimateTokenUsage(body: unknown, fallback = 1000): TokenUsageEstimate {
   try {
-    const b = body as { max_tokens?: number; messages?: unknown };
-    const max = typeof b.max_tokens === "number" ? b.max_tokens : 0;
+    const b = body as { max_tokens?: number; max_completion_tokens?: number; messages?: unknown };
+    const rawMax = b.max_tokens ?? b.max_completion_tokens;
+    const max = typeof rawMax === "number" && Number.isFinite(rawMax) ? rawMax : 0;
     const promptChars = JSON.stringify(b.messages ?? "").length;
     const promptTokens = Math.ceil(promptChars / 4);
-    // Floor: the estimate feeds Redis INCRBY (integers only) — a fractional
-    // max_tokens from the request body must not surface as "N.5" in the Lua.
-    const est = Math.floor(promptTokens + (max || 1024));
-    return est > 0 ? est : fallback;
+    const outputTokens = Math.max(0, Math.floor(max || 1024));
+    const totalTokens = promptTokens + outputTokens;
+    if (totalTokens > 0) return { inputTokens: promptTokens, outputTokens, totalTokens };
   } catch {
-    return fallback;
+    // fall through to fallback below
   }
+  return { inputTokens: 0, outputTokens: fallback, totalTokens: fallback };
+}
+
+/** Cheap pre-flight token estimate from a request body. */
+export function estimateTokens(body: unknown, fallback = 1000): number {
+  return estimateTokenUsage(body, fallback).totalTokens;
 }

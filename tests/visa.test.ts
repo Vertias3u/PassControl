@@ -16,6 +16,7 @@ describe("work visa", () => {
     budgetTokens: null,
     budgetCents: null,
     spentTokens: 0,
+    spentMicrocents: 0,
   };
 
   it("mints and verifies a visa with correct claims", async () => {
@@ -24,7 +25,9 @@ describe("work visa", () => {
       ...base,
       scope,
       budgetTokens: 1000,
+      budgetCents: 5,
       spentTokens: 42,
+      spentMicrocents: 12_345,
     });
     expect(expSeconds).toBe(300);
     const claims = await verifyVisa(token);
@@ -35,7 +38,9 @@ describe("work visa", () => {
     expect(claims!.jti).toBe("j1");
     expect(claims!.scope).toEqual(scope);
     expect(claims!.bt).toBe(1000);
+    expect(claims!.bc).toBe(5);
     expect(claims!.st).toBe(42);
+    expect(claims!.sc).toBe(12_345);
   });
 
   it("rejects a visa missing the owner claim", async () => {

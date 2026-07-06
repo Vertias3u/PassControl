@@ -24,6 +24,7 @@ export interface VisaClaims extends JWTPayload {
   bt: number | null; // budget_tokens snapshot at mint (null = unlimited)
   bc: number | null; // budget_cents snapshot at mint (null = no cost cap)
   st: number; // spent_tokens snapshot at mint (seeds the Redis counter NX)
+  sc: number; // spent_microcents snapshot at mint (seeds the Redis cost counter NX)
   ver: number;
 }
 
@@ -68,6 +69,7 @@ export interface MintVisaInput {
   budgetTokens: number | null;
   budgetCents: number | null;
   spentTokens: number;
+  spentMicrocents: number;
 }
 
 export async function mintVisa(input: MintVisaInput): Promise<{ token: string; expSeconds: number }> {
@@ -79,6 +81,7 @@ export async function mintVisa(input: MintVisaInput): Promise<{ token: string; e
     bt: input.budgetTokens,
     bc: input.budgetCents,
     st: input.spentTokens,
+    sc: input.spentMicrocents,
     ver: VISA_VER,
   })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
@@ -105,6 +108,17 @@ export async function verifyVisa(token: string): Promise<VisaClaims | null> {
       // Reject any token missing a required claim or carrying an unexpected
       // version (jose has already enforced signature, alg, iss, aud, exp/nbf).
       if (!claims.sub || !claims.agid || !claims.uid || !claims.jti || !Array.isArray(claims.scope))
+        return null;
+      if (
+        typeof claims.st !== "number" ||
+        !Number.isFinite(claims.st) ||
+        typeof claims.sc !== "number" ||
+        !Number.isFinite(claims.sc)
+      )
+        return null;
+      if (!(claims.bt == null || (typeof claims.bt === "number" && Number.isFinite(claims.bt))))
+        return null;
+      if (!(claims.bc == null || (typeof claims.bc === "number" && Number.isFinite(claims.bc))))
         return null;
       if (claims.ver !== VISA_VER) return null;
       return claims;

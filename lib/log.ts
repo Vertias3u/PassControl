@@ -15,6 +15,7 @@ export interface LogEntry {
   status:
     | "ok"
     | "blocked_budget"
+    | "blocked_endpoint"
     | "blocked_suspended"
     | "blocked_scope"
     | "upstream_error";

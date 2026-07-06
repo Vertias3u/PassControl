@@ -88,7 +88,7 @@ export async function POST(req: Request) {
   const db = serviceClient();
   const { data: agent, error } = await db
     .from("agents")
-    .select("id, user_id, status, allowed_scopes, budget_tokens, budget_cents, spent_tokens")
+    .select("id, user_id, status, allowed_scopes, budget_tokens, budget_cents, spent_tokens, spent_microcents")
     .eq("passport_pubkey", payload.passport_id)
     .maybeSingle();
   if (error) return fail(500, "lookup_failed");
@@ -117,6 +117,7 @@ export async function POST(req: Request) {
     budgetTokens: agent.budget_tokens == null ? null : Number(agent.budget_tokens),
     budgetCents: agent.budget_cents == null ? null : Number(agent.budget_cents),
     spentTokens: Number(agent.spent_tokens ?? 0),
+    spentMicrocents: Number(agent.spent_microcents ?? 0),
   });
 
   // Coalesced last-seen (flushed to Postgres by the reconcile cron).

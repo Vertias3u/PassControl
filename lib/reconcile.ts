@@ -25,13 +25,16 @@ export interface ReconcileResult {
 interface SpendRow {
   agent_id: string;
   spent_tokens: number;
+  spent_microcents: number;
 }
 
 /**
  * Reconcile budget counters and flush last-seen.
- *  - spent:<agid>  <- authoritative running total from the incremental RPC.
- *  - reserved:<agid> <- sum of still-live per-jti markers (orphaned reservations
- *    from a crashed reconcile have already expired) → self-heals the leak.
+ *  - spent:<agid> / spent_cost:<agid> <- authoritative running totals from the
+ *    incremental RPC.
+ *  - reserved:<agid> / reserved_cost:<agid> <- sums of still-live per-jti markers
+ *    (orphaned reservations from a crashed reconcile have already expired) →
+ *    self-heals the leak.
  *  - lastseen:<agid> -> agents.last_seen_at.
  */
 export async function runReconcile(
@@ -47,6 +50,7 @@ export async function runReconcile(
   for (const row of (totals ?? []) as SpendRow[]) {
     const agentId = row.agent_id;
     await r.set(`spent:${agentId}`, Number(row.spent_tokens) || 0);
+    await r.set(`spent_cost:${agentId}`, Number(row.spent_microcents) || 0);
 
     const markerKeys = await scanKeys(r, `reserve:${agentId}:*`);
     let reserved = 0;
@@ -55,6 +59,14 @@ export async function runReconcile(
       reserved = vals.reduce((s: number, v) => s + (Number(v) || 0), 0);
     }
     await r.set(`reserved:${agentId}`, reserved);
+
+    const costMarkerKeys = await scanKeys(r, `reserve_cost:${agentId}:*`);
+    let reservedMicrocents = 0;
+    if (costMarkerKeys.length) {
+      const vals = ((await r.mget<(number | null)[]>(...costMarkerKeys)) ?? []) as (number | null)[];
+      reservedMicrocents = vals.reduce((s: number, v) => s + (Number(v) || 0), 0);
+    }
+    await r.set(`reserved_cost:${agentId}`, reservedMicrocents);
     result.agents++;
   }
 

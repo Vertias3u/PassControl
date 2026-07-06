@@ -25,7 +25,7 @@ function makeRedis(initial: Record<string, number> = {}) {
 
 // Supabase double: rpc() returns the incremental totals; from().update().eq()
 // records last-seen flushes.
-function makeDb(totals: { agent_id: string; spent_tokens: number }[]) {
+function makeDb(totals: { agent_id: string; spent_tokens: number; spent_microcents: number }[]) {
   const updates: { table: string; values: any; id: string }[] = [];
   const rpc = vi.fn(async (_name: string, _args: any) => ({ data: totals, error: null }));
   const from = vi.fn((table: string) => ({
@@ -53,18 +53,20 @@ describe("runReconcile — incremental, checkpoint-backed spend reconciliation",
 
   it("sets spent:<agid> to the authoritative total returned by the RPC", async () => {
     const { db } = makeDb([
-      { agent_id: "a1", spent_tokens: 1200 },
-      { agent_id: "a2", spent_tokens: 0 },
+      { agent_id: "a1", spent_tokens: 1200, spent_microcents: 45_000 },
+      { agent_id: "a2", spent_tokens: 0, spent_microcents: 0 },
     ]);
     const res = await runReconcile(db, redish.r as any, { lagSeconds: 60 });
     expect(redish.sets["spent:a1"]).toBe(1200);
+    expect(redish.sets["spent_cost:a1"]).toBe(45_000);
     expect(redish.sets["spent:a2"]).toBe(0);
+    expect(redish.sets["spent_cost:a2"]).toBe(0);
     expect(res.agents).toBe(2);
   });
 
   it("resets reserved:<agid> to the sum of still-live per-jti markers", async () => {
     redish = makeRedis({ "reserve:a1:j1": 50, "reserve:a1:j2": 75, "reserve:a2:j9": 10 });
-    const { db } = makeDb([{ agent_id: "a1", spent_tokens: 0 }]);
+    const { db } = makeDb([{ agent_id: "a1", spent_tokens: 0, spent_microcents: 0 }]);
     await runReconcile(db, redish.r as any, { lagSeconds: 60 });
     // a1 has two live markers => reserved = 125; a2 was not returned, untouched.
     expect(redish.sets["reserved:a1"]).toBe(125);
@@ -72,9 +74,25 @@ describe("runReconcile — incremental, checkpoint-backed spend reconciliation",
   });
 
   it("resets reserved to 0 when an agent has no live markers (leak self-heal)", async () => {
-    const { db } = makeDb([{ agent_id: "a1", spent_tokens: 500 }]);
+    const { db } = makeDb([{ agent_id: "a1", spent_tokens: 500, spent_microcents: 2_500 }]);
     await runReconcile(db, redish.r as any, { lagSeconds: 60 });
     expect(redish.sets["reserved:a1"]).toBe(0);
+    expect(redish.sets["reserved_cost:a1"]).toBe(0);
+  });
+
+  it("resets reserved_cost:<agid> to the sum of still-live cost markers", async () => {
+    redish = makeRedis({
+      "reserve:a1:j1": 50,
+      "reserve_cost:a1:j1": 500,
+      "reserve:a1:j2": 75,
+      "reserve_cost:a1:j2": 900,
+      "reserve_cost:a2:j9": 10,
+    });
+    const { db } = makeDb([{ agent_id: "a1", spent_tokens: 0, spent_microcents: 0 }]);
+    await runReconcile(db, redish.r as any, { lagSeconds: 60 });
+    expect(redish.sets["reserved:a1"]).toBe(125);
+    expect(redish.sets["reserved_cost:a1"]).toBe(1_400);
+    expect(redish.sets["reserved_cost:a2"]).toBeUndefined();
   });
 
   it("flushes coalesced lastseen:<agid> into agents.last_seen_at", async () => {

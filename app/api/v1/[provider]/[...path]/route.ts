@@ -21,8 +21,8 @@ import {
 } from "@/lib/state/redis";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
-import { scopeAllows } from "@/lib/scope";
-import { costMicrocents, estimateTokens } from "@/lib/pricing";
+import { endpointAllows, isModelListing, scopeAllows } from "@/lib/scope";
+import { costMicrocents, estimateTokenUsage, MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { createUsageTransform, usageFromJson, type Usage } from "@/lib/usage/parseStream";
 import { writeLog, mirrorSpend } from "@/lib/log";
 import { isProvider, upstreamBaseUrl, authHeaders, type ProviderId } from "@/lib/providers";
@@ -89,7 +89,10 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   const jti = claims.jti;
   const userId: string = claims.uid;
   const capTokens: number | null = claims.bt ?? null;
+  const capMicrocents: number | null =
+    claims.bc == null ? null : Math.round(Number(claims.bc) * MICROCENTS_PER_CENT);
   const spentSnapshot: number = Number(claims.st ?? 0);
+  const spentMicrocentsSnapshot: number = Number(claims.sc ?? 0);
 
   // ── Per-agent request-rate limit (call-volume DoS / abuse guard) ─────────────
   const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
@@ -146,10 +149,16 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   const model: string = typeof bodyObj?.model === "string" ? bodyObj.model : "";
   const wantsStream = bodyObj?.stream === true;
 
-  // ── 3. Scope ────────────────────────────────────────────────────────────────
-  if (!scopeAllows(claims.scope, provider, model)) {
+  // ── 3. Scope + endpoint allowlist ────────────────────────────────────────────
+  // Per-model scope applies to model-bound calls; the read-only model-listing
+  // endpoint carries no model, so it is gated by the endpoint allowlist instead.
+  if (!isModelListing(path) && !scopeAllows(claims.scope, provider, model)) {
     logBlocked("blocked_scope", model);
     return err(403, "blocked_scope");
+  }
+  if (!endpointAllows(provider, req.method, path)) {
+    logBlocked("blocked_endpoint", model);
+    return err(403, "blocked_endpoint");
   }
 
   // S5: ensure OpenAI streams report usage.
@@ -159,15 +168,19 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   const forwardBody = JSON.stringify(bodyObj);
 
   // ── 4. Budget reserve (atomic) ───────────────────────────────────────────────
-  const estimate = estimateTokens(bodyObj);
-  if (capTokens != null) {
-    await seedSpent(agentId, spentSnapshot);
+  const estimatedUsage = estimateTokenUsage(bodyObj);
+  const estimate = estimatedUsage.totalTokens;
+  const estimateMicrocents = costMicrocents(model, estimatedUsage.inputTokens, estimatedUsage.outputTokens);
+  if (capTokens != null || capMicrocents != null) {
+    await seedSpent(agentId, spentSnapshot, spentMicrocentsSnapshot);
   }
   const reserve = await reserveBudget({
     agentId,
     jti,
     estimate,
+    estimateMicrocents,
     capTokens,
+    capMicrocents,
     markerTtlSeconds: RESERVE_MARKER_TTL_S,
   });
   if (!reserve.ok) {
@@ -179,7 +192,14 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   const reconcile = (usage: Usage, status: Parameters<typeof writeLog>[0]["status"]) => {
     const cost = costMicrocents(model, usage.inputTokens, usage.outputTokens);
     return Promise.all([
-      reconcileBudget({ agentId, jti, estimate, actualTokens: usage.inputTokens + usage.outputTokens }),
+      reconcileBudget({
+        agentId,
+        jti,
+        estimate,
+        estimateMicrocents,
+        actualTokens: usage.inputTokens + usage.outputTokens,
+        actualMicrocents: cost,
+      }),
       writeLog({
         agentId,
         userId,

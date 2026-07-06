@@ -62,7 +62,7 @@ create table if not exists public.agent_logs (
   input_tokens  integer,
   output_tokens integer,
   cost_cents    integer,
-  status        text not null,                  -- ok | blocked_budget | blocked_suspended | blocked_scope | upstream_error
+  status        text not null,                  -- ok | blocked_budget | blocked_endpoint | blocked_suspended | blocked_scope | upstream_error
   latency_ms    integer,
   created_at    timestamptz not null default now()
 );
