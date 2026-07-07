@@ -30,7 +30,15 @@ review. Treat it accordingly: **run it on a non-critical provider key first.**
 - **Tenant isolation** is enforced in code on the service-role path and by Postgres RLS;
   `db/tests/rls_invariants.sql` checks it, and CI runs it against a from-scratch database.
 - **Revocation** is layered: Redis-backed per-tenant/platform kill switch, per-agent
-  suspend, and short visa TTLs.
+  suspend, and short visa TTLs. Suspend/revoke also persist to Postgres (`agents.status`),
+  and visa minting rejects a non-active agent — so revocation is durable at the *mint*
+  boundary. The instant, in-flight layer (blocking an already-issued visa) is the Redis
+  suspend/kill state; for that to be reliable, run Redis with **key eviction disabled**
+  (Upstash paid tier, or self-hosted `maxmemory-policy noeviction`). On an evicting Redis
+  under memory pressure, an evicted suspend/kill key can let an *already-issued* visa keep
+  working until it expires — bounded by the visa TTL (default 5 min, max 15). Set
+  `KILL_SWITCH_FAIL_CLOSED=true` to make kill-switch/suspend read failures block rather than
+  pass through.
 
 ## In scope
 Auth/visa flows, the proxy and key handling, tenant isolation / RLS, the control-plane API

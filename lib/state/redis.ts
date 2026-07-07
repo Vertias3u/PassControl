@@ -182,7 +182,14 @@ export async function purgeAgentCaches(agentId: string, providers: string[]): Pr
 
 // ── Per-agent fast revocation ─────────────────────────────────────────────────
 export async function isSuspended(agentId: string): Promise<boolean> {
-  return (await redis().exists(k.suspended(agentId))) === 1;
+  try {
+    return (await redis().exists(k.suspended(agentId))) === 1;
+  } catch {
+    // Match the Redis-backed kill switch: fail open by default to avoid blocking
+    // every agent on a transient Redis read blip; operators can opt into strict
+    // fail-closed behavior for revocation reads.
+    return process.env.KILL_SWITCH_FAIL_CLOSED === "true";
+  }
 }
 
 export async function suspendAgent(agentId: string): Promise<void> {
