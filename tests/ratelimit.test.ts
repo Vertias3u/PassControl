@@ -1,18 +1,31 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Mock the Upstash client with an in-memory INCR/EXPIRE so we can test the
-// limiter's behavior without a real Redis.
-const { store, redisMock } = vi.hoisted(() => {
+// Mock the Upstash client with an in-memory EVAL/Lua-shaped operation so we can
+// test the limiter's behavior without a real Redis.
+const { store, ttls, redisMock } = vi.hoisted(() => {
   const store = new Map<string, number>();
+  const ttls = new Map<string, number>();
   const redisMock = {
     incr: vi.fn(async (k: string) => {
       const n = (store.get(k) ?? 0) + 1;
       store.set(k, n);
       return n;
     }),
-    expire: vi.fn(async () => 1),
+    expire: vi.fn(async (k: string, seconds: number) => {
+      ttls.set(k, seconds);
+      return 1;
+    }),
+    ttl: vi.fn(async (k: string) => ttls.get(k) ?? -1),
+    eval: vi.fn(async (_script: string, keys: string[], args: string[]) => {
+      const key = keys[0]!;
+      const windowSeconds = Number(args[0]);
+      const n = (store.get(key) ?? 0) + 1;
+      store.set(key, n);
+      if (n === 1 || (ttls.get(key) ?? -1) < 0) ttls.set(key, windowSeconds);
+      return n;
+    }),
   };
-  return { store, redisMock };
+  return { store, ttls, redisMock };
 });
 vi.mock("../lib/state/redis", () => ({ redis: () => redisMock }));
 
@@ -20,8 +33,11 @@ import { rateLimit } from "../lib/ratelimit";
 
 beforeEach(() => {
   store.clear();
+  ttls.clear();
   redisMock.incr.mockClear();
   redisMock.expire.mockClear();
+  redisMock.ttl.mockClear();
+  redisMock.eval.mockClear();
 });
 
 describe("rate limiter — /api/auth/challenge brute-force guard", () => {
@@ -48,9 +64,20 @@ describe("rate limiter — /api/auth/challenge brute-force guard", () => {
     expect(r2.remaining).toBe(1);
   });
 
-  it("sets the window TTL only on the first hit in the window", async () => {
+  it("uses one atomic operation while keeping the window TTL", async () => {
     await rateLimit("k", 5, 60);
     await rateLimit("k", 5, 60);
-    expect(redisMock.expire).toHaveBeenCalledTimes(1);
+    expect(redisMock.eval).toHaveBeenCalledTimes(2);
+    expect(await redisMock.ttl("ratelimit:k")).toBe(60);
+  });
+
+  it("repairs a counter that has no TTL so it never wedges forever", async () => {
+    store.set("ratelimit:wedged", 7);
+    expect(await redisMock.ttl("ratelimit:wedged")).toBe(-1);
+
+    await rateLimit("wedged", 10, 60);
+
+    expect(redisMock.eval).toHaveBeenCalledTimes(1);
+    expect(await redisMock.ttl("ratelimit:wedged")).toBe(60);
   });
 });

@@ -24,8 +24,22 @@ describe("costMicrocents — sub-cent precision (no rounding to zero)", () => {
     expect(costMicrocents("claude-something-new", 10, 10)).toBe(10 * 300 + 10 * 1500);
   });
 
-  it("returns 0 for an unknown model (never guesses a price)", () => {
+  it("returns 0 for an unknown model when no provider is known", () => {
     expect(costMicrocents("mystery-model", 1000, 1000)).toBe(0);
+  });
+
+  it("falls back to the known provider's highest rate for an unlisted model", () => {
+    // Groq max known rate: llama-3.3-70b-versatile at 59 µ¢ input / 79 µ¢ output.
+    expect(costMicrocents("some-new-model", 1000, 500, "groq")).toBe(1000 * 59 + 500 * 79);
+  });
+
+  it("keeps listed model pricing exact instead of using the fallback", () => {
+    expect(costMicrocents("llama-3.1-8b-instant", 1000, 500, "groq")).toBe(1000 * 5 + 500 * 8);
+  });
+
+  it("uses each provider's own fallback rate for unknown models", () => {
+    expect(costMicrocents("same-unknown-model", 1000, 500, "groq")).toBe(1000 * 59 + 500 * 79);
+    expect(costMicrocents("same-unknown-model", 1000, 500, "deepseek")).toBe(1000 * 44 + 500 * 87);
   });
 
   it("uses provider-specific prices for OpenAI-compatible providers", () => {

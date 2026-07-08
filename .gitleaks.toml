@@ -10,8 +10,15 @@ title = "PassControl gitleaks config"
 useDefault = true
 
 [allowlist]
-description = "Env templates hold placeholders, not secrets"
+description = "Placeholders and test fixtures, not real secrets"
 paths = [
   '''\.env\.example$''',
   '''\.env\.docker\.example$''',
+  # Test files carry dummy secret-shaped fixtures by design (e.g. a 32-byte
+  # "previous-secret-…" for the VISA_SECRET length check, "sk-not-ours-…" fake
+  # keys). Real secrets never live in tests — they're in gitignored .env files —
+  # and scripts/curate-public.sh runs its own independent secret grep over the
+  # whole tree as a second layer, so allowlisting fixtures keeps gitleaks a clean
+  # pass/fail gate without disabling real detection on shippable code.
+  '''tests/.*\.test\.ts$''',
 ]

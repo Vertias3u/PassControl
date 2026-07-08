@@ -48,15 +48,25 @@ function ttlSeconds(): number {
   return Math.min(900, Math.max(300, Math.floor(raw)));
 }
 
+function secretBytes(name: "VISA_SECRET" | "VISA_SECRET_PREV", value: string): Uint8Array {
+  const bytes = utf8ToBytes(value);
+  if (bytes.length < 32) {
+    throw new Error(`${name} must be at least 32 bytes for HS256 visa signing`);
+  }
+  return bytes;
+}
+
 function currentSecret(): Uint8Array {
   const s = process.env.VISA_SECRET;
   if (!s) throw new Error("VISA_SECRET is not set");
-  return utf8ToBytes(s);
+  return secretBytes("VISA_SECRET", s);
 }
 
 function acceptedSecrets(): Uint8Array[] {
   const secrets = [currentSecret()];
-  if (process.env.VISA_SECRET_PREV) secrets.push(utf8ToBytes(process.env.VISA_SECRET_PREV));
+  if (process.env.VISA_SECRET_PREV) {
+    secrets.push(secretBytes("VISA_SECRET_PREV", process.env.VISA_SECRET_PREV));
+  }
   return secrets;
 }
 

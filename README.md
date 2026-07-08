@@ -14,6 +14,9 @@ self-host it, or use the managed version when it's available.
 > first, and see [Security](#security) for responsible disclosure. We'd rather you know than
 > find out.
 
+**New here? Start with the [Getting Started tutorial](./TUTORIAL.md)** — clone to a real
+governed agent in ~15 minutes.
+
 ---
 
 ## Why

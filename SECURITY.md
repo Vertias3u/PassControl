@@ -39,6 +39,12 @@ review. Treat it accordingly: **run it on a non-critical provider key first.**
   working until it expires — bounded by the visa TTL (default 5 min, max 15). Set
   `KILL_SWITCH_FAIL_CLOSED=true` to make kill-switch/suspend read failures block rather than
   pass through.
+- **Client IP rate limits assume a trusted proxy.** The unauthenticated challenge throttle
+  and control-plane pre-auth flood guard key on `X-Forwarded-For` / `X-Real-IP`. Behind
+  Vercel or another trusted reverse proxy, those headers represent the real client IP. If
+  you run bare `next start` directly on the internet, clients can forge/rotate those
+  headers and the per-IP limits become advisory; self-hosters should put PassControl behind
+  a proxy that overwrites forwarding headers.
 
 ## In scope
 Auth/visa flows, the proxy and key handling, tenant isolation / RLS, the control-plane API

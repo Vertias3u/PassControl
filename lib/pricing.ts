@@ -75,6 +75,19 @@ const PRICES: Price[] = [
   { provider: "deepseek", pattern: "deepseek-reasoner", inputMicrocentsPerToken: mc(0.14), outputMicrocentsPerToken: mc(0.28) },
 ];
 
+const FALLBACK_PRICES = PRICES.reduce<Partial<Record<ProviderId, Price>>>((acc, price) => {
+  const current = acc[price.provider];
+  acc[price.provider] = current
+    ? {
+        provider: price.provider,
+        pattern: "*",
+        inputMicrocentsPerToken: Math.max(current.inputMicrocentsPerToken, price.inputMicrocentsPerToken),
+        outputMicrocentsPerToken: Math.max(current.outputMicrocentsPerToken, price.outputMicrocentsPerToken),
+      }
+    : { ...price, pattern: "*" };
+  return acc;
+}, {});
+
 function matches(pattern: string, model: string): boolean {
   if (pattern === "*") return true;
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
@@ -88,7 +101,11 @@ export function costMicrocents(
   outputTokens: number,
   provider?: ProviderId
 ): number {
-  const p = PRICES.find((x) => (!provider || x.provider === provider) && matches(x.pattern, model));
+  const p =
+    PRICES.find((x) => (!provider || x.provider === provider) && matches(x.pattern, model)) ??
+    (provider ? FALLBACK_PRICES[provider] : undefined);
+  // A known provider should always have a fallback row. Returning 0 here means a
+  // provider was added without pricing rows, which should be treated as a bug.
   if (!p) return 0;
   return inputTokens * p.inputMicrocentsPerToken + outputTokens * p.outputMicrocentsPerToken;
 }

@@ -1,10 +1,7 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { mintVisa, verifyVisa } from "../lib/auth/visa";
 
-beforeAll(() => {
-  process.env.VISA_SECRET = "test-secret-test-secret-test-secret-32";
-  process.env.VISA_TTL_SECONDS = "300";
-});
+const STRONG_SECRET = "test-secret-test-secret-test-secret-32";
 
 describe("work visa", () => {
   const base = {
@@ -18,6 +15,17 @@ describe("work visa", () => {
     spentTokens: 0,
     spentMicrocents: 0,
   };
+
+  beforeAll(() => {
+    process.env.VISA_SECRET = STRONG_SECRET;
+    process.env.VISA_TTL_SECONDS = "300";
+  });
+
+  beforeEach(() => {
+    process.env.VISA_SECRET = STRONG_SECRET;
+    delete process.env.VISA_SECRET_PREV;
+    process.env.VISA_TTL_SECONDS = "300";
+  });
 
   it("mints and verifies a visa with correct claims", async () => {
     const scope = [{ provider: "anthropic", models: ["claude-*"] }];
@@ -59,5 +67,27 @@ describe("work visa", () => {
     const { expSeconds } = await mintVisa(base);
     expect(expSeconds).toBe(300);
     process.env.VISA_TTL_SECONDS = "300";
+  });
+
+  it("rejects a primary VISA_SECRET shorter than 32 bytes", async () => {
+    process.env.VISA_SECRET = "secret";
+    await expect(mintVisa(base)).rejects.toThrow("VISA_SECRET must be at least 32 bytes");
+  });
+
+  it("rejects a previous rotation secret shorter than 32 bytes", async () => {
+    process.env.VISA_SECRET_PREV = "short-prev";
+    await expect(verifyVisa("not.a.jwt")).rejects.toThrow("VISA_SECRET_PREV must be at least 32 bytes");
+  });
+
+  it("accepts current and previous secrets when both are at least 32 bytes", async () => {
+    process.env.VISA_SECRET = STRONG_SECRET;
+    process.env.VISA_SECRET_PREV = "previous-secret-previous-secret-32";
+
+    const { token } = await mintVisa(base);
+    await expect(verifyVisa(token)).resolves.toMatchObject({
+      sub: "pid",
+      agid: "aid",
+      uid: "uid",
+    });
   });
 });
