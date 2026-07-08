@@ -34,32 +34,60 @@ export function scopeAllows(scopes: ScopeEntry[], provider: string, model: strin
 interface EndpointRule {
   readonly method: string;
   readonly path: readonly string[];
+  readonly upstreamPath: readonly string[];
 }
+
+const OPENAI_CHAT_PATH = ["v1", "chat", "completions"] as const;
+const OPENAI_MODELS_PATH = ["v1", "models"] as const;
+const ANTHROPIC_MESSAGES_PATH = ["v1", "messages"] as const;
+const DEEPSEEK_CHAT_PATH = ["chat", "completions"] as const;
+
 const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
   openai: [
-    { method: "POST", path: ["v1", "chat", "completions"] },
-    { method: "GET", path: ["v1", "models"] },
+    { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
   ],
   anthropic: [
-    { method: "POST", path: ["v1", "messages"] },
-    { method: "GET", path: ["v1", "models"] },
+    { method: "POST", path: ANTHROPIC_MESSAGES_PATH, upstreamPath: ANTHROPIC_MESSAGES_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
   ],
   groq: [
-    { method: "POST", path: ["v1", "chat", "completions"] },
-    { method: "GET", path: ["v1", "models"] },
+    { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
   ],
   mistral: [
-    { method: "POST", path: ["v1", "chat", "completions"] },
-    { method: "GET", path: ["v1", "models"] },
+    { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
   ],
   together: [
-    { method: "POST", path: ["v1", "chat", "completions"] },
-    { method: "GET", path: ["v1", "models"] },
+    { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
   ],
   deepseek: [
-    { method: "POST", path: ["chat", "completions"] },
+    { method: "POST", path: DEEPSEEK_CHAT_PATH, upstreamPath: DEEPSEEK_CHAT_PATH },
   ],
 };
+
+function pathEquals(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((seg, i) => seg === b[i]);
+}
+
+function endpointRuleFor(
+  provider: ProviderId,
+  method: string,
+  path: readonly string[]
+): EndpointRule | null {
+  const m = method.toUpperCase();
+  return ENDPOINT_ALLOWLIST[provider].find((rule) => rule.method === m && pathEquals(rule.path, path)) ?? null;
+}
 
 /** True if this (method, path) is one of the fixed, known-good endpoints. */
 export function endpointAllows(
@@ -67,18 +95,21 @@ export function endpointAllows(
   method: string,
   path: readonly string[]
 ): boolean {
-  const m = method.toUpperCase();
-  return (ENDPOINT_ALLOWLIST[provider] ?? []).some(
-    (rule) =>
-      rule.method === m &&
-      rule.path.length === path.length &&
-      rule.path.every((seg, i) => seg === path[i])
-  );
+  return endpointRuleFor(provider, method, path) !== null;
 }
 
-/** The model-listing endpoint (GET /v1/models) carries no model, so the
+/** Canonical upstream endpoint path for an allowed client path, or null if denied. */
+export function canonicalEndpointPath(
+  provider: ProviderId,
+  method: string,
+  path: readonly string[]
+): readonly string[] | null {
+  return endpointRuleFor(provider, method, path)?.upstreamPath ?? null;
+}
+
+/** The model-listing endpoints (GET /models or /v1/models) carry no model, so the
  *  per-model scope check does not apply to it — it is gated by the endpoint
  *  allowlist (GET-only) instead. */
 export function isModelListing(path: readonly string[]): boolean {
-  return path.length === 2 && path[0] === "v1" && path[1] === "models";
+  return (path.length === 1 && path[0] === "models") || pathEquals(path, OPENAI_MODELS_PATH);
 }

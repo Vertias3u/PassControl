@@ -267,7 +267,7 @@ components:
     Scope:
       type: object
       properties:
-        provider: { type: string, enum: [openai, anthropic] }
+        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek] }
         models: { type: array, items: { type: string } }
     Agent:
       type: object

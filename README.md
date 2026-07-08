@@ -37,9 +37,11 @@ PassControl removes the key from the agent entirely and puts a governed gateway 
 - 🪪 Per-agent cryptographic identity (Ed25519), short-lived revocable visas
 - 💸 Enforced per-agent **token + cost (USD)** budgets — reserved pre-flight, reconciled after
 - 🎯 **Capability scoping** — a visa is scoped to specific models *and* endpoints, so a
-  chat-scoped agent can't reach `/v1/files`, fine-tuning, batches, etc. with your key
+  chat-scoped agent can't reach files, fine-tuning, batches, responses, embeddings, etc.
+  with your key
 - ⛔ Layered, per-tenant kill switch + per-agent suspend — revoke a running agent mid-task
-- 📒 Per-agent / per-passport audit trail (append-only, tamper-evident)
+- 📒 Per-agent / per-passport audit trail (append-only; direct `UPDATE` / `DELETE` /
+  `TRUNCATE` rejected by the database)
 - 🧰 Drop-in for your SDK (OpenAI, Anthropic, + OpenAI-compatible **Groq / Mistral / Together
   / DeepSeek**), **or any agent** via the visa sidecar — point OpenHands / Aider / Cline /
   Continue at a local proxy and it just works
@@ -123,6 +125,9 @@ const pc = new PassControl({ gateway, passportId, passportSecret });
 const openai = new OpenAI(pc.clientOptions("openai")); // baseURL + auth wired; visas auto-refresh
 ```
 
+The SDK is vendored in this repo under `./sdk`; it is not a separately published npm package
+yet.
+
 **Using an agent you don't control (OpenHands, Aider, Cline, Continue…)?** They expect a
 static API key, but a visa expires in minutes. Run the **visa sidecar** — a local proxy that
 mints/refreshes the visa for you — and point the agent at it like any other endpoint:
@@ -144,6 +149,19 @@ await cp.killSwitch.set(true);
 
 Full API reference: [`openapi.yaml`](./openapi.yaml) and [`DOCUMENTATION.md`](./DOCUMENTATION.md).
 Runnable example agents in [`examples/`](./examples).
+
+## Limitations
+- A work-visa is a bearer token and is reusable until it expires (≤5 minutes). Keep it out
+  of logs and prompts; use suspend/kill switches to block future requests.
+- The gateway proxies only chat and model-listing endpoints: OpenAI/Groq/Mistral/Together
+  chat completions and models, Anthropic messages and models, and DeepSeek chat
+  completions. It does **not** proxy embeddings, files, fine-tuning, batches, responses, or
+  token-counting endpoints.
+- Pricing is a best-effort in-code table and can lag provider price changes. Use it for
+  budgets and monitoring, not as billing reconciliation against provider invoices.
+- Instant revocation assumes Redis is configured for persistence/no-eviction behavior. If
+  Redis evicts suspend/kill keys, enforcement falls back to short visa TTLs and durable agent
+  status checks at the next mint.
 
 ## Security
 Security is the point of this project, so please report issues privately rather than opening

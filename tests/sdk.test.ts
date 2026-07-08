@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
+import { endpointAllows } from "../lib/scope";
+import type { ProviderId } from "../lib/providers";
 import { PassControl } from "../sdk/passcontrol";
 
 // --- test passport keypair ---------------------------------------------------
@@ -120,5 +122,22 @@ describe("PassControl.clientOptions", () => {
   it("returns baseURL for OpenAI-compatible providers", () => {
     expect(client().clientOptions("groq").baseURL).toBe(`${GATEWAY}/api/v1/groq`);
     expect(client().clientOptions("deepseek").baseURL).toBe(`${GATEWAY}/api/v1/deepseek`);
+  });
+  it.each([
+    ["openai", "chat/completions", "POST"],
+    ["openai", "models", "GET"],
+    ["groq", "chat/completions", "POST"],
+    ["mistral", "chat/completions", "POST"],
+    ["together", "chat/completions", "POST"],
+    ["anthropic", "v1/messages", "POST"],
+    ["deepseek", "chat/completions", "POST"],
+  ] as const)("produces an allowlisted route for %s SDK path %s", (provider, sdkPath, method) => {
+    const { baseURL } = client().clientOptions(provider);
+    const url = new URL(sdkPath, `${baseURL}/`);
+    const segments = url.pathname.split("/").filter(Boolean);
+
+    expect(segments.slice(0, 2)).toEqual(["api", "v1"]);
+    expect(segments[2]).toBe(provider);
+    expect(endpointAllows(provider as ProviderId, method, segments.slice(3))).toBe(true);
   });
 });

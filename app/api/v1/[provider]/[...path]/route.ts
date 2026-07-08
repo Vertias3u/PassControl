@@ -21,7 +21,7 @@ import {
 } from "@/lib/state/redis";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
-import { endpointAllows, isModelListing, scopeAllows } from "@/lib/scope";
+import { canonicalEndpointPath, isModelListing, scopeAllows } from "@/lib/scope";
 import { costMicrocents, estimateTokenUsage, MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { createUsageTransform, usageFromJson, type Usage } from "@/lib/usage/parseStream";
 import { writeLog, mirrorSpend } from "@/lib/log";
@@ -214,7 +214,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     captureBlocked("blocked_scope", 403);
     return err(403, "blocked_scope");
   }
-  if (!endpointAllows(provider, req.method, path)) {
+  const upstreamPath = canonicalEndpointPath(provider, req.method, path);
+  if (!upstreamPath) {
     logBlocked("blocked_endpoint", model);
     captureBlocked("blocked_endpoint", 403);
     return err(403, "blocked_endpoint");
@@ -256,7 +257,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // From here a reservation is held; it MUST be reconciled on every exit path.
   const reconcile = (usage: Usage, status: Parameters<typeof writeLog>[0]["status"]) => {
     const cost = costMicrocents(model, usage.inputTokens, usage.outputTokens, provider);
-    return Promise.all([
+    const tasks: Promise<unknown>[] = [
       reconcileBudget({
         agentId,
         jti,
@@ -278,8 +279,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         status,
         latencyMs: Date.now() - started,
       }),
-      mirrorSpend(agentId, usage.inputTokens + usage.outputTokens, cost),
-    ]);
+    ];
+    if (status === "ok") {
+      tasks.push(mirrorSpend(agentId, usage.inputTokens + usage.outputTokens, cost));
+    }
+    return Promise.all(tasks);
   };
 
   // ── 5. Resolve provider key (encrypted cache, else Vault RPC) ────────────────
@@ -305,7 +309,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   }
 
   // ── 6. Inject + forward ──────────────────────────────────────────────────────
-  const targetUrl = `${upstreamBaseUrl(provider)}/${path.join("/")}${new URL(req.url).search}`;
+  const targetUrl = `${upstreamBaseUrl(provider)}/${upstreamPath.join("/")}${new URL(req.url).search}`;
   const fwdHeaders = new Headers();
   fwdHeaders.set("content-type", "application/json");
   // Forward only a sanitized Accept (strip CR/LF/control chars to prevent header
@@ -337,7 +341,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         code: "upstream_unreachable",
       })
     );
-    waitUntil(reconcile({ inputTokens: estimate, outputTokens: 0 }, "upstream_error"));
+    waitUntil(reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error"));
     return err(502, "upstream_unreachable");
   }
 
@@ -346,7 +350,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
 
   // Surface upstream errors verbatim (never leak the key); reconcile by releasing.
   if (!upstream.ok) {
-    waitUntil(reconcile({ inputTokens: estimate, outputTokens: 0 }, "upstream_error"));
+    waitUntil(reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error"));
     return new Response(upstream.body, {
       status: upstream.status,
       headers: { "content-type": contentType || "application/json" },
