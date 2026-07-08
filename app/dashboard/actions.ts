@@ -62,6 +62,8 @@ export async function createAgent(input: {
   name: string;
   passportPubkey: string;
   scopes: { provider: string; models: string[] }[];
+  budget_tokens?: number | null;
+  budget_cents?: number | null;
 }) {
   const { db, user } = await requireUser();
   // Ensure profile row exists (FK target).
@@ -77,6 +79,26 @@ export async function createAgent(input: {
     targetType: "agent",
     targetId: r.value.id,
     metadata: { name: r.value.name },
+  });
+  revalidatePath("/");
+}
+
+export async function updateAgentBudgets(
+  agentId: string,
+  input: { budget_tokens: number | null; budget_cents: number | null }
+) {
+  const { db, user } = await requireUser();
+  const r = await fleet.updateAgent(db, user.id, agentId, input);
+  if (!r.ok) {
+    console.error("[dashboard:updateAgentBudgets]", r.code, r.message ?? "");
+    throw new Error(r.message ?? "Something went wrong. Please try again.");
+  }
+  await recordAdminAction({
+    userId: user.id,
+    action: "agent.update",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: { fields: "budget_tokens,budget_cents" },
   });
   revalidatePath("/");
 }

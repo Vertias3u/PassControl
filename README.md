@@ -26,19 +26,24 @@ PassControl removes the key from the agent entirely and puts a governed gateway 
 2. **Work-visa** — the agent signs a challenge (timestamp + single-use nonce) → mints a
    short-lived (5 min) HS256 token carrying its identity, scope, and budget.
 3. **Inject & proxy** — a request arrives with a visa; the gateway verifies it → checks the
-   kill switch → checks scope → reserves budget → pulls your provider key from Supabase Vault
-   → injects it → forwards to the provider and streams back. The agent never sees the key.
-4. **Govern** — per-agent token/cost budgets (enforced), layered kill switch
-   (platform / tenant / per-agent), and an append-only audit log of every call.
+   kill switch → checks scope (provider + model **and** endpoint) → reserves budget → pulls
+   your provider key from Supabase Vault → injects it → forwards to the provider and streams
+   back. The agent never sees the key.
+4. **Govern** — per-agent token **and dollar** budgets (enforced pre-flight), a layered kill
+   switch (platform / tenant / per-agent), and an append-only audit log of every call.
 
 ## Features
 - 🔑 Agents never hold your provider key (BYOK; key stays in the vault, injected in-flight)
 - 🪪 Per-agent cryptographic identity (Ed25519), short-lived revocable visas
-- 💸 Enforced per-agent token/cost budgets (reserved pre-flight, reconciled after)
-- ⛔ Layered, per-tenant kill switch + per-agent suspend
+- 💸 Enforced per-agent **token + cost (USD)** budgets — reserved pre-flight, reconciled after
+- 🎯 **Capability scoping** — a visa is scoped to specific models *and* endpoints, so a
+  chat-scoped agent can't reach `/v1/files`, fine-tuning, batches, etc. with your key
+- ⛔ Layered, per-tenant kill switch + per-agent suspend — revoke a running agent mid-task
 - 📒 Per-agent / per-passport audit trail (append-only, tamper-evident)
-- 🧰 Drop-in: point your existing OpenAI/Anthropic SDK at the gateway (OpenAI & Anthropic)
-- 🖥️ Control Tower dashboard + a developer control-plane API + TOTP MFA
+- 🧰 Drop-in for your SDK (OpenAI & Anthropic), **or any agent** via the visa sidecar —
+  point OpenHands / Aider / Cline / Continue at a local proxy and it just works
+- 🖥️ Control Tower dashboard (fleet, spend, budgets, audit, kill switch) + a developer
+  control-plane API + TOTP MFA
 
 ## Quickstart (self-host)
 Stack: **Next.js** (App Router, edge routes) · **Supabase** (Postgres + Vault + Auth) ·
@@ -67,6 +72,11 @@ Open `http://localhost:3000` and log in with:
 dev@passcontrol.local
 passcontrol-dev
 ```
+
+> ⚠️ This seeded dev user exists **only for the local Docker stack** and is created by
+> `scripts/seed.mjs`. It is a convenience for local development — **never deploy it or reuse
+> these credentials** in a hosted/production instance. Real deployments create accounts
+> through normal signup (gated by `INVITE_CODE`); no default credentials ship.
 
 Then add a provider key in the Control Tower, issue a passport, and run:
 
@@ -110,6 +120,16 @@ import { PassControl } from "./sdk";
 
 const pc = new PassControl({ gateway, passportId, passportSecret });
 const openai = new OpenAI(pc.clientOptions("openai")); // baseURL + auth wired; visas auto-refresh
+```
+
+**Using an agent you don't control (OpenHands, Aider, Cline, Continue…)?** They expect a
+static API key, but a visa expires in minutes. Run the **visa sidecar** — a local proxy that
+mints/refreshes the visa for you — and point the agent at it like any other endpoint:
+
+```bash
+PASSPORT_ID=… PASSPORT_SECRET=… npm run sidecar   # http://127.0.0.1:8788
+# then set the agent's base URL to http://127.0.0.1:8788/api/v1/anthropic (or /openai),
+# API key = anything. The agent never holds a real key or a long-lived token.
 ```
 
 Manage the fleet programmatically with the control-plane SDK + API key:

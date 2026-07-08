@@ -25,10 +25,14 @@ export function validateAgentInput(input: {
   name?: unknown;
   passportPubkey?: unknown;
   scopes?: unknown;
+  budget_tokens?: unknown;
+  budget_cents?: unknown;
 }): {
   name: string;
   passportPubkey: string;
   scopes: { provider: string; models: string[] }[];
+  budget_tokens: number | null;
+  budget_cents: number | null;
 } {
   const name = str(input.name).trim();
   if (name.length < 1 || name.length > LIMITS.agentName) {
@@ -41,7 +45,13 @@ export function validateAgentInput(input: {
     throw new Error("Invalid passport public key.");
   }
 
-  return { name, passportPubkey, scopes: validateScopes(input.scopes) };
+  return {
+    name,
+    passportPubkey,
+    scopes: validateScopes(input.scopes),
+    budget_tokens: input.budget_tokens === undefined ? null : budget(input.budget_tokens, "budget_tokens"),
+    budget_cents: input.budget_cents === undefined ? null : budget(input.budget_cents, "budget_cents"),
+  };
 }
 
 /** Validate + normalize a scopes array. Throws on invalid input. */

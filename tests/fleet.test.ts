@@ -45,6 +45,15 @@ describe("createAgent", () => {
     expect(r).toEqual({ ok: true, value: { id: "a1", name: "bot" } });
     expect(calls.insert.user_id).toBe("u1"); // tenant binding
     expect(calls.insert.passport_pubkey).toBe(validPubkey);
+    expect(calls.insert.budget_tokens).toBeNull();
+    expect(calls.insert.budget_cents).toBeNull();
+  });
+
+  it("persists optional token and cost budgets on create", async () => {
+    const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
+    await createAgent(db, "u1", { ...validInput, budget_tokens: 1000, budget_cents: 500 });
+    expect(calls.insert.budget_tokens).toBe(1000);
+    expect(calls.insert.budget_cents).toBe(500);
   });
 
   it("rejects invalid input (422) without touching the DB", async () => {
@@ -85,9 +94,9 @@ describe("validateAgentUpdate", () => {
 describe("updateAgent", () => {
   it("applies a tenant-scoped patch", async () => {
     const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
-    const r = await updateAgent(db, "u1", "a1", { name: "renamed", budget_tokens: 500 });
+    const r = await updateAgent(db, "u1", "a1", { name: "renamed", budget_tokens: 500, budget_cents: null });
     expect(r).toEqual({ ok: true, value: { id: "a1" } });
-    expect(calls.update).toEqual({ name: "renamed", budget_tokens: 500 });
+    expect(calls.update).toEqual({ name: "renamed", budget_tokens: 500, budget_cents: null });
     expect(calls.eq).toContainEqual(["user_id", "u1"]);
     expect(calls.eq).toContainEqual(["id", "a1"]);
   });

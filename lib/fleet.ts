@@ -37,6 +37,8 @@ export async function createAgent(
       name: clean.name,
       passport_pubkey: clean.passportPubkey,
       allowed_scopes: clean.scopes,
+      budget_tokens: clean.budget_tokens,
+      budget_cents: clean.budget_cents,
     })
     .select("id")
     .single();

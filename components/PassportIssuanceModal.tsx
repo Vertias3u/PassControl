@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
 import { bytesToBase64url } from "@/lib/encoding";
+import { parseTokenBudgetInput, parseUsdBudgetToCents } from "@/lib/budget-input";
 import { createAgent } from "@/app/dashboard/actions";
 import { buttonVariants } from "@/components/ui/button";
 import { Plus, Copy, KeyRound } from "lucide-react";
@@ -13,6 +14,8 @@ export function PassportIssuanceModal() {
   const [name, setName] = useState("");
   const [provider, setProvider] = useState("anthropic");
   const [models, setModels] = useState("claude-*");
+  const [tokenBudget, setTokenBudget] = useState("");
+  const [costBudgetUsd, setCostBudgetUsd] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
   const [pubkey, setPubkey] = useState<string | null>(null);
   const [stored, setStored] = useState(false);
@@ -21,6 +24,8 @@ export function PassportIssuanceModal() {
   const reset = () => {
     setOpen(false);
     setName("");
+    setTokenBudget("");
+    setCostBudgetUsd("");
     setSecret(null);
     setPubkey(null);
     setStored(false);
@@ -29,6 +34,8 @@ export function PassportIssuanceModal() {
   const issue = async () => {
     setBusy(true);
     try {
+      const budget_tokens = parseTokenBudgetInput(tokenBudget);
+      const budget_cents = parseUsdBudgetToCents(costBudgetUsd);
       const priv = ed25519.utils.randomPrivateKey();
       const pub = ed25519.getPublicKey(priv);
       const passportId = bytesToBase64url(pub);
@@ -36,6 +43,8 @@ export function PassportIssuanceModal() {
         name,
         passportPubkey: passportId,
         scopes: [{ provider, models: models.split(",").map((m) => m.trim()).filter(Boolean) }],
+        budget_tokens,
+        budget_cents,
       });
       setPubkey(passportId);
       setSecret(bytesToBase64url(priv)); // shown once, never sent
@@ -83,6 +92,28 @@ export function PassportIssuanceModal() {
               <span className={labelText}>Allowed models (comma-separated, * wildcard)</span>
               <input value={models} onChange={(e) => setModels(e.target.value)} />
             </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className={labelCls}>
+                <span className={labelText}>Token budget</span>
+                <input
+                  value={tokenBudget}
+                  onChange={(e) => setTokenBudget(e.target.value)}
+                  inputMode="numeric"
+                  placeholder="Unlimited"
+                />
+                <span className="text-xs text-muted-foreground">Blank means unlimited.</span>
+              </label>
+              <label className={labelCls}>
+                <span className={labelText}>Cost budget (USD)</span>
+                <input
+                  value={costBudgetUsd}
+                  onChange={(e) => setCostBudgetUsd(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="Unlimited"
+                />
+                <span className="text-xs text-muted-foreground">Example: 5.00. Blank means unlimited.</span>
+              </label>
+            </div>
             <div className="flex justify-end gap-3">
               <button
                 onClick={reset}
