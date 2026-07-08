@@ -5,6 +5,7 @@
 // body: { payload: base64url(JSON{passport_id, ts, nonce}), signature: base64url }
 export const runtime = "edge";
 
+import { waitUntil } from "@vercel/functions";
 import { NextResponse } from "next/server";
 import { base64urlToBytes, bytesToUtf8 } from "@/lib/encoding";
 import { verifySignature, passportIdToPublicKey } from "@/lib/crypto/ed25519";
@@ -12,6 +13,7 @@ import { claimNonce, touchLastSeen } from "@/lib/state/redis";
 import { serviceClient } from "@/lib/supabase";
 import { mintVisa, type ScopeEntry } from "@/lib/auth/visa";
 import { rateLimit } from "@/lib/ratelimit";
+import { captureError, captureSecurityEvent } from "@/lib/observability";
 
 const SKEW_MS = 90_000;
 const NONCE_TTL_S = 180;
@@ -34,6 +36,35 @@ function fail(status: number, error: string) {
 }
 
 export async function POST(req: Request) {
+  try {
+    return await handlePost(req);
+  } catch (error) {
+    waitUntil(
+      captureError(error, {
+        route: "api.auth.challenge",
+        method: "POST",
+        status: 500,
+        code: "internal_error",
+      })
+    );
+    return fail(500, "internal_error");
+  }
+}
+
+function securityFail(status: number, error: string, context: { agentId?: string } = {}) {
+  waitUntil(
+    captureSecurityEvent(`challenge.${error}`, {
+      route: "api.auth.challenge",
+      method: "POST",
+      status,
+      code: error,
+      agentId: context.agentId,
+    })
+  );
+  return fail(status, error);
+}
+
+async function handlePost(req: Request) {
   // 0. Rate limit by client IP before any work — cheapest possible rejection.
   const ip =
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
@@ -41,6 +72,14 @@ export async function POST(req: Request) {
     "unknown";
   const rl = await rateLimit(`challenge:${ip}`, CHALLENGE_LIMIT, CHALLENGE_WINDOW_S);
   if (!rl.success) {
+    waitUntil(
+      captureSecurityEvent("challenge.rate_limited", {
+        route: "api.auth.challenge",
+        method: "POST",
+        status: 429,
+        code: "rate_limited",
+      })
+    );
     return NextResponse.json(
       { error: "rate_limited" },
       { status: 429, headers: { "retry-after": String(CHALLENGE_WINDOW_S) } }
@@ -55,12 +94,12 @@ export async function POST(req: Request) {
   // Enforce a body-size cap (Content-Length, then the actual bytes — a client can
   // lie about Content-Length).
   if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) {
-    return fail(413, "payload_too_large");
+    return securityFail(413, "payload_too_large");
   }
   let body: { payload?: string; signature?: string };
   try {
     const raw = await req.text();
-    if (raw.length > MAX_BODY_BYTES) return fail(413, "payload_too_large");
+    if (raw.length > MAX_BODY_BYTES) return securityFail(413, "payload_too_large");
     body = JSON.parse(raw);
   } catch {
     return fail(400, "invalid_json");
@@ -79,10 +118,10 @@ export async function POST(req: Request) {
   }
 
   // 2. Clock-skew window.
-  if (Math.abs(Date.now() - payload.ts) > SKEW_MS) return fail(401, "stale_timestamp");
+  if (Math.abs(Date.now() - payload.ts) > SKEW_MS) return securityFail(401, "stale_timestamp");
 
   // 3. Burn the nonce (replay protection). Must precede expensive work.
-  if (!(await claimNonce(payload.nonce, NONCE_TTL_S))) return fail(401, "replay_detected");
+  if (!(await claimNonce(payload.nonce, NONCE_TTL_S))) return securityFail(401, "replay_detected");
 
   // 4. Look up the agent by passport.
   const db = serviceClient();
@@ -91,19 +130,29 @@ export async function POST(req: Request) {
     .select("id, user_id, status, allowed_scopes, budget_tokens, budget_cents, spent_tokens, spent_microcents")
     .eq("passport_pubkey", payload.passport_id)
     .maybeSingle();
-  if (error) return fail(500, "lookup_failed");
-  if (!agent) return fail(401, "unknown_passport");
-  if (agent.status !== "active") return fail(403, "agent_not_active");
+  if (error) {
+    waitUntil(
+      captureError(new Error("challenge lookup failed"), {
+        route: "api.auth.challenge",
+        method: "POST",
+        status: 500,
+        code: "lookup_failed",
+      })
+    );
+    return fail(500, "lookup_failed");
+  }
+  if (!agent) return securityFail(401, "unknown_passport");
+  if (agent.status !== "active") return securityFail(403, "agent_not_active", { agentId: agent.id });
 
   // 5. Verify the Ed25519 signature over the raw payload bytes.
   const pubkey = passportIdToPublicKey(payload.passport_id);
-  if (!pubkey) return fail(400, "bad_passport_id");
+  if (!pubkey) return securityFail(400, "bad_passport_id");
   const ok = verifySignature(
     base64urlToBytes(body.signature),
     base64urlToBytes(body.payload),
     pubkey
   );
-  if (!ok) return fail(401, "bad_signature");
+  if (!ok) return securityFail(401, "bad_signature", { agentId: agent.id });
 
   // 6. Mint the visa.
   const jti = crypto.randomUUID();

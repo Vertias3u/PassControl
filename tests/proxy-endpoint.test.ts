@@ -179,6 +179,29 @@ describe("proxy endpoint allowlist", () => {
     );
   });
 
+  it.each([
+    ["groq", ["v1", "chat", "completions"], "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/chat/completions"],
+    ["mistral", ["v1", "chat", "completions"], "mistral-small-latest", "https://api.mistral.ai/v1/chat/completions"],
+    ["together", ["v1", "chat", "completions"], "openai/gpt-oss-20b", "https://api.together.ai/v1/chat/completions"],
+    ["deepseek", ["chat", "completions"], "deepseek-v4-flash", "https://api.deepseek.com/chat/completions"],
+  ])("allows %s chat on its fixed upstream host", async (provider, path, model, upstream) => {
+    const res = await callProxy(provider, path, model);
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(upstream, expect.objectContaining({ method: "POST" }));
+  });
+
+  it.each(["groq", "mistral", "together", "deepseek"])(
+    "blocks %s from non-allowlisted file endpoints",
+    async (provider) => {
+      const res = await callProxy(provider, ["v1", "files"], "gpt-oss-20b");
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "blocked_endpoint" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
+
   // ── Hardening: bypass attempts + method-aware model listing ──────────────────
 
   it("blocks a suffix-appended chat path (exact match, not prefix)", async () => {

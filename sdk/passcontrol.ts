@@ -16,7 +16,7 @@
 // Runs on Node 18+, edge runtimes, and the browser.
 import { ed25519 } from "@noble/curves/ed25519";
 
-export type ProviderId = "openai" | "anthropic";
+export type ProviderId = "openai" | "anthropic" | "groq" | "mistral" | "together" | "deepseek";
 
 export interface PassControlOptions {
   /** Gateway origin, e.g. https://passcontrol.example.com (no trailing slash). */

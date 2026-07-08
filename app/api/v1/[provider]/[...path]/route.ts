@@ -25,8 +25,9 @@ import { endpointAllows, isModelListing, scopeAllows } from "@/lib/scope";
 import { costMicrocents, estimateTokenUsage, MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { createUsageTransform, usageFromJson, type Usage } from "@/lib/usage/parseStream";
 import { writeLog, mirrorSpend } from "@/lib/log";
-import { isProvider, upstreamBaseUrl, authHeaders, type ProviderId } from "@/lib/providers";
+import { isProvider, upstreamBaseUrl, authHeaders, usesOpenAiUsageShape, type ProviderId } from "@/lib/providers";
 import { rateLimit } from "@/lib/ratelimit";
+import { captureError, captureSecurityEvent } from "@/lib/observability";
 
 // Per-agent request-rate cap (independent of the token budget): bounds raw call
 // volume so a runaway/abusive agent can't flood the gateway or upstream. Generous
@@ -52,15 +53,35 @@ interface Ctx {
 }
 
 export async function POST(req: Request, ctx: Ctx) {
-  return handle(req, ctx);
+  return observedHandle(req, ctx);
 }
 export async function GET(req: Request, ctx: Ctx) {
-  return handle(req, ctx);
+  return observedHandle(req, ctx);
 }
 
-async function handle(req: Request, ctx: Ctx): Promise<Response> {
+async function observedHandle(req: Request, ctx: Ctx): Promise<Response> {
+  let provider: string | undefined;
+  try {
+    const params = await ctx.params;
+    provider = params.provider;
+    return await handle(req, params);
+  } catch (error) {
+    waitUntil(
+      captureError(error, {
+        route: "api.proxy",
+        method: req.method,
+        status: 500,
+        provider,
+        code: "internal_error",
+      })
+    );
+    return err(500, "internal_error");
+  }
+}
+
+async function handle(req: Request, params: { provider: string; path: string[] }): Promise<Response> {
   const started = Date.now();
-  const { provider: providerRaw, path } = await ctx.params;
+  const { provider: providerRaw, path } = params;
   if (!isProvider(providerRaw)) return err(404, "unknown_provider");
   const provider: ProviderId = providerRaw;
 
@@ -78,7 +99,18 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   const visaToken = extractVisaToken(req.headers);
   if (!visaToken) return err(401, "missing_visa");
   const claims = await verifyVisa(visaToken);
-  if (!claims) return err(401, "invalid_visa");
+  if (!claims) {
+    waitUntil(
+      captureSecurityEvent("proxy.invalid_visa", {
+        route: "api.proxy",
+        method: req.method,
+        status: 401,
+        provider,
+        code: "invalid_visa",
+      })
+    );
+    return err(401, "invalid_visa");
+  }
 
   // Identity, ownership, and budget all travel in the (short-lived) visa, so the
   // hot path needs no per-request `agents` SELECT. Status changes propagate
@@ -97,6 +129,17 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   // ── Per-agent request-rate limit (call-volume DoS / abuse guard) ─────────────
   const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
   if (!rl.success) {
+    waitUntil(
+      captureSecurityEvent("proxy.rate_limited", {
+        route: "api.proxy",
+        method: req.method,
+        status: 429,
+        provider,
+        agentId,
+        jti,
+        code: "rate_limited",
+      })
+    );
     return new Response(JSON.stringify({ error: "rate_limited" }), {
       status: 429,
       headers: { "content-type": "application/json", "retry-after": String(PROXY_RATE_WINDOW_S) },
@@ -119,10 +162,24 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
       })
     );
 
+  const captureBlocked = (code: string, status: number) =>
+    waitUntil(
+      captureSecurityEvent(`proxy.${code}`, {
+        route: "api.proxy",
+        method: req.method,
+        status,
+        provider,
+        agentId,
+        jti,
+        code,
+      })
+    );
+
   // ── 2. Kill switch (Redis: platform + this tenant + denylist; Redis per-agent suspend) ──
   const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
   if (isBlocked(kill, agentId) || suspended) {
     logBlocked("blocked_suspended");
+    captureBlocked("blocked_suspended", 403);
     return err(403, "blocked_suspended");
   }
 
@@ -154,15 +211,17 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   // endpoint carries no model, so it is gated by the endpoint allowlist instead.
   if (!isModelListing(path) && !scopeAllows(claims.scope, provider, model)) {
     logBlocked("blocked_scope", model);
+    captureBlocked("blocked_scope", 403);
     return err(403, "blocked_scope");
   }
   if (!endpointAllows(provider, req.method, path)) {
     logBlocked("blocked_endpoint", model);
+    captureBlocked("blocked_endpoint", 403);
     return err(403, "blocked_endpoint");
   }
 
-  // S5: ensure OpenAI streams report usage.
-  if (provider === "openai" && wantsStream) {
+  // S5: ensure OpenAI-compatible streams report usage.
+  if (usesOpenAiUsageShape(provider) && wantsStream) {
     bodyObj.stream_options = { ...(bodyObj.stream_options ?? {}), include_usage: true };
   }
   const forwardBody = JSON.stringify(bodyObj);
@@ -170,7 +229,12 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   // ── 4. Budget reserve (atomic) ───────────────────────────────────────────────
   const estimatedUsage = estimateTokenUsage(bodyObj);
   const estimate = estimatedUsage.totalTokens;
-  const estimateMicrocents = costMicrocents(model, estimatedUsage.inputTokens, estimatedUsage.outputTokens);
+  const estimateMicrocents = costMicrocents(
+    model,
+    estimatedUsage.inputTokens,
+    estimatedUsage.outputTokens,
+    provider
+  );
   if (capTokens != null || capMicrocents != null) {
     await seedSpent(agentId, spentSnapshot, spentMicrocentsSnapshot);
   }
@@ -185,12 +249,13 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
   });
   if (!reserve.ok) {
     logBlocked("blocked_budget", model);
+    captureBlocked("blocked_budget", 402);
     return err(402, "blocked_budget");
   }
 
   // From here a reservation is held; it MUST be reconciled on every exit path.
   const reconcile = (usage: Usage, status: Parameters<typeof writeLog>[0]["status"]) => {
-    const cost = costMicrocents(model, usage.inputTokens, usage.outputTokens);
+    const cost = costMicrocents(model, usage.inputTokens, usage.outputTokens, provider);
     return Promise.all([
       reconcileBudget({
         agentId,
@@ -260,7 +325,18 @@ async function handle(req: Request, ctx: Ctx): Promise<Response> {
       body: req.method === "GET" ? undefined : forwardBody,
       signal: req.signal,
     });
-  } catch {
+  } catch (error) {
+    waitUntil(
+      captureError(error, {
+        route: "api.proxy",
+        method: req.method,
+        status: 502,
+        provider,
+        agentId,
+        jti,
+        code: "upstream_unreachable",
+      })
+    );
     waitUntil(reconcile({ inputTokens: estimate, outputTokens: 0 }, "upstream_error"));
     return err(502, "upstream_unreachable");
   }

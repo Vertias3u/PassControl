@@ -13,6 +13,7 @@ vi.mock("@/lib/state/redis", () => ({ suspendAgent, unsuspendAgent, purgeAgentCa
 vi.mock("@/lib/state/killswitch", () => ({ armTenantKill }));
 
 import { createAgent, updateAgent, setAgentSuspended, revokeAgent, setTenantKill } from "@/lib/fleet";
+import { PROVIDERS } from "@/lib/providers";
 import { validateAgentUpdate } from "@/lib/validate";
 
 // Chainable Supabase mock that records insert/update payloads + eq() filters.
@@ -125,7 +126,7 @@ describe("setAgentSuspended", () => {
     expect(calls.eq).toContainEqual(["user_id", "u1"]);
     expect(calls.eq).toContainEqual(["id", "a1"]);
     expect(suspendAgent).toHaveBeenCalledWith("a1");
-    expect(purgeAgentCaches).toHaveBeenCalledWith("a1", ["openai", "anthropic"]);
+    expect(purgeAgentCaches).toHaveBeenCalledWith("a1", PROVIDERS);
     expect(unsuspendAgent).not.toHaveBeenCalled();
   });
 

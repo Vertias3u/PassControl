@@ -11,8 +11,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { armTenantKill } from "@/lib/state/killswitch";
 import { suspendAgent, unsuspendAgent, purgeAgentCaches } from "@/lib/state/redis";
 import { validateAgentInput, validateAgentUpdate } from "@/lib/validate";
+import { PROVIDERS } from "@/lib/providers";
 
-const PROVIDERS = ["openai", "anthropic"];
+const cachePurgeProviders = () => [...PROVIDERS];
 
 export type FleetResult<T> =
   | { ok: true; value: T }
@@ -100,7 +101,7 @@ export async function setAgentSuspended(
 
   if (suspended) {
     await suspendAgent(agentId);
-    await purgeAgentCaches(agentId, PROVIDERS);
+    await purgeAgentCaches(agentId, cachePurgeProviders());
   } else {
     await unsuspendAgent(agentId);
   }
@@ -124,7 +125,7 @@ export async function revokeAgent(
   if (!data) return { ok: false, status: 404, code: "not_found" };
 
   await suspendAgent(agentId);
-  await purgeAgentCaches(agentId, PROVIDERS);
+  await purgeAgentCaches(agentId, cachePurgeProviders());
   return { ok: true, value: { id: agentId } };
 }
 
@@ -142,7 +143,7 @@ export async function setTenantKill(
     const id = a.id as string;
     if (on) {
       await suspendAgent(id);
-      await purgeAgentCaches(id, PROVIDERS);
+      await purgeAgentCaches(id, cachePurgeProviders());
     } else {
       await unsuspendAgent(id);
     }

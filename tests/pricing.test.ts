@@ -28,6 +28,18 @@ describe("costMicrocents — sub-cent precision (no rounding to zero)", () => {
     expect(costMicrocents("mystery-model", 1000, 1000)).toBe(0);
   });
 
+  it("uses provider-specific prices for OpenAI-compatible providers", () => {
+    expect(costMicrocents("llama-3.3-70b-versatile", 1000, 500, "groq")).toBe(1000 * 59 + 500 * 79);
+    expect(costMicrocents("mistral-small-latest", 1000, 500, "mistral")).toBe(1000 * 15 + 500 * 60);
+    expect(costMicrocents("openai/gpt-oss-20b", 1000, 500, "together")).toBe(1000 * 5 + 500 * 20);
+    expect(costMicrocents("deepseek-v4-flash", 1000, 500, "deepseek")).toBe(1000 * 14 + 500 * 28);
+  });
+
+  it("does not reuse a same-name provider-specific price across providers", () => {
+    expect(costMicrocents("openai/gpt-oss-20b", 1000, 500, "groq")).toBe(1000 * 8 + 500 * 30);
+    expect(costMicrocents("openai/gpt-oss-20b", 1000, 500, "together")).toBe(1000 * 5 + 500 * 20);
+  });
+
   it("returns integer µ¢ (safe to store as bigint, no float drift)", () => {
     const v = costMicrocents("gpt-4o", 1234, 567);
     expect(Number.isInteger(v)).toBe(true);

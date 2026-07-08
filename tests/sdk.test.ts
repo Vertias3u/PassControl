@@ -117,4 +117,8 @@ describe("PassControl.clientOptions", () => {
     expect(typeof opts.fetch).toBe("function");
     expect(opts.apiKey).toBeTruthy(); // placeholder; the fetch wrapper sets the real visa
   });
+  it("returns baseURL for OpenAI-compatible providers", () => {
+    expect(client().clientOptions("groq").baseURL).toBe(`${GATEWAY}/api/v1/groq`);
+    expect(client().clientOptions("deepseek").baseURL).toBe(`${GATEWAY}/api/v1/deepseek`);
+  });
 });

@@ -1,7 +1,7 @@
 # PassControl
 
-**An identity & credential gateway for AI agents.** Stop pasting your OpenAI/Anthropic keys
-into agent runtimes. Give each agent a cryptographic **passport**; it signs a challenge to
+**An identity & credential gateway for AI agents.** Stop pasting your OpenAI / Anthropic /
+Groq / Mistral / Together / DeepSeek keys into agent runtimes. Give each agent a cryptographic **passport**; it signs a challenge to
 mint a short-lived **work-visa**; the gateway injects your *real* provider key from a vault
 and proxies the call — so the agent never holds the key. You get per-agent budgets, scopes,
 an instant kill switch, and a per-agent audit trail.
@@ -40,8 +40,9 @@ PassControl removes the key from the agent entirely and puts a governed gateway 
   chat-scoped agent can't reach `/v1/files`, fine-tuning, batches, etc. with your key
 - ⛔ Layered, per-tenant kill switch + per-agent suspend — revoke a running agent mid-task
 - 📒 Per-agent / per-passport audit trail (append-only, tamper-evident)
-- 🧰 Drop-in for your SDK (OpenAI & Anthropic), **or any agent** via the visa sidecar —
-  point OpenHands / Aider / Cline / Continue at a local proxy and it just works
+- 🧰 Drop-in for your SDK (OpenAI, Anthropic, + OpenAI-compatible **Groq / Mistral / Together
+  / DeepSeek**), **or any agent** via the visa sidecar — point OpenHands / Aider / Cline /
+  Continue at a local proxy and it just works
 - 🖥️ Control Tower dashboard (fleet, spend, budgets, audit, kill switch) + a developer
   control-plane API + TOTP MFA
 

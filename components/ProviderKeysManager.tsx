@@ -4,6 +4,7 @@
 // row. The key is never stored in an app table and never shown again.
 import { useState, useTransition } from "react";
 import { addProviderKey } from "@/app/dashboard/actions";
+import { PROVIDERS } from "@/lib/providers";
 
 export function ProviderKeysManager() {
   const [provider, setProvider] = useState("anthropic");
@@ -33,8 +34,11 @@ export function ProviderKeysManager() {
           onChange={(e) => setProvider(e.target.value)}
           style={{ width: "auto" }}
         >
-          <option value="anthropic">anthropic</option>
-          <option value="openai">openai</option>
+          {PROVIDERS.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
         </select>
         <input
           placeholder="label (optional)"

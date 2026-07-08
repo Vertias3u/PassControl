@@ -3,9 +3,11 @@
 // the handler → catch and generically report errors. Handlers get a ctx with the
 // authenticated userId (which they MUST scope every query by — the service-role
 // client bypasses RLS, so `.eq("user_id", ctx.userId)` is the tenant boundary).
+import { waitUntil } from "@vercel/functions";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { serviceClient } from "@/lib/supabase";
 import { rateLimit } from "@/lib/ratelimit";
+import { captureError, captureSecurityEvent } from "@/lib/observability";
 import { authenticateApiKey, type Scope } from "./auth";
 import { errorResponse, newRequestId } from "./respond";
 import { normalizeIdemKey, runIdempotent } from "./idempotency";
@@ -45,21 +47,52 @@ export function control(
 ): (req: Request, routeCtx?: RouteCtx) => Promise<Response> {
   return async (req, routeCtx) => {
     const requestId = newRequestId();
+    const captureControlSecurity = (code: string, status: number) =>
+      waitUntil(
+        captureSecurityEvent(`control.${code}`, {
+          route: "api.control",
+          method: req.method,
+          status,
+          requestId,
+          controlScope: required,
+          code,
+        })
+      );
+
     try {
       // Cheapest rejection first: bound floods by source IP before any auth work.
       const ipRl = await rateLimit(`control-ip:${clientIp(req)}`, IP_LIMIT, WINDOW_S);
       if (!ipRl.success) {
+        captureControlSecurity("rate_limited", 429);
         return errorResponse(429, "rate_limited", requestId, { "retry-after": String(WINDOW_S) });
       }
 
       const auth = await authenticateApiKey(req);
-      if (!auth.ok) return errorResponse(auth.status, auth.code, requestId);
+      if (!auth.ok) {
+        if (auth.status >= 500) {
+          waitUntil(
+            captureError(new Error(`control ${auth.code}`), {
+              route: "api.control",
+              method: req.method,
+              status: auth.status,
+              requestId,
+              controlScope: required,
+              code: auth.code,
+            })
+          );
+        } else {
+          captureControlSecurity(auth.code, auth.status);
+        }
+        return errorResponse(auth.status, auth.code, requestId);
+      }
       if (required === "write" && auth.scope !== "write") {
+        captureControlSecurity("insufficient_scope", 403);
         return errorResponse(403, "insufficient_scope", requestId);
       }
       const limit = required === "write" ? WRITE_LIMIT : READ_LIMIT;
       const rl = await rateLimit(`control:${auth.keyId}`, limit, WINDOW_S);
       if (!rl.success) {
+        captureControlSecurity("rate_limited", 429);
         return errorResponse(429, "rate_limited", requestId, { "retry-after": String(WINDOW_S) });
       }
       const params = routeCtx?.params ? await routeCtx.params : {};
@@ -79,11 +112,24 @@ export function control(
       const idemRaw = req.method !== "GET" ? req.headers.get("idempotency-key") : null;
       if (idemRaw != null) {
         const idem = normalizeIdemKey(idemRaw);
-        if (!idem) return errorResponse(400, "invalid_idempotency_key", requestId);
+        if (!idem) {
+          captureControlSecurity("invalid_idempotency_key", 400);
+          return errorResponse(400, "invalid_idempotency_key", requestId);
+        }
         return await runIdempotent(auth.keyId, idem, requestId, exec);
       }
       return await exec();
     } catch (e) {
+      waitUntil(
+        captureError(e, {
+          route: "api.control",
+          method: req.method,
+          status: 500,
+          requestId,
+          controlScope: required,
+          code: "internal_error",
+        })
+      );
       // eslint-disable-next-line no-console
       console.error("[control]", requestId, e instanceof Error ? e.message : "unknown");
       return errorResponse(500, "internal_error", requestId);

@@ -18,6 +18,14 @@ describe("validateAgentInput", () => {
     expect(out.name).toBe("Bot");
     expect(out.scopes[0]!.provider).toBe("anthropic");
   });
+  it("accepts OpenAI-compatible providers in scopes", () => {
+    const out = validateAgentInput({
+      name: "Groq Bot",
+      passportPubkey: VALID_PUBKEY,
+      scopes: [{ provider: "groq", models: ["llama-*"] }],
+    });
+    expect(out.scopes[0]!.provider).toBe("groq");
+  });
   it("rejects empty name", () => {
     expect(() => validateAgentInput({ name: "", passportPubkey: VALID_PUBKEY, scopes: [] })).toThrow();
   });
@@ -34,6 +42,9 @@ describe("validateAgentInput", () => {
 describe("validateProviderKeyInput", () => {
   it("accepts valid", () => {
     expect(validateProviderKeyInput({ provider: "openai", label: "main", key: "sk-x" }).provider).toBe("openai");
+  });
+  it("accepts OpenAI-compatible provider keys", () => {
+    expect(validateProviderKeyInput({ provider: "deepseek", label: "main", key: "sk-x" }).provider).toBe("deepseek");
   });
   it("rejects unknown provider + empty key", () => {
     expect(() => validateProviderKeyInput({ provider: "x", label: "", key: "k" })).toThrow();

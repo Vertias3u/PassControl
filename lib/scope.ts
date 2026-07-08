@@ -44,6 +44,21 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
     { method: "POST", path: ["v1", "messages"] },
     { method: "GET", path: ["v1", "models"] },
   ],
+  groq: [
+    { method: "POST", path: ["v1", "chat", "completions"] },
+    { method: "GET", path: ["v1", "models"] },
+  ],
+  mistral: [
+    { method: "POST", path: ["v1", "chat", "completions"] },
+    { method: "GET", path: ["v1", "models"] },
+  ],
+  together: [
+    { method: "POST", path: ["v1", "chat", "completions"] },
+    { method: "GET", path: ["v1", "models"] },
+  ],
+  deepseek: [
+    { method: "POST", path: ["chat", "completions"] },
+  ],
 };
 
 /** True if this (method, path) is one of the fixed, known-good endpoints. */

@@ -6,7 +6,7 @@
 //
 // S5: OpenAI only emits usage when stream_options.include_usage=true (injected
 // by the proxy). Anthropic emits usage natively in message_start/message_delta.
-import type { ProviderId } from "../providers";
+import { usesOpenAiUsageShape, type ProviderId } from "../providers";
 
 export interface Usage {
   inputTokens: number;
@@ -28,7 +28,7 @@ class Tally {
     } catch {
       return;
     }
-    if (provider === "openai") {
+    if (usesOpenAiUsageShape(provider)) {
       // Usage arrives on the final chunk (choices: []) when include_usage is set.
       const u = obj?.usage;
       if (u) {
@@ -84,7 +84,7 @@ export function createUsageTransform(provider: ProviderId): UsageTransform {
 
 /** Parse usage from a non-streaming JSON response body. */
 export function usageFromJson(provider: ProviderId, body: any): Usage {
-  if (provider === "openai") {
+  if (usesOpenAiUsageShape(provider)) {
     return {
       inputTokens: body?.usage?.prompt_tokens ?? 0,
       outputTokens: body?.usage?.completion_tokens ?? 0,

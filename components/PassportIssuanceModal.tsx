@@ -5,15 +5,25 @@ import { useState } from "react";
 import { ed25519 } from "@noble/curves/ed25519";
 import { bytesToBase64url } from "@/lib/encoding";
 import { parseTokenBudgetInput, parseUsdBudgetToCents } from "@/lib/budget-input";
+import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { createAgent } from "@/app/dashboard/actions";
 import { buttonVariants } from "@/components/ui/button";
 import { Plus, Copy, KeyRound } from "lucide-react";
 
+const DEFAULT_MODELS: Record<ProviderId, string> = {
+  anthropic: "claude-*",
+  openai: "gpt-*",
+  groq: "llama-*",
+  mistral: "mistral-*",
+  together: "openai/gpt-oss-*",
+  deepseek: "deepseek-*",
+};
+
 export function PassportIssuanceModal() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  const [provider, setProvider] = useState("anthropic");
-  const [models, setModels] = useState("claude-*");
+  const [provider, setProvider] = useState<ProviderId>("anthropic");
+  const [models, setModels] = useState(DEFAULT_MODELS.anthropic);
   const [tokenBudget, setTokenBudget] = useState("");
   const [costBudgetUsd, setCostBudgetUsd] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
@@ -24,6 +34,8 @@ export function PassportIssuanceModal() {
   const reset = () => {
     setOpen(false);
     setName("");
+    setProvider("anthropic");
+    setModels(DEFAULT_MODELS.anthropic);
     setTokenBudget("");
     setCostBudgetUsd("");
     setSecret(null);
@@ -83,9 +95,19 @@ export function PassportIssuanceModal() {
             </label>
             <label className={labelCls}>
               <span className={labelText}>Provider</span>
-              <select value={provider} onChange={(e) => setProvider(e.target.value)}>
-                <option value="anthropic">anthropic</option>
-                <option value="openai">openai</option>
+              <select
+                value={provider}
+                onChange={(e) => {
+                  const next = e.target.value as ProviderId;
+                  setProvider(next);
+                  setModels(DEFAULT_MODELS[next]);
+                }}
+              >
+                {PROVIDERS.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
               </select>
             </label>
             <label className={labelCls}>
