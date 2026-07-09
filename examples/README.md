@@ -11,6 +11,49 @@ real agent — these *are* the example agents). Self-contained `.mjs`, run with 
 | `visa-sidecar.mjs` | data | A local reverse proxy that mints/refreshes the visa for you — makes PassControl **drop-in for any agent that wants a static key** (OpenHands, Aider, Cline, …), no SDK required. |
 | `fleet-admin.mjs` | control | Drives `/api/control/v1` with a `pc_` API key: list/create/suspend/revoke agents, read spend/audit, toggle kill switch. |
 
+## Product CLI
+
+The smooth path is the `passcontrol` command:
+
+```bash
+passcontrol init
+passcontrol call "Say hi in 3 words"
+passcontrol sidecar
+passcontrol spend
+passcontrol audit
+passcontrol logs
+```
+
+From a source checkout before linking the package, use the same command through npm:
+
+```bash
+npm run cli -- status
+npm run cli -- call "Say hi in 3 words"
+npm run cli -- env openhands
+```
+
+The scripts below remain useful as tiny, readable demos of what the CLI is doing.
+
+## One-time local config
+
+Create one local config file instead of pasting env vars into every command:
+
+```bash
+passcontrol init
+# or: cp .passcontrol.example .passcontrol
+# Fill PASSCONTROL_GATEWAY, then add PASSPORT_ID/PASSPORT_SECRET and/or PASSCONTROL_API_KEY.
+```
+
+The CLI/examples load the nearest `.passcontrol` from your current directory or a parent
+directory. A global profile from `passcontrol init --global` also works. Real environment
+variables always win, so this still works for one-off overrides:
+
+```bash
+MODEL=claude-haiku-4-5 node examples/chat-agent.mjs "Say hi"
+```
+
+If config is missing, the CLI and scripts print a one-line fix.
+
 ## Using PassControl with a third-party agent (the visa sidecar)
 
 Most agents (OpenHands, Aider, Cline, Continue…) expect a **static** API key + base URL —
@@ -20,9 +63,12 @@ background, and injects it into every request it forwards to the gateway.
 
 ```bash
 # 1. Start the gateway (npm run dev:docker) and issue a passport in the dashboard.
-# 2. Run the sidecar with that passport:
-PASSPORT_ID=<pubkey> PASSPORT_SECRET=<privkey> npm run sidecar
+# 2. Put that passport in .passcontrol, then run:
+passcontrol sidecar
 #    → listening on http://127.0.0.1:8788, forwarding to the gateway with a fresh visa
+
+# Optional: print copy/paste settings for OpenHands/LiteLLM.
+passcontrol env openhands
 ```
 
 Then point your agent at the sidecar exactly as you'd point it at the gateway, with the
@@ -39,31 +85,34 @@ give it a **budget** so you can watch PassControl govern a real agent.
 - The gateway running (`npm run dev`) or deployed — set `PASSCONTROL_GATEWAY`.
 - A **provider key** added in the dashboard (so the proxy has a real key to inject).
 - A **write-scoped API key** (dashboard → API keys) for `fleet-admin.mjs`.
+- A local `.passcontrol` copied from `.passcontrol.example`, or equivalent env vars.
 
 ## Typical test loop
 ```bash
-export PASSCONTROL_GATEWAY=http://localhost:3000
-export PASSCONTROL_API_KEY=pc_xxx        # from the dashboard API-keys panel
+passcontrol init
+# Fill PASSCONTROL_GATEWAY and PASSCONTROL_API_KEY first.
 
 # 1. Mint a test agent (prints its passport ONCE)
-node examples/fleet-admin.mjs create test-bot
-#   → copy the printed PASSPORT_ID / PASSPORT_SECRET
+passcontrol agent create test-bot
+#   → paste the printed PASSPORT_ID / PASSPORT_SECRET into .passcontrol
 
 # 2. Have that agent call a model through the gateway
-PASSPORT_ID=… PASSPORT_SECRET=… node examples/chat-agent.mjs "Say hi in 3 words"
+passcontrol call "Say hi in 3 words"
 
 # 3. See the effect
-node examples/fleet-admin.mjs spend
-node examples/fleet-admin.mjs audit
+passcontrol spend
+passcontrol logs --limit 10
+passcontrol audit --limit 10
 
 # 4. Kill-switch drill
-node examples/fleet-admin.mjs suspend <agent-id>   # next chat-agent run → 403
-node examples/fleet-admin.mjs resume <agent-id>
+passcontrol agent suspend <agent-id>   # next call → 403
+passcontrol agent resume <agent-id>
 ```
 
 ## Notes
 - The passport **private key never leaves the process** — `chat-agent.mjs` only signs
   challenges locally; `fleet-admin.mjs create` generates the keypair and sends only the
   public key.
-- Keys/secrets are read from env — don't commit them. These scripts are test tooling, not
-  part of the app build or test suite.
+- Keys/secrets are read from env or `.passcontrol`. The real `.passcontrol` file is
+  gitignored; only `.passcontrol.example` is meant to ship. These scripts are test tooling,
+  not part of the app build or test suite.

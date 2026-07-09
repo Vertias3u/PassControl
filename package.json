@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "description": "Secure Agent Control Plane & Passport Vault — identity-aware reverse proxy for AI agent credentials.",
+  "bin": {
+    "passcontrol": "./bin/passcontrol.mjs"
+  },
   "scripts": {
+    "cli": "node bin/passcontrol.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

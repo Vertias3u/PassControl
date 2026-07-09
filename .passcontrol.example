@@ -1,0 +1,18 @@
+# PassControl example-agent config.
+# Copy this file to .passcontrol and fill in local/demo values.
+# Or run: passcontrol init
+# Never commit .passcontrol: it can contain a passport secret.
+
+PASSCONTROL_GATEWAY=http://localhost:3000
+
+# From the dashboard "Issue passport" modal, or `node examples/fleet-admin.mjs create <name>`.
+PASSPORT_ID=
+PASSPORT_SECRET=
+
+# From dashboard -> API keys. Needed only by examples/fleet-admin.mjs.
+PASSCONTROL_API_KEY=
+
+# Optional. Defaults: PROVIDER=anthropic, MODEL=claude-haiku-4-5
+# For OpenAI, MODEL defaults to gpt-4o-mini.
+PROVIDER=anthropic
+MODEL=claude-haiku-4-5

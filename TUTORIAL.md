@@ -73,13 +73,24 @@ generated **in your browser**; you'll see the private key **once**. Copy both:
 
 Give it a **scope** of `anthropic` / `claude-*` so it can call any Claude model.
 
-**c. Make the call.** A runnable example agent lives in `examples/`:
+**c. Configure the CLI and make the call.** The `passcontrol` CLI removes the env-var soup —
+configure your passport once, then just call. From a source checkout (what you have after
+cloning), run it via `npm run cli --`:
 
 ```bash
-PASSCONTROL_GATEWAY=http://localhost:3000 \
-PASSPORT_ID=<your public key> \
-PASSPORT_SECRET=<your private key> \
-node examples/chat-agent.mjs "Say hi in 3 words"
+npm run cli -- init                      # prompts for gateway + passport, writes .passcontrol
+npm run cli -- doctor --deep             # verifies gateway/config; mints a visa if configured
+npm run cli -- call "Say hi in 3 words"
+```
+
+> The short `passcontrol …` form (instead of `npm run cli --`) works once you `npm link` the
+> repo, or when the package is installed. It's not published to npm yet — from a clone, use
+> `npm run cli --`. Runnable raw example scripts also live in [`examples/`](./examples).
+
+Prefer env vars? They still work and override `.passcontrol`:
+
+```bash
+PASSPORT_ID=<pub> PASSPORT_SECRET=<priv> npm run cli -- call "Say hi in 3 words"
 ```
 
 Expected:
@@ -128,9 +139,8 @@ it — so the agent points at a normal-looking endpoint and never holds a real k
 long-lived token.
 
 ```bash
-PASSCONTROL_GATEWAY=http://localhost:3000 \
-PASSPORT_ID=<pub> PASSPORT_SECRET=<priv> \
-npm run sidecar        # → http://127.0.0.1:8788
+# Reuses PASSCONTROL_GATEWAY + PASSPORT_ID/PASSPORT_SECRET from .passcontrol.
+npm run cli -- sidecar        # -> http://127.0.0.1:8788
 ```
 
 Then point your agent at the sidecar exactly like a provider, API key = anything:
@@ -142,6 +152,11 @@ Then point your agent at the sidecar exactly like a provider, API key = anything
 For **OpenHands** (LiteLLM under the hood): set the custom model to `anthropic/claude-…`,
 base URL to the sidecar, key to anything. Run a task and watch the Audit Log fill with
 governed calls — the agent is doing real work, and the key stayed in the vault the whole time.
+To print a copy/paste starting point:
+
+```bash
+npm run cli -- env openhands
+```
 
 Quick sanity check that scoping works — a blocked endpoint returns `403 blocked_endpoint`:
 

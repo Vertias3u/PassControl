@@ -6,26 +6,20 @@
 // rows and confirm the proxy works.
 //
 // Run:
-//   PASSCONTROL_GATEWAY=http://localhost:3000 \
-//   PASSPORT_ID=<base64url pubkey> PASSPORT_SECRET=<base64url privkey> \
+//   cp .passcontrol.example .passcontrol   # fill PASSPORT_ID/PASSPORT_SECRET
 //   node examples/chat-agent.mjs "Say hello in 3 words"
 //
 // Optional env: PROVIDER=anthropic|openai  MODEL=...  (sensible defaults below).
 // Get a PASSPORT_ID/SECRET from the dashboard "Issue passport" modal (the private
 // key is shown once), or mint one with fleet-admin.mjs `create`.
 import { ed25519 } from "@noble/curves/ed25519";
+import { config, fail, formatChallengeError, formatProxyError, ok, requirePassport, resolveModel, step } from "./_config.mjs";
 
-const GATEWAY = (process.env.PASSCONTROL_GATEWAY ?? "http://localhost:3000").replace(/\/+$/, "");
-const PASSPORT_ID = process.env.PASSPORT_ID;
-const PASSPORT_SECRET = process.env.PASSPORT_SECRET;
-const PROVIDER = process.env.PROVIDER ?? "anthropic";
-const MODEL = process.env.MODEL ?? (PROVIDER === "openai" ? "gpt-4o-mini" : "claude-haiku-4-5");
+const GATEWAY = config.gateway;
+const { passportId: PASSPORT_ID, passportSecret: PASSPORT_SECRET } = requirePassport();
+const PROVIDER = config.provider;
+const MODEL = resolveModel(PROVIDER);
 const PROMPT = process.argv.slice(2).join(" ") || process.env.PROMPT || "Say hello in exactly 3 words.";
-
-if (!PASSPORT_ID || !PASSPORT_SECRET) {
-  console.error("Set PASSPORT_ID and PASSPORT_SECRET (base64url Ed25519 public/private key).");
-  process.exit(1);
-}
 
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -42,15 +36,10 @@ async function mintVisa() {
   });
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 403 && body.includes("agent_not_active")) {
-      throw new Error(
-        "this agent is suspended or revoked — re-enable it in the dashboard (or `node examples/fleet-admin.mjs resume <id>`)."
-      );
-    }
-    throw new Error(`challenge failed: ${res.status} ${body}`);
+    throw new Error(formatChallengeError(res.status, body));
   }
   const { visa, expires_in } = await res.json();
-  console.log(`✓ minted visa (expires in ${expires_in}s)`);
+  ok(`minted visa (expires in ${expires_in}s)`);
   return visa;
 }
 
@@ -77,7 +66,8 @@ function extractDelta(json) {
 }
 
 async function main() {
-  console.log(`→ ${PROVIDER}/${MODEL} via ${GATEWAY}\n→ prompt: ${PROMPT}\n`);
+  step(`${PROVIDER}/${MODEL} via ${GATEWAY}`);
+  step(`prompt: ${PROMPT}\n`);
   const visa = await mintVisa();
   const { path, body } = buildRequest();
 
@@ -87,8 +77,7 @@ async function main() {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    console.error(`✗ proxy error ${res.status}: ${await res.text()}`);
-    process.exit(1);
+    throw new Error(formatProxyError(res.status, await res.text()));
   }
 
   process.stdout.write("\nresponse: ");
@@ -111,10 +100,11 @@ async function main() {
       }
     }
   }
-  console.log("\n\n✓ done — check the dashboard audit log + spend for this call.");
+  console.log("");
+  ok("done - check the dashboard audit log + spend for this call.");
 }
 
 main().catch((e) => {
-  console.error("✗", e.message);
+  fail(e.message);
   process.exit(1);
 });

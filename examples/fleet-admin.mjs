@@ -5,7 +5,7 @@
 // to set up test agents and exercise the control plane.
 //
 // Run:
-//   PASSCONTROL_GATEWAY=http://localhost:3000 PASSCONTROL_API_KEY=pc_... \
+//   cp .passcontrol.example .passcontrol   # fill PASSCONTROL_API_KEY
 //   node examples/fleet-admin.mjs <command> [args]
 //
 // Commands:
@@ -19,18 +19,18 @@
 //
 // A `create`d agent's printed PASSPORT_ID/SECRET feed straight into chat-agent.mjs.
 import { ed25519 } from "@noble/curves/ed25519";
+import { config, die, fail, ok, requireControlApiKey, step } from "./_config.mjs";
 
-const GATEWAY = (process.env.PASSCONTROL_GATEWAY ?? "http://localhost:3000").replace(/\/+$/, "");
-const API_KEY = process.env.PASSCONTROL_API_KEY;
+const GATEWAY = config.gateway;
+const API_KEY = requireControlApiKey();
 const BASE = `${GATEWAY}/api/control/v1`;
-
-if (!API_KEY) {
-  console.error("Set PASSCONTROL_API_KEY (a write-scoped pc_ key from the dashboard API-keys panel).");
-  process.exit(1);
-}
 
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+function usage() {
+  return "Usage: node examples/fleet-admin.mjs list|spend|audit|create <name>|suspend <id>|resume <id>|revoke <id>|kill on|off";
+}
 
 async function api(method, path, body) {
   const res = await fetch(`${BASE}${path}`, {
@@ -44,10 +44,21 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
-  const json = text ? JSON.parse(text) : {};
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { error: { message: text || "non-JSON response" } };
+  }
   if (!res.ok) {
     const e = json.error ?? {};
-    throw new Error(`${res.status} ${e.code ?? ""} ${e.message ?? ""} (req ${e.request_id ?? "?"})`);
+    const hint =
+      res.status === 401 || res.status === 403
+        ? " Check PASSCONTROL_API_KEY permissions, then retry."
+        : res.status === 429
+          ? " Wait for the rate limit window, then retry."
+          : "";
+    throw new Error(`${res.status} ${e.code ?? ""} ${e.message ?? ""} (req ${e.request_id ?? "?"}).${hint}`);
   }
   return json.data;
 }
@@ -74,7 +85,7 @@ async function main() {
     }
     case "create": {
       const name = args[0];
-      if (!name) throw new Error("usage: create <name>");
+      if (!name) throw new Error("Usage: node examples/fleet-admin.mjs create <name>");
       // Generate the passport IN THIS PROCESS; only the public key leaves.
       const priv = ed25519.utils.randomPrivateKey();
       const pub = ed25519.getPublicKey(priv);
@@ -84,11 +95,11 @@ async function main() {
         passportPubkey: passportId,
         scopes: [{ provider: "anthropic", models: ["claude-*"] }],
       });
-      console.log(`✓ created agent ${created.id} (${created.name})`);
-      console.log("\nStore these — the secret is shown once and is the agent's passport:");
+      ok(`created agent ${created.id} (${created.name})`);
+      step("Store these - the secret is shown once and is the agent's passport:");
       console.log(`  PASSPORT_ID=${passportId}`);
       console.log(`  PASSPORT_SECRET=${b64url(priv)}`);
-      console.log(`\nUse with: PASSPORT_ID=… PASSPORT_SECRET=… node examples/chat-agent.mjs "hi"`);
+      step('Next: add them to .passcontrol, then run `node examples/chat-agent.mjs "hi"`.');
       break;
     }
     case "suspend":
@@ -107,12 +118,11 @@ async function main() {
       break;
     }
     default:
-      console.error("commands: list | spend | audit | create <name> | suspend <id> | resume <id> | revoke <id> | kill on|off");
-      process.exit(1);
+      die(`Unknown or missing command. ${usage()}`);
   }
 }
 
 main().catch((e) => {
-  console.error("✗", e.message);
+  fail(e.message);
   process.exit(1);
 });

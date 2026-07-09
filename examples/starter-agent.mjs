@@ -6,24 +6,18 @@
 // you get to *experience* the product the way your users will.
 //
 // Run (after: provider key added in the dashboard + a passport issued):
-//   PASSCONTROL_GATEWAY=http://localhost:3000 \
-//   PASSPORT_ID=<base64url pubkey> PASSPORT_SECRET=<base64url privkey> \
+//   cp .passcontrol.example .passcontrol   # fill PASSPORT_ID/PASSPORT_SECRET
 //   node examples/starter-agent.mjs
 //
 // Get PASSPORT_ID/SECRET from the dashboard "Issue passport" modal, or:
 //   node examples/fleet-admin.mjs create my-first-agent
 import { ed25519 } from "@noble/curves/ed25519";
+import { config, fail, formatChallengeError, formatProxyError, ok, requirePassport, resolveModel, step } from "./_config.mjs";
 
-const GATEWAY = (process.env.PASSCONTROL_GATEWAY ?? "http://localhost:3000").replace(/\/+$/, "");
-const PASSPORT_ID = process.env.PASSPORT_ID;
-const PASSPORT_SECRET = process.env.PASSPORT_SECRET;
-const MODEL = process.env.MODEL ?? "claude-haiku-4-5";
+const GATEWAY = config.gateway;
+const { passportId: PASSPORT_ID, passportSecret: PASSPORT_SECRET } = requirePassport();
+const MODEL = resolveModel("anthropic");
 const MAX_TURNS = 6;
-
-if (!PASSPORT_ID || !PASSPORT_SECRET) {
-  console.error("Set PASSPORT_ID and PASSPORT_SECRET (from the dashboard / fleet-admin create).");
-  process.exit(1);
-}
 
 const b64url = (b) => Buffer.from(b).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const fromB64url = (s) => new Uint8Array(Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
@@ -40,12 +34,7 @@ async function mintVisa() {
   });
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 403 && body.includes("agent_not_active")) {
-      throw new Error(
-        "this agent is suspended or revoked — re-enable it in the dashboard (or `node examples/fleet-admin.mjs resume <id>`)."
-      );
-    }
-    throw new Error(`challenge failed: ${res.status} ${body}`);
+    throw new Error(formatChallengeError(res.status, body));
   }
   return (await res.json()).visa;
 }
@@ -100,17 +89,15 @@ async function callModel(visa, messages) {
     headers: { "content-type": "application/json", authorization: `Bearer ${visa}` },
     body: JSON.stringify({ model: MODEL, max_tokens: 512, tools, messages }),
   });
-  if (res.status === 402) throw new Error("BUDGET — the gateway blocked this call (402). Your budget cap works!");
-  if (res.status === 403) throw new Error("BLOCKED — kill switch / suspended / scope (403). Revocation works!");
-  if (!res.ok) throw new Error(`proxy ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(formatProxyError(res.status, await res.text()));
   return res.json();
 }
 
 // ── 4. The agent loop: think → (maybe) call tools → think → … → answer ────────
 async function main() {
-  console.log(`PassControl starter agent → ${MODEL} via ${GATEWAY}\n`);
+  step(`PassControl starter agent -> ${MODEL} via ${GATEWAY}\n`);
   const visa = await mintVisa();
-  console.log("✓ visa minted\n");
+  ok("visa minted\n");
 
   const messages = [
     {
@@ -126,17 +113,17 @@ async function main() {
 
     const toolUses = (reply.content ?? []).filter((b) => b.type === "tool_use");
     const text = (reply.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("");
-    if (text) console.log(`🤖 ${text}\n`);
+    if (text) step(`assistant: ${text}\n`);
 
     if (reply.stop_reason !== "tool_use" || toolUses.length === 0) {
-      console.log("✓ agent finished.");
+      ok("agent finished.");
       break;
     }
 
     const results = [];
     for (const tu of toolUses) {
       const out = runTool(tu.name, tu.input);
-      console.log(`🔧 ${tu.name}(${JSON.stringify(tu.input)}) → ${out}`);
+      step(`tool ${tu.name}(${JSON.stringify(tu.input)}) -> ${out}`);
       results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
     }
     console.log("");
@@ -148,6 +135,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error("\n✗", e.message);
+  console.error("");
+  fail(e.message);
   process.exit(1);
 });

@@ -87,9 +87,13 @@ passcontrol-dev
 Then add a provider key in the Control Tower, issue a passport, and run:
 
 ```bash
-PASSPORT_ID=<passport_id> PASSPORT_SECRET=<passport_secret> \
-node examples/chat-agent.mjs "Say hello in 3 words"
+passcontrol init
+passcontrol doctor --deep
+passcontrol call "Say hello in 3 words"
+passcontrol spend
 ```
+
+From an unlinked source checkout, use `npm run cli -- <command>` for the same CLI.
 
 The final agent call uses your real Anthropic/OpenAI key from the local Vault, so start
 with a non-critical key.
@@ -136,7 +140,8 @@ static API key, but a visa expires in minutes. Run the **visa sidecar** — a lo
 mints/refreshes the visa for you — and point the agent at it like any other endpoint:
 
 ```bash
-PASSPORT_ID=… PASSPORT_SECRET=… npm run sidecar   # http://127.0.0.1:8788
+passcontrol sidecar   # http://127.0.0.1:8788
+passcontrol env openhands
 # then set the agent's base URL to http://127.0.0.1:8788/api/v1/anthropic (or /openai),
 # API key = anything. The agent never holds a real key or a long-lived token.
 ```
@@ -148,6 +153,16 @@ import { ControlClient } from "./sdk";
 const cp = new ControlClient({ gateway, apiKey: process.env.PASSCONTROL_API_KEY! });
 await cp.agents.list();
 await cp.killSwitch.set(true);
+```
+
+The CLI also exposes the common read/control paths:
+
+```bash
+passcontrol agent list
+passcontrol spend
+passcontrol logs --limit 20
+passcontrol audit --limit 20
+passcontrol kill on
 ```
 
 Full API reference: [`openapi.yaml`](./openapi.yaml) and [`DOCUMENTATION.md`](./DOCUMENTATION.md).

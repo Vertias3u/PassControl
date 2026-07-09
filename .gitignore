@@ -5,6 +5,7 @@ out/
 .env.local
 .env*.local
 .env.docker
+.passcontrol
 # Supabase CLI local state (from `supabase start`) — not part of the repo; our
 # local stack uses CLI defaults, not a committed config. Leading slash anchors
 # this to the repo root so it does NOT also match lib/supabase/ (the SSR clients).
@@ -32,3 +33,4 @@ coverage/
 /fable5again.md
 /fable5output1.md
 /Fable5output1.md
+/passcontrol_cliui_v1.md
