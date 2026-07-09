@@ -81,8 +81,9 @@ export async function updateAgent(
   return { ok: true, value: { id: agentId } };
 }
 
-/** Suspend or resume an agent. Updates status (tenant-scoped) then the Redis
- *  suspend set + key-cache purge — the same machinery the gateway checks. */
+/** Suspend or resume an agent. Only active agents can be suspended, and only
+ * suspended agents can resume: a revoked agent is terminal and can never be
+ * reactivated through this path. */
 export async function setAgentSuspended(
   db: SupabaseClient,
   userId: string,
@@ -94,6 +95,7 @@ export async function setAgentSuspended(
     .update({ status: suspended ? "suspended" : "active" })
     .eq("user_id", userId)
     .eq("id", agentId)
+    .eq("status", suspended ? "active" : "suspended")
     .select("id")
     .maybeSingle();
   if (error) return { ok: false, status: 500, code: "query_failed" };
@@ -119,6 +121,7 @@ export async function revokeAgent(
     .update({ status: "revoked" })
     .eq("user_id", userId)
     .eq("id", agentId)
+    .neq("status", "revoked")
     .select("id")
     .maybeSingle();
   if (error) return { ok: false, status: 500, code: "query_failed" };
@@ -129,8 +132,9 @@ export async function revokeAgent(
   return { ok: true, value: { id: agentId } };
 }
 
-/** Arm/disarm the per-tenant master kill: flip Redis killswitch:tenant:<uid> and
- *  suspend+purge (or release) every owned agent. */
+/** Arm/disarm the per-tenant master kill. It is deliberately independent of
+ * per-agent suspension: disarming a tenant must never reactivate an agent that
+ * was separately suspended or revoked. */
 export async function setTenantKill(
   db: SupabaseClient,
   userId: string,
@@ -138,15 +142,5 @@ export async function setTenantKill(
 ): Promise<FleetResult<{ affected: number }>> {
   await armTenantKill(userId, on);
   const { data: agents } = await db.from("agents").select("id").eq("user_id", userId);
-  const list = agents ?? [];
-  for (const a of list) {
-    const id = a.id as string;
-    if (on) {
-      await suspendAgent(id);
-      await purgeAgentCaches(id, cachePurgeProviders());
-    } else {
-      await unsuspendAgent(id);
-    }
-  }
-  return { ok: true, value: { affected: list.length } };
+  return { ok: true, value: { affected: (agents ?? []).length } };
 }

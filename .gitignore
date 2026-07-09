@@ -17,20 +17,29 @@ coverage/
 .DS_Store
 **/.DS_Store
 
-# Private scratch — AI reviews, logs, drafts, and the scrapped landing-page shell.
-# These are internal-only (also blocked from the public tree by curate-public.sh
-# FORBIDDEN_NAMES). Gitignored so a stray `git add -A` can't sweep them into the
-# private repo either.
+# Private scratch / internal docs — AI reviews, logs, drafts, design notes, the scrapped
+# landing-page shell. Internal-only. DO NOT move these to .git/info/exclude — that is
+# LOCAL-ONLY and does not travel, so on a fresh clone `git add -A` would sweep them in.
+# Keep them EXPLICIT here. (The PUBLIC tree is separately protected by the ALLOWLIST in
+# scripts/curate-public.sh — these are never copied — plus its markdown allowlist.)
 /public-launch/
+/fable*.md
+/Fable*.md
 /output_anth.md
 /loghhh.md
 /shit_log.md
 /hermes_compat.md
 /REDDIT_POST.md
-/FABLE_output.md
-/fable_review2.md
-/Fable_review2.md
-/fable5again.md
-/fable5output1.md
-/Fable5output1.md
 /passcontrol_cliui_v1.md
+/problemsinoticed.md
+/scratch/
+/local-notes/
+*_scratch.md
+*_draft.md
+*_notes.md
+*_review.md
+*.local
+*.local.*
+*.scratch
+*.scratch.*
+/FULL_CONTEXT_DUMP.md

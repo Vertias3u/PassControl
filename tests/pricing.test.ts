@@ -20,8 +20,9 @@ describe("costMicrocents — sub-cent precision (no rounding to zero)", () => {
   it("matches model wildcards", () => {
     // claude-haiku-4*: in $1/1M => 100 µ¢/tok, out $5/1M => 500 µ¢/tok.
     expect(costMicrocents("claude-haiku-4-5", 1000, 500)).toBe(1000 * 100 + 500 * 500);
-    // generic claude-* fallback: in $3/1M => 300, out $15/1M => 1500.
-    expect(costMicrocents("claude-something-new", 10, 10)).toBe(10 * 300 + 10 * 1500);
+    // generic claude-* row is intentionally conservative: unknown Claude models
+    // should not under-reserve before a precise row is added.
+    expect(costMicrocents("claude-something-new", 10, 10)).toBe(10 * 1500 + 10 * 7500);
   });
 
   it("returns 0 for an unknown model when no provider is known", () => {
@@ -29,7 +30,7 @@ describe("costMicrocents — sub-cent precision (no rounding to zero)", () => {
   });
 
   it("falls back to the known provider's highest rate for an unlisted model", () => {
-    // Groq max known rate: llama-3.3-70b-versatile at 59 µ¢ input / 79 µ¢ output.
+    // Groq max verified rate: Llama 3.3 70B at 59 µ¢ input / 79 µ¢ output.
     expect(costMicrocents("some-new-model", 1000, 500, "groq")).toBe(1000 * 59 + 500 * 79);
   });
 
@@ -40,6 +41,17 @@ describe("costMicrocents — sub-cent precision (no rounding to zero)", () => {
   it("uses each provider's own fallback rate for unknown models", () => {
     expect(costMicrocents("same-unknown-model", 1000, 500, "groq")).toBe(1000 * 59 + 500 * 79);
     expect(costMicrocents("same-unknown-model", 1000, 500, "deepseek")).toBe(1000 * 44 + 500 * 87);
+    expect(costMicrocents("same-unknown-model", 1000, 500, "together")).toBe(1000 * 104 + 500 * 120);
+    expect(costMicrocents("same-unknown-model", 1000, 500, "openai")).toBe(1000 * 250 + 500 * 1000);
+  });
+
+  it("never presents an unverified model name as a precise price row", () => {
+    // These names intentionally use each provider's conservative fallback. A
+    // new model gets an explicit row only after its official price is verified.
+    expect(costMicrocents("claude-mythos-5", 1, 1, "anthropic")).toBe(1500 + 7500);
+    expect(costMicrocents("gpt-5.4-mini", 1, 1, "openai")).toBe(250 + 1000);
+    expect(costMicrocents("qwen-3.6-27b", 1, 1, "groq")).toBe(59 + 79);
+    expect(costMicrocents("moonshotai/Kimi-K2.6", 1, 1, "together")).toBe(104 + 120);
   });
 
   it("uses provider-specific prices for OpenAI-compatible providers", () => {
@@ -47,6 +59,9 @@ describe("costMicrocents — sub-cent precision (no rounding to zero)", () => {
     expect(costMicrocents("mistral-small-latest", 1000, 500, "mistral")).toBe(1000 * 15 + 500 * 60);
     expect(costMicrocents("openai/gpt-oss-20b", 1000, 500, "together")).toBe(1000 * 5 + 500 * 20);
     expect(costMicrocents("deepseek-v4-flash", 1000, 500, "deepseek")).toBe(1000 * 14 + 500 * 28);
+    expect(costMicrocents("deepseek-reasoner", 1000, 500, "deepseek")).toBe(1000 * 44 + 500 * 87);
+    expect(costMicrocents("claude-fable-5", 1000, 500, "anthropic")).toBe(1000 * 1000 + 500 * 5000);
+    expect(costMicrocents("gpt-4o", 1000, 500, "openai")).toBe(1000 * 250 + 500 * 1000);
   });
 
   it("does not reuse a same-name provider-specific price across providers", () => {

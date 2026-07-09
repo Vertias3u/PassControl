@@ -1,6 +1,6 @@
 # PassControl example-agent config.
 # Copy this file to .passcontrol and fill in local/demo values.
-# Or run: passcontrol init
+# Or run: npm run cli -- init (or `passcontrol init` after linking/installing the CLI).
 # Never commit .passcontrol: it can contain a passport secret.
 
 PASSCONTROL_GATEWAY=http://localhost:3000

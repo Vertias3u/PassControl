@@ -57,27 +57,36 @@ function parseArgv(argv) {
   return { opts, rest };
 }
 
+function cliPrefix() {
+  return process.env.npm_lifecycle_event === "cli" ? "npm run cli --" : "passcontrol";
+}
+
+function cliCommand(args = "") {
+  return args ? `${cliPrefix()} ${args}` : cliPrefix();
+}
+
 function usage() {
+  const cmd = cliPrefix();
   return `PassControl
 
 Usage:
-  passcontrol                         show cockpit status
-  passcontrol init [--global]          create a config profile
-  passcontrol status [--no-network]    show active config
-  passcontrol doctor [--deep]          check local setup
-  passcontrol call "hi"                mint a visa and call a model
-  passcontrol sidecar [--port 8788]    start the local agent bridge
-  passcontrol env [openhands]          print sidecar settings for agents
-  passcontrol agent list               list agents
-  passcontrol agent create <name>      create an agent passport
-  passcontrol agent suspend <id>       suspend an agent
-  passcontrol agent resume <id>        resume an agent
-  passcontrol agent revoke <id>        revoke an agent
-  passcontrol spend                    show fleet + per-agent spend
-  passcontrol audit [--limit 20]        show admin audit trail
-  passcontrol logs [--limit 20]         show gateway call logs
-  passcontrol kill on|off              toggle tenant kill switch
-  passcontrol open                     open the dashboard
+  ${cmd}                         show cockpit status
+  ${cmd} init [--global]          create a config profile
+  ${cmd} status [--no-network]    show active config
+  ${cmd} doctor [--deep]          check local setup
+  ${cmd} call "hi"                mint a visa and call a model
+  ${cmd} sidecar [--port 8788]    start the local agent bridge
+  ${cmd} env [openhands]          print sidecar settings for agents
+  ${cmd} agent list               list agents
+  ${cmd} agent create <name>      create an agent passport
+  ${cmd} agent suspend <id>       suspend an agent
+  ${cmd} agent resume <id>        resume an agent
+  ${cmd} agent revoke <id>        revoke an agent
+  ${cmd} spend                    show fleet + per-agent spend
+  ${cmd} audit [--limit 20]        show admin audit trail
+  ${cmd} logs [--limit 20]         show gateway call logs
+  ${cmd} kill on|off              toggle tenant kill switch
+  ${cmd} open                     open the dashboard
 
 Config:
   Env vars win, then nearest .passcontrol, then ~/.config/passcontrol/config.
@@ -129,16 +138,16 @@ async function printCockpit({ noNetwork = false } = {}) {
   console.log(`Model:    ${config.model}`);
   console.log(`Passport: ${passportConfigured ? redact(config.passportId) : "missing"}`);
   console.log(`Admin key: ${adminConfigured ? redact(config.apiKey, 6) : "missing"}`);
-  console.log("Sidecar:  foreground command (`passcontrol sidecar`)\n");
+  console.log(`Sidecar:  foreground command (\`${cliCommand("sidecar")}\`)\n`);
   console.log("Next commands:");
-  console.log('  passcontrol init              configure this project');
-  console.log('  passcontrol call "hi"         test a governed model call');
-  console.log("  passcontrol sidecar           start the local agent bridge");
-  console.log("  passcontrol agent list        list agents");
-  console.log("  passcontrol spend             show fleet spend");
-  console.log("  passcontrol env openhands     print agent settings");
-  console.log("  passcontrol doctor            check setup");
-  console.log("  passcontrol open              open dashboard");
+  console.log(`  ${cliCommand("init")}              configure this project`);
+  console.log(`  ${cliCommand('call "hi"')}         test a governed model call`);
+  console.log(`  ${cliCommand("sidecar")}           start the local agent bridge`);
+  console.log(`  ${cliCommand("agent list")}        list agents`);
+  console.log(`  ${cliCommand("spend")}             show fleet spend`);
+  console.log(`  ${cliCommand("env openhands")}     print agent settings`);
+  console.log(`  ${cliCommand("doctor")}            check setup`);
+  console.log(`  ${cliCommand("open")}              open dashboard`);
 }
 
 async function initCommand(opts) {
@@ -481,7 +490,7 @@ function printAgentPreset(name = "generic", opts = {}) {
   const preset = name.toLowerCase();
   const { provider, model, apiKey, baseUrl } = sidecarBaseUrl(opts);
   const modelWithProvider = `${provider}/${model}`;
-  const sidecarStart = opts.port ? `passcontrol sidecar --port ${opts.port}` : "passcontrol sidecar";
+  const sidecarStart = opts.port ? cliCommand(`sidecar --port ${opts.port}`) : cliCommand("sidecar");
 
   console.log(`# Start the bridge first: ${sidecarStart}`);
   switch (preset) {

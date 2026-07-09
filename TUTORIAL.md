@@ -147,7 +147,7 @@ Then point your agent at the sidecar exactly like a provider, API key = anything
 
 - **Base URL:** `http://127.0.0.1:8788/api/v1/anthropic` (or `/api/v1/openai`)
 - **API key:** `sidecar` (ignored — the sidecar replaces it)
-- **Model:** one your passport's scope allows
+- **Model:** one that your passport's scope allows
 
 For **OpenHands** (LiteLLM under the hood): set the custom model to `anthropic/claude-…`,
 base URL to the sidecar, key to anything. Run a task and watch the Audit Log fill with
@@ -157,6 +157,20 @@ To print a copy/paste starting point:
 ```bash
 npm run cli -- env openhands
 ```
+
+Other common presets:
+
+```bash
+npm run cli -- env aider
+npm run cli -- env cline
+npm run cli -- env continue
+npm run cli -- env litellm
+```
+
+Compatibility rule of thumb: PassControl proxies chat completions/messages and model-listing
+only. If a client tries OpenAI's newer `/responses` endpoint, embeddings, files, or
+fine-tuning, the gateway correctly returns `403 blocked_endpoint`. In Continue, set
+`useResponsesApi: false` for OpenAI/gpt-5/o-series configs so it uses `/chat/completions`.
 
 Quick sanity check that scoping works — a blocked endpoint returns `403 blocked_endpoint`:
 

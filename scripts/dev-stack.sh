@@ -6,7 +6,7 @@
 #
 # Prereqs: Docker running + the Supabase CLI. NO host psql needed — migrations run
 # inside the Supabase DB container. Afterwards, start the app with the docker env:
-#   set -a; . ./.env.docker; set +a; npm run dev
+#   npm run dev:docker
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -89,7 +89,7 @@ cat <<DONE
 
 ✅ Local stack is up.
    Supabase API    : ${API_URL}   (Studio UI is excluded — use the PassControl dashboard)
-   Start the app   : set -a; . ./.env.docker; set +a; npm run dev
+   Start the app   : npm run dev:docker
                      → http://localhost:3000  (log in: dev@passcontrol.local / passcontrol-dev)
 
    Then: add a provider key + issue a passport in the dashboard, and run:

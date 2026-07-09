@@ -10,9 +10,8 @@ Fastest local setup:
 ```bash
 git clone https://github.com/<you>/passcontrol && cd passcontrol
 npm install
-npm run dev:stack
-set -a; . ./.env.docker; set +a
-npm run dev
+npm run dev:stack      # starts Supabase + Redis, applies migrations, seeds a dev user
+npm run dev:docker     # runs the app with .env.docker loaded
 ```
 
 That starts Supabase locally, Redis-over-REST, applies migrations, and seeds the dev login

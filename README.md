@@ -87,13 +87,13 @@ passcontrol-dev
 Then add a provider key in the Control Tower, issue a passport, and run:
 
 ```bash
-passcontrol init
-passcontrol doctor --deep
-passcontrol call "Say hello in 3 words"
-passcontrol spend
+npm run cli -- init
+npm run cli -- doctor --deep
+npm run cli -- call "Say hello in 3 words"
+npm run cli -- spend
 ```
 
-From an unlinked source checkout, use `npm run cli -- <command>` for the same CLI.
+After linking/installing the package, the short form is `passcontrol <command>`.
 
 The final agent call uses your real Anthropic/OpenAI key from the local Vault, so start
 with a non-critical key.
@@ -140,11 +140,16 @@ static API key, but a visa expires in minutes. Run the **visa sidecar** — a lo
 mints/refreshes the visa for you — and point the agent at it like any other endpoint:
 
 ```bash
-passcontrol sidecar   # http://127.0.0.1:8788
-passcontrol env openhands
+npm run cli -- sidecar   # http://127.0.0.1:8788
+npm run cli -- env openhands
 # then set the agent's base URL to http://127.0.0.1:8788/api/v1/anthropic (or /openai),
 # API key = anything. The agent never holds a real key or a long-lived token.
 ```
+
+Presets are available for `openhands`, `aider`, `cline`, `continue`, and `litellm`.
+If a client defaults to OpenAI `/responses` (notably Continue for some o-series/gpt-5
+configs), disable that mode and force `/chat/completions`; PassControl intentionally proxies
+only chat/messages and model-listing endpoints.
 
 Manage the fleet programmatically with the control-plane SDK + API key:
 
@@ -158,11 +163,11 @@ await cp.killSwitch.set(true);
 The CLI also exposes the common read/control paths:
 
 ```bash
-passcontrol agent list
-passcontrol spend
-passcontrol logs --limit 20
-passcontrol audit --limit 20
-passcontrol kill on
+npm run cli -- agent list
+npm run cli -- spend
+npm run cli -- logs --limit 20
+npm run cli -- audit --limit 20
+npm run cli -- kill on
 ```
 
 Full API reference: [`openapi.yaml`](./openapi.yaml) and [`DOCUMENTATION.md`](./DOCUMENTATION.md).

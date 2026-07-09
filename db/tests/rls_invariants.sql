@@ -34,6 +34,17 @@ begin
      and relrowsecurity = false;
   if bad is not null then raise exception 'RLS disabled on: %', bad; end if;
 
+  -- A dashboard session may edit its own agent's metadata, but it must not be
+  -- able to reactivate a terminally revoked passport by PATCHing `status`
+  -- directly through PostgREST. Status transitions run only server-side with
+  -- an explicit tenant filter.
+  if has_column_privilege('authenticated', 'public.agents', 'status', 'UPDATE') then
+    raise exception 'authenticated must not have UPDATE on agents.status';
+  end if;
+  if not has_column_privilege('authenticated', 'public.agents', 'name', 'UPDATE') then
+    raise exception 'authenticated must retain UPDATE on editable agent metadata';
+  end if;
+
   -- Seed two tenants (service/owner role bypasses RLS for setup).
   insert into auth.users (id) values (v_a), (v_b);
   insert into public.users (id, email) values (v_a, 'a@example.test'), (v_b, 'b@example.test');

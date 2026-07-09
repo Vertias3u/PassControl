@@ -2,6 +2,7 @@
 // Control Tower server actions. Ownership is enforced via the user-scoped
 // Supabase client (RLS) before any privileged kill-switch / Redis write.
 import { revalidatePath } from "next/cache";
+import { serviceClient } from "@/lib/supabase";
 import { userClient } from "@/lib/supabase/server";
 import { validateProviderKeyInput, validateRotateInput } from "@/lib/validate";
 import { logSecurityEvent } from "@/lib/seclog";
@@ -40,10 +41,13 @@ export async function setMasterKill(on: boolean) {
   revalidatePath("/");
 }
 
-/** Per-agent kill toggle. Ownership verified by RLS (update returns 0 rows if not owner). */
+/** Per-agent kill toggle. The session authenticates the owner; the server-only
+ * fleet mutation enforces that owner with an explicit user_id filter. */
 export async function setAgentSuspended(agentId: string, suspended: boolean) {
-  const { db, user } = await requireUser();
-  const r = await fleet.setAgentSuspended(db, user.id, agentId, suspended);
+  const { user } = await requireUser();
+  // Status is deliberately not client-updatable: use the server-only client
+  // with fleet's explicit user_id filter so a revoked passport stays terminal.
+  const r = await fleet.setAgentSuspended(serviceClient(), user.id, agentId, suspended);
   if (!r.ok) throw new Error("not_authorized");
   logSecurityEvent("agent.suspend", { user: user.id, agentId, suspended });
   await dispatchSecurityAlert("agent.suspend", { user: user.id, agentId, suspended });

@@ -18,13 +18,20 @@ import { validateAgentUpdate } from "@/lib/validate";
 
 // Chainable Supabase mock that records insert/update payloads + eq() filters.
 function makeDb(result: { data: unknown; error: unknown }) {
-  const calls = { from: [] as string[], insert: null as any, update: null as any, eq: [] as [string, unknown][] };
+  const calls = {
+    from: [] as string[],
+    insert: null as any,
+    update: null as any,
+    eq: [] as [string, unknown][],
+    neq: [] as [string, unknown][],
+  };
   const builder = () => {
     const b: any = {
       insert: (p: any) => { calls.insert = p; return b; },
       update: (p: any) => { calls.update = p; return b; },
       select: () => b,
       eq: (c: string, v: unknown) => { calls.eq.push([c, v]); return b; },
+      neq: (c: string, v: unknown) => { calls.neq.push([c, v]); return b; },
       single: async () => result,
       maybeSingle: async () => result,
       then: (res: any) => res(result),
@@ -130,10 +137,11 @@ describe("setAgentSuspended", () => {
     expect(unsuspendAgent).not.toHaveBeenCalled();
   });
 
-  it("resumes: unsuspend, no purge", async () => {
+  it("resumes only an explicitly suspended agent", async () => {
     const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
     await setAgentSuspended(db, "u1", "a1", false);
     expect(calls.update).toEqual({ status: "active" });
+    expect(calls.eq).toContainEqual(["status", "suspended"]);
     expect(unsuspendAgent).toHaveBeenCalledWith("a1");
     expect(suspendAgent).not.toHaveBeenCalled();
   });
@@ -153,6 +161,7 @@ describe("revokeAgent", () => {
     expect(r).toEqual({ ok: true, value: { id: "a1" } });
     expect(calls.update).toEqual({ status: "revoked" });
     expect(calls.eq).toContainEqual(["user_id", "u1"]);
+    expect(calls.neq).toContainEqual(["status", "revoked"]);
     expect(suspendAgent).toHaveBeenCalledWith("a1");
   });
   it("404 when not found", async () => {
@@ -162,21 +171,23 @@ describe("revokeAgent", () => {
 });
 
 describe("setTenantKill", () => {
-  it("arms: flips the tenant kill flag and suspends every owned agent", async () => {
+  it("arms only the tenant kill flag; it never overwrites individual suspension state", async () => {
     const { db, calls } = makeDb({ data: [{ id: "a1" }, { id: "a2" }], error: null });
     const r = await setTenantKill(db, "u1", true);
     expect(r).toEqual({ ok: true, value: { affected: 2 } });
     expect(armTenantKill).toHaveBeenCalledWith("u1", true);
     expect(calls.eq).toContainEqual(["user_id", "u1"]);
-    expect(suspendAgent).toHaveBeenCalledTimes(2);
-    expect(purgeAgentCaches).toHaveBeenCalledTimes(2);
+    expect(suspendAgent).not.toHaveBeenCalled();
+    expect(unsuspendAgent).not.toHaveBeenCalled();
+    expect(purgeAgentCaches).not.toHaveBeenCalled();
   });
 
-  it("disarms: releases every owned agent", async () => {
+  it("disarms only the tenant kill flag; individual suspension markers remain untouched", async () => {
     const { db } = makeDb({ data: [{ id: "a1" }], error: null });
     await setTenantKill(db, "u1", false);
     expect(armTenantKill).toHaveBeenCalledWith("u1", false);
-    expect(unsuspendAgent).toHaveBeenCalledWith("a1");
     expect(suspendAgent).not.toHaveBeenCalled();
+    expect(unsuspendAgent).not.toHaveBeenCalled();
+    expect(purgeAgentCaches).not.toHaveBeenCalled();
   });
 });

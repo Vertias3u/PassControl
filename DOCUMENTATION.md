@@ -133,6 +133,22 @@ await openai.chat.completions.create({ model: "gpt-4o-mini", messages: [{ role: 
 Anthropic is identical with `pc.clientOptions("anthropic")`. The SDK caches the visa, refreshes
 before expiry, single-flights concurrent mints, and retries once on a 401.
 
+For third-party agents that expect a static key, run the visa sidecar and point the agent at
+`http://127.0.0.1:8788/api/v1/<provider>` with any API key value. CLI presets print the
+right variables/settings:
+
+```bash
+npm run cli -- env openhands
+npm run cli -- env aider
+npm run cli -- env cline
+npm run cli -- env continue
+npm run cli -- env litellm
+```
+
+Continue-specific note: its OpenAI provider may default to `/responses` for o-series and
+gpt-5 models. PassControl intentionally does not proxy `/responses`; set
+`useResponsesApi: false` so Continue uses `/chat/completions`.
+
 ---
 
 ## Control plane — manage your fleet
@@ -156,7 +172,7 @@ includes tenant-scoped agent lifecycle, logs, audit, spend, and kill-switch endp
 | Method | Path | Scope | Description |
 |---|---|---|---|
 | GET | `/agents` | read | List agents (filter `?status=`). |
-| POST | `/agents` | write | Create. Body: `name`, `passport_pubkey`, `scopes`, `budget_tokens?`, `budget_cents?`. **You generate the Ed25519 keypair and send only the public key.** |
+| POST | `/agents` | write | Create. Body: `name`, `passportPubkey`, `scopes`, `budget_tokens?`, `budget_cents?`. **You generate the Ed25519 keypair and send only the public key.** |
 | GET | `/agents/{id}` | read | Fetch one. |
 | PATCH | `/agents/{id}` | write | Update name / scopes / budgets. |
 | POST | `/agents/{id}/suspend` · `/resume` | write | Per-agent kill toggle. |
@@ -175,7 +191,7 @@ provider secrets are never returned by the API and are never accepted by the con
 ### Observability
 | Method | Path | Scope | Description |
 |---|---|---|---|
-| GET | `/logs` | read | Gateway calls; filter by agent/status/time. |
+| GET | `/logs` | read | Gateway calls; filter by `agent_id`, `status`, and `limit`. |
 | GET | `/audit` | read | Admin-action trail. |
 | GET | `/spend` | read | Per-agent + fleet totals (micro-cents; $ = µ¢ / 100,000,000). |
 

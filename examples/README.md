@@ -13,23 +13,23 @@ real agent — these *are* the example agents). Self-contained `.mjs`, run with 
 
 ## Product CLI
 
-The smooth path is the `passcontrol` command:
+From a source checkout, run the product CLI through npm:
 
 ```bash
-passcontrol init
-passcontrol call "Say hi in 3 words"
-passcontrol sidecar
-passcontrol spend
-passcontrol audit
-passcontrol logs
+npm run cli -- init
+npm run cli -- call "Say hi in 3 words"
+npm run cli -- sidecar
+npm run cli -- spend
+npm run cli -- audit
+npm run cli -- logs
 ```
 
-From a source checkout before linking the package, use the same command through npm:
+After linking/installing the package, the shorter `passcontrol` command works too:
 
 ```bash
-npm run cli -- status
-npm run cli -- call "Say hi in 3 words"
-npm run cli -- env openhands
+passcontrol status
+passcontrol call "Say hi in 3 words"
+passcontrol env openhands
 ```
 
 The scripts below remain useful as tiny, readable demos of what the CLI is doing.
@@ -39,14 +39,14 @@ The scripts below remain useful as tiny, readable demos of what the CLI is doing
 Create one local config file instead of pasting env vars into every command:
 
 ```bash
-passcontrol init
+npm run cli -- init
 # or: cp .passcontrol.example .passcontrol
 # Fill PASSCONTROL_GATEWAY, then add PASSPORT_ID/PASSPORT_SECRET and/or PASSCONTROL_API_KEY.
 ```
 
 The CLI/examples load the nearest `.passcontrol` from your current directory or a parent
-directory. A global profile from `passcontrol init --global` also works. Real environment
-variables always win, so this still works for one-off overrides:
+directory. A global profile from `npm run cli -- init --global` also works. Real
+environment variables always win, so this still works for one-off overrides:
 
 ```bash
 MODEL=claude-haiku-4-5 node examples/chat-agent.mjs "Say hi"
@@ -64,11 +64,15 @@ background, and injects it into every request it forwards to the gateway.
 ```bash
 # 1. Start the gateway (npm run dev:docker) and issue a passport in the dashboard.
 # 2. Put that passport in .passcontrol, then run:
-passcontrol sidecar
+npm run cli -- sidecar
 #    → listening on http://127.0.0.1:8788, forwarding to the gateway with a fresh visa
 
-# Optional: print copy/paste settings for OpenHands/LiteLLM.
-passcontrol env openhands
+# Optional: print copy/paste settings for common agents.
+npm run cli -- env openhands
+npm run cli -- env aider
+npm run cli -- env cline
+npm run cli -- env continue
+npm run cli -- env litellm
 ```
 
 Then point your agent at the sidecar exactly as you'd point it at the gateway, with the
@@ -76,37 +80,43 @@ API key set to **anything** (it's replaced):
 
 - **OpenHands / LiteLLM:** base URL `http://127.0.0.1:8788/api/v1/anthropic` (or
   `/api/v1/openai`), API key = `sidecar` (ignored), model within the passport's scope.
+- **Aider:** use the OpenAI-compatible preset (`OPENAI_API_BASE`, `OPENAI_API_KEY`,
+  `AIDER_MODEL`) printed by `npm run cli -- env aider`.
+- **Cline / Continue:** use their OpenAI-compatible/custom provider UI with the sidecar base
+  URL and API key `sidecar`. For Continue, disable `/responses` for o-series/gpt-5 configs
+  (`useResponsesApi: false`) so it calls `/chat/completions`.
 
 The agent never holds a real key *or* a visa — the sidecar owns the visa, the gateway owns
 the provider key. Make sure the passport's **scope** covers the model the agent calls and
 give it a **budget** so you can watch PassControl govern a real agent.
 
 ## Prereqs
-- The gateway running (`npm run dev`) or deployed — set `PASSCONTROL_GATEWAY`.
+- The gateway running (`npm run dev:docker` for the local stack, or `npm run dev` for your
+  own `.env.local`) or deployed — set `PASSCONTROL_GATEWAY`.
 - A **provider key** added in the dashboard (so the proxy has a real key to inject).
 - A **write-scoped API key** (dashboard → API keys) for `fleet-admin.mjs`.
 - A local `.passcontrol` copied from `.passcontrol.example`, or equivalent env vars.
 
 ## Typical test loop
 ```bash
-passcontrol init
+npm run cli -- init
 # Fill PASSCONTROL_GATEWAY and PASSCONTROL_API_KEY first.
 
 # 1. Mint a test agent (prints its passport ONCE)
-passcontrol agent create test-bot
+npm run cli -- agent create test-bot
 #   → paste the printed PASSPORT_ID / PASSPORT_SECRET into .passcontrol
 
 # 2. Have that agent call a model through the gateway
-passcontrol call "Say hi in 3 words"
+npm run cli -- call "Say hi in 3 words"
 
 # 3. See the effect
-passcontrol spend
-passcontrol logs --limit 10
-passcontrol audit --limit 10
+npm run cli -- spend
+npm run cli -- logs --limit 10
+npm run cli -- audit --limit 10
 
 # 4. Kill-switch drill
-passcontrol agent suspend <agent-id>   # next call → 403
-passcontrol agent resume <agent-id>
+npm run cli -- agent suspend <agent-id>   # next call → 403
+npm run cli -- agent resume <agent-id>
 ```
 
 ## Notes

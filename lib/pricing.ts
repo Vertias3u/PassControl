@@ -28,13 +28,18 @@ const mc = (usdPerMillion: number) => Math.ceil(usdPerMillion * 100 - 1e-9);
 
 const PRICES: Price[] = [
   // Anthropic
+  { provider: "anthropic", pattern: "claude-fable-5*", inputMicrocentsPerToken: mc(10), outputMicrocentsPerToken: mc(50) },
+  { provider: "anthropic", pattern: "claude-opus-4-8*", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(25) },
+  { provider: "anthropic", pattern: "claude-opus-4-7*", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(25) },
+  { provider: "anthropic", pattern: "claude-opus-4-6*", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(25) },
+  { provider: "anthropic", pattern: "claude-opus-4-5*", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(25) },
   { provider: "anthropic", pattern: "claude-3-5-sonnet*", inputMicrocentsPerToken: mc(3), outputMicrocentsPerToken: mc(15) },
   { provider: "anthropic", pattern: "claude-3-5-haiku*", inputMicrocentsPerToken: mc(0.8), outputMicrocentsPerToken: mc(4) },
   { provider: "anthropic", pattern: "claude-haiku-4*", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(5) },
   { provider: "anthropic", pattern: "claude-3-opus*", inputMicrocentsPerToken: mc(15), outputMicrocentsPerToken: mc(75) },
   { provider: "anthropic", pattern: "claude-opus-4*", inputMicrocentsPerToken: mc(15), outputMicrocentsPerToken: mc(75) },
   { provider: "anthropic", pattern: "claude-sonnet-4*", inputMicrocentsPerToken: mc(3), outputMicrocentsPerToken: mc(15) },
-  { provider: "anthropic", pattern: "claude-*", inputMicrocentsPerToken: mc(3), outputMicrocentsPerToken: mc(15) },
+  { provider: "anthropic", pattern: "claude-*", inputMicrocentsPerToken: mc(15), outputMicrocentsPerToken: mc(75) },
   // OpenAI
   { provider: "openai", pattern: "gpt-4o-mini*", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
   { provider: "openai", pattern: "gpt-4o*", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(10) },
@@ -72,7 +77,7 @@ const PRICES: Price[] = [
   { provider: "deepseek", pattern: "deepseek-v4-flash", inputMicrocentsPerToken: mc(0.14), outputMicrocentsPerToken: mc(0.28) },
   { provider: "deepseek", pattern: "deepseek-v4-pro", inputMicrocentsPerToken: mc(0.435), outputMicrocentsPerToken: mc(0.87) },
   { provider: "deepseek", pattern: "deepseek-chat", inputMicrocentsPerToken: mc(0.14), outputMicrocentsPerToken: mc(0.28) },
-  { provider: "deepseek", pattern: "deepseek-reasoner", inputMicrocentsPerToken: mc(0.14), outputMicrocentsPerToken: mc(0.28) },
+  { provider: "deepseek", pattern: "deepseek-reasoner", inputMicrocentsPerToken: mc(0.435), outputMicrocentsPerToken: mc(0.87) },
 ];
 
 const FALLBACK_PRICES = PRICES.reduce<Partial<Record<ProviderId, Price>>>((acc, price) => {
@@ -94,7 +99,7 @@ function matches(pattern: string, model: string): boolean {
   return new RegExp(`^${escaped}$`).test(model);
 }
 
-/** Cost in integer micro-cents for a token split. 0 if model unknown. */
+/** Cost in integer micro-cents for a token split. Falls back per provider when possible. */
 export function costMicrocents(
   model: string,
   inputTokens: number,
