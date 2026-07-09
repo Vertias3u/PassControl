@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "description": "Secure Agent Control Plane & Passport Vault — identity-aware reverse proxy for AI agent credentials.",
+  "files": [
+    "bin",
+    "cli",
+    "LICENSE",
+    "README.md"
+  ],
   "bin": {
     "passcontrol": "./bin/passcontrol.mjs"
   },
@@ -20,6 +26,7 @@
     "seed": "node scripts/seed.mjs",
     "sidecar": "node examples/visa-sidecar.mjs",
     "test:rls": "psql -v ON_ERROR_STOP=1 -f db/tests/rls_invariants.sql \"$DATABASE_URL\"",
+    "check:npm-pack": "node scripts/check-npm-package.mjs",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {

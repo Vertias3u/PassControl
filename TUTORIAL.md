@@ -36,8 +36,7 @@ No hosted accounts needed — the whole stack runs locally. (No host `psql` requ
 ```bash
 git clone https://github.com/Vertias3u/PassControl && cd PassControl
 npm install
-npm run dev:stack     # starts local Supabase + Redis, applies migrations, seeds a dev user
-npm run dev:docker    # runs the app against the local stack
+npm run cli -- setup  # starts local services, migrates, seeds a dev user, opens dashboard
 ```
 
 Open **http://localhost:3000** and log in with the seeded dev user:
@@ -47,13 +46,13 @@ dev@passcontrol.local
 passcontrol-dev
 ```
 
-> ⚠️ **Use `npm run dev:docker`, not `npm run dev`.** Plain `npm run dev` loads `.env.local`
-> (a hosted Supabase), not the Docker stack's generated `.env.docker`. This is the #1 first-run
-> gotcha.
+> Use `npm run cli -- setup --no-open` to suppress browser launch. If another local
+> Supabase/Redis project owns the default service ports, use `npm run cli -- setup --no-open
+> --port-offset 100`. This offsets those local service ports together; the dashboard keeps its
+> configured gateway port (3000 by default).
 >
 > The seeded dev user is **local-only** (created by `scripts/seed.mjs`) — never deploy it.
-> To reset to a truly clean slate: `supabase stop --no-backup && docker compose -f
-> docker/compose.yml down -v`, then `npm run dev:stack` again.
+> To reset to a truly clean slate: `npm run cli -- reset --local --confirm RESET`.
 
 You should land on the **Control Tower** dashboard — empty fleet, no spend yet.
 
@@ -73,9 +72,10 @@ generated **in your browser**; you'll see the private key **once**. Copy both:
 
 Give it a **scope** of `anthropic` / `claude-*` so it can call any Claude model.
 
-**c. Configure the CLI and make the call.** The `passcontrol` CLI removes the env-var soup —
-configure your passport once, then just call. From a source checkout (what you have after
-cloning), run it via `npm run cli --`:
+**c. Configure the CLI and make the call.** The `passcontrol` CLI is the terminal cockpit for
+an agent and its fleet: it removes the env-var soup, can call a model, run a sidecar, inspect
+spend/logs, and operate the kill switch. Configure your passport once, then just call. From a
+source checkout (what you have after cloning), run it via `npm run cli --`:
 
 ```bash
 npm run cli -- init                      # prompts for gateway + passport, writes .passcontrol
@@ -86,6 +86,14 @@ npm run cli -- call "Say hi in 3 words"
 > The short `passcontrol …` form (instead of `npm run cli --`) works once you `npm link` the
 > repo, or when the package is installed. It's not published to npm yet — from a clone, use
 > `npm run cli --`. Runnable raw example scripts also live in [`examples/`](./examples).
+
+Want the short form on a development machine? From the repository root, run `npm link`, then:
+
+```bash
+passcontrol --help
+passcontrol status
+passcontrol call "Say hi in 3 words"
+```
 
 Prefer env vars? They still work and override `.passcontrol`:
 
@@ -104,6 +112,28 @@ response: Hey, what's up!
 Refresh the dashboard: the **Audit Log** shows one `ok` row (tokens + cost), and spend ticked
 up for that agent. That's the whole loop: passport → visa → key injected from the vault →
 real call → audited.
+
+### CLI cheat sheet
+
+```bash
+npm run cli -- status                 # cockpit: config, gateway, next commands
+npm run cli -- doctor --fix           # recover a stopped local dashboard
+npm run cli -- start                  # start the CLI-managed local dashboard
+npm run cli -- restart                # replace the CLI-managed dashboard process
+npm run cli -- local-logs --follow    # stream local dashboard output
+npm run cli -- sidecar                # local bridge for OpenHands/Aider/Cline/etc.
+npm run cli -- agent list             # managed passports
+npm run cli -- spend                  # fleet and per-agent spend
+npm run cli -- logs --limit 20        # recent gateway calls
+npm run cli -- kill on                # emergency tenant stop
+npm run cli -- kill off               # release the tenant stop
+npm run cli -- configure aider        # preview an Aider project config
+npm run cli -- configure aider --write # write it only if no .aider.conf.yml exists
+```
+
+Run `npm run cli -- --help` for the complete command list. The CLI reads environment variables,
+then `.passcontrol`, then `~/.config/passcontrol/config`; keep passport secrets out of source
+control.
 
 ---
 

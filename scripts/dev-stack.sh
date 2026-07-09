@@ -12,6 +12,17 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SRC"
 ENVF="$SRC/.env.docker"
+OFFSET="${PASSCONTROL_PORT_OFFSET:-0}"
+if ! [[ "$OFFSET" =~ ^[0-9]+$ ]] || (( OFFSET > 10000 )); then
+  echo "✗ PASSCONTROL_PORT_OFFSET must be an integer from 0 to 10000." >&2; exit 1
+fi
+PROJECT_ID="$(basename "$SRC")"
+[[ "$OFFSET" == "0" ]] || PROJECT_ID+="-$OFFSET"
+API_PORT=$((54321 + OFFSET))
+SRH_PORT=$((8079 + OFFSET))
+COMPOSE_PROJECT_NAME="passcontrol_${PROJECT_ID//[^A-Za-z0-9]/_}"
+COMPOSE_PROJECT_NAME="$(printf '%s' "$COMPOSE_PROJECT_NAME" | tr '[:upper:]' '[:lower:]')"
+node "$SRC/scripts/write-local-supabase-config.mjs" "$SRC" "$PROJECT_ID" "$OFFSET" "${PORT:-3000}"
 
 # ── 1. Prereqs ────────────────────────────────────────────────────────────────
 command -v docker >/dev/null || { echo "✗ docker not found — install Docker Desktop." >&2; exit 1; }
@@ -31,7 +42,7 @@ eval "$(supabase status -o env)"
 
 # ── 3. Redis + SRH (the Upstash-REST piece the CLI doesn't provide) ───────────
 echo "→ Starting redis + serverless-redis-http…"
-docker compose -f docker/compose.yml up -d >/dev/null
+COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" PASSCONTROL_SRH_PORT="$SRH_PORT" docker compose -f docker/compose.yml up -d >/dev/null
 
 # ── 4. Generate .env.docker (preserve previously generated secrets) ───────────
 gen() { openssl rand -base64 32 | tr -d '\n'; }
@@ -50,7 +61,7 @@ cat > "$ENVF" <<EOF
 NEXT_PUBLIC_SUPABASE_URL=$API_URL
 NEXT_PUBLIC_SUPABASE_ANON_KEY=$ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY
-UPSTASH_REDIS_REST_URL=http://localhost:8079
+UPSTASH_REDIS_REST_URL=http://localhost:$SRH_PORT
 UPSTASH_REDIS_REST_TOKEN=passcontrol_local_dev_token
 VISA_SECRET=$VISA_SECRET
 VISA_TTL_SECONDS=300
@@ -66,7 +77,7 @@ echo "→ Wrote .env.docker"
 # Mirrors scripts/migrate.sh's ledger, but via docker exec. Each file + its
 # ledger insert run in ONE transaction (psql -1) so a non-idempotent migration
 # (e.g. 0005) can never be half-applied.
-DBC=$(docker ps --filter name=supabase_db --format '{{.Names}}' | head -1)
+DBC=$(docker ps --filter "label=com.supabase.cli.project=$PROJECT_ID" --filter name=supabase_db --format '{{.Names}}' | head -1)
 [[ -n "$DBC" ]] || { echo "✗ Could not find the Supabase DB container." >&2; exit 1; }
 PSQL=(docker exec -i "$DBC" psql -U postgres -d postgres -v ON_ERROR_STOP=1)
 echo "→ Applying migrations (in $DBC)…"

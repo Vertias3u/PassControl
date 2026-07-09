@@ -70,6 +70,39 @@ jobs:
       - name: Audit dependencies
         run: npm audit --audit-level=high
 
+      - name: Verify npm package allowlist
+        run: npm run check:npm-pack
+
+  local-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.107.0
+
+      - name: Install from lockfile
+        run: npm ci
+
+      - name: Fresh local setup smoke test
+        run: |
+          npm run cli -- setup --no-open
+          npm run cli -- doctor --fix
+          npm run cli -- stop
+
+      - name: Stop local services
+        if: always()
+        run: |
+          supabase stop --no-backup || true
+          docker compose -f docker/compose.yml down -v || true
+
   # Spins up a real Supabase local stack (Postgres + auth/vault/roles), applies
   # the migrations from scratch, and runs the RLS invariant test against it. This
   # enforces trust boundary #5 (tenant isolation) on every push — if a migration

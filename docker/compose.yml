@@ -28,5 +28,5 @@ services:
       SRH_TOKEN: passcontrol_local_dev_token
       SRH_CONNECTION_STRING: "redis://redis:6379"
     ports:
-      - "8079:80"
+      - "${PASSCONTROL_SRH_PORT:-8079}:80"
     restart: unless-stopped

@@ -43,3 +43,4 @@ coverage/
 *.scratch
 *.scratch.*
 /FULL_CONTEXT_DUMP.md
+/graphify-out/

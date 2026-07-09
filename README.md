@@ -19,6 +19,21 @@ governed agent in ~15 minutes.
 
 ---
 
+## The `passcontrol` CLI
+
+PassControl pairs the browser-based **Control Tower** (where you add a provider key and issue a
+passport) with a terminal **CLI** (where you configure agents, make governed calls, run a
+sidecar, inspect spend/logs, and control a fleet).
+
+From a source checkout, use `npm run cli -- <command>`. The shorter `passcontrol <command>`
+form is available after `npm link` (or when the package is installed).
+
+```bash
+npm run cli -- --help      # every command
+npm run cli -- status      # configuration + next steps
+npm run cli -- doctor      # gateway/config check
+```
+
 ## Why
 A raw provider key handed to an autonomous agent leaks (logs, repos, prompts), never rotates,
 has no per-agent spend cap, no off-switch, and no record of *which* agent did *what*.
@@ -59,18 +74,24 @@ services are required — the kill switch is Redis-backed.
 ### Local (Docker) quickstart
 For the fastest local run, use the bundled Docker stack. It starts Supabase locally
 (Postgres + Vault + Auth), Redis-over-REST, applies migrations inside the DB container, and
-seeds a confirmed dev user. Prereqs: Docker Desktop and the Supabase CLI. No host `psql`
-is required.
+seeds a confirmed dev user. Prereqs: Docker Desktop, the Supabase CLI, and Node 18+. No host
+`psql` is required.
 
 ```bash
 git clone https://github.com/Vertias3u/PassControl && cd PassControl
 npm install
-npm run dev:stack     # starts Supabase + Redis locally, migrates, seeds a dev user
-npm run dev:docker    # runs the app against the local stack (loads .env.docker)
+npm run cli -- setup  # starts local services, migrates, seeds a dev user, opens dashboard
 ```
 
-> Use **`npm run dev:docker`**, not `npm run dev`, for the local stack — plain `npm run
-> dev` loads `.env.local` (your hosted Supabase), not the Docker stack's `.env.docker`.
+Use `npm run cli -- setup --no-open` to suppress browser launch. If another local
+Supabase/Redis project owns the default service ports, use:
+
+```bash
+npm run cli -- setup --no-open --port-offset 100
+```
+
+This offsets the local Supabase and Redis-over-REST ports together (for example, API `54421`
+and database `54422`). The dashboard still uses the configured gateway port, which defaults to 3000.
 
 Open `http://localhost:3000` and log in with:
 
@@ -84,16 +105,30 @@ passcontrol-dev
 > these credentials** in a hosted/production instance. Real deployments create accounts
 > through normal signup (gated by `INVITE_CODE`); no default credentials ship.
 
-Then add a provider key in the Control Tower, issue a passport, and run:
+Then add a **non-critical** provider key in the Control Tower, issue a passport, and copy the
+one-time `PASSPORT_ID` / `PASSPORT_SECRET` values. In the second terminal, run:
 
 ```bash
-npm run cli -- init
-npm run cli -- doctor --deep
+npm run cli -- init             # gateway + passport + provider/model → .passcontrol
+npm run cli -- doctor --deep    # verifies the configuration and mints a visa
 npm run cli -- call "Say hello in 3 words"
-npm run cli -- spend
+npm run cli -- spend            # confirms governed spend
 ```
 
-After linking/installing the package, the short form is `passcontrol <command>`.
+You should see a streamed response in the terminal and an `ok` row in the dashboard Audit Log.
+That is the complete governed loop: passport → visa → vault key injection → proxied call → audit.
+
+To expose the short form locally, run this once from the repository root:
+
+```bash
+npm link
+passcontrol --help
+passcontrol status
+```
+
+Use `passcontrol start`, `passcontrol stop`, and `passcontrol restart` to manage only a dashboard
+process started by the CLI. Use `passcontrol local-logs --follow` for its output.
+`passcontrol reset --local --confirm RESET` destroys and recreates local data—use it only for a clean slate.
 
 The final agent call uses your real Anthropic/OpenAI key from the local Vault, so start
 with a non-critical key.
@@ -120,6 +155,32 @@ Upstash, `CRON_SECRET`, `INVITE_CODE`). Apply migrations `0001 → …` in order
 drift and flushes last-seen. On Vercel it's wired via `vercel.json`. Self-hosting, schedule it
 yourself (system `cron`, a GitHub Action, etc.) every few minutes — it's a correction layer,
 not the hot path, so an occasional missed run is harmless.
+
+## CLI command center
+
+The CLI is the terminal operator interface. `npm run cli -- …` works from a clone; replace it
+with `passcontrol …` after `npm link`.
+
+| Need | Command |
+|---|---|
+| See config, gateway status, and suggested next steps | `npm run cli -- status` |
+| Check local setup / mint a test visa | `npm run cli -- doctor --deep` |
+| Make a governed model call | `npm run cli -- call "Summarize this"` |
+| Start a bridge for an existing agent | `npm run cli -- sidecar` |
+| Print settings for OpenHands, Aider, Cline, Continue, or LiteLLM | `npm run cli -- env openhands` |
+| List or create agents | `npm run cli -- agent list` · `npm run cli -- agent create billing-bot` |
+| Suspend, resume, or revoke an agent | `npm run cli -- agent suspend <id>` |
+| Inspect spend, logs, and audit history | `npm run cli -- spend` · `npm run cli -- logs` · `npm run cli -- audit` |
+| Arm or release the tenant kill switch | `npm run cli -- kill on` · `npm run cli -- kill off` |
+| Open the Control Tower | `npm run cli -- open` |
+| Prepare or repair local services | `npm run cli -- setup` · `npm run cli -- doctor --fix` |
+| Manage the local dashboard | `npm run cli -- start` · `npm run cli -- stop` · `npm run cli -- restart` |
+| Follow local dashboard logs | `npm run cli -- local-logs --follow` |
+| Preview/write an Aider config | `npm run cli -- configure aider` · `npm run cli -- configure aider --write` |
+
+The CLI reads environment variables first, then a project-local `.passcontrol`, then
+`~/.config/passcontrol/config`. `.passcontrol` contains a passport secret, is gitignored, and
+is written with owner-only permissions—never commit or share it.
 
 ## Using it from an agent
 The client SDK hides the visa dance — point your provider SDK at the gateway:

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519";
 import {
   CONFIG_FILE,
@@ -27,6 +30,10 @@ import { startSidecar } from "../cli/sidecar.mjs";
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const fromB64url = (s) => new Uint8Array(Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const DASHBOARD_STATE_FILE = "local-dashboard.json";
+const LOCAL_DASHBOARD_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const LOCAL_STACK_PORTS = [54321, 54322, 54324, 54327, 8079];
 
 function parseArgv(argv) {
   const opts = {};
@@ -73,10 +80,20 @@ Usage:
   ${cmd}                         show cockpit status
   ${cmd} init [--global]          create a config profile
   ${cmd} status [--no-network]    show active config
-  ${cmd} doctor [--deep]          check local setup
+  ${cmd} start                    start the configured local dashboard
+  ${cmd} stop                     stop the CLI-managed local dashboard
+  ${cmd} restart                  restart the CLI-managed local dashboard
+  ${cmd} local-logs [--follow]    show local dashboard logs
+  ${cmd} doctor [--deep] [--fix]  check local setup and repair a stopped dashboard
+  ${cmd} reset --local --confirm RESET
+                                 destroy and recreate the local stack
+  ${cmd} setup [--no-open] [--port-offset N]
+                                 prepare local services and open the dashboard
   ${cmd} call "hi"                mint a visa and call a model
   ${cmd} sidecar [--port 8788]    start the local agent bridge
   ${cmd} env [openhands]          print sidecar settings for agents
+  ${cmd} configure <integration> [--write]
+                                 preview or create a supported integration config
   ${cmd} agent list               list agents
   ${cmd} agent create <name>      create an agent passport
   ${cmd} agent suspend <id>       suspend an agent
@@ -86,7 +103,7 @@ Usage:
   ${cmd} audit [--limit 20]        show admin audit trail
   ${cmd} logs [--limit 20]         show gateway call logs
   ${cmd} kill on|off              toggle tenant kill switch
-  ${cmd} open                     open the dashboard
+  ${cmd} open                     start (if needed) and open the dashboard
 
 Config:
   Env vars win, then nearest .passcontrol, then ~/.config/passcontrol/config.
@@ -120,7 +137,7 @@ async function gatewayStatus(noNetwork = false) {
   if (noNetwork) return { label: "not checked", ok: null };
   try {
     const res = await fetchWithTimeout(config.gateway, { method: "GET" });
-    return { label: `online (${res.status})`, ok: true };
+    return { label: res.ok ? `online (${res.status})` : `unhealthy (${res.status})`, ok: res.ok };
   } catch {
     return { label: "offline or unreachable", ok: false };
   }
@@ -133,6 +150,7 @@ async function printCockpit({ noNetwork = false } = {}) {
 
   console.log("PassControl\n");
   console.log(`Gateway:  ${gateway.label}  ${config.gateway}`);
+  console.log(`Dashboard: ${dashboardStatusLabel(gateway, noNetwork)}`);
   console.log(`Config:   ${configPathLabel(config.sources)}`);
   console.log(`Provider: ${config.provider}`);
   console.log(`Model:    ${config.model}`);
@@ -140,6 +158,10 @@ async function printCockpit({ noNetwork = false } = {}) {
   console.log(`Admin key: ${adminConfigured ? redact(config.apiKey, 6) : "missing"}`);
   console.log(`Sidecar:  foreground command (\`${cliCommand("sidecar")}\`)\n`);
   console.log("Next commands:");
+  console.log(`  ${cliCommand("start")}             start the local dashboard`);
+  console.log(`  ${cliCommand("stop")}              stop the local dashboard`);
+  console.log(`  ${cliCommand("restart")}           restart the local dashboard`);
+  console.log(`  ${cliCommand("local-logs --follow")}  follow local dashboard logs`);
   console.log(`  ${cliCommand("init")}              configure this project`);
   console.log(`  ${cliCommand('call "hi"')}         test a governed model call`);
   console.log(`  ${cliCommand("sidecar")}           start the local agent bridge`);
@@ -148,6 +170,299 @@ async function printCockpit({ noNetwork = false } = {}) {
   console.log(`  ${cliCommand("env openhands")}     print agent settings`);
   console.log(`  ${cliCommand("doctor")}            check setup`);
   console.log(`  ${cliCommand("open")}              open dashboard`);
+}
+
+function dashboardStatePath(env = process.env) {
+  const base = env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  return path.join(base, "passcontrol", DASHBOARD_STATE_FILE);
+}
+
+function dashboardLogPath(env = process.env) {
+  return path.join(path.dirname(dashboardStatePath(env)), "local-dashboard.log");
+}
+
+function localComposeProjectName() {
+  const configPath = path.join(PACKAGE_ROOT, "supabase", "config.toml");
+  const configText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  const projectId = configText.match(/^project_id\s*=\s*"([^"]+)"\s*$/m)?.[1] ?? path.basename(PACKAGE_ROOT);
+  return `passcontrol_${projectId.replace(/[^A-Za-z0-9]/g, "_").toLowerCase()}`;
+}
+
+function localDashboard() {
+  let url;
+  try {
+    url = new URL(config.gateway);
+  } catch {
+    throw new Error(`Invalid PASSCONTROL_GATEWAY URL: ${config.gateway}`);
+  }
+
+  if (url.protocol !== "http:" || !LOCAL_DASHBOARD_HOSTS.has(url.hostname)) {
+    throw new Error(
+      `passcontrol only manages local gateways (http://localhost or 127.0.0.1); configured gateway is ${config.gateway}.`
+    );
+  }
+
+  const port = Number(url.port || 80);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid local dashboard port in PASSCONTROL_GATEWAY: ${config.gateway}`);
+  }
+  return { url: url.toString().replace(/\/$/, ""), port };
+}
+
+function readDashboardState() {
+  const statePath = dashboardStatePath();
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    if (!Number.isInteger(state.pid) || state.pid < 1) throw new Error("bad pid");
+    return state;
+  } catch {
+    return null;
+  }
+}
+
+function removeDashboardState() {
+  fs.rmSync(dashboardStatePath(), { force: true });
+}
+
+function runningManagedDashboard() {
+  const state = readDashboardState();
+  if (!state) return null;
+  try {
+    process.kill(state.pid, 0);
+    return state;
+  } catch (error) {
+    if (error.code === "ESRCH") removeDashboardState();
+    return null;
+  }
+}
+
+function dashboardStatusLabel(gateway, noNetwork) {
+  try {
+    localDashboard();
+  } catch {
+    return "remote gateway (not managed locally)";
+  }
+  if (noNetwork) return "local server not checked";
+  const managed = runningManagedDashboard();
+  if (managed) return gateway.ok ? `CLI-managed (PID ${managed.pid})` : `CLI-managed, unhealthy (PID ${managed.pid})`;
+  return gateway.ok ? "online (not managed by CLI)" : "stopped";
+}
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function portIsListening(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const done = (listening) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(listening);
+    };
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+    socket.setTimeout(500, () => done(false));
+  });
+}
+
+async function waitForPortRelease(port, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!await portIsListening(port)) return true;
+    await pause(100);
+  }
+  return !await portIsListening(port);
+}
+
+async function waitForGateway(timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const gateway = await gatewayStatus(false);
+    if (gateway.ok) return true;
+    await pause(250);
+  }
+  return false;
+}
+
+function ownSupabaseDatabaseIsRunning(offset = 0) {
+  const project = `${path.basename(PACKAGE_ROOT)}${offset ? `-${offset}` : ""}`;
+  try {
+    return Boolean(
+      execFileSync("docker", ["ps", "-q", "--filter", `name=^/supabase_db_${project}$`], { encoding: "utf8" }).trim()
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function assertLocalStackPortsAvailable(offset = 0) {
+  if (ownSupabaseDatabaseIsRunning(offset)) return;
+  const busy = [];
+  for (const port of LOCAL_STACK_PORTS.map((port) => port + offset)) {
+    if (await portIsListening(port)) busy.push(port);
+  }
+  if (busy.length) {
+    throw new Error(
+      `Local stack ports ${busy.join(", ")} are in use by another project. Stop that project first (for example, \`supabase stop --project-id <project>\`), then rerun \`passcontrol setup\`.`
+    );
+  }
+}
+
+async function startDashboard() {
+  const dashboard = localDashboard();
+  if ((await gatewayStatus(false)).ok) {
+    ok(`dashboard already online at ${dashboard.url}`);
+    return dashboard;
+  }
+
+  const running = runningManagedDashboard();
+  if (running) {
+    step(`dashboard is still starting (PID ${running.pid}); waiting for ${dashboard.url}…`);
+    if (await waitForGateway()) {
+      ok(`dashboard online at ${dashboard.url}`);
+      return dashboard;
+    }
+    throw new Error(`CLI-managed dashboard (PID ${running.pid}) did not become ready. See ${running.logPath}.`);
+  }
+
+  const envFile = path.join(PACKAGE_ROOT, ".env.docker");
+  if (!fs.existsSync(envFile)) {
+    throw new Error(`Local stack is not configured. Run \`npm run dev:stack\` in ${PACKAGE_ROOT} first.`);
+  }
+
+  const statePath = dashboardStatePath();
+  const logPath = dashboardLogPath();
+  fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+  const logFd = fs.openSync(logPath, "a", 0o600);
+  const child = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:docker"], {
+    cwd: PACKAGE_ROOT,
+    detached: process.platform !== "win32",
+    env: { ...process.env, PORT: String(dashboard.port) },
+    stdio: ["ignore", logFd, logFd],
+  });
+  fs.closeSync(logFd);
+  child.unref();
+  fs.writeFileSync(
+    statePath,
+    `${JSON.stringify({ pid: child.pid, gateway: dashboard.url, port: dashboard.port, logPath, startedAt: new Date().toISOString() })}\n`,
+    { mode: 0o600 }
+  );
+
+  step(`starting local dashboard at ${dashboard.url}…`);
+  if (!await waitForGateway()) {
+    throw new Error(`Dashboard did not become ready. See ${logPath}.`);
+  }
+  ok(`dashboard online at ${dashboard.url}`);
+  return dashboard;
+}
+
+async function stopDashboard() {
+  const state = runningManagedDashboard();
+  if (!state) {
+    ok("No CLI-managed local dashboard is running.");
+    return;
+  }
+
+  try {
+    if (process.platform === "win32") process.kill(state.pid, "SIGTERM");
+    else process.kill(-state.pid, "SIGTERM");
+  } catch (error) {
+    if (error.code === "ESRCH") {
+      removeDashboardState();
+      ok("No CLI-managed local dashboard is running.");
+      return;
+    }
+    throw error;
+  }
+
+  if (!await waitForPortRelease(state.port)) {
+    if (process.platform === "win32") process.kill(state.pid, "SIGKILL");
+    else process.kill(-state.pid, "SIGKILL");
+    if (!await waitForPortRelease(state.port)) {
+      throw new Error(`Dashboard process group ${state.pid} did not release port ${state.port}.`);
+    }
+  }
+  removeDashboardState();
+  ok(`stopped CLI-managed dashboard (PID ${state.pid})`);
+}
+
+async function restartDashboard() {
+  localDashboard();
+  const managed = runningManagedDashboard();
+  if (!managed) {
+    if ((await gatewayStatus(false)).ok) {
+      throw new Error("Dashboard is online but was not started by passcontrol; stop it manually before restarting.");
+    }
+    return startDashboard();
+  }
+  await stopDashboard();
+  return startDashboard();
+}
+
+async function localLogsCommand(opts = {}) {
+  const logPath = dashboardLogPath();
+  if (!fs.existsSync(logPath)) {
+    throw new Error(`No local dashboard log found at ${logPath}. Run \`passcontrol start\` first.`);
+  }
+  if (!opts.follow) {
+    process.stdout.write(fs.readFileSync(logPath, "utf8"));
+    return;
+  }
+  if (process.platform === "win32") {
+    throw new Error(`Live log following is not available on Windows. Open ${logPath} directly.`);
+  }
+  await new Promise((resolve, reject) => {
+    const child = spawn("tail", ["-n", "100", "-f", logPath], { stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`tail exited with code ${code}.`)));
+  });
+}
+
+async function runLocalCommand(command, args, env = process.env) {
+  await new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd: PACKAGE_ROOT, env, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`${command} exited with code ${code}.`)));
+  });
+}
+
+async function resetLocalStack(opts = {}) {
+  if (opts.local !== true) {
+    throw new Error("Usage: passcontrol reset --local --confirm RESET");
+  }
+  localDashboard();
+  if (opts.confirm !== "RESET") {
+    throw new Error("reset refuses to delete local data without `--confirm RESET`.");
+  }
+
+  step("Resetting local PassControl data, Supabase, and Redis…");
+  await stopDashboard();
+  await runLocalCommand("supabase", ["stop", "--no-backup"]);
+  await runLocalCommand("docker", ["compose", "-f", "docker/compose.yml", "down", "-v"], {
+    ...process.env,
+    COMPOSE_PROJECT_NAME: localComposeProjectName(),
+  });
+  fs.rmSync(path.join(PACKAGE_ROOT, ".env.docker"), { force: true });
+  await runLocalCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:stack"]);
+  ok("Local stack recreated. Run `passcontrol start` to launch the dashboard.");
+}
+
+async function setupLocal(opts = {}) {
+  const dashboard = localDashboard();
+  const offset = opts.portOffset === undefined ? 0 : Number(opts.portOffset);
+  if (!Number.isInteger(offset) || offset < 0 || offset > 10000) {
+    throw new Error("--port-offset must be an integer from 0 to 10000.");
+  }
+  await assertLocalStackPortsAvailable(offset);
+  step("Preparing the local Supabase, Redis, migrations, and dev user…");
+  await runLocalCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:stack"], {
+    ...process.env,
+    PASSCONTROL_PORT_OFFSET: String(offset),
+  });
+  await startDashboard();
+  if (!opts.noOpen) await openDashboard();
+  console.log(`\nLocal dashboard: ${dashboard.url}`);
+  console.log("Local-only login: dev@passcontrol.local / passcontrol-dev");
+  step("Add a non-critical provider key, issue a passport, then run `passcontrol doctor --deep`.");
 }
 
 async function initCommand(opts) {
@@ -538,6 +853,40 @@ function printAgentPreset(name = "generic", opts = {}) {
   }
 }
 
+function aiderConfig(opts = {}) {
+  const { provider, model, baseUrl } = sidecarBaseUrl(opts);
+  return [
+    "# Generated by PassControl. This file contains no provider API key.",
+    "# Start `passcontrol sidecar` before running Aider.",
+    `model: ${provider}/${model}`,
+    `openai-api-base: ${baseUrl}`,
+    "openai-api-key: passcontrol",
+    "",
+  ].join("\n");
+}
+
+async function configureCommand(rest, opts = {}) {
+  const integration = String(rest[0] ?? "").toLowerCase();
+  if (!integration) throw new Error("Usage: passcontrol configure <aider|cline|continue|openhands> [--write]");
+  if (integration !== "aider") {
+    if (opts.write) throw new Error(`${integration} configuration is UI- or project-schema-specific; no file was written. Use the preview below.`);
+    printAgentPreset(integration, opts);
+    step("This integration is configured manually from the settings shown above. Aider is the current file-writing integration.");
+    return;
+  }
+
+  const target = path.join(process.cwd(), ".aider.conf.yml");
+  const content = aiderConfig(opts);
+  console.log(`Preview: .aider.conf.yml\n\n${content}`);
+  if (!opts.write) {
+    step("Dry run only. Re-run with `--write` to create this file.");
+    return;
+  }
+  if (fs.existsSync(target)) throw new Error(`${target} already exists; refusing to overwrite it.`);
+  fs.writeFileSync(target, content, { mode: 0o600 });
+  ok(`wrote ${target}`);
+}
+
 async function doctorCommand(opts = {}) {
   const gateway = await gatewayStatus(false);
   console.log("PassControl doctor\n");
@@ -547,6 +896,23 @@ async function doctorCommand(opts = {}) {
   );
   (config.apiKey ? ok : step)(`Control API key ${config.apiKey ? "configured" : "missing (needed only for agent/kill commands)"}`);
   step(`Config source: ${configPathLabel(config.sources)}`);
+
+  if (opts.fix) {
+    console.log("");
+    let dashboard;
+    try {
+      dashboard = localDashboard();
+    } catch {
+      step("--fix manages only a local dashboard; remote gateways are not changed.");
+    }
+    if (dashboard && gateway.ok) {
+      ok("Local dashboard is already healthy; no repair needed.");
+    } else if (dashboard && !fs.existsSync(path.join(PACKAGE_ROOT, ".env.docker"))) {
+      fail(`Local stack is not configured. Run \`npm run dev:stack\` in ${PACKAGE_ROOT}.`);
+    } else if (dashboard) {
+      await startDashboard();
+    }
+  }
 
   if (!opts.deep) return;
 
@@ -575,8 +941,16 @@ async function doctorCommand(opts = {}) {
   }
 }
 
-function openDashboard() {
-  const url = config.gateway;
+async function openDashboard() {
+  let parsed;
+  try {
+    parsed = new URL(config.gateway);
+  } catch {
+    throw new Error(`Invalid PASSCONTROL_GATEWAY URL: ${config.gateway}`);
+  }
+  const url = parsed.protocol === "http:" && LOCAL_DASHBOARD_HOSTS.has(parsed.hostname)
+    ? (await startDashboard()).url
+    : config.gateway;
   const platform = process.platform;
   const command =
     platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
@@ -611,6 +985,24 @@ async function main() {
     case "doctor":
       await doctorCommand(opts);
       break;
+    case "start":
+      await startDashboard();
+      break;
+    case "stop":
+      await stopDashboard();
+      break;
+    case "restart":
+      await restartDashboard();
+      break;
+    case "local-logs":
+      await localLogsCommand(opts);
+      break;
+    case "reset":
+      await resetLocalStack(opts);
+      break;
+    case "setup":
+      await setupLocal(opts);
+      break;
     case "call":
       await callCommand(commandRest, opts);
       break;
@@ -619,6 +1011,9 @@ async function main() {
       break;
     case "env":
       printAgentPreset(commandRest[0] || "generic", opts);
+      break;
+    case "configure":
+      await configureCommand(commandRest, opts);
       break;
     case "agent":
     case "fleet":
@@ -637,7 +1032,7 @@ async function main() {
       await killCommand(commandRest);
       break;
     case "open":
-      openDashboard();
+      await openDashboard();
       break;
     default:
       throw new Error(`Unknown command "${command}". Run \`passcontrol help\`.`);
