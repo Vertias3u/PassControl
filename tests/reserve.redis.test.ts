@@ -44,10 +44,10 @@ const { reserveBudget, reconcileBudget, redis } = await import("../lib/state/red
 const MARKER_TTL = 60;
 const usedAgents: string[] = [];
 
-function agent(): { agentId: string; jti: string } {
+function agent(): { agentId: string; reserveId: string } {
   const agentId = `test-${crypto.randomUUID()}`;
   usedAgents.push(agentId);
-  return { agentId, jti: crypto.randomUUID() };
+  return { agentId, reserveId: crypto.randomUUID() };
 }
 
 afterEach(async () => {
@@ -68,36 +68,36 @@ afterEach(async () => {
 
 describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Redis via SRH)", () => {
   it("reserves under the cap and returns the running reservation", async () => {
-    const { agentId, jti } = agent();
-    const r = await reserveBudget({ agentId, jti, estimate: 40, capTokens: 100, markerTtlSeconds: MARKER_TTL });
+    const { agentId, reserveId } = agent();
+    const r = await reserveBudget({ agentId, reserveId, estimate: 40, capTokens: 100, markerTtlSeconds: MARKER_TTL });
     expect(r).toEqual({ ok: true, reserved: 40 });
   });
 
   it("allows landing exactly ON the cap (reserved + spent == cap)", async () => {
-    const { agentId, jti } = agent();
-    const r = await reserveBudget({ agentId, jti, estimate: 100, capTokens: 100, markerTtlSeconds: MARKER_TTL });
+    const { agentId, reserveId } = agent();
+    const r = await reserveBudget({ agentId, reserveId, estimate: 100, capTokens: 100, markerTtlSeconds: MARKER_TTL });
     expect(r.ok).toBe(true);
   });
 
   it("rejects over the cap AND rolls the reservation back (no leaked reserve)", async () => {
     const { agentId } = agent();
-    const first = await reserveBudget({ agentId, jti: "j1", estimate: 60, capTokens: 100, markerTtlSeconds: MARKER_TTL });
+    const first = await reserveBudget({ agentId, reserveId: "r1", estimate: 60, capTokens: 100, markerTtlSeconds: MARKER_TTL });
     expect(first.ok).toBe(true);
 
-    const over = await reserveBudget({ agentId, jti: "j2", estimate: 41, capTokens: 100, markerTtlSeconds: MARKER_TTL });
+    const over = await reserveBudget({ agentId, reserveId: "r2", estimate: 41, capTokens: 100, markerTtlSeconds: MARKER_TTL });
     expect(over.ok).toBe(false);
     // The rejected 41 must be DECRBY'd back out — reserved is still exactly 60…
     expect(Number(await redis().get(`reserved:${agentId}`))).toBe(60);
     // …so the remaining 40 is still reservable.
-    const fits = await reserveBudget({ agentId, jti: "j3", estimate: 40, capTokens: 100, markerTtlSeconds: MARKER_TTL });
+    const fits = await reserveBudget({ agentId, reserveId: "r3", estimate: 40, capTokens: 100, markerTtlSeconds: MARKER_TTL });
     expect(fits.ok).toBe(true);
   });
 
   it("reserves under the cost cap and returns the running cost reservation", async () => {
-    const { agentId, jti } = agent();
+    const { agentId, reserveId } = agent();
     const r = await reserveBudget({
       agentId,
-      jti,
+      reserveId,
       estimate: 40,
       estimateMicrocents: 600,
       capTokens: null,
@@ -111,7 +111,7 @@ describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Re
     const { agentId } = agent();
     const first = await reserveBudget({
       agentId,
-      jti: "j1",
+      reserveId: "r1",
       estimate: 60,
       estimateMicrocents: 600,
       capTokens: 1_000,
@@ -122,7 +122,7 @@ describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Re
 
     const over = await reserveBudget({
       agentId,
-      jti: "j2",
+      reserveId: "r2",
       estimate: 10,
       estimateMicrocents: 401,
       capTokens: 1_000,
@@ -135,7 +135,7 @@ describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Re
 
     const fits = await reserveBudget({
       agentId,
-      jti: "j3",
+      reserveId: "r3",
       estimate: 40,
       estimateMicrocents: 400,
       capTokens: 1_000,
@@ -152,7 +152,7 @@ describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Re
       (
         await reserveBudget({
           agentId,
-          jti: "j1",
+          reserveId: "r1",
           estimate: 1,
           estimateMicrocents: 101,
           capTokens: null,
@@ -165,7 +165,7 @@ describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Re
       (
         await reserveBudget({
           agentId,
-          jti: "j2",
+          reserveId: "r2",
           estimate: 1,
           estimateMicrocents: 100,
           capTokens: null,
@@ -209,43 +209,43 @@ describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Re
   it("counts already-spent tokens against the cap", async () => {
     const { agentId } = agent();
     await redis().set(`spent:${agentId}`, 90);
-    expect((await reserveBudget({ agentId, jti: "j1", estimate: 11, capTokens: 100, markerTtlSeconds: MARKER_TTL })).ok).toBe(false);
-    expect((await reserveBudget({ agentId, jti: "j2", estimate: 10, capTokens: 100, markerTtlSeconds: MARKER_TTL })).ok).toBe(true);
+    expect((await reserveBudget({ agentId, reserveId: "r1", estimate: 11, capTokens: 100, markerTtlSeconds: MARKER_TTL })).ok).toBe(false);
+    expect((await reserveBudget({ agentId, reserveId: "r2", estimate: 10, capTokens: 100, markerTtlSeconds: MARKER_TTL })).ok).toBe(true);
   });
 
   it("a ZERO cap blocks every reserve (cap=0 is not 'unlimited')", async () => {
-    const { agentId, jti } = agent();
-    const r = await reserveBudget({ agentId, jti, estimate: 1, capTokens: 0, markerTtlSeconds: MARKER_TTL });
+    const { agentId, reserveId } = agent();
+    const r = await reserveBudget({ agentId, reserveId, estimate: 1, capTokens: 0, markerTtlSeconds: MARKER_TTL });
     expect(r.ok).toBe(false);
     expect(Number(await redis().get(`reserved:${agentId}`) ?? 0)).toBe(0);
   });
 
   it("a null cap is unlimited", async () => {
-    const { agentId, jti } = agent();
-    const r = await reserveBudget({ agentId, jti, estimate: 10_000_000, capTokens: null, markerTtlSeconds: MARKER_TTL });
+    const { agentId, reserveId } = agent();
+    const r = await reserveBudget({ agentId, reserveId, estimate: 10_000_000, capTokens: null, markerTtlSeconds: MARKER_TTL });
     expect(r.ok).toBe(true);
   });
 
-  it("writes the per-jti reserve marker (crash self-heal breadcrumb)", async () => {
-    const { agentId, jti } = agent();
+  it("writes the per-request reserve marker (crash self-heal breadcrumb)", async () => {
+    const { agentId, reserveId } = agent();
     await reserveBudget({
       agentId,
-      jti,
+      reserveId,
       estimate: 25,
       estimateMicrocents: 75,
       capTokens: 100,
       capMicrocents: 1_000,
       markerTtlSeconds: MARKER_TTL,
     });
-    expect(Number(await redis().get(`reserve:${agentId}:${jti}`))).toBe(25);
-    expect(Number(await redis().get(`reserve_cost:${agentId}:${jti}`))).toBe(75);
+    expect(Number(await redis().get(`reserve:${agentId}:${reserveId}`))).toBe(25);
+    expect(Number(await redis().get(`reserve_cost:${agentId}:${reserveId}`))).toBe(75);
   });
 
   it("reconcileBudget releases the estimate, records actual spend, drops the marker", async () => {
-    const { agentId, jti } = agent();
+    const { agentId, reserveId } = agent();
     await reserveBudget({
       agentId,
-      jti,
+      reserveId,
       estimate: 50,
       estimateMicrocents: 500,
       capTokens: 100,
@@ -254,7 +254,7 @@ describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Re
     });
     await reconcileBudget({
       agentId,
-      jti,
+      reserveId,
       estimate: 50,
       estimateMicrocents: 500,
       actualTokens: 30,
@@ -265,7 +265,7 @@ describe.skipIf(!live)("reserveBudget — the atomic budget-reserve Lua (real Re
     expect(Number(await redis().get(`spent:${agentId}`))).toBe(30);
     expect(Number(await redis().get(`reserved_cost:${agentId}`))).toBe(0);
     expect(Number(await redis().get(`spent_cost:${agentId}`))).toBe(450);
-    expect(await redis().exists(`reserve:${agentId}:${jti}`)).toBe(0);
-    expect(await redis().exists(`reserve_cost:${agentId}:${jti}`)).toBe(0);
+    expect(await redis().exists(`reserve:${agentId}:${reserveId}`)).toBe(0);
+    expect(await redis().exists(`reserve_cost:${agentId}:${reserveId}`)).toBe(0);
   });
 });

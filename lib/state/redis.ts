@@ -17,8 +17,8 @@ const k = {
   spent: (agid: string) => `spent:${agid}`,
   reservedCost: (agid: string) => `reserved_cost:${agid}`,
   spentCost: (agid: string) => `spent_cost:${agid}`,
-  reserveMarker: (agid: string, jti: string) => `reserve:${agid}:${jti}`,
-  reserveCostMarker: (agid: string, jti: string) => `reserve_cost:${agid}:${jti}`,
+  reserveMarker: (agid: string, reserveId: string) => `reserve:${agid}:${reserveId}`,
+  reserveCostMarker: (agid: string, reserveId: string) => `reserve_cost:${agid}:${reserveId}`,
   key: (agid: string, provider: string) => `key:${agid}:${provider}`,
   suspended: (agid: string) => `suspended:${agid}`,
   lastSeen: (agid: string) => `lastseen:${agid}`,
@@ -35,7 +35,7 @@ export async function claimNonce(nonce: string, ttlSeconds = 180): Promise<boole
 // Reserve token and cost estimates for agid unless reserved+spent would exceed
 // either cap. cap < 0 means unlimited. The single Lua script keeps both budget
 // dimensions atomic: if either cap fails, both reservations roll back together.
-// Per-jti reserve markers let a crashed reconcile self-heal after marker expiry.
+// Per-request reserve markers let a crashed reconcile self-heal after marker expiry.
 const RESERVE_LUA = `
 local tokenCap = tonumber(ARGV[1])
 local tokenEstimate = tonumber(ARGV[2])
@@ -74,7 +74,7 @@ export interface ReserveResult {
 
 export async function reserveBudget(params: {
   agentId: string;
-  jti: string;
+  reserveId: string;
   estimate: number;
   estimateMicrocents?: number;
   capTokens: number | null; // null = unlimited
@@ -91,10 +91,10 @@ export async function reserveBudget(params: {
     [
       k.reserved(params.agentId),
       k.spent(params.agentId),
-      k.reserveMarker(params.agentId, params.jti),
+      k.reserveMarker(params.agentId, params.reserveId),
       k.reservedCost(params.agentId),
       k.spentCost(params.agentId),
-      k.reserveCostMarker(params.agentId, params.jti),
+      k.reserveCostMarker(params.agentId, params.reserveId),
     ],
     [
       String(tokenCap),
@@ -113,10 +113,10 @@ export async function reserveBudget(params: {
 }
 
 // Reconcile after a stream: release the estimate from `reserved`, add the true
-// usage to `spent`, and drop the per-jti marker. Done in one pipeline.
+// usage to `spent`, and drop the per-request marker. Done in one pipeline.
 export async function reconcileBudget(params: {
   agentId: string;
-  jti: string;
+  reserveId: string;
   estimate: number;
   estimateMicrocents?: number;
   actualTokens: number;
@@ -131,8 +131,8 @@ export async function reconcileBudget(params: {
   pipe.decrby(k.reservedCost(params.agentId), estimateMicrocents);
   pipe.incrby(k.spent(params.agentId), actualTokens);
   pipe.incrby(k.spentCost(params.agentId), actualMicrocents);
-  pipe.del(k.reserveMarker(params.agentId, params.jti));
-  pipe.del(k.reserveCostMarker(params.agentId, params.jti));
+  pipe.del(k.reserveMarker(params.agentId, params.reserveId));
+  pipe.del(k.reserveCostMarker(params.agentId, params.reserveId));
   await pipe.exec();
 }
 

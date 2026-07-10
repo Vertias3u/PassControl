@@ -119,6 +119,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   const agentId = claims.agid;
   const passportId = claims.sub;
   const jti = claims.jti;
+  const reserveId = crypto.randomUUID();
   const userId: string = claims.uid;
   const capTokens: number | null = claims.bt ?? null;
   const capMicrocents: number | null =
@@ -241,7 +242,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   }
   const reserve = await reserveBudget({
     agentId,
-    jti,
+    reserveId,
     estimate,
     estimateMicrocents,
     capTokens,
@@ -260,7 +261,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const tasks: Promise<unknown>[] = [
       reconcileBudget({
         agentId,
-        jti,
+        reserveId,
         estimate,
         estimateMicrocents,
         actualTokens: usage.inputTokens + usage.outputTokens,
@@ -360,7 +361,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // ── 7/8. Stream tee + reconcile, OR buffered JSON path ───────────────────────
   if (isStream && upstream.body) {
     const { stream, usage } = createUsageTransform(provider);
-    // On client abort, the stream flush still resolves usage with what we parsed.
+    // The monitored transform resolves usage exactly once on normal close or client cancel.
     waitUntil(usage.then((u) => reconcile(u, "ok")));
     return new Response(upstream.body.pipeThrough(stream), {
       status: 200,

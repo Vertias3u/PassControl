@@ -71,12 +71,39 @@ describe("passcontrol CLI", () => {
 
   // When the CLI is installed globally (no surrounding repo checkout), the local
   // stack lives in a cloned app dir. PASSCONTROL_FORCE_INSTALLED=1 simulates that.
+  // Exercised via `start`, which hits ensureAppRoot's clone logic directly without
+  // the setup prerequisite gate — so this stays deterministic on CI runners that
+  // lack Docker/Supabase (the gate itself is covered by the PATH="" test below).
   it("asks to clone the app when installed globally without a checkout", async () => {
     await expect(
-      runCli(["setup", "--no-open"], { env: { PASSCONTROL_FORCE_INSTALLED: "1" } })
+      runCli(["start"], { env: { PASSCONTROL_FORCE_INSTALLED: "1" } })
     ).rejects.toMatchObject({
       stderr: expect.stringMatching(/interactive terminal.*--yes|--yes.*clone/s),
     });
+  }, 10000);
+
+  it("reports a missing Docker binary before setup attempts to clone", async () => {
+    await expect(
+      runCli(["setup", "--no-open"], {
+        env: {
+          PATH: "",
+          PASSCONTROL_FORCE_INSTALLED: "1",
+        },
+      })
+    ).rejects.toMatchObject({
+      stderr: expect.stringMatching(/Docker.*not installed.*install Docker Desktop/is),
+    });
+  }, 10000);
+
+  it("lists local prerequisites in doctor --deep", async () => {
+    const { stdout, stderr } = await runCli(["doctor", "--deep"]);
+    const output = `${stdout}\n${stderr}`;
+    expect(output).toContain("Local prerequisites");
+    expect(output).toContain("Docker CLI");
+    expect(output).toContain("Docker daemon");
+    expect(output).toContain("Supabase CLI");
+    expect(output).toContain("Node.js");
+    expect(output).toContain("Local stack ports");
   }, 10000);
 
   it("refuses to clone the app into a non-empty directory", async () => {
@@ -84,7 +111,9 @@ describe("passcontrol CLI", () => {
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "keep.txt"), "x");
     await expect(
-      runCli(["setup", "--no-open", "--yes", "--app-dir", dir], { env: { PASSCONTROL_FORCE_INSTALLED: "1" } })
+      runCli(["start", "--yes", "--app-dir", dir], {
+        env: { PASSCONTROL_FORCE_INSTALLED: "1" },
+      })
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("already exists and is not empty"),
     });

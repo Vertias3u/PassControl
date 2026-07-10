@@ -90,21 +90,50 @@ export async function setAgentSuspended(
   agentId: string,
   suspended: boolean
 ): Promise<FleetResult<{ id: string }>> {
-  const { data, error } = await db
+  const { data: agent, error: lookupError } = await db
     .from("agents")
-    .update({ status: suspended ? "suspended" : "active" })
+    .select("id, status")
     .eq("user_id", userId)
     .eq("id", agentId)
-    .eq("status", suspended ? "active" : "suspended")
-    .select("id")
     .maybeSingle();
-  if (error) return { ok: false, status: 500, code: "query_failed" };
-  if (!data) return { ok: false, status: 404, code: "not_found" };
+  if (lookupError) return { ok: false, status: 500, code: "query_failed" };
+  if (!agent || agent.status === "revoked") {
+    return { ok: false, status: 404, code: "not_found" };
+  }
 
   if (suspended) {
+    // Install the hot-path block before persisting the status. A Redis failure
+    // therefore leaves Postgres unchanged and is surfaced to the caller; a retry
+    // can safely repair an already-suspended row by re-applying this block.
     await suspendAgent(agentId);
     await purgeAgentCaches(agentId, cachePurgeProviders());
+    if (agent.status !== "suspended") {
+      const { data, error } = await db
+        .from("agents")
+        .update({ status: "suspended" })
+        .eq("user_id", userId)
+        .eq("id", agentId)
+        .eq("status", "active")
+        .select("id")
+        .maybeSingle();
+      if (error) return { ok: false, status: 500, code: "query_failed" };
+      if (!data) return { ok: false, status: 404, code: "not_found" };
+    }
   } else {
+    // Persist active first. If DEL fails, the error reaches the caller; a retry
+    // sees the already-active row and retries only the stale Redis cleanup.
+    if (agent.status === "suspended") {
+      const { data, error } = await db
+        .from("agents")
+        .update({ status: "active" })
+        .eq("user_id", userId)
+        .eq("id", agentId)
+        .eq("status", "suspended")
+        .select("id")
+        .maybeSingle();
+      if (error) return { ok: false, status: 500, code: "query_failed" };
+      if (!data) return { ok: false, status: 404, code: "not_found" };
+    }
     await unsuspendAgent(agentId);
   }
   return { ok: true, value: { id: agentId } };
@@ -116,19 +145,32 @@ export async function revokeAgent(
   userId: string,
   agentId: string
 ): Promise<FleetResult<{ id: string }>> {
-  const { data, error } = await db
+  const { data: agent, error: lookupError } = await db
     .from("agents")
-    .update({ status: "revoked" })
+    .select("id, status")
     .eq("user_id", userId)
     .eq("id", agentId)
-    .neq("status", "revoked")
-    .select("id")
     .maybeSingle();
-  if (error) return { ok: false, status: 500, code: "query_failed" };
-  if (!data) return { ok: false, status: 404, code: "not_found" };
+  if (lookupError) return { ok: false, status: 500, code: "query_failed" };
+  if (!agent) return { ok: false, status: 404, code: "not_found" };
 
+  // Revoke is fail-closed: an owned agent is blocked and its cached keys are
+  // purged before the terminal Postgres transition. Repeating revoke repairs a
+  // missing Redis marker even when the durable row is already revoked.
   await suspendAgent(agentId);
   await purgeAgentCaches(agentId, cachePurgeProviders());
+  if (agent.status !== "revoked") {
+    const { data, error } = await db
+      .from("agents")
+      .update({ status: "revoked" })
+      .eq("user_id", userId)
+      .eq("id", agentId)
+      .eq("status", agent.status)
+      .select("id")
+      .maybeSingle();
+    if (error) return { ok: false, status: 500, code: "query_failed" };
+    if (!data) return { ok: false, status: 404, code: "not_found" };
+  }
   return { ok: true, value: { id: agentId } };
 }
 

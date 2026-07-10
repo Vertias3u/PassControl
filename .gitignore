@@ -30,6 +30,8 @@ coverage/
 /shit_log.md
 /hermes_compat.md
 /REDDIT_POST.md
+/SHOW_HN.md
+/CODEX_TASKS.md
 /passcontrol_cliui_v1.md
 /problemsinoticed.md
 /scratch/
@@ -44,3 +46,4 @@ coverage/
 *.scratch.*
 /FULL_CONTEXT_DUMP.md
 /graphify-out/
+/CODEX_P1_FIXES.md

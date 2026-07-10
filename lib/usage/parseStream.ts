@@ -59,10 +59,18 @@ export function createUsageTransform(provider: ProviderId): UsageTransform {
   const tally = new Tally();
   const decoder = new TextDecoder();
   let buffer = "";
+  let settled = false;
   let resolveUsage!: (u: Usage) => void;
   const usage = new Promise<Usage>((r) => (resolveUsage = r));
 
-  const stream = new TransformStream<Uint8Array, Uint8Array>({
+  const settleUsage = () => {
+    if (settled) return;
+    settled = true;
+    if (buffer.trim()) tally.feedLine(provider, buffer);
+    resolveUsage({ inputTokens: tally.input, outputTokens: tally.output });
+  };
+
+  const inner = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       controller.enqueue(chunk); // forward unchanged FIRST (no added latency)
       buffer += decoder.decode(chunk, { stream: true });
@@ -74,10 +82,29 @@ export function createUsageTransform(provider: ProviderId): UsageTransform {
       }
     },
     flush() {
-      if (buffer.trim()) tally.feedLine(provider, buffer);
-      resolveUsage({ inputTokens: tally.input, outputTokens: tally.output });
+      settleUsage();
     },
   });
+
+  // TransformStream.flush() is not called when the downstream consumer cancels.
+  // Wrap its readable side so both normal close and cancellation settle the same
+  // usage promise exactly once while preserving the stream's backpressure.
+  const reader = inner.readable.getReader();
+  const readable = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) controller.close();
+      else controller.enqueue(value);
+    },
+    async cancel(reason) {
+      settleUsage();
+      await reader.cancel(reason);
+    },
+  });
+  const stream = { readable, writable: inner.writable } as TransformStream<
+    Uint8Array,
+    Uint8Array
+  >;
 
   return { stream, usage };
 }

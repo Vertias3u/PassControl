@@ -265,6 +265,53 @@ function commandExists(command) {
   }
 }
 
+function checkDockerInstalled() {
+  return commandExists("docker")
+    ? { ok: true, message: "Docker CLI: installed." }
+    : {
+        ok: false,
+        message: "Docker CLI: not installed. Fix: install Docker Desktop from https://docs.docker.com/desktop/.",
+      };
+}
+
+function checkDockerDaemon() {
+  if (!commandExists("docker")) {
+    return {
+      ok: false,
+      message: "Docker daemon: unavailable. Fix: install Docker Desktop, start it, and wait for the engine to become ready.",
+    };
+  }
+  try {
+    execFileSync("docker", ["info"], { stdio: "ignore" });
+    return { ok: true, message: "Docker daemon: running." };
+  } catch {
+    return {
+      ok: false,
+      message: "Docker daemon: not running. Fix: start Docker Desktop and wait for the engine to become ready.",
+    };
+  }
+}
+
+function checkSupabaseInstalled() {
+  return commandExists("supabase")
+    ? { ok: true, message: "Supabase CLI: installed." }
+    : {
+        ok: false,
+        message: "Supabase CLI: not installed. Fix: install it from https://supabase.com/docs/guides/local-development/cli/getting-started.",
+      };
+}
+
+function checkNodeVersion() {
+  const version = process.versions.node;
+  const major = Number(version.split(".")[0]);
+  return major >= 18
+    ? { ok: true, message: `Node.js: v${version} (supported).` }
+    : {
+        ok: false,
+        message: `Node.js: v${version} is unsupported. Fix: install Node.js 18 or newer from https://nodejs.org/.`,
+      };
+}
+
 async function promptLine(question, fallback) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -435,8 +482,10 @@ async function waitForGateway(timeoutMs = 30000) {
 }
 
 function ownSupabaseDatabaseIsRunning(offset = 0) {
-  const project = `${path.basename(appRoot)}${offset ? `-${offset}` : ""}`;
   try {
+    const root = appRoot ?? resolveAppRoot();
+    if (!root) return false;
+    const project = `${path.basename(root)}${offset ? `-${offset}` : ""}`;
     return Boolean(
       execFileSync("docker", ["ps", "-q", "--filter", `name=^/supabase_db_${project}$`], { encoding: "utf8" }).trim()
     );
@@ -456,6 +505,39 @@ async function assertLocalStackPortsAvailable(offset = 0) {
       `Local stack ports ${busy.join(", ")} are in use by another project. Stop that project first (for example, \`supabase stop --project-id <project>\`), then rerun \`passcontrol setup\`.`
     );
   }
+}
+
+async function checkLocalStackPorts(offset = 0) {
+  try {
+    await assertLocalStackPortsAvailable(offset);
+    return { ok: true, message: "Local stack ports: available." };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Local stack ports: unavailable. Fix: stop the conflicting project or rerun setup with --port-offset N. Details: ${error.message}`,
+    };
+  }
+}
+
+async function runLocalPrerequisiteChecks({ offset = 0, report = false, enforce = false } = {}) {
+  const results = [
+    checkDockerInstalled(),
+    checkDockerDaemon(),
+    checkSupabaseInstalled(),
+    checkNodeVersion(),
+    await checkLocalStackPorts(offset),
+  ];
+
+  if (report) {
+    step("Local prerequisites");
+    for (const result of results) (result.ok ? ok : fail)(result.message);
+  }
+
+  if (enforce) {
+    const failure = results.find((result) => !result.ok);
+    if (failure) throw new Error(failure.message);
+  }
+  return results;
 }
 
 async function startDashboard(opts = {}) {
@@ -609,8 +691,8 @@ async function setupLocal(opts = {}) {
   if (!Number.isInteger(offset) || offset < 0 || offset > 10000) {
     throw new Error("--port-offset must be an integer from 0 to 10000.");
   }
+  await runLocalPrerequisiteChecks({ offset, enforce: true });
   await ensureAppRoot({ clone: true, appDir: opts.appDir, yes: opts.yes });
-  await assertLocalStackPortsAvailable(offset);
   step("Preparing the local Supabase, Redis, migrations, and dev user…");
   await runLocalCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:stack"], {
     ...process.env,
@@ -1082,6 +1164,7 @@ async function doctorCommand(opts = {}) {
 
   console.log("");
   step("Deep checks");
+  await runLocalPrerequisiteChecks({ report: true });
   if (config.passportId && config.passportSecret) {
     try {
       const visa = await mintVisa(config);

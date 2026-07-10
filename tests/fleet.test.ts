@@ -17,7 +17,10 @@ import { PROVIDERS } from "@/lib/providers";
 import { validateAgentUpdate } from "@/lib/validate";
 
 // Chainable Supabase mock that records insert/update payloads + eq() filters.
-function makeDb(result: { data: unknown; error: unknown }) {
+function makeDb(
+  result: { data: unknown; error: unknown },
+  selectResult: { data: unknown; error: unknown } = result
+) {
   const calls = {
     from: [] as string[],
     insert: null as any,
@@ -26,14 +29,15 @@ function makeDb(result: { data: unknown; error: unknown }) {
     neq: [] as [string, unknown][],
   };
   const builder = () => {
+    let mutation = false;
     const b: any = {
-      insert: (p: any) => { calls.insert = p; return b; },
-      update: (p: any) => { calls.update = p; return b; },
+      insert: (p: any) => { mutation = true; calls.insert = p; return b; },
+      update: (p: any) => { mutation = true; calls.update = p; return b; },
       select: () => b,
       eq: (c: string, v: unknown) => { calls.eq.push([c, v]); return b; },
       neq: (c: string, v: unknown) => { calls.neq.push([c, v]); return b; },
       single: async () => result,
-      maybeSingle: async () => result,
+      maybeSingle: async () => mutation ? result : selectResult,
       then: (res: any) => res(result),
     };
     return b;
@@ -125,8 +129,34 @@ describe("updateAgent", () => {
 });
 
 describe("setAgentSuspended", () => {
+  it("does not mutate Postgres when the security-critical Redis suspend fails", async () => {
+    suspendAgent.mockRejectedValueOnce(new Error("redis unavailable"));
+    const { db, calls } = makeDb(
+      { data: { id: "a1" }, error: null },
+      { data: { id: "a1", status: "active" }, error: null }
+    );
+
+    await expect(setAgentSuspended(db, "u1", "a1", true)).rejects.toThrow("redis unavailable");
+    expect(calls.update).toBeNull();
+  });
+
+  it("repairs a stale Redis suspend when Postgres is already active", async () => {
+    const { db } = makeDb(
+      { data: null, error: null },
+      { data: { id: "a1", status: "active" }, error: null }
+    );
+
+    const r = await setAgentSuspended(db, "u1", "a1", false);
+
+    expect(r).toEqual({ ok: true, value: { id: "a1" } });
+    expect(unsuspendAgent).toHaveBeenCalledWith("a1");
+  });
+
   it("suspends: scoped update + Redis suspend + cache purge", async () => {
-    const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
+    const { db, calls } = makeDb(
+      { data: { id: "a1" }, error: null },
+      { data: { id: "a1", status: "active" }, error: null }
+    );
     const r = await setAgentSuspended(db, "u1", "a1", true);
     expect(r).toEqual({ ok: true, value: { id: "a1" } });
     expect(calls.update).toEqual({ status: "suspended" });
@@ -138,7 +168,10 @@ describe("setAgentSuspended", () => {
   });
 
   it("resumes only an explicitly suspended agent", async () => {
-    const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
+    const { db, calls } = makeDb(
+      { data: { id: "a1" }, error: null },
+      { data: { id: "a1", status: "suspended" }, error: null }
+    );
     await setAgentSuspended(db, "u1", "a1", false);
     expect(calls.update).toEqual({ status: "active" });
     expect(calls.eq).toContainEqual(["status", "suspended"]);
@@ -155,13 +188,27 @@ describe("setAgentSuspended", () => {
 });
 
 describe("revokeAgent", () => {
+  it("does not persist revocation when the security-critical Redis block fails", async () => {
+    suspendAgent.mockRejectedValueOnce(new Error("redis unavailable"));
+    const { db, calls } = makeDb(
+      { data: { id: "a1" }, error: null },
+      { data: { id: "a1", status: "active" }, error: null }
+    );
+
+    await expect(revokeAgent(db, "u1", "a1")).rejects.toThrow("redis unavailable");
+    expect(calls.update).toBeNull();
+  });
+
   it("sets status revoked + suspend + purge", async () => {
-    const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
+    const { db, calls } = makeDb(
+      { data: { id: "a1" }, error: null },
+      { data: { id: "a1", status: "active" }, error: null }
+    );
     const r = await revokeAgent(db, "u1", "a1");
     expect(r).toEqual({ ok: true, value: { id: "a1" } });
     expect(calls.update).toEqual({ status: "revoked" });
     expect(calls.eq).toContainEqual(["user_id", "u1"]);
-    expect(calls.neq).toContainEqual(["status", "revoked"]);
+    expect(calls.eq).toContainEqual(["status", "active"]);
     expect(suspendAgent).toHaveBeenCalledWith("a1");
   });
   it("404 when not found", async () => {

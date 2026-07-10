@@ -92,16 +92,19 @@ async function callProxy() {
 }
 
 function expectReleasedWithoutSpend() {
+  const reserveId = reserveBudgetMock.mock.calls[0]?.[0]?.reserveId;
+  expect(reserveId).toEqual(expect.any(String));
   expect(reconcileBudgetMock).toHaveBeenCalledWith(
     expect.objectContaining({
       agentId: "agent-id",
-      jti: "jti-1",
+      reserveId,
       actualTokens: 0,
       actualMicrocents: 0,
     })
   );
   expect(writeLogMock).toHaveBeenCalledWith(
     expect.objectContaining({
+      jti: "jti-1",
       status: "upstream_error",
       inputTokens: 0,
       outputTokens: 0,
