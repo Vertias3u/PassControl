@@ -36,7 +36,7 @@
     "README.md"
   ],
   "bin": {
-    "passcontrol": "./bin/passcontrol.mjs"
+    "passcontrol": "bin/passcontrol.mjs"
   },
   "scripts": {
     "cli": "node bin/passcontrol.mjs",
