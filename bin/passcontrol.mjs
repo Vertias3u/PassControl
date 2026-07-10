@@ -32,8 +32,16 @@ const b64url = (bytes) =>
 const fromB64url = (s) => new Uint8Array(Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DASHBOARD_STATE_FILE = "local-dashboard.json";
+const APP_STATE_FILE = "app.json";
+const PUBLIC_REPO_URL = "https://github.com/Vertias3u/PassControl.git";
 const LOCAL_DASHBOARD_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const LOCAL_STACK_PORTS = [54321, 54322, 54324, 54327, 8079];
+// The local stack (Supabase + Redis + dashboard) lives in a PassControl repo
+// checkout — NOT in the installed CLI package (which ships only bin/ + cli/).
+// `appRoot` is that checkout: the surrounding repo when run via `npm run cli --`,
+// or a cloned/configured checkout when the CLI is installed globally. Resolved
+// lazily by ensureAppRoot() before any stack command runs.
+let appRoot = null;
 
 function parseArgv(argv) {
   const opts = {};
@@ -87,8 +95,8 @@ Usage:
   ${cmd} doctor [--deep] [--fix]  check local setup and repair a stopped dashboard
   ${cmd} reset --local --confirm RESET
                                  destroy and recreate the local stack
-  ${cmd} setup [--no-open] [--port-offset N]
-                                 prepare local services and open the dashboard
+  ${cmd} setup [--no-open] [--port-offset N] [--app-dir DIR]
+                                 clone the app (if needed), start local services, open the dashboard
   ${cmd} call "hi"                mint a visa and call a model
   ${cmd} sidecar [--port 8788]    start the local agent bridge
   ${cmd} env [openhands]          print sidecar settings for agents
@@ -107,6 +115,8 @@ Usage:
 
 Config:
   Env vars win, then nearest .passcontrol, then ~/.config/passcontrol/config.
+  Installed globally, the local-stack commands (setup/start/reset) use a cloned
+  app checkout; override its location with PASSCONTROL_APP_ROOT.
 `;
 }
 
@@ -151,6 +161,7 @@ async function printCockpit({ noNetwork = false } = {}) {
   console.log("PassControl\n");
   console.log(`Gateway:  ${gateway.label}  ${config.gateway}`);
   console.log(`Dashboard: ${dashboardStatusLabel(gateway, noNetwork)}`);
+  console.log(`App:      ${appRootLabel()}`);
   console.log(`Config:   ${configPathLabel(config.sources)}`);
   console.log(`Provider: ${config.provider}`);
   console.log(`Model:    ${config.model}`);
@@ -172,19 +183,159 @@ async function printCockpit({ noNetwork = false } = {}) {
   console.log(`  ${cliCommand("open")}              open dashboard`);
 }
 
-function dashboardStatePath(env = process.env) {
+function appConfigDir(env = process.env) {
   const base = env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.join(base, "passcontrol", DASHBOARD_STATE_FILE);
+  return path.join(base, "passcontrol");
+}
+
+function dashboardStatePath(env = process.env) {
+  return path.join(appConfigDir(env), DASHBOARD_STATE_FILE);
 }
 
 function dashboardLogPath(env = process.env) {
-  return path.join(path.dirname(dashboardStatePath(env)), "local-dashboard.log");
+  return path.join(appConfigDir(env), "local-dashboard.log");
+}
+
+function appRootStatePath(env = process.env) {
+  return path.join(appConfigDir(env), APP_STATE_FILE);
+}
+
+// A directory is a usable stack checkout if it has the bootstrap script, the
+// Redis compose file, and a package.json (with the dev:stack/dev:docker scripts).
+function isRepoCheckout(dir) {
+  return Boolean(
+    dir &&
+      fs.existsSync(path.join(dir, "scripts", "dev-stack.sh")) &&
+      fs.existsSync(path.join(dir, "docker", "compose.yml")) &&
+      fs.existsSync(path.join(dir, "package.json"))
+  );
+}
+
+function readSavedAppRoot() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(appRootStatePath(), "utf8")).path;
+    return typeof saved === "string" ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveAppRoot(dir) {
+  const statePath = appRootStatePath();
+  fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(statePath, `${JSON.stringify({ path: dir, savedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+}
+
+// Precedence: explicit env override → the surrounding checkout (npm run cli --) →
+// a previously cloned/saved checkout. Returns null when the CLI is installed
+// globally and no stack has been set up yet.
+function resolveAppRoot() {
+  const envRoot = process.env.PASSCONTROL_APP_ROOT?.trim();
+  if (envRoot) {
+    const abs = path.resolve(envRoot);
+    if (!isRepoCheckout(abs)) {
+      throw new Error(`PASSCONTROL_APP_ROOT=${envRoot} is not a PassControl checkout (missing scripts/dev-stack.sh).`);
+    }
+    return abs;
+  }
+  if (process.env.PASSCONTROL_FORCE_INSTALLED !== "1" && isRepoCheckout(PACKAGE_ROOT)) return PACKAGE_ROOT;
+  const saved = readSavedAppRoot();
+  if (saved && isRepoCheckout(saved)) return path.resolve(saved);
+  return null;
+}
+
+function defaultAppDir() {
+  return path.join(os.homedir(), "passcontrol");
+}
+
+function appRootLabel() {
+  try {
+    return resolveAppRoot() ?? `not set up (run \`${cliCommand("setup")}\`)`;
+  } catch (error) {
+    return error.message;
+  }
+}
+
+function commandExists(command) {
+  try {
+    execFileSync(process.platform === "win32" ? "where" : "which", [command], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function promptLine(question, fallback) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(question)).trim();
+    return answer || fallback;
+  } finally {
+    rl.close();
+  }
+}
+
+async function confirmYes(question) {
+  const answer = (await promptLine(question, "")).toLowerCase();
+  return answer === "" || answer === "y" || answer === "yes";
+}
+
+// Resolve the stack checkout, cloning the public repo on demand when the CLI is
+// installed globally. `clone: false` never clones — it errors with a pointer to
+// `passcontrol setup` (used by reset/doctor, where there's nothing yet to act on).
+async function ensureAppRoot({ clone = false, appDir, yes = false } = {}) {
+  if (appRoot) return appRoot;
+  const resolved = resolveAppRoot();
+  if (resolved) {
+    appRoot = resolved;
+    return appRoot;
+  }
+  if (!clone) {
+    throw new Error(
+      `No PassControl app checkout found. Run \`${cliCommand("setup")}\` to clone and start it, or set PASSCONTROL_APP_ROOT to an existing checkout.`
+    );
+  }
+
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (!interactive && !yes) {
+    throw new Error(
+      `No PassControl app checkout found. Re-run \`${cliCommand("setup")}\` in an interactive terminal, or pass --yes (with optional --app-dir <path>) to clone ${PUBLIC_REPO_URL} non-interactively.`
+    );
+  }
+
+  const target = path.resolve(appDir || (interactive ? await promptLine(`Where should the PassControl app be cloned? [${defaultAppDir()}] `, defaultAppDir()) : defaultAppDir()));
+  if (fs.existsSync(target) && fs.readdirSync(target).length) {
+    if (isRepoCheckout(target)) {
+      saveAppRoot(target);
+      appRoot = target;
+      ok(`Using existing PassControl checkout at ${target}`);
+      return appRoot;
+    }
+    throw new Error(`${target} already exists and is not empty. Choose an empty path with --app-dir.`);
+  }
+
+  if (!commandExists("git")) {
+    throw new Error("git is required to fetch the PassControl app. Install it from https://git-scm.com/downloads, then retry.");
+  }
+  if (interactive && !yes) {
+    const proceed = await confirmYes(`Clone ${PUBLIC_REPO_URL} into ${target} and install dependencies? [Y/n] `);
+    if (!proceed) throw new Error("Aborted — nothing was cloned.");
+  }
+
+  step(`Cloning ${PUBLIC_REPO_URL} → ${target}…`);
+  await runCommand("git", ["clone", "--depth", "1", PUBLIC_REPO_URL, target], { cwd: process.cwd() });
+  step("Installing dependencies (npm install)…");
+  await runCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["install"], { cwd: target });
+  saveAppRoot(target);
+  appRoot = target;
+  ok(`PassControl app ready at ${target}`);
+  return appRoot;
 }
 
 function localComposeProjectName() {
-  const configPath = path.join(PACKAGE_ROOT, "supabase", "config.toml");
+  const configPath = path.join(appRoot, "supabase", "config.toml");
   const configText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
-  const projectId = configText.match(/^project_id\s*=\s*"([^"]+)"\s*$/m)?.[1] ?? path.basename(PACKAGE_ROOT);
+  const projectId = configText.match(/^project_id\s*=\s*"([^"]+)"\s*$/m)?.[1] ?? path.basename(appRoot);
   return `passcontrol_${projectId.replace(/[^A-Za-z0-9]/g, "_").toLowerCase()}`;
 }
 
@@ -284,7 +435,7 @@ async function waitForGateway(timeoutMs = 30000) {
 }
 
 function ownSupabaseDatabaseIsRunning(offset = 0) {
-  const project = `${path.basename(PACKAGE_ROOT)}${offset ? `-${offset}` : ""}`;
+  const project = `${path.basename(appRoot)}${offset ? `-${offset}` : ""}`;
   try {
     return Boolean(
       execFileSync("docker", ["ps", "-q", "--filter", `name=^/supabase_db_${project}$`], { encoding: "utf8" }).trim()
@@ -307,7 +458,8 @@ async function assertLocalStackPortsAvailable(offset = 0) {
   }
 }
 
-async function startDashboard() {
+async function startDashboard(opts = {}) {
+  await ensureAppRoot({ clone: true, appDir: opts.appDir, yes: opts.yes });
   const dashboard = localDashboard();
   if ((await gatewayStatus(false)).ok) {
     ok(`dashboard already online at ${dashboard.url}`);
@@ -324,9 +476,9 @@ async function startDashboard() {
     throw new Error(`CLI-managed dashboard (PID ${running.pid}) did not become ready. See ${running.logPath}.`);
   }
 
-  const envFile = path.join(PACKAGE_ROOT, ".env.docker");
+  const envFile = path.join(appRoot, ".env.docker");
   if (!fs.existsSync(envFile)) {
-    throw new Error(`Local stack is not configured. Run \`npm run dev:stack\` in ${PACKAGE_ROOT} first.`);
+    throw new Error(`Local stack is not configured. Run \`${cliCommand("setup")}\` in ${appRoot} first.`);
   }
 
   const statePath = dashboardStatePath();
@@ -334,7 +486,7 @@ async function startDashboard() {
   fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
   const logFd = fs.openSync(logPath, "a", 0o600);
   const child = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:docker"], {
-    cwd: PACKAGE_ROOT,
+    cwd: appRoot,
     detached: process.platform !== "win32",
     env: { ...process.env, PORT: String(dashboard.port) },
     stdio: ["ignore", logFd, logFd],
@@ -385,17 +537,17 @@ async function stopDashboard() {
   ok(`stopped CLI-managed dashboard (PID ${state.pid})`);
 }
 
-async function restartDashboard() {
+async function restartDashboard(opts = {}) {
   localDashboard();
   const managed = runningManagedDashboard();
   if (!managed) {
     if ((await gatewayStatus(false)).ok) {
       throw new Error("Dashboard is online but was not started by passcontrol; stop it manually before restarting.");
     }
-    return startDashboard();
+    return startDashboard(opts);
   }
   await stopDashboard();
-  return startDashboard();
+  return startDashboard(opts);
 }
 
 async function localLogsCommand(opts = {}) {
@@ -417,12 +569,16 @@ async function localLogsCommand(opts = {}) {
   });
 }
 
-async function runLocalCommand(command, args, env = process.env) {
+async function runCommand(command, args, { cwd = appRoot, env = process.env } = {}) {
   await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: PACKAGE_ROOT, env, stdio: "inherit" });
+    const child = spawn(command, args, { cwd, env, stdio: "inherit" });
     child.once("error", reject);
     child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`${command} exited with code ${code}.`)));
   });
+}
+
+async function runLocalCommand(command, args, env = process.env) {
+  await runCommand(command, args, { cwd: appRoot, env });
 }
 
 async function resetLocalStack(opts = {}) {
@@ -433,6 +589,7 @@ async function resetLocalStack(opts = {}) {
   if (opts.confirm !== "RESET") {
     throw new Error("reset refuses to delete local data without `--confirm RESET`.");
   }
+  await ensureAppRoot({ clone: false });
 
   step("Resetting local PassControl data, Supabase, and Redis…");
   await stopDashboard();
@@ -441,7 +598,7 @@ async function resetLocalStack(opts = {}) {
     ...process.env,
     COMPOSE_PROJECT_NAME: localComposeProjectName(),
   });
-  fs.rmSync(path.join(PACKAGE_ROOT, ".env.docker"), { force: true });
+  fs.rmSync(path.join(appRoot, ".env.docker"), { force: true });
   await runLocalCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:stack"]);
   ok("Local stack recreated. Run `passcontrol start` to launch the dashboard.");
 }
@@ -452,14 +609,15 @@ async function setupLocal(opts = {}) {
   if (!Number.isInteger(offset) || offset < 0 || offset > 10000) {
     throw new Error("--port-offset must be an integer from 0 to 10000.");
   }
+  await ensureAppRoot({ clone: true, appDir: opts.appDir, yes: opts.yes });
   await assertLocalStackPortsAvailable(offset);
   step("Preparing the local Supabase, Redis, migrations, and dev user…");
   await runLocalCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:stack"], {
     ...process.env,
     PASSCONTROL_PORT_OFFSET: String(offset),
   });
-  await startDashboard();
-  if (!opts.noOpen) await openDashboard();
+  await startDashboard(opts);
+  if (!opts.noOpen) await openDashboard(opts);
   console.log(`\nLocal dashboard: ${dashboard.url}`);
   console.log("Local-only login: dev@passcontrol.local / passcontrol-dev");
   step("Add a non-critical provider key, issue a passport, then run `passcontrol doctor --deep`.");
@@ -905,12 +1063,18 @@ async function doctorCommand(opts = {}) {
     } catch {
       step("--fix manages only a local dashboard; remote gateways are not changed.");
     }
-    if (dashboard && gateway.ok) {
-      ok("Local dashboard is already healthy; no repair needed.");
-    } else if (dashboard && !fs.existsSync(path.join(PACKAGE_ROOT, ".env.docker"))) {
-      fail(`Local stack is not configured. Run \`npm run dev:stack\` in ${PACKAGE_ROOT}.`);
-    } else if (dashboard) {
-      await startDashboard();
+    if (dashboard) {
+      const root = resolveAppRoot();
+      if (gateway.ok) {
+        ok("Local dashboard is already healthy; no repair needed.");
+      } else if (!root) {
+        fail(`No PassControl app checkout found. Run \`${cliCommand("setup")}\` to clone and start the local stack.`);
+      } else if (!fs.existsSync(path.join(root, ".env.docker"))) {
+        fail(`Local stack is not configured. Run \`${cliCommand("setup")}\` in ${root}.`);
+      } else {
+        appRoot = root;
+        await startDashboard();
+      }
     }
   }
 
@@ -941,7 +1105,7 @@ async function doctorCommand(opts = {}) {
   }
 }
 
-async function openDashboard() {
+async function openDashboard(opts = {}) {
   let parsed;
   try {
     parsed = new URL(config.gateway);
@@ -949,7 +1113,7 @@ async function openDashboard() {
     throw new Error(`Invalid PASSCONTROL_GATEWAY URL: ${config.gateway}`);
   }
   const url = parsed.protocol === "http:" && LOCAL_DASHBOARD_HOSTS.has(parsed.hostname)
-    ? (await startDashboard()).url
+    ? (await startDashboard(opts)).url
     : config.gateway;
   const platform = process.platform;
   const command =
@@ -986,13 +1150,13 @@ async function main() {
       await doctorCommand(opts);
       break;
     case "start":
-      await startDashboard();
+      await startDashboard(opts);
       break;
     case "stop":
       await stopDashboard();
       break;
     case "restart":
-      await restartDashboard();
+      await restartDashboard(opts);
       break;
     case "local-logs":
       await localLogsCommand(opts);
@@ -1032,7 +1196,7 @@ async function main() {
       await killCommand(commandRest);
       break;
     case "open":
-      await openDashboard();
+      await openDashboard(opts);
       break;
     default:
       throw new Error(`Unknown command "${command}". Run \`passcontrol help\`.`);

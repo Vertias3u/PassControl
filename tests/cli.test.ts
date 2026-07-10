@@ -45,6 +45,7 @@ describe("passcontrol CLI", () => {
     expect(stdout).toContain("passcontrol local-logs");
     expect(stdout).toContain("passcontrol reset --local --confirm RESET");
     expect(stdout).toContain("passcontrol setup [--no-open] [--port-offset N]");
+    expect(stdout).toContain("[--app-dir DIR]");
     expect(stdout).toContain("passcontrol configure <integration>");
     expect(stdout).toContain("passcontrol doctor [--deep] [--fix]");
     expect(stdout).toContain("passcontrol call \"hi\"");
@@ -66,6 +67,50 @@ describe("passcontrol CLI", () => {
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("only manages local gateways"),
     });
+  }, 10000);
+
+  // When the CLI is installed globally (no surrounding repo checkout), the local
+  // stack lives in a cloned app dir. PASSCONTROL_FORCE_INSTALLED=1 simulates that.
+  it("asks to clone the app when installed globally without a checkout", async () => {
+    await expect(
+      runCli(["setup", "--no-open"], { env: { PASSCONTROL_FORCE_INSTALLED: "1" } })
+    ).rejects.toMatchObject({
+      stderr: expect.stringMatching(/interactive terminal.*--yes|--yes.*clone/s),
+    });
+  }, 10000);
+
+  it("refuses to clone the app into a non-empty directory", async () => {
+    const dir = path.join(tmp, "occupied");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "keep.txt"), "x");
+    await expect(
+      runCli(["setup", "--no-open", "--yes", "--app-dir", dir], { env: { PASSCONTROL_FORCE_INSTALLED: "1" } })
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("already exists and is not empty"),
+    });
+  }, 10000);
+
+  it("points a checkout-less reset at setup instead of destroying nothing", async () => {
+    await expect(
+      runCli(["reset", "--local", "--confirm", "RESET"], { env: { PASSCONTROL_FORCE_INSTALLED: "1" } })
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("passcontrol setup"),
+    });
+  }, 10000);
+
+  it("reports the app checkout as not set up when installed globally", async () => {
+    const { stdout } = await runCli(["status", "--no-network"], {
+      env: { PASSCONTROL_FORCE_INSTALLED: "1" },
+    });
+    expect(stdout).toContain("App:");
+    expect(stdout).toContain("not set up");
+  }, 10000);
+
+  it("uses PASSCONTROL_APP_ROOT as an explicit checkout override", async () => {
+    const { stdout } = await runCli(["status", "--no-network"], {
+      env: { PASSCONTROL_APP_ROOT: process.cwd() },
+    });
+    expect(stdout).toContain(`App:      ${process.cwd()}`);
   }, 10000);
 
   it("does not run local setup against a remote gateway", async () => {

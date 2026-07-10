@@ -1,8 +1,34 @@
 {
   "name": "passcontrol",
   "version": "0.1.0",
-  "private": true,
   "description": "Secure Agent Control Plane & Passport Vault — identity-aware reverse proxy for AI agent credentials.",
+  "license": "BUSL-1.1",
+  "homepage": "https://github.com/Vertias3u/PassControl#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vertias3u/PassControl.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Vertias3u/PassControl/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "llm",
+    "gateway",
+    "credentials",
+    "identity",
+    "api-key",
+    "vault",
+    "proxy",
+    "passport"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "bin",
     "cli",
