@@ -8,6 +8,15 @@
 # Bypass in an emergency with:  git push --no-verify
 set -e
 
+# Skip cleanly when dependencies aren't installed — e.g. a curated mirror
+# checkout, or a fresh clone before `npm install`. (npm's `prepare` script sets
+# core.hooksPath on any npm command, so this hook can activate in a deps-less
+# tree.) CI still enforces the full gate server-side, so nothing regresses.
+if [ ! -x node_modules/.bin/tsc ]; then
+  echo "pre-push: dependencies not installed — skipping local typecheck/tests (CI still enforces). Run 'npm install' to enable them."
+  exit 0
+fi
+
 echo "pre-push: typecheck…"
 npm run --silent typecheck
 
