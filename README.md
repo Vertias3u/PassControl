@@ -25,13 +25,29 @@ PassControl pairs the browser-based **Control Tower** (where you add a provider 
 passport) with a terminal **CLI** (where you configure agents, make governed calls, run a
 sidecar, inspect spend/logs, and control a fleet).
 
-From a source checkout, use `npm run cli -- <command>`. The shorter `passcontrol <command>`
-form is available after `npm link` (or when the package is installed).
+## Install
+
+**Fastest — install the CLI globally:**
 
 ```bash
+npm install -g passcontrol
+passcontrol setup      # offers to fetch the local stack, then boots it and opens the dashboard
+```
+
+The published package is just the CLI (a few files, no provider keys). `passcontrol setup`
+detects it's installed globally and offers to clone the self-hostable stack (Supabase + Redis +
+dashboard) into `~/passcontrol`, install its dependencies, and start it — so a single command
+takes you from nothing to a running Control Tower. Override the location with `--app-dir <path>`
+or the `PASSCONTROL_APP_ROOT` environment variable, and pass `--yes` for non-interactive setups.
+
+**From a source checkout** (if you'd rather clone yourself), run the CLI with `npm run cli -- <command>`.
+The short `passcontrol <command>` form also works inside a clone after `npm link`:
+
+```bash
+git clone https://github.com/Vertias3u/PassControl.git
+cd PassControl && npm install
 npm run cli -- --help      # every command
-npm run cli -- status      # configuration + next steps
-npm run cli -- doctor      # gateway/config check
+npm run cli -- setup       # boots the local stack from this checkout
 ```
 
 ## Why
