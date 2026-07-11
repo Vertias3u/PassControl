@@ -45,6 +45,19 @@ begin
     raise exception 'authenticated must retain UPDATE on editable agent metadata';
   end if;
 
+  -- api_keys: an owner may revoke their own key (UPDATE revoked_at), but must not
+  -- be able to escalate an existing key's `scope` (read->write) or tamper
+  -- `key_hash` via a direct PostgREST PATCH. Privileged columns are server-only.
+  if has_column_privilege('authenticated', 'public.api_keys', 'scope', 'UPDATE') then
+    raise exception 'authenticated must not have UPDATE on api_keys.scope';
+  end if;
+  if has_column_privilege('authenticated', 'public.api_keys', 'key_hash', 'UPDATE') then
+    raise exception 'authenticated must not have UPDATE on api_keys.key_hash';
+  end if;
+  if not has_column_privilege('authenticated', 'public.api_keys', 'revoked_at', 'UPDATE') then
+    raise exception 'authenticated must retain UPDATE on api_keys.revoked_at (revoke path)';
+  end if;
+
   -- Seed two tenants (service/owner role bypasses RLS for setup).
   insert into auth.users (id) values (v_a), (v_b);
   insert into public.users (id, email) values (v_a, 'a@example.test'), (v_b, 'b@example.test');
