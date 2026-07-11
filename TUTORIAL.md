@@ -33,10 +33,20 @@ minted from it), **scope** (which provider/model/endpoints that agent may use).
 [Supabase CLI](https://supabase.com/docs/guides/local-development), and Node 18+.
 No hosted accounts needed — the whole stack runs locally. (No host `psql` required.)
 
+Install the CLI globally and let it fetch + boot the stack for you:
+
+```bash
+npm install -g passcontrol
+passcontrol setup  # checks prereqs, clones the stack, starts services, migrates, seeds, opens dashboard
+```
+
+`passcontrol setup` clones the self-hostable stack into `~/passcontrol` (override with
+`--app-dir <path>`), installs it, and starts it. Prefer to clone yourself? That works too:
+
 ```bash
 git clone https://github.com/Vertias3u/PassControl && cd PassControl
 npm install
-npm run cli -- setup  # starts local services, migrates, seeds a dev user, opens dashboard
+npm run cli -- setup   # run the CLI from the checkout
 ```
 
 Open **http://localhost:3000** and log in with the seeded dev user:
@@ -46,13 +56,16 @@ dev@passcontrol.local
 passcontrol-dev
 ```
 
-> Use `npm run cli -- setup --no-open` to suppress browser launch. If another local
-> Supabase/Redis project owns the default service ports, use `npm run cli -- setup --no-open
+> Use `passcontrol setup --no-open` to suppress browser launch. If another local
+> Supabase/Redis project owns the default service ports, use `passcontrol setup --no-open
 > --port-offset 100`. This offsets those local service ports together; the dashboard keeps its
 > configured gateway port (3000 by default).
 >
 > The seeded dev user is **local-only** (created by `scripts/seed.mjs`) — never deploy it.
-> To reset to a truly clean slate: `npm run cli -- reset --local --confirm RESET`.
+> To reset to a truly clean slate: `passcontrol reset --local --confirm RESET`.
+>
+> **From a source clone** without the global install, every `passcontrol <cmd>` below is
+> `npm run cli -- <cmd>`; after `npm link` in the checkout, the short form works there too.
 
 You should land on the **Control Tower** dashboard — empty fleet, no spend yet.
 
@@ -74,31 +87,21 @@ Give it a **scope** of `anthropic` / `claude-*` so it can call any Claude model.
 
 **c. Configure the CLI and make the call.** The `passcontrol` CLI is the terminal cockpit for
 an agent and its fleet: it removes the env-var soup, can call a model, run a sidecar, inspect
-spend/logs, and operate the kill switch. Configure your passport once, then just call. From a
-source checkout (what you have after cloning), run it via `npm run cli --`:
+spend/logs, and operate the kill switch. Configure your passport once, then just call:
 
 ```bash
-npm run cli -- init                      # prompts for gateway + passport, writes .passcontrol
-npm run cli -- doctor --deep             # verifies gateway/config; mints a visa if configured
-npm run cli -- call "Say hi in 3 words"
-```
-
-> The short `passcontrol …` form (instead of `npm run cli --`) works once you `npm link` the
-> repo, or when the package is installed. It's not published to npm yet — from a clone, use
-> `npm run cli --`. Runnable raw example scripts also live in [`examples/`](./examples).
-
-Want the short form on a development machine? From the repository root, run `npm link`, then:
-
-```bash
-passcontrol --help
-passcontrol status
+passcontrol init                      # prompts for gateway + passport, writes .passcontrol
+passcontrol doctor --deep             # verifies gateway/config; mints a visa if configured
 passcontrol call "Say hi in 3 words"
 ```
+
+> Runnable raw example scripts also live in [`examples/`](./examples). (From a source clone
+> without the global install, use `npm run cli -- <cmd>` in place of `passcontrol <cmd>`.)
 
 Prefer env vars? They still work and override `.passcontrol`:
 
 ```bash
-PASSPORT_ID=<pub> PASSPORT_SECRET=<priv> npm run cli -- call "Say hi in 3 words"
+PASSPORT_ID=<pub> PASSPORT_SECRET=<priv> passcontrol call "Say hi in 3 words"
 ```
 
 Expected:
@@ -116,22 +119,22 @@ real call → audited.
 ### CLI cheat sheet
 
 ```bash
-npm run cli -- status                 # cockpit: config, gateway, next commands
-npm run cli -- doctor --fix           # recover a stopped local dashboard
-npm run cli -- start                  # start the CLI-managed local dashboard
-npm run cli -- restart                # replace the CLI-managed dashboard process
-npm run cli -- local-logs --follow    # stream local dashboard output
-npm run cli -- sidecar                # local bridge for OpenHands/Aider/Cline/etc.
-npm run cli -- agent list             # managed passports
-npm run cli -- spend                  # fleet and per-agent spend
-npm run cli -- logs --limit 20        # recent gateway calls
-npm run cli -- kill on                # emergency tenant stop
-npm run cli -- kill off               # release the tenant stop
-npm run cli -- configure aider        # preview an Aider project config
-npm run cli -- configure aider --write # write it only if no .aider.conf.yml exists
+passcontrol status                 # cockpit: config, gateway, next commands
+passcontrol doctor --fix           # recover a stopped local dashboard
+passcontrol start                  # start the CLI-managed local dashboard
+passcontrol restart                # replace the CLI-managed dashboard process
+passcontrol local-logs --follow    # stream local dashboard output
+passcontrol sidecar                # local bridge for OpenHands/Aider/Cline/etc.
+passcontrol agent list             # managed passports
+passcontrol spend                  # fleet and per-agent spend
+passcontrol logs --limit 20        # recent gateway calls
+passcontrol kill on                # emergency tenant stop
+passcontrol kill off               # release the tenant stop
+passcontrol configure aider        # preview an Aider project config
+passcontrol configure aider --write # write it only if no .aider.conf.yml exists
 ```
 
-Run `npm run cli -- --help` for the complete command list. The CLI reads environment variables,
+Run `passcontrol --help` for the complete command list. The CLI reads environment variables,
 then `.passcontrol`, then `~/.config/passcontrol/config`; keep passport secrets out of source
 control.
 
@@ -170,7 +173,7 @@ long-lived token.
 
 ```bash
 # Reuses PASSCONTROL_GATEWAY + PASSPORT_ID/PASSPORT_SECRET from .passcontrol.
-npm run cli -- sidecar        # -> http://127.0.0.1:8788
+passcontrol sidecar        # -> http://127.0.0.1:8788
 ```
 
 Then point your agent at the sidecar exactly like a provider, API key = anything:
@@ -185,16 +188,16 @@ governed calls — the agent is doing real work, and the key stayed in the vault
 To print a copy/paste starting point:
 
 ```bash
-npm run cli -- env openhands
+passcontrol env openhands
 ```
 
 Other common presets:
 
 ```bash
-npm run cli -- env aider
-npm run cli -- env cline
-npm run cli -- env continue
-npm run cli -- env litellm
+passcontrol env aider
+passcontrol env cline
+passcontrol env continue
+passcontrol env litellm
 ```
 
 Compatibility rule of thumb: PassControl proxies chat completions/messages and model-listing

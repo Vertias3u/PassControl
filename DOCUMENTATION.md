@@ -138,11 +138,11 @@ For third-party agents that expect a static key, run the visa sidecar and point 
 right variables/settings:
 
 ```bash
-npm run cli -- env openhands
-npm run cli -- env aider
-npm run cli -- env cline
-npm run cli -- env continue
-npm run cli -- env litellm
+passcontrol env openhands
+passcontrol env aider
+passcontrol env cline
+passcontrol env continue
+passcontrol env litellm
 ```
 
 Continue-specific note: its OpenAI provider may default to `/responses` for o-series and
