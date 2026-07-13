@@ -1,4 +1,4 @@
-// Vertias company mark — three petals of a leaf (the flare). Brand orange,
+// Vertias company mark — three petals of a leaf (the flare). Brand green,
 // preserved from the Vertias identity. One instance per page (static gradient ids).
 export function VertiasLogo({ size = 44 }: { size?: number }) {
   const height = Math.round((size * 62) / 58);
@@ -6,16 +6,16 @@ export function VertiasLogo({ size = 44 }: { size?: number }) {
     <svg width={size} height={height} viewBox="0 0 58 62" fill="none" role="img" aria-label="Vertias">
       <defs>
         <linearGradient id="vertias-a" x1="20" y1="58" x2="12" y2="4" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#0e7490" />
-          <stop offset="100%" stopColor="#67e8f9" />
+          <stop offset="0%" stopColor="#7fa933" />
+          <stop offset="100%" stopColor="#b7f34a" />
         </linearGradient>
         <linearGradient id="vertias-b" x1="29" y1="58" x2="29" y2="2" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#00e5ff" />
-          <stop offset="100%" stopColor="#cffafe" />
+          <stop offset="0%" stopColor="#94c63b" />
+          <stop offset="100%" stopColor="#b7f34a" />
         </linearGradient>
         <linearGradient id="vertias-c" x1="38" y1="58" x2="46" y2="4" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#0e7490" />
-          <stop offset="100%" stopColor="#67e8f9" />
+          <stop offset="0%" stopColor="#7fa933" />
+          <stop offset="100%" stopColor="#b7f34a" />
         </linearGradient>
       </defs>
       <path
@@ -32,16 +32,16 @@ export function VertiasLogo({ size = 44 }: { size?: number }) {
         fill="url(#vertias-c)"
         opacity="0.88"
       />
-      <ellipse cx="29" cy="55" rx="5" ry="3" fill="#00e5ff" opacity="0.3" />
+      <ellipse cx="29" cy="55" rx="5" ry="3" fill="#b7f34a" opacity="0.3" />
     </svg>
   );
 }
 
-// Wordmark: "Vertias" with the brand-orange second half.
+// Wordmark: "Vertias" with the brand-green second half.
 export function VertiasWordmark({ size = 20 }: { size?: number }) {
   return (
     <span style={{ fontWeight: 800, fontSize: size, letterSpacing: "-0.02em" }}>
-      Ver<span style={{ color: "#00e5ff" }}>tias</span>
+      Ver<span style={{ color: "#b7f34a" }}>tias</span>
     </span>
   );
 }
