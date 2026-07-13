@@ -9,6 +9,10 @@ You get per-agent budgets, capability scopes, an instant kill switch, and a per-
 A [Vertias](https://vertias.eu) project. **Bring-your-own-key** — your provider key stays in your
 own vault. Self-host it today; a managed version comes later.
 
+![PassControl kill switch — a live agent's calls flip from 200 OK to 403 BLOCKED the instant the kill switch is armed, then back when it's released](docs/demo/kill-switch.gif)
+
+*Instant, per-agent revocation — the kill switch cuts off a live agent mid-run (`200 OK` → `403 BLOCKED`) and restores it, with no key rotation and no redeploy. Real traffic through the gateway; the status codes and timestamps are live.*
+
 > ⚠️ **Status: early.** Built by a small team, **not yet independently audited.** It's
 > security-focused and test-covered, but treat it as beta — run it against a **non-critical key
 > first**, and see [Security](#security) for responsible disclosure. We'd rather you know than
