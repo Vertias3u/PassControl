@@ -67,6 +67,8 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
   by the database)
 - 🧰 **Drop-in for your SDK** (OpenAI, Anthropic, and OpenAI-compatible Groq / Mistral / Together /
   DeepSeek) — **or any agent** via the visa sidecar (OpenHands, Aider, Cline, Continue…)
+- 🔌 **Local MCP server** for Claude Desktop, Cursor, and Claude Code — governed `chat` and
+  `list_models` tools with no provider key or passport secret in the client config
 - 🖥️ **Control Tower** dashboard (fleet, spend, budgets, audit, kill switch) + a developer
   control-plane API + TOTP MFA
 
@@ -76,7 +78,7 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 
 ```bash
 npm install -g passcontrol
-passcontrol --version     # 0.1.2
+passcontrol --version     # 0.2.0
 passcontrol setup         # prereq checks → fetches the stack → boots it → opens the dashboard
 ```
 
@@ -121,6 +123,22 @@ real key from the local Vault, so start with a throwaway one.
 > `npm run cli -- <command>`; after `npm link` in the clone, the short `passcontrol <command>` form
 > works too.
 
+## Claude Desktop, Cursor, and Claude Code via MCP
+
+PassControl ships a local stdio MCP server. Store the passport once in the owner-only global
+profile, then let the CLI merge a secret-free entry into your client config:
+
+```bash
+passcontrol init --global
+passcontrol configure claude-desktop --write   # or: cursor
+# Claude Code: passcontrol configure claude-code prints its `claude mcp add` command
+```
+
+Restart the client, then use the governed `chat` and `list_models` tools. The generated config
+contains only absolute Node/CLI paths—no passport or provider key. `chat` still goes through the
+gateway's identity, scope, budget, endpoint, and kill-switch checks. Preview without writing via
+`passcontrol configure claude-desktop`, or print the JSON with `passcontrol env claude-desktop`.
+
 ## Real agents & the visa sidecar
 
 A visa is deliberately short-lived so it's revocable — but a real coding agent runs a **long,
@@ -159,8 +177,9 @@ The primary interface is `passcontrol <command>`. Highlights:
 | Config, gateway status, suggested next steps | `passcontrol status` |
 | Check local setup / mint a test visa | `passcontrol doctor --deep` |
 | Make a governed model call | `passcontrol call "Summarize this"` |
+| Run the local MCP server | `passcontrol mcp` |
 | Run the auto-refreshing bridge for an agent | `passcontrol sidecar` |
-| Print agent settings (OpenHands, Aider, Cline, Continue, LiteLLM) | `passcontrol env openhands` |
+| Print agent/MCP settings | `passcontrol env openhands` · `passcontrol env claude-desktop` |
 | List / create agents | `passcontrol agent list` · `passcontrol agent create billing-bot` |
 | Suspend, resume, or revoke an agent | `passcontrol agent suspend <id>` |
 | Inspect spend, logs, and audit history | `passcontrol spend` · `passcontrol logs` · `passcontrol audit` |
@@ -169,7 +188,7 @@ The primary interface is `passcontrol <command>`. Highlights:
 | Manage the local dashboard | `passcontrol start` · `passcontrol stop` · `passcontrol restart` |
 | Follow local dashboard logs | `passcontrol local-logs --follow` |
 | Open the Control Tower | `passcontrol open` |
-| Preview/write an agent config | `passcontrol configure aider` · `passcontrol configure aider --write` |
+| Preview/write an integration config | `passcontrol configure aider` · `passcontrol configure claude-desktop --write` |
 
 Config resolves in order: **environment variables → project-local `.passcontrol` →
 `~/.config/passcontrol/config`**. `.passcontrol` holds a passport secret, is gitignored, and is

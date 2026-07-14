@@ -11,6 +11,7 @@ import {
   CONFIG_FILE,
   OPENAI_SHAPE_PROVIDERS,
   PROVIDERS,
+  assertConfigLoaded,
   config,
   configPathLabel,
   defaultModelForProvider,
@@ -25,12 +26,28 @@ import {
   step,
   writeConfigFile,
 } from "../cli/config.mjs";
+import {
+  CLAUDE_CODE_ADD_COMMAND,
+  isMcpIntegration,
+  mcpClientConfigPath,
+  mcpServerEntry,
+  mcpServersDocument,
+  writeMcpClientConfig,
+} from "../cli/mcp/integration.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
 
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const fromB64url = (s) => new Uint8Array(Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
-const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const CLI_ENTRY = fileURLToPath(import.meta.url);
+const PACKAGE_ROOT = path.resolve(path.dirname(CLI_ENTRY), "..");
+const CLI_VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8")).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 const DASHBOARD_STATE_FILE = "local-dashboard.json";
 const APP_STATE_FILE = "app.json";
 const PUBLIC_REPO_URL = "https://github.com/Vertias3u/PassControl.git";
@@ -99,8 +116,11 @@ Usage:
                                  clone the app (if needed), start local services, open the dashboard
   ${cmd} call "hi"                mint a visa and call a model
   ${cmd} sidecar [--port 8788]    start the local agent bridge
+  ${cmd} mcp                      start the local stdio MCP server
   ${cmd} env [openhands]          print sidecar settings for agents
-  ${cmd} configure <integration> [--write]
+  ${cmd} env claude-desktop|cursor|claude-code
+                                 print secret-free MCP client settings
+  ${cmd} configure <integration> [--write] [--force]
                                  preview or create a supported integration config
   ${cmd} agent list               list agents
   ${cmd} agent create <name>      create an agent passport
@@ -974,17 +994,25 @@ async function logsCommand(opts) {
     })
   );
   console.table(
-    rows.map((row) => ({
-      at: row.created_at,
-      agent: row.agent_id,
-      provider: row.provider,
-      model: row.model,
-      status: row.status,
-      in: row.input_tokens,
-      out: row.output_tokens,
-      total: row.total_tokens,
-      usd: usd(row.cost_microcents),
-    }))
+    rows.map((row) => {
+      const input = typeof row.input_tokens === "number" && Number.isFinite(row.input_tokens)
+        ? row.input_tokens
+        : null;
+      const output = typeof row.output_tokens === "number" && Number.isFinite(row.output_tokens)
+        ? row.output_tokens
+        : null;
+      return {
+        at: row.created_at,
+        agent: row.agent_id,
+        provider: row.provider,
+        model: row.model,
+        status: row.status,
+        in: input ?? "-",
+        out: output ?? "-",
+        total: input === null && output === null ? "-" : (input ?? 0) + (output ?? 0),
+        usd: usd(row.cost_microcents),
+      };
+    })
   );
 }
 
@@ -1018,6 +1046,12 @@ async function sidecarCommand(rest, opts) {
   }
 }
 
+async function mcpCommand() {
+  const { passportId, passportSecret } = requirePassport(config);
+  const { startMcpServer } = await import("../cli/mcp/server.mjs");
+  await startMcpServer({ gateway: config.gateway, passportId, passportSecret });
+}
+
 function sidecarBaseUrl(opts = {}) {
   const provider = String(opts.provider || config.provider);
   assertProvider(provider);
@@ -1041,8 +1075,42 @@ function printExports(values) {
   }
 }
 
+function requireGlobalMcpPassport() {
+  assertConfigLoaded();
+  const globalSource = config.sources.find((source) => source.type === "global");
+  const passportId = String(globalSource?.values?.PASSPORT_ID ?? "").trim();
+  const passportSecret = String(globalSource?.values?.PASSPORT_SECRET ?? "").trim();
+  if (!passportId || !passportSecret) {
+    throw new Error(
+      "MCP client setup requires a passport in the global PassControl config. Run `passcontrol init --global` first."
+    );
+  }
+}
+
+function passControlMcpEntry() {
+  return mcpServerEntry({ cliPath: CLI_ENTRY });
+}
+
+function printMcpPreset(integration) {
+  requireGlobalMcpPassport();
+  if (integration === "claude-code") {
+    console.log("# Add PassControl to Claude Code:");
+    console.log(CLAUDE_CODE_ADD_COMMAND);
+    return;
+  }
+
+  const label = integration === "cursor" ? "Cursor" : "Claude Desktop";
+  console.log(`# ${label} mcpServers config:`);
+  console.log(JSON.stringify(mcpServersDocument(passControlMcpEntry()), null, 2));
+}
+
 function printAgentPreset(name = "generic", opts = {}) {
   const preset = name.toLowerCase();
+  if (isMcpIntegration(preset)) {
+    printMcpPreset(preset);
+    return;
+  }
+
   const { provider, model, apiKey, baseUrl } = sidecarBaseUrl(opts);
   const modelWithProvider = `${provider}/${model}`;
   const sidecarStart = opts.port ? cliCommand(`sidecar --port ${opts.port}`) : cliCommand("sidecar");
@@ -1089,7 +1157,9 @@ function printAgentPreset(name = "generic", opts = {}) {
       ]);
       break;
     default:
-      throw new Error("Usage: passcontrol env [generic|openhands|litellm|aider|cline|continue]");
+      throw new Error(
+        "Usage: passcontrol env [generic|openhands|litellm|aider|cline|continue|claude-desktop|cursor|claude-code]"
+      );
   }
 }
 
@@ -1105,9 +1175,43 @@ function aiderConfig(opts = {}) {
   ].join("\n");
 }
 
+function configureMcpClient(integration, opts = {}) {
+  requireGlobalMcpPassport();
+  if (integration === "claude-code") {
+    console.log("Claude Code manages MCP servers through its CLI. Run:");
+    console.log(CLAUDE_CODE_ADD_COMMAND);
+    return;
+  }
+
+  const target = mcpClientConfigPath(integration);
+  const entry = passControlMcpEntry();
+  const preview = JSON.stringify(mcpServersDocument(entry), null, 2);
+  console.log(`Preview: ${target}\n\n${preview}`);
+  if (!opts.write) {
+    step("Dry run only. Re-run with `--write` to merge this entry.");
+    return;
+  }
+
+  const result = writeMcpClientConfig({ target, entry, force: Boolean(opts.force) });
+  if (!result.changed) {
+    ok(`${target} already contains this PassControl MCP entry`);
+    return;
+  }
+  if (result.backupPath) step(`backed up ${result.backupPath}`);
+  ok(`wrote ${target}`);
+}
+
 async function configureCommand(rest, opts = {}) {
   const integration = String(rest[0] ?? "").toLowerCase();
-  if (!integration) throw new Error("Usage: passcontrol configure <aider|cline|continue|openhands> [--write]");
+  if (!integration) {
+    throw new Error(
+      "Usage: passcontrol configure <aider|cline|continue|openhands|claude-desktop|cursor|claude-code> [--write] [--force]"
+    );
+  }
+  if (isMcpIntegration(integration)) {
+    configureMcpClient(integration, opts);
+    return;
+  }
   if (integration !== "aider") {
     if (opts.write) throw new Error(`${integration} configuration is UI- or project-schema-specific; no file was written. Use the preview below.`);
     printAgentPreset(integration, opts);
@@ -1217,7 +1321,7 @@ async function main() {
     return;
   }
   if (opts.version || command === "version") {
-    console.log("passcontrol 0.1.0");
+    console.log(`passcontrol ${CLI_VERSION}`);
     return;
   }
 
@@ -1255,6 +1359,9 @@ async function main() {
       break;
     case "sidecar":
       await sidecarCommand(commandRest, opts);
+      break;
+    case "mcp":
+      await mcpCommand();
       break;
     case "env":
       printAgentPreset(commandRest[0] || "generic", opts);

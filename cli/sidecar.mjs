@@ -1,48 +1,19 @@
 import http from "node:http";
 import { Readable } from "node:stream";
-import { ed25519 } from "@noble/curves/ed25519";
-import { fail, formatChallengeError, ok, step } from "./config.mjs";
-
-const b64url = (bytes) =>
-  Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const fromB64url = (s) => new Uint8Array(Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64"));
+import { fail, ok, step } from "./config.mjs";
+import { createVisaClient } from "./visa-client.mjs";
 
 const STRIP_REQ = new Set(["authorization", "x-api-key", "host", "content-length", "accept-encoding", "connection"]);
 const STRIP_RES = new Set(["content-encoding", "content-length", "transfer-encoding", "connection"]);
 
 export function createSidecar({ gateway, passportId, passportSecret, port = 8788, host = "127.0.0.1", refreshSkewSeconds = 30 }) {
-  const skewMs = Math.max(0, Number(refreshSkewSeconds) * 1000);
-  let cached = null;
-  let inflight = null;
-
-  async function mint() {
-    const obj = { passport_id: passportId, ts: Date.now(), nonce: crypto.randomUUID() };
-    const payload = b64url(new TextEncoder().encode(JSON.stringify(obj)));
-    const signature = b64url(ed25519.sign(fromB64url(payload), fromB64url(passportSecret)));
-    const res = await fetch(`${gateway}/api/auth/challenge`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ payload, signature }),
-    });
-    if (!res.ok) throw new Error(formatChallengeError(res.status, await res.text()));
-    const { visa, expires_in } = await res.json();
-    if (!visa) throw new Error("challenge returned no visa");
-    return { token: visa, expiresAt: Date.now() + (expires_in ?? 300) * 1000 };
-  }
-
-  async function getVisa() {
-    if (cached && Date.now() < cached.expiresAt - skewMs) return cached.token;
-    if (inflight) return inflight;
-    inflight = mint()
-      .then((v) => {
-        cached = v;
-        return v.token;
-      })
-      .finally(() => {
-        inflight = null;
-      });
-    return inflight;
-  }
+  const visas = createVisaClient({
+    gateway,
+    passportId,
+    passportSecret,
+    refreshSkewSeconds,
+    missingVisaMessage: "challenge returned no visa",
+  });
 
   function readBody(req) {
     return new Promise((resolve, reject) => {
@@ -76,11 +47,7 @@ export function createSidecar({ gateway, passportId, passportSecret, port = 8788
   const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
-      let upstream = await fetchUpstream(req, body, await getVisa());
-      if (upstream.status === 401) {
-        cached = null;
-        upstream = await fetchUpstream(req, body, await getVisa());
-      }
+      const upstream = await visas.fetchWithVisa((visa) => fetchUpstream(req, body, visa));
       writeResponse(res, upstream);
     } catch (e) {
       if (!res.headersSent) {
@@ -92,7 +59,7 @@ export function createSidecar({ gateway, passportId, passportSecret, port = 8788
     }
   });
 
-  return { server, getVisa };
+  return { server, getVisa: visas.getVisa };
 }
 
 export function startSidecar(opts) {

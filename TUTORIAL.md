@@ -124,6 +124,7 @@ passcontrol doctor --fix           # recover a stopped local dashboard
 passcontrol start                  # start the CLI-managed local dashboard
 passcontrol restart                # replace the CLI-managed dashboard process
 passcontrol local-logs --follow    # stream local dashboard output
+passcontrol mcp                    # local stdio MCP server (chat + list_models)
 passcontrol sidecar                # local bridge for OpenHands/Aider/Cline/etc.
 passcontrol agent list             # managed passports
 passcontrol spend                  # fleet and per-agent spend
@@ -132,6 +133,7 @@ passcontrol kill on                # emergency tenant stop
 passcontrol kill off               # release the tenant stop
 passcontrol configure aider        # preview an Aider project config
 passcontrol configure aider --write # write it only if no .aider.conf.yml exists
+passcontrol configure claude-desktop --write # merge secret-free MCP config
 ```
 
 Run `passcontrol --help` for the complete command list. The CLI reads environment variables,
@@ -215,7 +217,25 @@ curl -s -X POST http://127.0.0.1:8788/api/v1/anthropic/v1/files \
 
 ---
 
-## 6. Revoke a running agent (the kill switch)
+## 6. Connect an MCP client
+
+Claude Desktop, Cursor, and Claude Code can call PassControl's governed `chat` and
+`list_models` tools over local stdio. Put the passport in the global owner-only profile so
+the client config itself stays secret-free:
+
+```bash
+passcontrol init --global
+passcontrol configure claude-desktop --write   # use `cursor` for Cursor
+# `passcontrol configure claude-code` prints the Claude-managed add command
+```
+
+Restart the client after writing its config. The generated entry contains only absolute
+Node/CLI paths; every `chat` call still crosses the gateway's scope, budget, endpoint, and
+kill-switch checks. Run without `--write` for a preview.
+
+---
+
+## 7. Revoke a running agent (the kill switch)
 
 This is the part a raw API key can't do. With an agent mid-task:
 
@@ -225,12 +245,12 @@ This is the part a raw API key can't do. With an agent mid-task:
 3. **Disarm**, and it runs again.
 
 No key rotation, no redeploy, no re-issuing the passport. One toggle severs a live agent and
-another restores it. (Note: instant in-flight revocation relies on Redis; see §7. A call
+another restores it. (Note: instant in-flight revocation relies on Redis; see §8. A call
 *already in flight* when you flip the switch completes — new calls are blocked immediately.)
 
 ---
 
-## 7. Going to production
+## 8. Going to production
 
 The Docker stack is for local dev. To self-host for real:
 

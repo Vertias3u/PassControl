@@ -19,6 +19,7 @@ Install the CLI globally (`npm install -g passcontrol`) and drive everything wit
 passcontrol status
 passcontrol init
 passcontrol call "Say hi in 3 words"
+passcontrol mcp
 passcontrol sidecar
 passcontrol env openhands
 passcontrol spend
@@ -50,6 +51,21 @@ MODEL=claude-haiku-4-5 node examples/chat-agent.mjs "Say hi"
 ```
 
 If config is missing, the CLI and scripts print a one-line fix.
+
+## Using PassControl from an MCP client
+
+Claude Desktop, Cursor, and Claude Code can use PassControl's governed `chat` and
+`list_models` tools without receiving a provider key or passport secret:
+
+```bash
+passcontrol init --global
+passcontrol configure claude-desktop --write   # use `cursor` for Cursor
+# `passcontrol configure claude-code` prints the command Claude Code owns
+```
+
+Restart the client. Its config contains only absolute launch paths; the passport remains in
+the global owner-only profile, and model calls still traverse the gateway's scope, budget,
+audit, and kill-switch enforcement.
 
 ## Using PassControl with a third-party agent (the visa sidecar)
 

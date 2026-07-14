@@ -151,6 +151,25 @@ gpt-5 models. PassControl intentionally does not proxy `/responses`; set
 
 ---
 
+## MCP integration
+
+The CLI exposes a local stdio MCP server with governed `chat` and `list_models` tools. Keep
+the passport in the global PassControl profile; generated client configs contain only the
+absolute Node executable and CLI path:
+
+```bash
+passcontrol init --global
+passcontrol configure claude-desktop --write   # or: cursor
+# Claude Code: passcontrol configure claude-code prints the CLI-managed add command
+```
+
+Restart the client after configuration. Every `chat` invocation uses the normal challenge
+and proxy flow, so scope, budget, endpoint allowlisting, suspension, and kill switches still
+apply. Use `passcontrol env claude-desktop` or `passcontrol env cursor` to print the
+secret-free `mcpServers` JSON without writing it.
+
+---
+
 ## Control plane — manage your fleet
 
 Base: `/api/control/v1` · `Authorization: Bearer pc_…` · JSON · responses carry `X-Request-Id`.

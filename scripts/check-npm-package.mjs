@@ -10,7 +10,12 @@ const allowed = new Set([
   "package.json",
   "bin/passcontrol.mjs",
   "cli/config.mjs",
+  "cli/mcp/gateway.mjs",
+  "cli/mcp/integration.mjs",
+  "cli/mcp/README.md",
+  "cli/mcp/server.mjs",
   "cli/sidecar.mjs",
+  "cli/visa-client.mjs",
 ]);
 const unexpected = files.filter((file) => !allowed.has(file));
 const missing = [...allowed].filter((file) => !files.includes(file));
