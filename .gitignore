@@ -39,6 +39,7 @@ coverage/
 *_scratch.md
 *_draft.md
 *_notes.md
+!/PASSCONTROL_SITE_NOTES.md
 *_review.md
 *.local
 *.local.*
@@ -49,3 +50,4 @@ coverage/
 /CODEX_P1_FIXES.md
 /firstnpmsetup.md
 /GIF_SCRIPT.md
+.env*

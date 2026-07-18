@@ -82,6 +82,16 @@ async function observedHandle(req: Request, ctx: Ctx): Promise<Response> {
 async function handle(req: Request, params: { provider: string; path: string[] }): Promise<Response> {
   const started = Date.now();
   const { provider: providerRaw, path } = params;
+
+  // Keyless demo provider (local "try it" stack + CI). Env-gated OFF by default,
+  // so production has ZERO extra surface. It runs the full real governance
+  // pipeline (visa → kill → scope → budget); only the Vault-key resolution +
+  // upstream forward is replaced with a synthesized response — it never reaches
+  // get_provider_key and never forwards anywhere.
+  if (providerRaw === "demo") {
+    return demoEnabled() ? handleDemo(req, path, started) : err(404, "unknown_provider");
+  }
+
   if (!isProvider(providerRaw)) return err(404, "unknown_provider");
   const provider: ProviderId = providerRaw;
 
@@ -381,4 +391,218 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     status: 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+// ── Keyless demo provider ─────────────────────────────────────────────────────
+// A no-key, no-cost provider for the local "try it" experience and for CI. It is
+// enabled ONLY when PASSCONTROL_DEMO=1 — production is unaffected. A demo call
+// goes through the entire real governance pipeline (identical primitives: verify
+// visa, kill switch, per-model scope, atomic budget reserve). The single thing it
+// does NOT do is resolve/inject a real provider key or forward upstream — that
+// step is replaced with a locally synthesized response, clearly marked `[demo]`.
+// So everything that makes PassControl PassControl is real; only the downstream
+// model is faked, and the Vault is never touched.
+function demoEnabled(): boolean {
+  return process.env.PASSCONTROL_DEMO === "1";
+}
+
+// Synthetic per-token price so budget/spend demos show real (small) numbers.
+const DEMO_MICROCENTS_PER_TOKEN = 1;
+
+function lastUserMessage(body: any): string {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role !== "user") continue;
+    if (typeof m.content === "string") return m.content;
+    if (Array.isArray(m.content)) {
+      return m.content
+        .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+        .join(" ")
+        .trim();
+    }
+  }
+  return "";
+}
+
+function demoText(body: any): string {
+  const echo = lastUserMessage(body).slice(0, 500);
+  return (
+    "[demo] PassControl governed this call — visa verified, scope and budget " +
+    "enforced, kill switch live. The real provider key never left the vault. " +
+    (echo ? `You said: ${echo}` : "Add a real provider key to make this a live model call.")
+  );
+}
+
+async function handleDemo(req: Request, path: string[], started: number): Promise<Response> {
+  // Demo serves only the chat-completions shape (what `passcontrol try` uses).
+  const isChat =
+    req.method === "POST" && path.length === 2 && path[0] === "chat" && path[1] === "completions";
+
+  // 1. Verify visa — the same Ed25519/HS256 crypto as the real path.
+  const visaToken = extractVisaToken(req.headers);
+  if (!visaToken) return err(401, "missing_visa");
+  const claims = await verifyVisa(visaToken);
+  if (!claims) return err(401, "invalid_visa");
+
+  const agentId = claims.agid;
+  const userId: string = claims.uid;
+  const passportId = claims.sub;
+  const jti = claims.jti;
+  const reserveId = crypto.randomUUID();
+  const capTokens: number | null = claims.bt ?? null;
+  const capMicrocents: number | null =
+    claims.bc == null ? null : Math.round(Number(claims.bc) * MICROCENTS_PER_CENT);
+  const spentSnapshot: number = Number(claims.st ?? 0);
+  const spentMicrocentsSnapshot: number = Number(claims.sc ?? 0);
+
+  const logBlocked = (status: Parameters<typeof writeLog>[0]["status"], model?: string) =>
+    waitUntil(
+      writeLog({
+        agentId,
+        userId,
+        passportId,
+        jti,
+        provider: "demo",
+        model,
+        status,
+        latencyMs: Date.now() - started,
+      })
+    );
+
+  // 2. Per-agent request-rate limit.
+  const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
+  if (!rl.success) {
+    return new Response(JSON.stringify({ error: "rate_limited" }), {
+      status: 429,
+      headers: { "content-type": "application/json", "retry-after": String(PROXY_RATE_WINDOW_S) },
+    });
+  }
+
+  // 3. Kill switch (platform + tenant + denylist; per-agent suspend).
+  const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
+  if (isBlocked(kill, agentId) || suspended) {
+    logBlocked("blocked_suspended");
+    return err(403, "blocked_suspended");
+  }
+
+  // Parse body (model + stream).
+  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) {
+    return err(413, "payload_too_large");
+  }
+  let bodyObj: any = {};
+  const rawBody = await req.text();
+  if (rawBody.length > MAX_BODY_BYTES) return err(413, "payload_too_large");
+  if (rawBody) {
+    try {
+      bodyObj = JSON.parse(rawBody);
+    } catch {
+      return err(400, "invalid_body");
+    }
+  }
+  const model: string = typeof bodyObj?.model === "string" && bodyObj.model ? bodyObj.model : "demo-1";
+  const wantsStream = bodyObj?.stream === true;
+
+  // 4. Scope (per-model) + endpoint allowlist.
+  if (!scopeAllows(claims.scope, "demo", model)) {
+    logBlocked("blocked_scope", model);
+    return err(403, "blocked_scope");
+  }
+  if (!isChat) {
+    logBlocked("blocked_endpoint", model);
+    return err(403, "blocked_endpoint");
+  }
+
+  // 5. Budget reserve (atomic) — real, so the budget/kill demos are honest.
+  const estimatedUsage = estimateTokenUsage(bodyObj);
+  const estimate = estimatedUsage.totalTokens;
+  const estimateMicrocents = estimate * DEMO_MICROCENTS_PER_TOKEN;
+  if (capTokens != null || capMicrocents != null) {
+    await seedSpent(agentId, spentSnapshot, spentMicrocentsSnapshot);
+  }
+  const reserve = await reserveBudget({
+    agentId,
+    reserveId,
+    estimate,
+    estimateMicrocents,
+    capTokens,
+    capMicrocents,
+    markerTtlSeconds: RESERVE_MARKER_TTL_S,
+  });
+  if (!reserve.ok) {
+    logBlocked("blocked_budget", model);
+    return err(402, "blocked_budget");
+  }
+
+  // 6. Synthesize the response in place of Vault-key resolution + upstream forward.
+  const text = demoText(bodyObj);
+  const outputTokens = Math.max(1, Math.ceil(text.length / 4));
+  const usage = { inputTokens: estimatedUsage.inputTokens, outputTokens };
+  const totalTokens = usage.inputTokens + usage.outputTokens;
+  const cost = totalTokens * DEMO_MICROCENTS_PER_TOKEN;
+
+  waitUntil(
+    Promise.all([
+      reconcileBudget({
+        agentId,
+        reserveId,
+        estimate,
+        estimateMicrocents,
+        actualTokens: totalTokens,
+        actualMicrocents: cost,
+      }),
+      writeLog({
+        agentId,
+        userId,
+        passportId,
+        jti,
+        provider: "demo",
+        model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        costMicrocents: cost,
+        status: "ok",
+        latencyMs: Date.now() - started,
+      }),
+      mirrorSpend(agentId, totalTokens, cost),
+    ])
+  );
+
+  const id = `demo-${crypto.randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+
+  if (wantsStream) {
+    const chunk = (delta: object, finish: string | null) =>
+      `data: ${JSON.stringify({
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`;
+    const sse = chunk({ role: "assistant", content: text }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
+    return new Response(sse, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform",
+      },
+    });
+  }
+
+  return new Response(
+    JSON.stringify({
+      id,
+      object: "chat.completion",
+      created,
+      model,
+      choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: usage.inputTokens,
+        completion_tokens: usage.outputTokens,
+        total_tokens: totalTokens,
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
 }

@@ -70,6 +70,7 @@ CRON_SECRET=$CRON_SECRET
 INVITE_CODE=local-dev
 DEV_USER_EMAIL=dev@passcontrol.local
 DEV_USER_PASSWORD=passcontrol-dev
+PASSCONTROL_DEMO=${PASSCONTROL_DEMO:-0}
 EOF
 echo "→ Wrote .env.docker"
 

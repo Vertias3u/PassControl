@@ -48,6 +48,16 @@ const CLI_VERSION = (() => {
     return "0.0.0";
   }
 })();
+
+// Fixed demo credentials for `passcontrol try` — LOCAL demo stack ONLY. The demo
+// passport can only ever reach the keyless `demo` provider (no real key, no cost,
+// no real upstream); the demo provider + these seeds exist only when the stack is
+// brought up with PASSCONTROL_DEMO=1. Hardcoding them is safe, like the seeded dev
+// password — they grant nothing in a real deployment.
+// App-side source of truth: lib/demo/identity.ts (duplicated here to keep the shipped plain-ESM CLI transpilation-free).
+const DEMO_PASSPORT_ID = "kZCFp7d2x4VDruiulJ21gogYbczBDAGZa-OuwR3qgh8";
+const DEMO_PASSPORT_SECRET = "XqsVuXtmWiu6bKEmmqov2Q2TwkOVdzlZMWR-NWubSKo";
+const DEMO_API_KEY = "pc_demolocaltrydemolocaltrydemolocaltry0000";
 const DASHBOARD_STATE_FILE = "local-dashboard.json";
 const APP_STATE_FILE = "app.json";
 const PUBLIC_REPO_URL = "https://github.com/Vertias3u/PassControl.git";
@@ -114,6 +124,7 @@ Usage:
                                  destroy and recreate the local stack
   ${cmd} setup [--no-open] [--port-offset N] [--app-dir DIR]
                                  clone the app (if needed), start local services, open the dashboard
+  ${cmd} try                      60-second demo: governed keyless call + kill switch (no key)
   ${cmd} call "hi"                mint a visa and call a model
   ${cmd} sidecar [--port 8788]    start the local agent bridge
   ${cmd} mcp                      start the local stdio MCP server
@@ -861,6 +872,108 @@ async function callCommand(rest, opts) {
   ok("done - check the dashboard audit log + spend for this call.");
 }
 
+// `passcontrol try` — the 60-second, no-key, no-accounts experience. Uses the
+// seeded demo passport (demo scope only) to make a GOVERNED call through the
+// keyless `demo` provider, then arms the kill switch to show the same call
+// blocked. Everything is real (visa, scope, budget, kill) except the model.
+async function tryCommand() {
+  const gateway = config.gateway;
+  const demo = { gateway, passportId: DEMO_PASSPORT_ID, passportSecret: DEMO_PASSPORT_SECRET };
+
+  const demoCall = async () => {
+    const { visa } = await mintVisa(demo);
+    return fetch(`${gateway}/api/v1/demo/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${visa}` },
+      body: JSON.stringify({
+        model: "demo-1",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "Say hi in exactly three words" }],
+      }),
+    });
+  };
+  const setKill = async (armed) => {
+    const res = await fetch(`${gateway}/api/control/v1/kill-switch`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${DEMO_API_KEY}`,
+        "idempotency-key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ armed }),
+    });
+    if (!res.ok) throw new Error(`kill-switch ${armed ? "on" : "off"} → ${res.status} ${await res.text()}`);
+  };
+
+  console.log("PassControl — 60-second try (no provider key, no accounts)\n");
+  step(`gateway: ${gateway}`);
+
+  // 1. Governed, keyless call.
+  let res;
+  try {
+    res = await demoCall();
+  } catch (e) {
+    const msg = e?.message || String(e);
+    if (/unknown_passport|Challenge failed|challenge/i.test(msg)) {
+      // Gateway reachable, but the demo passport isn't seeded in ITS database.
+      fail(`The gateway is up, but the demo passport isn't seeded here (${msg}).`);
+      step("Seed + enable the demo on this stack:");
+      step("  PASSCONTROL_DEMO=1 npm run dev:stack    # seeds the demo passport + control key");
+      step("  PASSCONTROL_DEMO=1 npm run dev:docker   # enables the keyless demo provider");
+    } else {
+      fail(`Could not reach the gateway at ${gateway} (${msg}).`);
+      step("Bring the local demo stack up first:");
+      step("  PASSCONTROL_DEMO=1 npm run dev:stack    # Supabase + Redis + migrate + seed the demo passport");
+      step("  PASSCONTROL_DEMO=1 npm run dev:docker   # start the gateway with the demo provider enabled");
+    }
+    process.exitCode = 1;
+    return;
+  }
+  if (res.status === 404) {
+    fail("The demo provider is not enabled on this gateway.");
+    step("Start it with PASSCONTROL_DEMO=1 (e.g. `PASSCONTROL_DEMO=1 npm run dev:docker`).");
+    process.exitCode = 1;
+    return;
+  }
+  if (res.status === 401 || res.status === 403) {
+    fail(`Demo passport not accepted (${res.status}). Re-seed the demo stack: PASSCONTROL_DEMO=1 npm run seed`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!res.ok) {
+    fail(`Unexpected ${res.status}: ${await res.text()}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const json = await res.json().catch(() => ({}));
+  const text = json?.choices?.[0]?.message?.content ?? JSON.stringify(json);
+  const usage = json?.usage ?? {};
+  ok("Governed keyless call succeeded — the passport signed a visa, the gateway enforced scope + budget, and no key was needed:");
+  console.log(`\n  ${text}\n`);
+  step(`tokens: ${usage.total_tokens ?? "?"} (prompt ${usage.prompt_tokens ?? "?"} + completion ${usage.completion_tokens ?? "?"})`);
+
+  // 2. Kill switch blocks the very next call.
+  console.log("");
+  step("arming the kill switch…");
+  await setKill(true);
+  try {
+    const blocked = await demoCall();
+    if (blocked.status === 403) {
+      ok(`Kill switch works — the same call is now ${blocked.status} blocked_suspended.`);
+    } else {
+      fail(`Expected 403 after arming the kill switch, got ${blocked.status}.`);
+    }
+  } finally {
+    await setKill(false);
+    step("kill switch disarmed.");
+  }
+
+  console.log("");
+  ok("That's PassControl: cryptographic identity → short-lived visa → governed call → instant kill. The provider key never touched the agent.");
+  step("Next: add a real provider key in the Control Tower and re-point your agent at the gateway (see the README).");
+}
+
 async function api(method, pathPart, body) {
   const apiKey = requireControlApiKey(config);
   const res = await fetch(`${config.gateway}/api/control/v1${pathPart}`, {
@@ -1356,6 +1469,9 @@ async function main() {
       break;
     case "call":
       await callCommand(commandRest, opts);
+      break;
+    case "try":
+      await tryCommand();
       break;
     case "sidecar":
       await sidecarCommand(commandRest, opts);

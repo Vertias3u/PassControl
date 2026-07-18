@@ -1,0 +1,1 @@
+PassControl — a live, keyless demo of governed AI calls. Run 01 is allowed; the kill switch fires; Run 02 (the same call) is blocked at the gateway. The provider key never moves.
