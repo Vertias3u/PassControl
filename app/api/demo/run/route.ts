@@ -15,7 +15,15 @@ import {
 } from "@/lib/encoding";
 import { demoPassportSecret } from "@/lib/demo/identity";
 import { rateLimit } from "@/lib/ratelimit";
-import { clientIp, demoEnabled, demoPassportId, json } from "../_shared";
+import { serviceClient } from "@/lib/supabase";
+import {
+  clientIp,
+  demoEnabled,
+  demoPassportId,
+  isDemoOnlyAgent,
+  json,
+  type DemoAgent,
+} from "../_shared";
 
 const RUN_LIMIT = 8;
 const RUN_WINDOW_SECONDS = 60;
@@ -69,6 +77,15 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     const passportId = demoPassportId();
+    const db = serviceClient();
+    const { data, error } = await db
+      .from("agents")
+      .select("user_id, status, allowed_scopes")
+      .eq("passport_pubkey", passportId)
+      .maybeSingle();
+    const agent = data as DemoAgent | null;
+    if (error || !agent || !isDemoOnlyAgent(agent)) return unavailable();
+
     const privateKey = base64urlToBytes(demoPassportSecret());
     if (
       privateKey.length !== 32 ||

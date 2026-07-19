@@ -36,6 +36,19 @@ afterEach(async () => {
 });
 
 describe("passcontrol CLI", () => {
+  it("runs the styled help and status commands without ANSI when NO_COLOR is set", async () => {
+    const help = await runCli(["help"], { env: { NO_COLOR: "1" } });
+    const status = await runCli(["status", "--no-network"], {
+      env: { NO_COLOR: "1" },
+    });
+    const output = `${help.stdout}\n${status.stdout}`;
+
+    expect(output).toContain("PassControl");
+    expect(output).toContain("Usage:");
+    expect(output).toContain("Gateway:");
+    expect(output).not.toMatch(/\x1b\[/);
+  }, 10000);
+
   it("prints command help", async () => {
     const { stdout } = await runCli(["help"]);
     expect(stdout).toContain("passcontrol sidecar");
@@ -55,9 +68,9 @@ describe("passcontrol CLI", () => {
 
   it("shows status without network access", async () => {
     const { stdout } = await runCli(["status", "--no-network"]);
-    expect(stdout).toContain("Gateway:  not checked  http://localhost:3000");
+    expect(stdout).toContain("Gateway:   not checked  http://localhost:3000");
     expect(stdout).toContain("Dashboard: local server not checked");
-    expect(stdout).toContain("Passport: missing");
+    expect(stdout).toContain("Passport:  missing");
     expect(stdout).toContain("passcontrol spend");
   }, 10000);
 
@@ -139,7 +152,7 @@ describe("passcontrol CLI", () => {
     const { stdout } = await runCli(["status", "--no-network"], {
       env: { PASSCONTROL_APP_ROOT: process.cwd() },
     });
-    expect(stdout).toContain(`App:      ${process.cwd()}`);
+    expect(stdout).toContain(`App:       ${process.cwd()}`);
   }, 10000);
 
   it("does not run local setup against a remote gateway", async () => {
@@ -199,10 +212,10 @@ describe("passcontrol CLI", () => {
       },
     });
 
-    expect(stdout).toContain("Gateway:  not checked  http://from-env.test");
-    expect(stdout).toContain("Provider: openai");
-    expect(stdout).toContain("Model:    env-model");
-    expect(stdout).toContain("Passport: configured");
+    expect(stdout).toContain("Gateway:   not checked  http://from-env.test");
+    expect(stdout).toContain("Provider:  openai");
+    expect(stdout).toContain("Model:     env-model");
+    expect(stdout).toContain("Passport:  configured");
     expect(stdout).toContain(path.join(tmp, "project", ".passcontrol"));
   }, 10000);
 

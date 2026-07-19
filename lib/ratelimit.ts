@@ -4,6 +4,7 @@
 // @upstash/ratelimit for simplicity + testability — upgrade to its sliding window
 // later if burst-at-the-window-boundary becomes a real concern (see DECISIONS.md).
 import { redis } from "./state/redis";
+import { logFailOpen } from "./observability";
 
 export interface RateLimitResult {
   success: boolean;
@@ -34,6 +35,7 @@ export async function rateLimit(
     const count = Number(await redis().eval(RATE_LIMIT_LUA, [k], [String(windowSeconds)]));
     return { success: count <= limit, remaining: Math.max(0, limit - count) };
   } catch {
+    logFailOpen("ratelimit");
     return { success: true, remaining: limit };
   }
 }

@@ -16,9 +16,11 @@ import {
   configPathLabel,
   defaultModelForProvider,
   fail,
+  formatLabel,
   formatChallengeError,
   formatProxyError,
   globalConfigPath,
+  heading,
   ok,
   redact,
   requireControlApiKey,
@@ -109,9 +111,9 @@ function cliCommand(args = "") {
 
 function usage() {
   const cmd = cliPrefix();
-  return `PassControl
+  return `${heading("PassControl")}
 
-Usage:
+${heading("Usage:")}
   ${cmd}                         show cockpit status
   ${cmd} init [--global]          create a config profile
   ${cmd} status [--no-network]    show active config
@@ -144,7 +146,7 @@ Usage:
   ${cmd} kill on|off              toggle tenant kill switch
   ${cmd} open                     start (if needed) and open the dashboard
 
-Config:
+${heading("Config:")}
   Env vars win, then nearest .passcontrol, then ~/.config/passcontrol/config.
   Installed globally, the local-stack commands (setup/start/reset) use a cloned
   app checkout; override its location with PASSCONTROL_APP_ROOT.
@@ -189,17 +191,17 @@ async function printCockpit({ noNetwork = false } = {}) {
   const passportConfigured = Boolean(config.passportId && config.passportSecret);
   const adminConfigured = Boolean(config.apiKey);
 
-  console.log("PassControl\n");
-  console.log(`Gateway:  ${gateway.label}  ${config.gateway}`);
-  console.log(`Dashboard: ${dashboardStatusLabel(gateway, noNetwork)}`);
-  console.log(`App:      ${appRootLabel()}`);
-  console.log(`Config:   ${configPathLabel(config.sources)}`);
-  console.log(`Provider: ${config.provider}`);
-  console.log(`Model:    ${config.model}`);
-  console.log(`Passport: ${passportConfigured ? redact(config.passportId) : "missing"}`);
-  console.log(`Admin key: ${adminConfigured ? redact(config.apiKey, 6) : "missing"}`);
-  console.log(`Sidecar:  foreground command (\`${cliCommand("sidecar")}\`)\n`);
-  console.log("Next commands:");
+  console.log(`${heading("PassControl")}\n`);
+  console.log(formatLabel("Gateway", `${gateway.label}  ${config.gateway}`));
+  console.log(formatLabel("Dashboard", dashboardStatusLabel(gateway, noNetwork)));
+  console.log(formatLabel("App", appRootLabel()));
+  console.log(formatLabel("Config", configPathLabel(config.sources)));
+  console.log(formatLabel("Provider", config.provider));
+  console.log(formatLabel("Model", config.model));
+  console.log(formatLabel("Passport", passportConfigured ? redact(config.passportId) : "missing"));
+  console.log(formatLabel("Admin key", adminConfigured ? redact(config.apiKey, 6) : "missing"));
+  console.log(`${formatLabel("Sidecar", `foreground command (\`${cliCommand("sidecar")}\`)`)}\n`);
+  console.log(heading("Next commands:"));
   console.log(`  ${cliCommand("start")}             start the local dashboard`);
   console.log(`  ${cliCommand("stop")}              stop the local dashboard`);
   console.log(`  ${cliCommand("restart")}           restart the local dashboard`);
@@ -731,8 +733,8 @@ async function setupLocal(opts = {}) {
   });
   await startDashboard(opts);
   if (!opts.noOpen) await openDashboard(opts);
-  console.log(`\nLocal dashboard: ${dashboard.url}`);
-  console.log("Local-only login: dev@passcontrol.local / passcontrol-dev");
+  console.log(`\n${formatLabel("Local dashboard", dashboard.url, 19)}`);
+  console.log(formatLabel("Local-only login", "dev@passcontrol.local / passcontrol-dev", 19));
   step("Add a non-critical provider key, issue a passport, then run `passcontrol doctor --deep`.");
 }
 
@@ -752,7 +754,7 @@ async function initCommand(opts) {
       }
     }
 
-    console.log("PassControl init");
+    console.log(heading("PassControl init"));
     if (opts.global) {
       console.log("Saving a global profile. Only do this on a machine you trust.\n");
     } else {
@@ -905,7 +907,7 @@ async function tryCommand() {
     if (!res.ok) throw new Error(`kill-switch ${armed ? "on" : "off"} → ${res.status} ${await res.text()}`);
   };
 
-  console.log("PassControl — 60-second try (no provider key, no accounts)\n");
+  console.log(`${heading("PassControl — 60-second try (no provider key, no accounts)")}\n`);
   step(`gateway: ${gateway}`);
 
   // 1. Governed, keyless call.
@@ -1346,7 +1348,7 @@ async function configureCommand(rest, opts = {}) {
 
 async function doctorCommand(opts = {}) {
   const gateway = await gatewayStatus(false);
-  console.log("PassControl doctor\n");
+  console.log(`${heading("PassControl doctor")}\n`);
   (gateway.ok ? ok : fail)(`Gateway ${gateway.label}: ${config.gateway}`);
   (config.passportId && config.passportSecret ? ok : fail)(
     `Passport ${config.passportId && config.passportSecret ? "configured" : "missing"}`

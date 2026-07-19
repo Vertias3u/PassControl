@@ -59,6 +59,6 @@ export async function middleware(request: NextRequest) {
 export const config = {
   // Exclude API routes (visa/secret-authenticated), static assets, and images.
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|llms.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock the Upstash client with an in-memory EVAL/Lua-shaped operation so we can
 // test the limiter's behavior without a real Redis.
-const { store, ttls, redisMock } = vi.hoisted(() => {
+const { store, ttls, redisMock, logFailOpenMock } = vi.hoisted(() => {
   const store = new Map<string, number>();
   const ttls = new Map<string, number>();
   const redisMock = {
@@ -25,9 +25,10 @@ const { store, ttls, redisMock } = vi.hoisted(() => {
       return n;
     }),
   };
-  return { store, ttls, redisMock };
+  return { store, ttls, redisMock, logFailOpenMock: vi.fn() };
 });
 vi.mock("../lib/state/redis", () => ({ redis: () => redisMock }));
+vi.mock("../lib/observability", () => ({ logFailOpen: logFailOpenMock }));
 
 import { rateLimit } from "../lib/ratelimit";
 
@@ -38,6 +39,7 @@ beforeEach(() => {
   redisMock.expire.mockClear();
   redisMock.ttl.mockClear();
   redisMock.eval.mockClear();
+  logFailOpenMock.mockClear();
 });
 
 describe("rate limiter — /api/auth/challenge brute-force guard", () => {
@@ -79,5 +81,16 @@ describe("rate limiter — /api/auth/challenge brute-force guard", () => {
 
     expect(redisMock.eval).toHaveBeenCalledTimes(1);
     expect(await redisMock.ttl("ratelimit:wedged")).toBe(60);
+  });
+
+  it("fails open and logs a sanitized warning when Redis throws", async () => {
+    redisMock.eval.mockRejectedValueOnce(new Error("redis down"));
+
+    await expect(rateLimit("client", 5, 60)).resolves.toEqual({
+      success: true,
+      remaining: 5,
+    });
+    expect(logFailOpenMock).toHaveBeenCalledOnce();
+    expect(logFailOpenMock).toHaveBeenCalledWith("ratelimit");
   });
 });

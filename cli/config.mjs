@@ -18,6 +18,24 @@ const CONFIG_KEYS = [
 ];
 
 const trimSlash = (value) => String(value ?? "").replace(/\/+$/, "");
+const ANSI = {
+  reset: "\x1b[0m",
+  green: "\x1b[32m",
+  cyan: "\x1b[36m",
+  red: "\x1b[31m",
+  heading: "\x1b[1;32m",
+};
+
+function paint(code, value) {
+  if (
+    process.stdout.isTTY !== true ||
+    process.env.NO_COLOR !== undefined ||
+    process.env.CI
+  ) {
+    return String(value);
+  }
+  return `${code}${value}${ANSI.reset}`;
+}
 
 export function defaultModelForProvider(provider) {
   switch (provider) {
@@ -170,16 +188,24 @@ export function writeConfigFile(file, values) {
   fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
 }
 
+export function heading(message = "") {
+  return paint(ANSI.heading, message);
+}
+
+export function formatLabel(label, value, width = 11) {
+  return `${paint(ANSI.cyan, `${label}:`.padEnd(width))}${value}`;
+}
+
 export function step(message = "") {
-  console.log(`→ ${message}`);
+  console.log(`${paint(ANSI.cyan, "→")} ${message}`);
 }
 
 export function ok(message = "") {
-  console.log(`✓ ${message}`);
+  console.log(`${paint(ANSI.green, "✓")} ${message}`);
 }
 
 export function fail(message = "") {
-  console.error(`✗ ${message}`);
+  console.error(`${paint(ANSI.red, "✗")} ${message}`);
 }
 
 export function die(message) {

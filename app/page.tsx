@@ -7,6 +7,109 @@ import {
 
 const REPO_URL = "https://github.com/Vertias3u/PassControl";
 
+// FAQ — rendered visibly in the page AND emitted as FAQPage structured data from
+// this one source, so the two never drift (search + AI engines require a match).
+const FAQ_ITEMS: { q: string; a: string }[] = [
+  {
+    q: "What is PassControl?",
+    a: "PassControl is a source-available identity and credential gateway for AI agents. Instead of putting your OpenAI or Anthropic key inside an agent, each agent gets a cryptographic identity and a short-lived, scoped token — and the gateway injects the real key only after the request passes policy.",
+  },
+  {
+    q: "Does my agent ever hold my real API key?",
+    a: "No. The agent holds a sign-only Ed25519 passport and mints a short-lived work-visa; the gateway resolves the real provider key from a vault and injects it in-flight, then proxies the call. The key never enters the agent runtime.",
+  },
+  {
+    q: "Is PassControl open source?",
+    a: "It's source-available under the Business Source License 1.1 — the full working core is free to inspect and self-host, but it is not an OSI open-source license. The plan is open-core: paid hosting and an accountability layer come later.",
+  },
+  {
+    q: "Is it production-ready and audited?",
+    a: "It's early (v0.2.x), built solo, and not yet independently audited — run it against a non-critical key first. It is built security-first (RLS on every table, a single service-role-only decrypt path, an append-only audit log, tenant-isolation tests), but test-covered and careful is not the same as audited.",
+  },
+  {
+    q: "Which providers does it support?",
+    a: "OpenAI, Anthropic, Groq, Mistral, Together, and DeepSeek today. Because it is a drop-in gateway, you keep your existing SDK and just point its base URL at PassControl.",
+  },
+  {
+    q: "How is it different from LiteLLM, Portkey, or an LLM gateway?",
+    a: "Those center on routing, caching, and observability behind a shared key. PassControl centers on per-agent cryptographic identity, capability scoping, per-agent budgets, and instant revocation — and it runs drop-in alongside them.",
+  },
+  {
+    q: "Won't a 5-minute token break a long-running agent?",
+    a: "No — the agent does not hold the visa. A local sidecar mints and auto-refreshes it (and re-mints instantly on a 401), so a multi-hour session never times out mid-task while revocation stays near-instant. A single long streaming call is verified once at the start and finishes regardless.",
+  },
+];
+
+// Structured data (Schema.org) for search + AI answer engines. Truthful only:
+// no ratings/reviews (there are none), price 0 = free to self-host under BSL 1.1.
+const JSON_LD = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://vertias.eu/#org",
+      name: "Vertias",
+      legalName: "Vertias ЕООД",
+      url: "https://vertias.eu",
+      email: "hello@vertias.eu",
+      address: {
+        "@type": "PostalAddress",
+        addressLocality: "Sofia",
+        addressCountry: "BG",
+      },
+      sameAs: ["https://github.com/Vertias3u/PassControl"],
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://passcontrol.vertias.eu/#website",
+      url: "https://passcontrol.vertias.eu",
+      name: "PassControl",
+      inLanguage: "en",
+      publisher: { "@id": "https://vertias.eu/#org" },
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://passcontrol.vertias.eu/#software",
+      name: "PassControl",
+      applicationCategory: "SecurityApplication",
+      applicationSubCategory: "AI agent identity and credential gateway",
+      operatingSystem: "Cross-platform (self-hosted; Docker)",
+      url: "https://passcontrol.vertias.eu",
+      downloadUrl: REPO_URL,
+      softwareVersion: "0.2.0",
+      license: "https://spdx.org/licenses/BUSL-1.1.html",
+      publisher: { "@id": "https://vertias.eu/#org" },
+      description:
+        "Source-available identity and credential gateway for AI agents. Agents hold a sign-only Ed25519 passport and mint short-lived scoped work-visas; the gateway injects the real provider key from a vault, so the agent never holds your API key. Per-agent budgets, instant kill switch, and full audit.",
+      featureList: [
+        "Cryptographic agent identity (Ed25519 passport, sign-only)",
+        "Short-lived scoped work-visas",
+        "Per-agent token and dollar budgets enforced before the call",
+        "Layered instant kill switch (platform, tenant, agent)",
+        "Per-agent audit trail",
+        "Vaulted provider keys, injected only after policy passes",
+        "Drop-in gateway via OpenAI/Anthropic SDK base-URL swap",
+        "Native MCP server",
+      ],
+      offers: {
+        "@type": "Offer",
+        price: "0",
+        priceCurrency: "USD",
+        description: "Free to self-host (source-available, BSL 1.1).",
+      },
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://passcontrol.vertias.eu/#faq",
+      mainEntity: FAQ_ITEMS.map((item) => ({
+        "@type": "Question",
+        name: item.q,
+        acceptedAnswer: { "@type": "Answer", text: item.a },
+      })),
+    },
+  ],
+};
+
 export const metadata: Metadata = {
   title: "PassControl — Keep real API keys out of AI agents",
   description:
@@ -88,6 +191,10 @@ export default function LandingPage() {
 
   return (
     <div className="pc-site" id="top">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
+      />
       <a className="pc-skip-link" href="#main-content">
         Skip to content
       </a>
@@ -319,6 +426,32 @@ export default function LandingPage() {
               </div>
               <pre><code><span className="pc-code-comment">// Same SDK. Governed credential path.</span>{"\n"}<span className="pc-code-key">const</span> client = <span className="pc-code-key">new</span> OpenAI({`{`}{"\n"}  baseURL: <span className="pc-code-value">&quot;https://your-gateway/api/v1/openai&quot;</span>,{"\n"}  apiKey: workVisa,{"\n"}{`}`});{"\n\n"}<span className="pc-code-key">const</span> response = <span className="pc-code-key">await</span> client.chat.completions.create({`{`}{"\n"}  model: <span className="pc-code-value">&quot;your-model&quot;</span>,{"\n"}  messages,{"\n"}{`}`});</code></pre>
               <div className="pc-mcp-line"><span>MCP</span><code>passcontrol mcp</code><small>same policy boundary</small></div>
+            </div>
+          </div>
+        </section>
+
+        <section className="pc-section pc-faq-section" id="faq" aria-labelledby="faq-title">
+          <div className="pc-container">
+            <div className="pc-section-heading">
+              <div>
+                <p className="pc-section-kicker">05 / FAQ</p>
+                <h2 id="faq-title">Questions, answered honestly.</h2>
+              </div>
+              <p>
+                The short version of what PassControl is, what it protects, and what it does
+                not — no marketing gloss.
+              </p>
+            </div>
+            <div className="pc-faq">
+              {FAQ_ITEMS.map((item) => (
+                <details className="pc-faq-item" key={item.q}>
+                  <summary>
+                    <span>{item.q}</span>
+                    <i aria-hidden="true" />
+                  </summary>
+                  <p>{item.a}</p>
+                </details>
+              ))}
             </div>
           </div>
         </section>

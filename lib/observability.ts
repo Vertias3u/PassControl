@@ -3,6 +3,7 @@ import { sanitizeValue } from "./seclog";
 type SentryEvent = Record<string, unknown>;
 type SentryModule = typeof import("@sentry/nextjs");
 type SafeScalar = string | number | boolean;
+type FailOpenScope = "kill_read" | "suspend_read" | "ratelimit";
 
 export interface ObservabilityContext {
   route: string;
@@ -117,6 +118,12 @@ export function scrubSentryEvent(event: unknown): SentryEvent {
 
 export function isSentryConfigured(): boolean {
   return Boolean(process.env.SENTRY_DSN);
+}
+
+/** Fixed-code warning only: never accepts request data or secret-bearing context. */
+export function logFailOpen(scope: FailOpenScope): void {
+  // eslint-disable-next-line no-console
+  console.warn(`[passcontrol:fail_open] ${scope}`);
 }
 
 async function sentry(): Promise<SentryModule | null> {

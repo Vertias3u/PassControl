@@ -5,7 +5,14 @@ export const runtime = "edge";
 import { rateLimit } from "@/lib/ratelimit";
 import { serviceClient } from "@/lib/supabase";
 import { armTenantKill } from "@/lib/state/killswitch";
-import { clientIp, demoEnabled, demoPassportId, json } from "../_shared";
+import {
+  clientIp,
+  demoEnabled,
+  demoPassportId,
+  isDemoOnlyAgent,
+  json,
+  type DemoAgent,
+} from "../_shared";
 
 const KILL_LIMIT = 12;
 const KILL_WINDOW_SECONDS = 60;
@@ -13,21 +20,6 @@ const MAX_BODY_BYTES = 512;
 
 interface KillBody {
   armed?: unknown;
-}
-
-interface DemoAgent {
-  user_id?: unknown;
-  status?: unknown;
-  allowed_scopes?: unknown;
-}
-
-function isDemoOnlyAgent(agent: DemoAgent): agent is DemoAgent & { user_id: string } {
-  if (typeof agent.user_id !== "string" || agent.status !== "active") return false;
-  if (!Array.isArray(agent.allowed_scopes) || agent.allowed_scopes.length === 0) return false;
-  return agent.allowed_scopes.every((scope) => {
-    if (!scope || typeof scope !== "object") return false;
-    return (scope as { provider?: unknown }).provider === "demo";
-  });
 }
 
 async function parseBody(request: Request): Promise<KillBody | null> {

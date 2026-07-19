@@ -2,6 +2,7 @@
 // suspend set, last-seen. The budget reserve is a single atomic Lua script
 // (Tension 2 / S3) so reserve+check+rollback never races across round-trips.
 import { Redis } from "@upstash/redis";
+import { logFailOpen } from "../observability";
 
 let _redis: Redis | null = null;
 export function redis(): Redis {
@@ -185,6 +186,7 @@ export async function isSuspended(agentId: string): Promise<boolean> {
   try {
     return (await redis().exists(k.suspended(agentId))) === 1;
   } catch {
+    logFailOpen("suspend_read");
     // Match the Redis-backed kill switch: fail open by default to avoid blocking
     // every agent on a transient Redis read blip; operators can opt into strict
     // fail-closed behavior for revocation reads.

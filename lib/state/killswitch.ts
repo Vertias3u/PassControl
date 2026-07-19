@@ -8,6 +8,7 @@
 //
 // (Reads are 3 concurrent Redis ops; could be folded into one pipeline later to
 // cut request count — kept as Promise.all here for clarity. Correctness first.)
+import { logFailOpen } from "../observability";
 import { redis } from "./redis";
 
 const KEY = {
@@ -37,6 +38,7 @@ export async function readKillState(userId: string | null): Promise<KillState> {
       denylist: Array.isArray(denylist) ? (denylist as string[]) : [],
     };
   } catch {
+    logFailOpen("kill_read");
     // Default: fail OPEN (treat as not-killed). The same Redis backs budget
     // reserves and per-agent suspend, so an outage already fails the proxy
     // request elsewhere — we don't add a "block every tenant on a transient

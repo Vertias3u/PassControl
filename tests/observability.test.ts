@@ -1,7 +1,20 @@
-import { describe, expect, it } from "vitest";
-import { isSentryConfigured, scrubSentryEvent } from "@/lib/observability";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { isSentryConfigured, logFailOpen, scrubSentryEvent } from "@/lib/observability";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("Sentry observability scrubber", () => {
+  it("emits a fixed operational warning for a fail-open read", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    logFailOpen("kill_read");
+
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith("[passcontrol:fail_open] kill_read");
+  });
+
   it("is disabled when SENTRY_DSN is unset", () => {
     const before = process.env.SENTRY_DSN;
     delete process.env.SENTRY_DSN;

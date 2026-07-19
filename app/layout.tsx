@@ -39,6 +39,30 @@ export const metadata: Metadata = {
   },
   description:
     "Source-available identity and credential gateway for AI agents, with scoped work-visas, budgets, revocation, audit, and vaulted provider keys.",
+  applicationName: "PassControl",
+  authors: [{ name: "Vertias", url: "https://vertias.eu" }],
+  creator: "Vertias",
+  publisher: "Vertias",
+  category: "technology",
+  keywords: [
+    "AI agent security",
+    "API key management for AI agents",
+    "agent credential gateway",
+    "non-human identity",
+    "AI agent identity",
+    "work-visa token",
+    "LLM gateway",
+    "self-hosted AI gateway",
+    "kill switch for AI agents",
+    "per-agent spend limits",
+    "OpenAI Anthropic proxy",
+    "Ed25519 passport",
+  ],
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: { index: true, follow: true, "max-image-preview": "large" },
+  },
   openGraph: {
     title: "PassControl — Your AI agents should never hold your real API keys",
     description:

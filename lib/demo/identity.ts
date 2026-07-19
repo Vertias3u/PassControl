@@ -2,6 +2,8 @@ import "server-only";
 
 // Canonical app-side identity for the keyless demo. This module is guarded by
 // `server-only` so importing it into a Client Component fails the Next.js build.
+// These seeded values are PUBLIC and committed on purpose for the keyless demo.
+// They must NEVER receive a real provider scope or be reused as a live control key.
 export const SEEDED_DEMO_PASSPORT_ID =
   "kZCFp7d2x4VDruiulJ21gogYbczBDAGZa-OuwR3qgh8";
 export const SEEDED_DEMO_PASSPORT_SECRET =

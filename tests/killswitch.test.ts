@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // In-memory Redis stand-in (get/set/del + set-type ops) so we can drive the
 // kill switch without a real Redis. vi.hoisted keeps it reachable from the mock.
-const { store, sets, redisMock } = vi.hoisted(() => {
+const { store, sets, redisMock, logFailOpenMock } = vi.hoisted(() => {
   const store = new Map<string, unknown>();
   const sets = new Map<string, Set<string>>();
   const redisMock = {
@@ -13,9 +13,10 @@ const { store, sets, redisMock } = vi.hoisted(() => {
     sadd: vi.fn(async (k: string, ...m: string[]) => { const s = sets.get(k) ?? new Set(); m.forEach((x) => s.add(x)); sets.set(k, s); return m.length; }),
     srem: vi.fn(async (k: string, ...m: string[]) => { const s = sets.get(k) ?? new Set(); let n = 0; m.forEach((x) => { if (s.delete(x)) n++; }); return n; }),
   };
-  return { store, sets, redisMock };
+  return { store, sets, redisMock, logFailOpenMock: vi.fn() };
 });
 vi.mock("../lib/state/redis", () => ({ redis: () => redisMock }));
+vi.mock("../lib/observability", () => ({ logFailOpen: logFailOpenMock }));
 
 import {
   readKillState,
@@ -72,6 +73,8 @@ describe("kill switch (Redis-backed)", () => {
     const s = await readKillState("userA");
     expect(s).toEqual({ platformKill: false, userKill: false, denylist: [] });
     expect(isBlocked(s, "anyAgent")).toBe(false);
+    expect(logFailOpenMock).toHaveBeenCalledOnce();
+    expect(logFailOpenMock).toHaveBeenCalledWith("kill_read");
   });
 
   // Opt-in: an operator who wants the emergency stop to be strict can make a
@@ -81,5 +84,7 @@ describe("kill switch (Redis-backed)", () => {
     redisMock.get.mockRejectedValueOnce(new Error("redis down"));
     const s = await readKillState("userA");
     expect(isBlocked(s, "anyAgent")).toBe(true); // read failure => blocked
+    expect(logFailOpenMock).toHaveBeenCalledOnce();
+    expect(logFailOpenMock).toHaveBeenCalledWith("kill_read");
   });
 });

@@ -1939,3 +1939,83 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
     display: inline-flex;
   }
 }
+
+/* FAQ accordion — visible Q&A that mirrors the FAQPage structured data. */
+.pc-faq {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 860px;
+}
+
+.pc-faq-item {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.012);
+  overflow: hidden;
+}
+
+.pc-faq-item summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  cursor: pointer;
+  list-style: none;
+  font-family: inherit;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--paper);
+}
+
+.pc-faq-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.pc-faq-item[open] summary {
+  color: var(--signal);
+}
+
+.pc-faq-item summary i {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.pc-faq-item summary i::before,
+.pc-faq-item summary i::after {
+  content: "";
+  position: absolute;
+  background: var(--signal);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.pc-faq-item summary i::before {
+  top: 6px;
+  left: 0;
+  width: 14px;
+  height: 2px;
+}
+
+.pc-faq-item summary i::after {
+  top: 0;
+  left: 6px;
+  width: 2px;
+  height: 14px;
+}
+
+.pc-faq-item[open] summary i::after {
+  opacity: 0;
+  transform: scaleY(0);
+}
+
+.pc-faq-item > p {
+  margin: 0;
+  padding: 0 20px 20px;
+  max-width: 72ch;
+  color: var(--muted);
+  font-size: 0.98rem;
+  line-height: 1.6;
+}

@@ -23,6 +23,7 @@ const {
   writeLogMock,
   mirrorSpendMock,
   fetchMock,
+  demoPassportSecretMock,
 } = vi.hoisted(() => ({
   serviceClientMock: vi.fn(),
   fromMock: vi.fn(),
@@ -42,6 +43,7 @@ const {
   writeLogMock: vi.fn(),
   mirrorSpendMock: vi.fn(),
   fetchMock: vi.fn(),
+  demoPassportSecretMock: vi.fn(),
 }));
 
 vi.mock("server-only", () => ({}));
@@ -77,6 +79,16 @@ vi.mock("@/lib/observability", () => ({
   captureError: vi.fn(async () => undefined),
   captureSecurityEvent: vi.fn(async () => undefined),
 }));
+vi.mock("@/lib/demo/identity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/demo/identity")>();
+  return {
+    ...actual,
+    demoPassportSecret: () => {
+      demoPassportSecretMock();
+      return actual.demoPassportSecret();
+    },
+  };
+});
 vi.mock("@/lib/auth/visa", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/auth/visa")>();
   return {
@@ -133,6 +145,7 @@ beforeEach(() => {
   writeLogMock.mockReset();
   mirrorSpendMock.mockReset();
   fetchMock.mockReset();
+  demoPassportSecretMock.mockReset();
 
   fromMock.mockImplementation((table: string) => {
     expect(table).toBe("agents");
@@ -192,7 +205,7 @@ describe("public demo safety gates", () => {
 });
 
 describe("POST /api/demo/run", () => {
-  it("returns a governed synthesized response without touching the Vault or an upstream", async () => {
+  it("allows the demo-only agent through without touching the Vault or an upstream", async () => {
     const response = await runDemo(
       jsonRequest("/api/demo/run", { prompt: "Say hello in 3 words" })
     );
@@ -208,6 +221,33 @@ describe("POST /api/demo/run", () => {
     expect(reconcileBudgetMock).toHaveBeenCalled();
     expect(rpcMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent with any non-demo provider scope before key access", async () => {
+    agentLookupMock.mockResolvedValue({
+      data: {
+        ...DEMO_AGENT,
+        allowed_scopes: [
+          { provider: "demo", models: ["*"] },
+          { provider: "openai", models: ["*"] },
+        ],
+      },
+      error: null,
+    });
+
+    const response = await runDemo(
+      jsonRequest("/api/demo/run", { prompt: "This must not run" })
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      ok: false,
+      blocked: false,
+      response: "demo temporarily unavailable",
+    });
+    expect(demoPassportSecretMock).not.toHaveBeenCalled();
+    expect(mintVisaMock).not.toHaveBeenCalled();
+    expect(reserveBudgetMock).not.toHaveBeenCalled();
   });
 
   it("returns blocked (403) when the demo tenant kill switch is armed", async () => {
@@ -241,7 +281,7 @@ describe("POST /api/demo/run", () => {
 });
 
 describe("POST /api/demo/kill", () => {
-  it("toggles only the fixed demo passport's tenant", async () => {
+  it("allows the demo-only agent to toggle only its fixed tenant", async () => {
     const armed = await setDemoKill(
       jsonRequest("/api/demo/kill", { armed: true, user_id: "real-user-id" })
     );
@@ -297,6 +337,7 @@ describe("POST /api/demo/kill", () => {
     );
 
     expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "demo_unavailable" });
     expect(armTenantKillMock).not.toHaveBeenCalled();
   });
 
