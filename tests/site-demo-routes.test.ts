@@ -102,6 +102,7 @@ vi.mock("@/lib/auth/visa", async (importOriginal) => {
 
 import { POST as runDemo } from "@/app/api/demo/run/route";
 import { POST as setDemoKill } from "@/app/api/demo/kill/route";
+import { DEMO_KILL_TTL_SECONDS } from "@/app/api/demo/_shared";
 import { SEEDED_DEMO_PASSPORT_ID } from "@/lib/demo/identity";
 
 const DEMO_AGENT = {
@@ -288,13 +289,44 @@ describe("POST /api/demo/kill", () => {
     const disarmed = await setDemoKill(jsonRequest("/api/demo/kill", { armed: false }));
 
     expect(armed.status).toBe(200);
-    expect(await armed.json()).toEqual({ ok: true, armed: true });
+    expect(await armed.json()).toEqual({
+      ok: true,
+      armed: true,
+      expires_in: DEMO_KILL_TTL_SECONDS,
+    });
     expect(disarmed.status).toBe(200);
     expect(await disarmed.json()).toEqual({ ok: true, armed: false });
     expect(eqMock).toHaveBeenCalledWith("passport_pubkey", SEEDED_DEMO_PASSPORT_ID);
-    expect(armTenantKillMock).toHaveBeenNthCalledWith(1, "demo-user-id", true);
-    expect(armTenantKillMock).toHaveBeenNthCalledWith(2, "demo-user-id", false);
-    expect(armTenantKillMock).not.toHaveBeenCalledWith("real-user-id", expect.anything());
+    expect(armTenantKillMock).toHaveBeenNthCalledWith(1, "demo-user-id", true, {
+      ttlSeconds: DEMO_KILL_TTL_SECONDS,
+    });
+    expect(armTenantKillMock).toHaveBeenNthCalledWith(2, "demo-user-id", false, {
+      ttlSeconds: DEMO_KILL_TTL_SECONDS,
+    });
+    expect(armTenantKillMock).not.toHaveBeenCalledWith(
+      "real-user-id",
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
+  // The demo kill switch is ONE shared tenant flag touched by every anonymous
+  // visitor. Without an expiry, the first person who arms it and closes the tab
+  // leaves the public demo permanently stuck at "blocked" — which is exactly what
+  // happened in production. The arm must self-heal.
+  it("arms with a short expiry so an abandoned arm cannot wedge the public demo", async () => {
+    const response = await setDemoKill(jsonRequest("/api/demo/kill", { armed: true }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      armed: true,
+      expires_in: DEMO_KILL_TTL_SECONDS,
+    });
+    expect(armTenantKillMock).toHaveBeenCalledWith("demo-user-id", true, {
+      ttlSeconds: DEMO_KILL_TTL_SECONDS,
+    });
+    expect(DEMO_KILL_TTL_SECONDS).toBeLessThanOrEqual(300);
   });
 
   it("is hard rate-limited before resolving or changing the demo tenant", async () => {

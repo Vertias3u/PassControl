@@ -20,6 +20,18 @@ export function isDemoOnlyAgent(
   });
 }
 
+/**
+ * How long a public-demo kill-switch arm survives before it expires on its own.
+ *
+ * The demo kill switch is ONE tenant flag shared by every anonymous visitor, so
+ * an arm has to self-heal: a visitor who arms it and closes the tab would
+ * otherwise leave the public demo stuck at "blocked" forever. Long enough to
+ * walk through the demo (arm → re-run the call → see it blocked), short enough
+ * that the next visitor lands on a working demo. Real tenants never expire —
+ * see `armTenantKill`.
+ */
+export const DEMO_KILL_TTL_SECONDS = 120;
+
 export function demoEnabled(): boolean {
   return process.env.PASSCONTROL_DEMO === "1";
 }

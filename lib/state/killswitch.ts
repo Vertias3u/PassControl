@@ -55,11 +55,31 @@ export function isBlocked(state: KillState, agentId: string): boolean {
   return state.platformKill || state.userKill || state.denylist.includes(agentId);
 }
 
-/** Arm/disarm the per-tenant master kill (the dashboard / control-API switch). */
-export async function armTenantKill(userId: string, on: boolean): Promise<void> {
+/**
+ * Arm/disarm the per-tenant master kill (the dashboard / control-API switch).
+ *
+ * `ttlSeconds` makes an ARM self-expire. It exists for exactly one caller — the
+ * public keyless demo, where a single shared tenant flag is toggled by anonymous
+ * visitors and an abandoned arm would wedge the demo for everyone after them.
+ * Real tenants must never pass it: an operator's emergency stop stays armed until
+ * a human disarms it. Omitting it keeps the original permanent-write behaviour.
+ * Disarm is a delete, so the TTL is irrelevant there and is never sent.
+ */
+export async function armTenantKill(
+  userId: string,
+  on: boolean,
+  opts: { ttlSeconds?: number } = {}
+): Promise<void> {
   const r = redis();
-  if (on) await r.set(KEY.tenant(userId), 1);
-  else await r.del(KEY.tenant(userId));
+  if (!on) {
+    await r.del(KEY.tenant(userId));
+    return;
+  }
+  if (opts.ttlSeconds && opts.ttlSeconds > 0) {
+    await r.set(KEY.tenant(userId), 1, { ex: opts.ttlSeconds });
+    return;
+  }
+  await r.set(KEY.tenant(userId), 1);
 }
 
 /** Ops-only: platform-wide kill across all tenants. No dashboard path by design. */

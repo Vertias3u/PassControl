@@ -52,6 +52,27 @@ describe("kill switch (Redis-backed)", () => {
     expect(isBlocked(await readKillState("userA"), "a")).toBe(false);
   });
 
+  // A real tenant's emergency stop must NEVER expire on its own — an operator
+  // arms it and it stays armed until a human disarms it. Only the public demo
+  // opts into an expiry (see the ttlSeconds test below), and it must not leak
+  // into this path.
+  it("a real tenant arm is permanent (no TTL on the Redis write)", async () => {
+    await armTenantKill("userA", true);
+    expect(redisMock.set).toHaveBeenCalledWith("killswitch:tenant:userA", 1);
+  });
+
+  it("armTenantKill applies an expiry only when ttlSeconds is given", async () => {
+    await armTenantKill("demo-user", true, { ttlSeconds: 120 });
+    expect(redisMock.set).toHaveBeenCalledWith("killswitch:tenant:demo-user", 1, { ex: 120 });
+  });
+
+  // Disarm is a delete — an expiry would be meaningless and must never be sent.
+  it("ttlSeconds is ignored when disarming", async () => {
+    await armTenantKill("demo-user", false, { ttlSeconds: 120 });
+    expect(redisMock.del).toHaveBeenCalledWith("killswitch:tenant:demo-user");
+    expect(redisMock.set).not.toHaveBeenCalled();
+  });
+
   it("platformKill blocks every tenant (ops-only global flag)", async () => {
     await setPlatformKill(true);
     expect(isBlocked(await readKillState("anyUser"), "anyAgent")).toBe(true);

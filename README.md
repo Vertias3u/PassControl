@@ -78,7 +78,7 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 
 ```bash
 npm install -g passcontrol
-passcontrol --version     # 0.2.0
+passcontrol --version     # 0.3.0
 passcontrol setup         # prereq checks → fetches the stack → boots it → opens the dashboard
 ```
 

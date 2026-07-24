@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 const INSTALL_COMMAND = "npm install -g passcontrol";
 
@@ -62,6 +62,19 @@ export function DemoConsole() {
   const [running, setRunning] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [switchMessage, setSwitchMessage] = useState("Demo tenant accepting requests");
+  // The server expires a demo arm on its own (one shared tenant flag, anonymous
+  // callers). Mirror that expiry locally so the switch can never read "armed"
+  // while the gateway is already letting calls through again.
+  const expiryTimer = useRef<number | null>(null);
+
+  function clearExpiry() {
+    if (expiryTimer.current !== null) {
+      window.clearTimeout(expiryTimer.current);
+      expiryTimer.current = null;
+    }
+  }
+
+  useEffect(() => clearExpiry, []);
 
   async function run(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -116,10 +129,26 @@ export function DemoConsole() {
       const data = (await response.json().catch(() => ({}))) as {
         ok?: boolean;
         armed?: boolean;
+        expires_in?: number;
       };
       if (!response.ok || !data.ok || data.armed !== next) throw new Error("toggle failed");
       setArmed(next);
-      setSwitchMessage(next ? "Demo tenant blocked at the gateway" : "Demo tenant accepting requests");
+      clearExpiry();
+
+      if (next && typeof data.expires_in === "number" && data.expires_in > 0) {
+        setSwitchMessage(
+          `Demo tenant blocked at the gateway — auto-restores in ${data.expires_in}s`
+        );
+        expiryTimer.current = window.setTimeout(() => {
+          expiryTimer.current = null;
+          setArmed(false);
+          setSwitchMessage("Demo tenant auto-restored — arm it again to retry");
+        }, data.expires_in * 1_000);
+      } else {
+        setSwitchMessage(
+          next ? "Demo tenant blocked at the gateway" : "Demo tenant accepting requests"
+        );
+      }
     } catch {
       setSwitchMessage("Switch unavailable — no state changed");
     } finally {

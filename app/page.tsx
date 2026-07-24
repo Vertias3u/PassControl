@@ -124,7 +124,9 @@ export const metadata: Metadata = {
     siteName: "PassControl",
   },
   twitter: {
-    card: "summary",
+    // The attached card image is 2400x1254 — `summary` would shrink it to a
+    // thumbnail. Matches the root layout, which this page-level block overrides.
+    card: "summary_large_image",
     title: "PassControl — Keep real API keys out of AI agents",
     description:
       "Source-available identity and credential infrastructure for governed AI agent calls.",

@@ -7,6 +7,7 @@ import { serviceClient } from "@/lib/supabase";
 import { armTenantKill } from "@/lib/state/killswitch";
 import {
   clientIp,
+  DEMO_KILL_TTL_SECONDS,
   demoEnabled,
   demoPassportId,
   isDemoOnlyAgent,
@@ -77,8 +78,14 @@ export async function POST(request: Request): Promise<Response> {
       return json({ error: "demo_unavailable" }, 503);
     }
 
-    await armTenantKill(agent.user_id, body.armed);
-    return json({ ok: true, armed: body.armed });
+    await armTenantKill(agent.user_id, body.armed, {
+      ttlSeconds: DEMO_KILL_TTL_SECONDS,
+    });
+    return json(
+      body.armed
+        ? { ok: true, armed: true, expires_in: DEMO_KILL_TTL_SECONDS }
+        : { ok: true, armed: false }
+    );
   } catch {
     return json({ error: "demo_unavailable" }, 503);
   }
