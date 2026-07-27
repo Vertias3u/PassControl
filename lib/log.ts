@@ -13,10 +13,15 @@ export interface LogEntry {
   inputTokens?: number;
   outputTokens?: number;
   costMicrocents?: number;
+  // blocked_killed vs blocked_suspended distinguishes the kill switch (platform,
+  // tenant, or denylist) from a per-agent suspend. Both answer 403
+  // "blocked_suspended" on the wire — the split exists only here, for the audit
+  // trail. agent_logs.status is plain text, so no migration gates a new value.
   status:
     | "ok"
     | "blocked_budget"
     | "blocked_endpoint"
+    | "blocked_killed"
     | "blocked_suspended"
     | "blocked_scope"
     | "upstream_error";

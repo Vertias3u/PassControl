@@ -50,4 +50,10 @@ coverage/
 /CODEX_P1_FIXES.md
 /firstnpmsetup.md
 /GIF_SCRIPT.md
+# Catch-all for stray env files (belt and braces over the specific rules above).
+# The *.example templates must stay tracked — they are the documented starting
+# point for a self-host and ship in the public mirror, so negate them here or a
+# fresh `git add -A` silently drops them.
 .env*
+!.env.example
+!.env.docker.example

@@ -55,6 +55,34 @@ export function isBlocked(state: KillState, agentId: string): boolean {
   return state.platformKill || state.userKill || state.denylist.includes(agentId);
 }
 
+/** Why a call was stopped, for the audit trail only — never for the wire. */
+export type BlockedReason = "blocked_killed" | "blocked_suspended";
+
+/**
+ * Attribute a block to the control that caused it.
+ *
+ * The proxy answers every revocation with the same 403 body: a caller learns
+ * that it was stopped, never which control stopped it. That opacity is
+ * deliberate on the wire and wrong in the log — an operator who armed the
+ * tenant kill switch used to read `blocked_suspended` in the audit trail and go
+ * looking at a per-agent suspension that was never set.
+ *
+ * A kill (platform, tenant, or denylist) outranks a suspend when both apply: it
+ * is the operator's deliberate, tenant-wide act and the one they are looking
+ * for. Returns null when nothing blocks, so a caller cannot log an allow as a
+ * block. Keep in step with isBlocked() — every state it rejects must yield a
+ * reason here.
+ */
+export function blockedReason(
+  state: KillState,
+  agentId: string,
+  suspended: boolean
+): BlockedReason | null {
+  if (isBlocked(state, agentId)) return "blocked_killed";
+  if (suspended) return "blocked_suspended";
+  return null;
+}
+
 /**
  * Arm/disarm the per-tenant master kill (the dashboard / control-API switch).
  *

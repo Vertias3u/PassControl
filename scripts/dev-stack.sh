@@ -68,8 +68,6 @@ VISA_TTL_SECONDS=300
 CACHE_ENC_KEY=$CACHE_ENC_KEY
 CRON_SECRET=$CRON_SECRET
 INVITE_CODE=local-dev
-DEV_USER_EMAIL=dev@passcontrol.local
-DEV_USER_PASSWORD=passcontrol-dev
 PASSCONTROL_DEMO=${PASSCONTROL_DEMO:-0}
 EOF
 echo "→ Wrote .env.docker"
@@ -102,7 +100,7 @@ cat <<DONE
 ✅ Local stack is up.
    Supabase API    : ${API_URL}   (Studio UI is excluded — use the PassControl dashboard)
    Start the app   : npm run dev:docker
-                     → http://localhost:3000  (log in: dev@passcontrol.local / passcontrol-dev)
+                     → http://localhost:3000  (log in with the account you just created)
 
    Then: add a provider key + issue a passport in the dashboard, and run:
          node examples/chat-agent.mjs "Say hi in 3 words"

@@ -108,6 +108,12 @@ Errors: `401 missing_visa | invalid_visa`, `402 blocked_budget`, `403 blocked_su
 blocked_scope | blocked_endpoint`, `404 unknown_provider`, `413 payload_too_large`,
 `429 rate_limited`, `502 upstream_unreachable`.
 
+Every revocation answers `403 blocked_suspended` regardless of cause, so a caller cannot
+probe which control stopped it. Your **audit log** does distinguish them:
+`blocked_killed` for the kill switch (platform, tenant, or denylist) and `blocked_suspended`
+for a per-agent suspend. Check `passcontrol logs` or the Control Tower when you need to know
+which one fired.
+
 ---
 
 ## SDK quickstart

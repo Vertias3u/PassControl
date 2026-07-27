@@ -23,6 +23,7 @@ const ANSI = {
   green: "\x1b[32m",
   cyan: "\x1b[36m",
   red: "\x1b[31m",
+  yellow: "\x1b[33m",
   heading: "\x1b[1;32m",
 };
 
@@ -206,6 +207,12 @@ export function ok(message = "") {
 
 export function fail(message = "") {
   console.error(`${paint(ANSI.red, "✗")} ${message}`);
+}
+
+// Goes to stdout, not stderr: a warning accompanies work that still succeeded,
+// so it must not make a passing command look failed to a caller reading stderr.
+export function warn(message = "") {
+  console.log(`${paint(ANSI.yellow, "!")} ${message}`);
 }
 
 export function die(message) {

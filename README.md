@@ -9,6 +9,13 @@ You get per-agent budgets, capability scopes, an instant kill switch, and a per-
 A [Vertias](https://vertias.eu) project. **Bring-your-own-key** — your provider key stays in your
 own vault. Self-host it today; a managed version comes later.
 
+### ▶ [See it work in 60 seconds →](https://passcontrol.vertias.eu)
+
+No signup, no provider key, nothing to install. Run a governed AI call, arm the kill switch,
+run the same call again, and watch it get blocked at the gateway. The demo runs the **real**
+pipeline — passport → work-visa → scope + budget checks → kill switch — and only the model
+response is synthesized, by a keyless provider that never touches a vault.
+
 ![PassControl kill switch — a live agent's calls flip from 200 OK to 403 BLOCKED the instant the kill switch is armed, then back when it's released](docs/demo/kill-switch.gif)
 
 *Instant, per-agent revocation — the kill switch cuts off a live agent mid-run (`200 OK` → `403 BLOCKED`) and restores it, with no key rotation and no redeploy. Real traffic through the gateway; the status codes and timestamps are live.*
@@ -78,7 +85,7 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 
 ```bash
 npm install -g passcontrol
-passcontrol --version     # 0.3.0
+passcontrol --version     # 0.4.0
 passcontrol setup         # prereq checks → fetches the stack → boots it → opens the dashboard
 ```
 
@@ -94,16 +101,14 @@ version, free ports) and tells you exactly what to fix if something's missing.
 - Ports already taken by another local Supabase? `passcontrol setup --port-offset 100`
   (offsets Supabase + Redis together, e.g. API `54421`, DB `54422`; the dashboard stays on `:3000`)
 
-Then log in to the Control Tower at **http://localhost:3000** with the seeded local dev user:
+During `dev:stack` the seed step (`scripts/seed.mjs`) asks you to **choose an account email
+and password**. Then log in to the Control Tower at **http://localhost:3000** with those.
 
-```text
-dev@passcontrol.local
-passcontrol-dev
-```
-
-> ⚠️ This seeded user exists **only for the local Docker stack** (created by `scripts/seed.mjs`).
-> **Never deploy it or reuse these credentials.** Real deployments create accounts through normal
-> signup, gated by `INVITE_CODE`; no default credentials ship.
+> ⚠️ **No shared default credentials ship**, on any install. The account you create guards the
+> real provider keys in your local Vault — and the stack stops being localhost-only the moment
+> you reach it from another device (Tailscale, LAN), so choose a real password. Non-interactive
+> runs (CI, piped output) get a generated password printed once. Deployed installs create
+> accounts through normal signup, gated by `INVITE_CODE`.
 
 Add a **non-critical** provider key in the Control Tower, issue a passport, and copy the one-time
 `PASSPORT_ID` / `PASSPORT_SECRET`. Then, in your project directory:
@@ -187,12 +192,25 @@ The primary interface is `passcontrol <command>`. Highlights:
 | Prepare or repair local services | `passcontrol setup` · `passcontrol doctor --fix` |
 | Manage the local dashboard | `passcontrol start` · `passcontrol stop` · `passcontrol restart` |
 | Follow local dashboard logs | `passcontrol local-logs --follow` |
+| Point the CLI at a different checkout | `passcontrol setup --app-dir <path>` |
+| Forget the remembered checkout | `passcontrol unlink` |
 | Open the Control Tower | `passcontrol open` |
 | Preview/write an integration config | `passcontrol configure aider` · `passcontrol configure claude-desktop --write` |
+
+`passcontrol stop` brings down the **whole** local stack — dashboard, Supabase, and Redis.
+Use `--dashboard-only` to leave the services running. It never removes volumes, so your
+Vault, passports, and audit log survive; wiping data stays with `reset` below.
 
 Config resolves in order: **environment variables → project-local `.passcontrol` →
 `~/.config/passcontrol/config`**. `.passcontrol` holds a passport secret, is gitignored, and is
 written owner-only — never commit or share it.
+
+The local stack itself lives in a checkout of this repo, not in the installed npm package.
+The CLI resolves it in order: **`--app-dir <path>` → `PASSCONTROL_APP_ROOT` → the
+surrounding checkout → the one it remembers** in `~/.config/passcontrol/app.json`.
+`passcontrol status` shows which of those the current path came from. That remembered path
+outlives `npm uninstall -g`, so if a fresh install keeps pointing at an old directory, clear
+it with `passcontrol unlink` (or repoint with `--app-dir`).
 
 `passcontrol reset --local --confirm RESET` destroys and recreates local data — use it only for a
 clean slate.

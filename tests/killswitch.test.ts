@@ -21,6 +21,7 @@ vi.mock("../lib/observability", () => ({ logFailOpen: logFailOpenMock }));
 import {
   readKillState,
   isBlocked,
+  blockedReason,
   armTenantKill,
   setPlatformKill,
   addToDenylist,
@@ -107,5 +108,60 @@ describe("kill switch (Redis-backed)", () => {
     expect(isBlocked(s, "anyAgent")).toBe(true); // read failure => blocked
     expect(logFailOpenMock).toHaveBeenCalledOnce();
     expect(logFailOpenMock).toHaveBeenCalledWith("kill_read");
+  });
+
+  // The proxy answers every one of these with the SAME 403 body on the wire —
+  // a caller is not told which control stopped it. The audit trail must not
+  // inherit that blindness: an operator who armed the tenant kill switch used to
+  // read "blocked_suspended" and go looking at the agent's suspension state,
+  // which was never set. The distinction is free here and irrecoverable later.
+  describe("blockedReason (audit attribution, not the wire response)", () => {
+    it("attributes a tenant kill switch to the kill switch, not to suspension", async () => {
+      await armTenantKill("userA", true);
+      const state = await readKillState("userA");
+      expect(blockedReason(state, "agentA", false)).toBe("blocked_killed");
+    });
+
+    it("attributes a platform kill to the kill switch", async () => {
+      await setPlatformKill(true);
+      const state = await readKillState("userA");
+      expect(blockedReason(state, "agentA", false)).toBe("blocked_killed");
+    });
+
+    it("attributes a denylisted agent to the kill switch", async () => {
+      await addToDenylist("agentA");
+      const state = await readKillState("userA");
+      expect(blockedReason(state, "agentA", false)).toBe("blocked_killed");
+      expect(blockedReason(state, "agentB", false)).toBeNull();
+    });
+
+    it("attributes a per-agent suspend to suspension", async () => {
+      const state = await readKillState("userA");
+      expect(blockedReason(state, "agentA", true)).toBe("blocked_suspended");
+    });
+
+    // Both engaged at once: the kill switch is the operator's deliberate,
+    // tenant-wide act and the one they are looking for in the log.
+    it("reports the kill switch when both a kill and a suspend apply", async () => {
+      await armTenantKill("userA", true);
+      const state = await readKillState("userA");
+      expect(blockedReason(state, "agentA", true)).toBe("blocked_killed");
+    });
+
+    it("returns null when nothing blocks", async () => {
+      const state = await readKillState("userA");
+      expect(blockedReason(state, "agentA", false)).toBeNull();
+    });
+
+    // blockedReason must stay consistent with isBlocked: any state the proxy
+    // blocks on has to produce a reason, or a block would log as an allow.
+    it("produces a reason for every state isBlocked rejects", async () => {
+      await armTenantKill("userA", true);
+      const state = await readKillState("userA");
+      for (const suspended of [true, false]) {
+        expect(isBlocked(state, "agentA") || suspended).toBe(true);
+        expect(blockedReason(state, "agentA", suspended)).not.toBeNull();
+      }
+    });
   });
 });

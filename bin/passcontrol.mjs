@@ -26,6 +26,7 @@ import {
   requireControlApiKey,
   requirePassport,
   step,
+  warn,
   writeConfigFile,
 } from "../cli/config.mjs";
 import {
@@ -118,7 +119,7 @@ ${heading("Usage:")}
   ${cmd} init [--global]          create a config profile
   ${cmd} status [--no-network]    show active config
   ${cmd} start                    start the configured local dashboard
-  ${cmd} stop                     stop the CLI-managed local dashboard
+  ${cmd} stop [--dashboard-only]  stop the whole local stack (dashboard + Supabase + Redis)
   ${cmd} restart                  restart the CLI-managed local dashboard
   ${cmd} local-logs [--follow]    show local dashboard logs
   ${cmd} doctor [--deep] [--fix]  check local setup and repair a stopped dashboard
@@ -126,6 +127,8 @@ ${heading("Usage:")}
                                  destroy and recreate the local stack
   ${cmd} setup [--no-open] [--port-offset N] [--app-dir DIR]
                                  clone the app (if needed), start local services, open the dashboard
+                                 --app-dir repoints the CLI and is remembered
+  ${cmd} unlink                   forget the remembered app checkout
   ${cmd} try                      60-second demo: governed keyless call + kill switch (no key)
   ${cmd} call "hi"                mint a visa and call a model
   ${cmd} sidecar [--port 8788]    start the local agent bridge
@@ -149,7 +152,10 @@ ${heading("Usage:")}
 ${heading("Config:")}
   Env vars win, then nearest .passcontrol, then ~/.config/passcontrol/config.
   Installed globally, the local-stack commands (setup/start/reset) use a cloned
-  app checkout; override its location with PASSCONTROL_APP_ROOT.
+  app checkout, resolved in this order:
+    --app-dir DIR → PASSCONTROL_APP_ROOT → surrounding checkout → remembered
+    checkout in ~/.config/passcontrol/app.json (survives npm uninstall; clear
+    it with \`${cmd} unlink\`).
 `;
 }
 
@@ -259,22 +265,39 @@ function saveAppRoot(dir) {
   fs.writeFileSync(statePath, `${JSON.stringify({ path: dir, savedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
 }
 
+function forgetAppRoot() {
+  const saved = readSavedAppRoot();
+  fs.rmSync(appRootStatePath(), { force: true });
+  return saved;
+}
+
 // Precedence: explicit env override → the surrounding checkout (npm run cli --) →
-// a previously cloned/saved checkout. Returns null when the CLI is installed
-// globally and no stack has been set up yet.
-function resolveAppRoot() {
+// a previously cloned/saved checkout. (An explicit --app-dir outranks all three;
+// ensureAppRoot applies it before consulting this.) Returns null when the CLI is
+// installed globally and no stack has been set up yet. `source` exists so status
+// can say where the path came from — a saved root that outlives the checkout it
+// points at is invisible otherwise, which reads as the CLI ignoring the user.
+function resolveAppRootSource() {
   const envRoot = process.env.PASSCONTROL_APP_ROOT?.trim();
   if (envRoot) {
     const abs = path.resolve(envRoot);
     if (!isRepoCheckout(abs)) {
       throw new Error(`PASSCONTROL_APP_ROOT=${envRoot} is not a PassControl checkout (missing scripts/dev-stack.sh).`);
     }
-    return abs;
+    return { path: abs, source: "PASSCONTROL_APP_ROOT" };
   }
-  if (process.env.PASSCONTROL_FORCE_INSTALLED !== "1" && isRepoCheckout(PACKAGE_ROOT)) return PACKAGE_ROOT;
+  if (process.env.PASSCONTROL_FORCE_INSTALLED !== "1" && isRepoCheckout(PACKAGE_ROOT)) {
+    return { path: PACKAGE_ROOT, source: "surrounding checkout" };
+  }
   const saved = readSavedAppRoot();
-  if (saved && isRepoCheckout(saved)) return path.resolve(saved);
+  if (saved && isRepoCheckout(saved)) {
+    return { path: path.resolve(saved), source: `saved — \`${cliCommand("unlink")}\` to clear` };
+  }
   return null;
+}
+
+function resolveAppRoot() {
+  return resolveAppRootSource()?.path ?? null;
 }
 
 function defaultAppDir() {
@@ -283,7 +306,9 @@ function defaultAppDir() {
 
 function appRootLabel() {
   try {
-    return resolveAppRoot() ?? `not set up (run \`${cliCommand("setup")}\`)`;
+    const resolved = resolveAppRootSource();
+    if (!resolved) return `not set up (run \`${cliCommand("setup")}\`)`;
+    return `${resolved.path}  (${resolved.source})`;
   } catch (error) {
     return error.message;
   }
@@ -364,15 +389,35 @@ async function confirmYes(question) {
 // installed globally. `clone: false` never clones — it errors with a pointer to
 // `passcontrol setup` (used by reset/doctor, where there's nothing yet to act on).
 async function ensureAppRoot({ clone = false, appDir, yes = false } = {}) {
-  if (appRoot) return appRoot;
-  const resolved = resolveAppRoot();
-  if (resolved) {
-    appRoot = resolved;
+  // An explicit --app-dir is the strongest signal there is and must outrank a
+  // saved checkout. It used to lose: resolveAppRoot() ran first, so a stale
+  // ~/.config/passcontrol/app.json (which survives `npm uninstall -g`) meant
+  // `setup --app-dir NEW` silently kept using the old directory, with no error
+  // and no way to repoint short of deleting an undocumented state file.
+  // parseArgv yields `true` for a valueless --app-dir; path.resolve(true) would
+  // throw a raw TypeError that reads as a crash rather than a usage mistake.
+  if (appDir !== undefined && typeof appDir !== "string") {
+    throw new Error(`--app-dir needs a directory path, e.g. \`${cliCommand("setup --app-dir ~/passcontrol")}\`.`);
+  }
+  const explicit = appDir ? path.resolve(appDir) : null;
+  if (explicit && isRepoCheckout(explicit)) {
+    saveAppRoot(explicit);
+    appRoot = explicit;
     return appRoot;
+  }
+  if (appRoot) return appRoot;
+  if (!explicit) {
+    const resolved = resolveAppRoot();
+    if (resolved) {
+      appRoot = resolved;
+      return appRoot;
+    }
   }
   if (!clone) {
     throw new Error(
-      `No PassControl app checkout found. Run \`${cliCommand("setup")}\` to clone and start it, or set PASSCONTROL_APP_ROOT to an existing checkout.`
+      explicit
+        ? `--app-dir ${appDir} is not a PassControl checkout (missing scripts/dev-stack.sh).`
+        : `No PassControl app checkout found. Run \`${cliCommand("setup")}\` to clone and start it, or set PASSCONTROL_APP_ROOT to an existing checkout.`
     );
   }
 
@@ -383,7 +428,9 @@ async function ensureAppRoot({ clone = false, appDir, yes = false } = {}) {
     );
   }
 
-  const target = path.resolve(appDir || (interactive ? await promptLine(`Where should the PassControl app be cloned? [${defaultAppDir()}] `, defaultAppDir()) : defaultAppDir()));
+  const target =
+    explicit ??
+    path.resolve(interactive ? await promptLine(`Where should the PassControl app be cloned? [${defaultAppDir()}] `, defaultAppDir()) : defaultAppDir());
   if (fs.existsSync(target) && fs.readdirSync(target).length) {
     if (isRepoCheckout(target)) {
       saveAppRoot(target);
@@ -652,6 +699,68 @@ async function stopDashboard() {
   ok(`stopped CLI-managed dashboard (PID ${state.pid})`);
 }
 
+// `passcontrol stop` — one command for "stop PassControl". Previously this halted
+// only the CLI-managed dashboard, so a developer still had to remember
+// `supabase stop` and a `docker compose` invocation in the right directory to
+// actually free the ports and the RAM.
+//
+// Deliberately NON-DESTRUCTIVE: it stops containers but never removes volumes, so
+// the Vault, passports, and audit log survive. Wiping local data stays with
+// `passcontrol reset --local --confirm RESET`, which asks before it deletes.
+async function stopCommand(opts = {}) {
+  await stopDashboard();
+
+  if (opts.dashboardOnly) {
+    step("Left Supabase and Redis running (--dashboard-only).");
+    return;
+  }
+
+  let root;
+  try {
+    root = resolveAppRoot();
+  } catch (error) {
+    // A bad PASSCONTROL_APP_ROOT shouldn't turn "stop" into a failure — the
+    // dashboard is already down, which is most of what was asked for.
+    step(error.message);
+    return;
+  }
+  if (!root) {
+    step(`No local stack checkout found — nothing else to stop (\`${cliCommand("setup")}\` creates one).`);
+    return;
+  }
+  // Helpers below (localComposeProjectName) read the module-level appRoot, which
+  // is only populated by ensureAppRoot() on the setup path. Stop never clones, so
+  // publish the resolved checkout here.
+  appRoot = root;
+
+  // Each service is stopped independently and tolerantly: a stack that is already
+  // down, or half down, must still end with everything down and exit 0.
+  await stopLocalService("Supabase", "supabase", ["stop"], root);
+  await stopLocalService(
+    "Redis",
+    "docker",
+    ["compose", "-f", "docker/compose.yml", "down"],
+    root,
+    { ...process.env, COMPOSE_PROJECT_NAME: localComposeProjectName() }
+  );
+
+  ok("PassControl stopped. Local data kept — `passcontrol reset --local` wipes it.");
+}
+
+/** Stop one local service, reporting rather than throwing when it is already down. */
+async function stopLocalService(label, command, args, cwd, env = process.env) {
+  if (!commandExists(command)) {
+    step(`${label}: \`${command}\` not found — skipping.`);
+    return;
+  }
+  try {
+    await runCommand(command, args, { cwd, env });
+    ok(`${label} stopped`);
+  } catch {
+    step(`${label}: already stopped (or not running).`);
+  }
+}
+
 async function restartDashboard(opts = {}) {
   localDashboard();
   const managed = runningManagedDashboard();
@@ -696,6 +805,37 @@ async function runLocalCommand(command, args, env = process.env) {
   await runCommand(command, args, { cwd: appRoot, env });
 }
 
+// The saved app root lives outside the npm package, so `npm uninstall -g` leaves
+// it behind and a reinstall silently keeps pointing at the old checkout. `unlink`
+// is the supported way to forget it — without this, deleting an undocumented
+// state file by hand is the only reset.
+function unlinkCommand() {
+  const statePath = appRootStatePath();
+  // Branch on the file, not on readSavedAppRoot(): that returns null for corrupt
+  // JSON exactly as it does for a missing file, so keying off it would report
+  // "does not exist" about a file that does — and leave the blockage in place.
+  if (!fs.existsSync(statePath)) {
+    ok(`No saved app checkout to forget (${statePath} does not exist).`);
+    return;
+  }
+  const saved = readSavedAppRoot();
+
+  // Forgetting the path while the stack is up strands it: `stop` resolves the
+  // checkout to bring Supabase and Redis down, and can't once the path is gone.
+  const running = runningManagedDashboard();
+  if (running) {
+    warn(`A CLI-managed dashboard (PID ${running.pid}) is still running from ${saved ?? "the saved checkout"}.`);
+    warn(`Run \`${cliCommand("stop")}\` first, or stop it from that checkout by hand.`);
+  }
+
+  forgetAppRoot();
+  ok(saved ? `Forgot the saved app checkout ${saved} (removed ${statePath}).` : `Removed an unreadable app checkout state file (${statePath}).`);
+  // `setup --app-dir` runs the Docker/Supabase prerequisite gate before it
+  // repoints, so it is not the zero-dependency answer; name the env override too.
+  step(`Link another with \`${cliCommand("setup --app-dir <path>")}\` (also starts the local stack),`);
+  step("or set PASSCONTROL_APP_ROOT=<path> for a one-off override.");
+}
+
 async function resetLocalStack(opts = {}) {
   if (opts.local !== true) {
     throw new Error("Usage: passcontrol reset --local --confirm RESET");
@@ -734,7 +874,7 @@ async function setupLocal(opts = {}) {
   await startDashboard(opts);
   if (!opts.noOpen) await openDashboard(opts);
   console.log(`\n${formatLabel("Local dashboard", dashboard.url, 19)}`);
-  console.log(formatLabel("Local-only login", "dev@passcontrol.local / passcontrol-dev", 19));
+  console.log(formatLabel("Login", "the account you created during setup", 19));
   step("Add a non-critical provider key, issue a passport, then run `passcontrol doctor --deep`.");
 }
 
@@ -1455,7 +1595,7 @@ async function main() {
       await startDashboard(opts);
       break;
     case "stop":
-      await stopDashboard();
+      await stopCommand(opts);
       break;
     case "restart":
       await restartDashboard(opts);
@@ -1468,6 +1608,9 @@ async function main() {
       break;
     case "setup":
       await setupLocal(opts);
+      break;
+    case "unlink":
+      unlinkCommand();
       break;
     case "call":
       await callCommand(commandRest, opts);

@@ -10,7 +10,7 @@ export const runtime = "edge";
 
 import { waitUntil } from "@vercel/functions";
 import { verifyVisa, extractVisaToken } from "@/lib/auth/visa";
-import { readKillState, isBlocked } from "@/lib/state/killswitch";
+import { readKillState, blockedReason } from "@/lib/state/killswitch";
 import {
   isSuspended,
   reserveBudget,
@@ -188,9 +188,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
 
   // ── 2. Kill switch (Redis: platform + this tenant + denylist; Redis per-agent suspend) ──
   const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
-  if (isBlocked(kill, agentId) || suspended) {
-    logBlocked("blocked_suspended");
-    captureBlocked("blocked_suspended", 403);
+  const blocked = blockedReason(kill, agentId, suspended);
+  if (blocked) {
+    // Log and alert on the control that actually fired; answer the wire with the
+    // single opaque code so a caller still cannot probe which one it tripped.
+    logBlocked(blocked);
+    captureBlocked(blocked, 403);
     return err(403, "blocked_suspended");
   }
 
@@ -481,8 +484,10 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
 
   // 3. Kill switch (platform + tenant + denylist; per-agent suspend).
   const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
-  if (isBlocked(kill, agentId) || suspended) {
-    logBlocked("blocked_suspended");
+  const blocked = blockedReason(kill, agentId, suspended);
+  if (blocked) {
+    // Attribute in the log; keep the wire response opaque (see the other handler).
+    logBlocked(blocked);
     return err(403, "blocked_suspended");
   }
 

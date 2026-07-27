@@ -49,12 +49,11 @@ npm install
 npm run cli -- setup   # run the CLI from the checkout
 ```
 
-Open **http://localhost:3000** and log in with the seeded dev user:
+The seed step asks you to choose an account email and password — that account guards your
+local Vault, so pick a real one. Open **http://localhost:3000** and log in with it.
 
-```
-dev@passcontrol.local
-passcontrol-dev
-```
+> No shared default credentials ship. Non-interactive runs get a generated password,
+> printed once by the seed step.
 
 > Use `passcontrol setup --no-open` to suppress browser launch. If another local
 > Supabase/Redis project owns the default service ports, use `passcontrol setup --no-open

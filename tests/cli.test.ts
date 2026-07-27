@@ -17,6 +17,11 @@ async function runCli(args: string[], opts: { cwd?: string; env?: Record<string,
     HOME: home,
     NODE_ENV: "test",
     XDG_CONFIG_HOME: path.join(home, ".config"),
+    // Default ON, not opt-in: without it the CLI resolves THIS repo as the local
+    // stack checkout, so any test touching a stack command (`stop`, `reset`) would
+    // operate on the developer's real Supabase/Redis. A test suite must never be
+    // able to tear down the machine it runs on. Individual tests may override.
+    PASSCONTROL_FORCE_INSTALLED: "1",
     ...opts.env,
   };
   return execFileAsync(process.execPath, [CLI, ...args], {
@@ -24,6 +29,28 @@ async function runCli(args: string[], opts: { cwd?: string; env?: Record<string,
     env,
     timeout: 10000,
   });
+}
+
+// isRepoCheckout() demands all three of these, so a fixture missing any one of
+// them makes resolveAppRoot() return null — and the *unfixed* CLI then honours
+// --app-dir by falling through to the adopt branch. A partial fixture would make
+// the --app-dir precedence test pass against the bug it is meant to catch.
+async function makeCheckout(dir: string) {
+  await fs.mkdir(path.join(dir, "scripts"), { recursive: true });
+  await fs.mkdir(path.join(dir, "docker"), { recursive: true });
+  await fs.writeFile(path.join(dir, "scripts", "dev-stack.sh"), "#!/bin/sh\n");
+  await fs.writeFile(path.join(dir, "docker", "compose.yml"), "services: {}\n");
+  await fs.writeFile(path.join(dir, "package.json"), "{}\n");
+  return dir;
+}
+
+function appStatePath() {
+  return path.join(tmp, "home", ".config", "passcontrol", "app.json");
+}
+
+async function saveAppRoot(dir: string) {
+  await fs.mkdir(path.dirname(appStatePath()), { recursive: true });
+  await fs.writeFile(appStatePath(), JSON.stringify({ path: dir, savedAt: new Date().toISOString() }));
 }
 
 beforeEach(async () => {
@@ -59,6 +86,7 @@ describe("passcontrol CLI", () => {
     expect(stdout).toContain("passcontrol reset --local --confirm RESET");
     expect(stdout).toContain("passcontrol setup [--no-open] [--port-offset N]");
     expect(stdout).toContain("[--app-dir DIR]");
+    expect(stdout).toContain("passcontrol unlink");
     expect(stdout).toContain("passcontrol configure <integration>");
     expect(stdout).toContain("passcontrol doctor [--deep] [--fix]");
     expect(stdout).toContain("passcontrol call \"hi\"");
@@ -74,9 +102,17 @@ describe("passcontrol CLI", () => {
     expect(stdout).toContain("passcontrol spend");
   }, 10000);
 
+  // Opts out of the force-installed default so `start` gets past ensureAppRoot and
+  // reaches the gateway check it is actually asserting on. Safe: a remote gateway
+  // throws before any local service is touched.
   it("does not manage a remote gateway as a local dashboard", async () => {
     await expect(
-      runCli(["start"], { env: { PASSCONTROL_GATEWAY: "https://passcontrol.example.com" } })
+      runCli(["start"], {
+        env: {
+          PASSCONTROL_GATEWAY: "https://passcontrol.example.com",
+          PASSCONTROL_FORCE_INSTALLED: "",
+        },
+      })
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("only manages local gateways"),
     });
@@ -132,6 +168,39 @@ describe("passcontrol CLI", () => {
     });
   }, 10000);
 
+  // `stop` used to halt only the dashboard, leaving Supabase and Redis running —
+  // so "stopping PassControl" meant three commands in two directories. It now
+  // brings the whole local stack down. PASSCONTROL_FORCE_INSTALLED=1 is load-bearing
+  // in these tests: without it the CLI resolves this very repo as the app root and
+  // the test would shut down the developer's real Supabase stack.
+  it("stops everything and reports cleanly when nothing is running", async () => {
+    const { stdout } = await runCli(["stop"], {
+      env: { PASSCONTROL_FORCE_INSTALLED: "1", NO_COLOR: "1" },
+    });
+    expect(stdout).toMatch(/dashboard/i);
+    expect(stdout).toMatch(/passcontrol setup/);
+  }, 10000);
+
+  it("keeps `stop` non-destructive — volumes and backups are reset's job, not stop's", async () => {
+    const src = await fs.readFile(CLI, "utf8");
+    const start = src.indexOf("async function stopCommand");
+    expect(start).toBeGreaterThan(-1);
+    const nextFn = src.indexOf("\nasync function ", start + 1);
+    const body = src.slice(start, nextFn === -1 ? undefined : nextFn);
+
+    // `docker compose down -v` deletes the Postgres volume: provider keys in the
+    // Vault, passports, and the audit log. `stop` must never reach for it.
+    expect(body).not.toContain('"-v"');
+    expect(body).not.toContain("--no-backup");
+    expect(body).toContain("down");
+  });
+
+  it("documents stop as covering the whole stack", async () => {
+    const { stdout } = await runCli(["help"], { env: { NO_COLOR: "1" } });
+    const line = stdout.split("\n").find((l) => /^\s*passcontrol stop\b/.test(l)) ?? "";
+    expect(line).toMatch(/stack|everything/i);
+  }, 10000);
+
   it("points a checkout-less reset at setup instead of destroying nothing", async () => {
     await expect(
       runCli(["reset", "--local", "--confirm", "RESET"], { env: { PASSCONTROL_FORCE_INSTALLED: "1" } })
@@ -153,6 +222,121 @@ describe("passcontrol CLI", () => {
       env: { PASSCONTROL_APP_ROOT: process.cwd() },
     });
     expect(stdout).toContain(`App:       ${process.cwd()}`);
+  }, 10000);
+
+  // Regression: a saved ~/.config/passcontrol/app.json used to short-circuit
+  // ensureAppRoot before it ever looked at appDir, so `setup --app-dir NEW`
+  // silently kept using the old checkout — the documented way to repoint the CLI
+  // did nothing. A remote gateway makes localDashboard() throw immediately after
+  // the app root is resolved, so this asserts the save without touching Docker.
+  it("lets --app-dir repoint the CLI away from a saved checkout", async () => {
+    const stale = await makeCheckout(path.join(tmp, "stale-checkout"));
+    const fresh = await makeCheckout(path.join(tmp, "fresh-checkout"));
+    await saveAppRoot(stale);
+
+    await expect(
+      runCli(["start", "--yes", "--app-dir", fresh], {
+        env: { PASSCONTROL_GATEWAY: "https://passcontrol.example.com" },
+      })
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("only manages local gateways"),
+    });
+
+    expect(JSON.parse(await fs.readFile(appStatePath(), "utf8")).path).toBe(fresh);
+  }, 10000);
+
+  it("prefers an explicit --app-dir over PASSCONTROL_APP_ROOT", async () => {
+    const envRoot = await makeCheckout(path.join(tmp, "env-checkout"));
+    const flagRoot = await makeCheckout(path.join(tmp, "flag-checkout"));
+
+    await expect(
+      runCli(["start", "--yes", "--app-dir", flagRoot], {
+        env: {
+          PASSCONTROL_APP_ROOT: envRoot,
+          PASSCONTROL_GATEWAY: "https://passcontrol.example.com",
+        },
+      })
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("only manages local gateways"),
+    });
+
+    expect(JSON.parse(await fs.readFile(appStatePath(), "utf8")).path).toBe(flagRoot);
+  }, 10000);
+
+  it("rejects an --app-dir that is not a checkout instead of falling back to the saved one", async () => {
+    const stale = await makeCheckout(path.join(tmp, "stale-checkout"));
+    const notACheckout = path.join(tmp, "not-a-checkout");
+    await fs.mkdir(notACheckout, { recursive: true });
+    await fs.writeFile(path.join(notACheckout, "keep.txt"), "x");
+    await saveAppRoot(stale);
+
+    await expect(runCli(["start", "--yes", "--app-dir", notACheckout])).rejects.toMatchObject({
+      stderr: expect.stringContaining("already exists and is not empty"),
+    });
+
+    // The stale save must survive a rejected repoint — failing to adopt is not
+    // a reason to forget where the working checkout is.
+    expect(JSON.parse(await fs.readFile(appStatePath(), "utf8")).path).toBe(stale);
+  }, 10000);
+
+  it("forgets the saved checkout with unlink", async () => {
+    const saved = await makeCheckout(path.join(tmp, "saved-checkout"));
+    await saveAppRoot(saved);
+
+    const { stdout } = await runCli(["unlink"], { env: { NO_COLOR: "1" } });
+    expect(stdout).toContain(saved);
+    expect(stdout).toContain("app.json");
+    await expect(fs.access(appStatePath())).rejects.toBeTruthy();
+
+    const status = await runCli(["status", "--no-network"], { env: { NO_COLOR: "1" } });
+    expect(status.stdout).toContain("not set up");
+  }, 10000);
+
+  it("reports unlink as a no-op when no checkout is saved", async () => {
+    const { stdout } = await runCli(["unlink"], { env: { NO_COLOR: "1" } });
+    expect(stdout).toMatch(/no saved app checkout/i);
+  }, 10000);
+
+  // readSavedAppRoot() returns null for unparseable JSON just as it does for a
+  // missing file, so keying the no-op message off it would tell the user "does
+  // not exist" about a file that does — and leave the only thing blocking them
+  // in place. unlink must clear a corrupt state file, not step around it.
+  it("clears a corrupt app.json instead of claiming there is nothing to forget", async () => {
+    await fs.mkdir(path.dirname(appStatePath()), { recursive: true });
+    await fs.writeFile(appStatePath(), "{ not json");
+
+    const { stdout } = await runCli(["unlink"], { env: { NO_COLOR: "1" } });
+    expect(stdout).not.toMatch(/does not exist/i);
+    await expect(fs.access(appStatePath())).rejects.toBeTruthy();
+  }, 10000);
+
+  // parseArgv turns a valueless `--app-dir` into `true`; path.resolve(true) then
+  // throws a raw TypeError about "the path argument", which reads as a CLI crash
+  // rather than a usage mistake.
+  it("rejects --app-dir with no value as a usage error", async () => {
+    await expect(runCli(["start", "--yes", "--app-dir"])).rejects.toMatchObject({
+      stderr: expect.stringContaining("--app-dir needs a directory path"),
+    });
+  }, 10000);
+
+  // "App: /some/path" with no provenance is what made a stale saved root look
+  // like a bug in the fresh install: nothing said where the path came from.
+  it("shows where the app checkout path came from", async () => {
+    const saved = await makeCheckout(path.join(tmp, "saved-checkout"));
+    await saveAppRoot(saved);
+
+    const { stdout } = await runCli(["status", "--no-network"], { env: { NO_COLOR: "1" } });
+    expect(stdout).toContain(`App:       ${saved}`);
+    expect(stdout).toMatch(/saved/i);
+    expect(stdout).toContain("passcontrol unlink");
+  }, 10000);
+
+  it("marks an env-provided app checkout as coming from the environment", async () => {
+    const { stdout } = await runCli(["status", "--no-network"], {
+      env: { PASSCONTROL_APP_ROOT: process.cwd(), NO_COLOR: "1" },
+    });
+    expect(stdout).toContain(`App:       ${process.cwd()}`);
+    expect(stdout).toContain("PASSCONTROL_APP_ROOT");
   }, 10000);
 
   it("does not run local setup against a remote gateway", async () => {
