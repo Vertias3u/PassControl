@@ -58,7 +58,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@noble/curves": "^1.6.0",
     "@noble/hashes": "^1.5.0",
     "@sentry/nextjs": "^10.64.0",
@@ -83,9 +83,14 @@
     "@types/node": "^22.5.5",
     "@types/react": "^18.3.8",
     "@types/react-dom": "^18.3.0",
-    "postcss": "^8.5.15",
+    "postcss": "^8.5.24",
     "tailwindcss": "^4.3.1",
     "typescript": "^5.6.2",
     "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "postcss": "$postcss",
+    "sharp": "^0.35.3",
+    "@hono/node-server": "^2.0.5"
   }
 }
