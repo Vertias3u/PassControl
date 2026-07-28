@@ -164,7 +164,8 @@ export ANTHROPIC_API_KEY="passcontrol"   # ignored — the sidecar injects a liv
 ```
 
 The agent never holds a real key or a long-lived token. Presets ship for **openhands, aider, cline,
-continue, litellm** (`passcontrol env <preset>`). A single long streaming completion also works
+continue, litellm** (`passcontrol env <preset>`), and **[Hermes Agent](docs/integrations/hermes.md)**
+works through the generic settings with no custom code. A single long streaming completion also works
 directly — it's verified once at the start, so it finishes even if it runs past the visa TTL; only
 *multi-call* sessions need the sidecar's refresh. Raise `VISA_TTL_SECONDS` (300–900) to widen the
 window, but the sidecar is the real answer for long sessions.

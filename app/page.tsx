@@ -4,6 +4,7 @@ import {
   DemoConsole,
   InstallCommand,
 } from "@/components/PassControlSiteClient";
+import { RELEASE_SERIES, RELEASE_VERSION } from "@/lib/version";
 
 const REPO_URL = "https://github.com/Vertias3u/PassControl";
 
@@ -24,7 +25,7 @@ const FAQ_ITEMS: { q: string; a: string }[] = [
   },
   {
     q: "Is it production-ready and audited?",
-    a: "It's early (v0.2.x), built solo, and not yet independently audited — run it against a non-critical key first. It is built security-first (RLS on every table, a single service-role-only decrypt path, an append-only audit log, tenant-isolation tests), but test-covered and careful is not the same as audited.",
+    a: `It's early (${RELEASE_SERIES}), built solo, and not yet independently audited — run it against a non-critical key first. It is built security-first (RLS on every table, a single service-role-only decrypt path, an append-only audit log, tenant-isolation tests), but test-covered and careful is not the same as audited.`,
   },
   {
     q: "Which providers does it support?",
@@ -76,7 +77,7 @@ const JSON_LD = {
       operatingSystem: "Cross-platform (self-hosted; Docker)",
       url: "https://passcontrol.vertias.eu",
       downloadUrl: REPO_URL,
-      softwareVersion: "0.2.0",
+      softwareVersion: RELEASE_VERSION,
       license: "https://spdx.org/licenses/BUSL-1.1.html",
       publisher: { "@id": "https://vertias.eu/#org" },
       description:
@@ -468,8 +469,8 @@ export default function LandingPage() {
               <a className="pc-dark-text" href="mailto:hello@vertias.eu">hello@vertias.eu</a>
             </div>
             <p>
-              Early (v0.1.x), built in the open, not yet independently audited — run it against a
-              non-critical key first.{" "}
+              Early ({RELEASE_SERIES}), built in the open, not yet independently audited — run it
+              against a non-critical key first.{" "}
               <a
                 className="pc-dark-text"
                 href={`${REPO_URL}/blob/main/SECURITY.md`}

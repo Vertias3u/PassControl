@@ -52,3 +52,28 @@ describe("site metadata (social card surface)", () => {
     }
   );
 });
+
+// Every public version string was typed by hand, so they drifted independently: at
+// package 0.4.0 the JSON-LD said 0.2.0, the FAQ said v0.2.x, the footer said v0.1.x,
+// and the MCP server announced 0.2.0 to its clients. They all render from one source
+// now; these tests fail if a literal grows back.
+describe("advertised version", () => {
+  const pkgVersion = async () => JSON.parse(await source("package.json")).version as string;
+
+  it("derives both public forms from package.json", async () => {
+    const { RELEASE_VERSION, RELEASE_SERIES } = await import("../lib/version");
+    const version = await pkgVersion();
+    expect(RELEASE_VERSION).toBe(version);
+    expect(RELEASE_SERIES).toBe(`v${version.split(".").slice(0, 2).join(".")}.x`);
+  });
+
+  // A bare x.y.z / vx.y.z anywhere in these files means someone typed a version again.
+  // (The CLI side of this lives in cli/__tests__/version.test.mjs — importing an
+  // untyped .mjs from a .ts test breaks `tsc --noEmit`.)
+  it.each(["app/page.tsx", "app/llms.txt/route.ts", "cli/mcp/server.mjs"])(
+    "hardcodes no version literal in %s",
+    async (path) => {
+      expect((await source(path)).match(/\bv?\d+\.\d+\.[\dx]+\b/g)).toBeNull();
+    }
+  );
+});

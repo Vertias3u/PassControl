@@ -1,3 +1,5 @@
+import { RELEASE_SERIES } from "@/lib/version";
+
 export const runtime = "edge";
 
 // Served at /llms.txt — a concise, factual description for AI answer engines
@@ -9,7 +11,7 @@ const BODY = `# PassControl
 > a sign-only Ed25519 "passport" and mints short-lived, scoped "work-visas"; the
 > gateway verifies the request, enforces per-agent budgets and a kill switch,
 > injects the real provider key from a vault, and proxies the call — so the agent
-> never holds your API key. Built by Vertias (Sofia, Bulgaria). Early (v0.2.x),
+> never holds your API key. Built by Vertias (Sofia, Bulgaria). Early (${RELEASE_SERIES}),
 > solo-built, self-hostable, and not yet independently audited.
 
 ## What it is
@@ -34,7 +36,7 @@ budget-scoped token. Revocation is instant and per-agent; every call is audited.
   working core is free to self-host.
 - Providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek.
 - Stack: Next.js, Supabase (Postgres/Vault/Auth), Redis.
-- Status: v0.2.x, built solo, not independently audited — run it against a non-critical key
+- Status: ${RELEASE_SERIES}, built solo, not independently audited — run it against a non-critical key
   first. Self-host only; no hosted version yet.
 - By design the gateway sees plaintext provider traffic (it must, to inject the key), so the
   boundary is "the agent doesn't hold the key," not "nobody does." Self-hosted, the vault and

@@ -1,8 +1,21 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const CONFIG_FILE = ".passcontrol";
+
+// The version the shipped CLI reports. Read from the installed package.json rather
+// than typed anywhere — the MCP server used to carry its own literal and was still
+// announcing 0.2.0 to clients at 0.4.0.
+export const PACKAGE_VERSION = (() => {
+  try {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    return JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek"];
 export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek"]);
 

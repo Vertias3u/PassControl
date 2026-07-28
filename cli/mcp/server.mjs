@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod/v4";
-import { PROVIDERS } from "../config.mjs";
+import { PACKAGE_VERSION, PROVIDERS } from "../config.mjs";
 import { createGatewayClient } from "./gateway.mjs";
 
 const messageSchema = z.object({
@@ -30,7 +30,7 @@ function toolError(error) {
 export function createMcpServer(options) {
   const gateway = createGatewayClient(options);
   const server = new McpServer(
-    { name: "passcontrol", version: "0.2.0" },
+    { name: "passcontrol", version: PACKAGE_VERSION },
     {
       instructions:
         "Use chat for governed model calls through PassControl. Every chat call is subject to the configured passport's scope, budget, and kill switches.",
