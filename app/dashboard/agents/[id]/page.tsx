@@ -1,0 +1,62 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import { AgentPassport } from "@/components/AgentPassport";
+import { VertiasLogo } from "@/components/VertiasLogo";
+import { needsMfaStepUp } from "@/lib/mfa";
+import { userClient } from "@/lib/supabase/server";
+import { requireAgentPassport } from "./passport-data";
+
+export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Agent Passport",
+  robots: { index: false, follow: false },
+};
+
+export default async function AgentPassportPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const db = await userClient();
+  const {
+    data: { user },
+  } = await db.auth.getUser();
+
+  if (!user) redirect("/login");
+  if (await needsMfaStepUp(db)) redirect("/login/verify");
+
+  const passport = await requireAgentPassport(db, user.id, id);
+
+  return (
+    <div className="min-h-screen bg-background text-foreground">
+      <header className="border-b border-border bg-background/90 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+          <Link
+            href="/dashboard"
+            className="inline-flex min-w-0 items-center gap-2 text-foreground no-underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+            aria-label="Return to Control Tower"
+          >
+            <VertiasLogo size={22} />
+            <span className="truncate text-sm font-bold">
+              Ver<span className="text-primary">tias</span>
+              <span className="font-normal text-muted-foreground"> / Control Tower</span>
+            </span>
+          </Link>
+          <Link
+            href="/dashboard"
+            className="shrink-0 rounded-lg border border-border bg-secondary px-3 py-2 text-xs font-semibold text-foreground no-underline transition-colors hover:bg-secondary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm"
+          >
+            ← Fleet
+          </Link>
+        </div>
+      </header>
+
+      <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
+        <AgentPassport passport={passport} />
+      </main>
+    </div>
+  );
+}

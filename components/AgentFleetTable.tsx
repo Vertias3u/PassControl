@@ -1,5 +1,6 @@
 "use client";
 import { Fragment, type FormEvent, useState, useTransition } from "react";
+import Link from "next/link";
 import { setAgentSuspended, updateAgentBudgets } from "@/app/dashboard/actions";
 import {
   formatCentsAsUsdDisplay,
@@ -64,6 +65,13 @@ export function AgentFleetTable({ agents }: { agents: Agent[] }) {
                 </td>
                 <td>
                   <div className="flex flex-wrap gap-2">
+                    <Link
+                      href={`/dashboard/agents/${a.id}`}
+                      className="inline-flex items-center rounded-lg border border-border px-3 py-2 text-sm font-semibold text-foreground no-underline transition-colors hover:bg-secondary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                      aria-label={`View passport for ${a.name}`}
+                    >
+                      View passport
+                    </Link>
                     <button className="ghost" onClick={() => setEditingId(editingId === a.id ? null : a.id)}>
                       Budgets
                     </button>

@@ -1,0 +1,24 @@
+.desktopCard {
+  display: block;
+}
+
+.mobileCard {
+  display: none;
+}
+
+.identityGrid {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+@media (max-width: 639px) {
+  .desktopCard {
+    display: none;
+  }
+
+  .mobileCard {
+    display: grid;
+  }
+}
