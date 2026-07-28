@@ -7,15 +7,45 @@
 // only the human-facing dashboard pages.
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import {
+  buildContentSecurityPolicy,
+  createCspNonce,
+  isPrerenderedPublicPath,
+} from "@/lib/csp";
 
 const PUBLIC_PATHS = ["/", "/login", "/signup", "/auth/callback"];
+const CSP_HEADER = "Content-Security-Policy";
 
 function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
 }
 
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({ request });
+  // One nonce per request. Setting the policy on the REQUEST headers as well as
+  // the response is what makes Next stamp the same nonce onto the scripts it
+  // renders; without it 'strict-dynamic' would block the framework's own
+  // bootstrap and the page would never hydrate.
+  const nonce = createCspNonce();
+  const csp = buildContentSecurityPolicy({
+    nonce,
+    prerendered: isPrerenderedPublicPath(request.nextUrl.pathname),
+  });
+
+  // Rebuilt per call rather than captured once: Supabase's setAll mutates
+  // request.cookies below, and the forwarded headers must reflect that.
+  const forwardedHeaders = () => {
+    const headers = new Headers(request.headers);
+    headers.set("x-nonce", nonce);
+    headers.set(CSP_HEADER, csp);
+    return headers;
+  };
+
+  const withCsp = (response: NextResponse): NextResponse => {
+    response.headers.set(CSP_HEADER, csp);
+    return response;
+  };
+
+  let supabaseResponse = NextResponse.next({ request: { headers: forwardedHeaders() } });
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -29,7 +59,7 @@ export async function middleware(request: NextRequest) {
           cookiesToSet: { name: string; value: string; options?: Record<string, unknown> }[]
         ) {
           cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
-          supabaseResponse = NextResponse.next({ request });
+          supabaseResponse = NextResponse.next({ request: { headers: forwardedHeaders() } });
           cookiesToSet.forEach(({ name, value, options }) =>
             supabaseResponse.cookies.set(name, value, options)
           );
@@ -47,13 +77,13 @@ export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
   if (!user && !isPublic(pathname)) {
-    return NextResponse.redirect(new URL("/login", request.url));
+    return withCsp(NextResponse.redirect(new URL("/login", request.url)));
   }
   if (user && (pathname === "/login" || pathname === "/signup")) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
+    return withCsp(NextResponse.redirect(new URL("/dashboard", request.url)));
   }
 
-  return supabaseResponse;
+  return withCsp(supabaseResponse);
 }
 
 export const config = {

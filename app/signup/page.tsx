@@ -20,3 +20,5 @@ export default function SignupPage() {
     </main>
   );
 }
+
+export const dynamic = "force-dynamic";
