@@ -71,4 +71,6 @@ unchanged.
 
 ## Reporting security issues
 
-Do **not** use public issues for vulnerabilities — see [SECURITY.md](./SECURITY.md).
+Do **not** use public issues for vulnerabilities. Report them through GitHub's
+[private vulnerability reporting](https://github.com/Vertias3u/PassControl/security/advisories/new)
+(Security tab → "Report a vulnerability") — details and scope in [SECURITY.md](./SECURITY.md).

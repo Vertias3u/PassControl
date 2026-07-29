@@ -5,8 +5,12 @@ vulnerability, thank you. Please report it responsibly.
 
 ## Reporting a vulnerability
 
-**Email security@vertias.eu** (or use GitHub's private "Report a vulnerability"
-advisory feature). **Do not open a public issue** for a security bug.
+Use GitHub's **[private vulnerability reporting](https://github.com/Vertias3u/PassControl/security/advisories/new)**
+(the "Report a vulnerability" button under the repository's Security tab). It's private
+between you and the maintainer, and it's the only reporting channel — there is no
+security@ mailbox, deliberately: an address nobody reads is worse than none.
+
+**Do not open a public issue** for a security bug.
 
 Please include: what you found, how to reproduce it, and the impact you think it has.
 We'll acknowledge within a few days and work with you on a fix and a coordinated

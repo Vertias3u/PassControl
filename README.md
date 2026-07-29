@@ -76,6 +76,9 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
   DeepSeek) — **or any agent** via the visa sidecar (OpenHands, Aider, Cline, Continue…)
 - 🔌 **Local MCP server** for Claude Desktop, Cursor, and Claude Code — governed `chat` and
   `list_models` tools with no provider key or passport secret in the client config
+- 🪪 **Agent passport page** — a per-agent identity document: a sigil derived from the
+  agent's public key, its visas (allowed scopes), the providers it has actually reached,
+  budget state, and a redacted PNG you can export
 - 🖥️ **Control Tower** dashboard (fleet, spend, budgets, audit, kill switch) + a developer
   control-plane API + TOTP MFA
 
@@ -308,8 +311,11 @@ your full provider surface).
 
 ## Security
 
-Security is the whole point, so please report issues privately rather than opening a public issue:
-**security@vertias.eu**. We'll acknowledge and work with you on a fix + disclosure timeline.
+Security is the whole point, so please report issues privately rather than opening a public
+issue — use GitHub's
+**[private vulnerability reporting](https://github.com/Vertias3u/PassControl/security/advisories/new)**
+(Security tab → "Report a vulnerability"). You'll get an acknowledgement and a fix +
+disclosure timeline worked out with you.
 
 - It's **BYOK** — your provider key lives encrypted in your own Supabase Vault, decrypted only
   in-flight and cached briefly (encrypted) in your own Redis. It is never logged or returned.
