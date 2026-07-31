@@ -22,3 +22,19 @@ paths = [
   # pass/fail gate without disabling real detection on shippable code.
   '''tests/.*\.test\.ts$''',
 ]
+regexes = [
+  # The seeded keyless-demo passport, committed ON PURPOSE and documented at
+  # bin/passcontrol.mjs:55-60 and lib/demo/identity.ts:5-6. It can only ever
+  # reach the env-gated `demo` provider, which synthesizes its response and
+  # never touches the Vault — it grants nothing in a real deployment. The
+  # values are duplicated across the app and the plain-ESM CLI by design, so
+  # one value-scoped entry covers both call sites.
+  #
+  # Matched by VALUE, deliberately not by path: allowlisting
+  # `bin/passcontrol.mjs` would disable secret detection across the CLI's whole
+  # 1600-line entry point, and this file is a real security gate. Every other
+  # line of both files stays under detection.
+  '''XqsVuXtmWiu6bKEmmqov2Q2TwkOVdzlZMWR-NWubSKo''',   # demo passport secret
+  '''kZCFp7d2x4VDruiulJ21gogYbczBDAGZa-OuwR3qgh8''',   # demo passport id
+  '''pc_demolocaltrydemolocaltrydemolocaltry0000''',   # demo control-plane key
+]

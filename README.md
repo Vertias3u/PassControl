@@ -167,8 +167,9 @@ export ANTHROPIC_API_KEY="passcontrol"   # ignored — the sidecar injects a liv
 ```
 
 The agent never holds a real key or a long-lived token. Presets ship for **openhands, aider, cline,
-continue, litellm** (`passcontrol env <preset>`), and **[Hermes Agent](docs/integrations/hermes.md)**
-works through the generic settings with no custom code. A single long streaming completion also works
+continue, litellm** and a catch-all **generic** (`passcontrol env <preset>`), and
+**[Hermes Agent](docs/integrations/hermes.md)** works through the generic settings with no custom
+code. A single long streaming completion also works
 directly — it's verified once at the start, so it finishes even if it runs past the visa TTL; only
 *multi-call* sessions need the sidecar's refresh. Raise `VISA_TTL_SECONDS` (300–900) to widen the
 window, but the sidecar is the real answer for long sessions.
@@ -188,7 +189,7 @@ The primary interface is `passcontrol <command>`. Highlights:
 | Make a governed model call | `passcontrol call "Summarize this"` |
 | Run the local MCP server | `passcontrol mcp` |
 | Run the auto-refreshing bridge for an agent | `passcontrol sidecar` |
-| Print agent/MCP settings | `passcontrol env openhands` · `passcontrol env claude-desktop` |
+| Print agent/MCP settings without writing | `passcontrol env openhands` · `passcontrol env claude-desktop` |
 | List / create agents | `passcontrol agent list` · `passcontrol agent create billing-bot` |
 | Suspend, resume, or revoke an agent | `passcontrol agent suspend <id>` |
 | Inspect spend, logs, and audit history | `passcontrol spend` · `passcontrol logs` · `passcontrol audit` |
@@ -199,7 +200,7 @@ The primary interface is `passcontrol <command>`. Highlights:
 | Point the CLI at a different checkout | `passcontrol setup --app-dir <path>` |
 | Forget the remembered checkout | `passcontrol unlink` |
 | Open the Control Tower | `passcontrol open` |
-| Preview/write an integration config | `passcontrol configure aider` · `passcontrol configure claude-desktop --write` |
+| Set up an integration (preview, or `--write`) | `passcontrol configure aider` · `passcontrol configure claude-desktop --write` |
 
 `passcontrol stop` brings down the **whole** local stack — dashboard, Supabase, and Redis.
 Use `--dashboard-only` to leave the services running. It never removes volumes, so your

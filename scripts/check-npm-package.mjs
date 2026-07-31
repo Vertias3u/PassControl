@@ -14,6 +14,7 @@ const allowed = new Set([
   "cli/mcp/integration.mjs",
   "cli/mcp/README.md",
   "cli/mcp/server.mjs",
+  "cli/presets.mjs",
   "cli/sidecar.mjs",
   "cli/visa-client.mjs",
 ]);

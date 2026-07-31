@@ -151,6 +151,22 @@ passcontrol env continue
 passcontrol env litellm
 ```
 
+### `configure` vs `env`
+
+Both accept the same integrations — `generic`, `openhands`, `litellm`, `aider`, `cline`,
+`continue`, `claude-desktop`, `cursor`, `claude-code` — and differ only in what they do
+with the result:
+
+- **`passcontrol configure <integration>`** is the one to reach for. It previews the config,
+  and `--write` creates it for the three integrations that own a config file
+  (`aider`, `claude-desktop`, `cursor`). For the others `--write` is refused with the reason,
+  rather than accepted and silently ignored.
+- **`passcontrol env <integration>`** only ever prints. It never writes and takes no
+  `--write`.
+
+For the MCP targets the two print different things: `configure` shows the client config file
+it would merge into, `env` prints just the `mcpServers` JSON.
+
 Continue-specific note: its OpenAI provider may default to `/responses` for o-series and
 gpt-5 models. PassControl intentionally does not proxy `/responses`; set
 `useResponsesApi: false` so Continue uses `/chat/completions`.

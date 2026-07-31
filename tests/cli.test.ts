@@ -91,7 +91,9 @@ describe("passcontrol CLI", () => {
     expect(stdout).toContain("passcontrol doctor [--deep] [--fix]");
     expect(stdout).toContain("passcontrol call \"hi\"");
     expect(stdout).toContain("passcontrol spend");
-    expect(stdout).toContain("passcontrol env [openhands]");
+    // Help lists every supported integration by name — see
+    // cli/__tests__/integration-presets.test.mjs, which asserts the full set.
+    expect(stdout).toContain("passcontrol env [integration]");
   }, 10000);
 
   it("shows status without network access", async () => {

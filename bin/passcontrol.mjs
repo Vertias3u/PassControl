@@ -37,6 +37,7 @@ import {
   mcpServersDocument,
   writeMcpClientConfig,
 } from "../cli/mcp/integration.mjs";
+import { integrationChoices, isIntegration, supportsWrite } from "../cli/presets.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
 
 const b64url = (bytes) =>
@@ -133,11 +134,12 @@ ${heading("Usage:")}
   ${cmd} call "hi"                mint a visa and call a model
   ${cmd} sidecar [--port 8788]    start the local agent bridge
   ${cmd} mcp                      start the local stdio MCP server
-  ${cmd} env [openhands]          print sidecar settings for agents
-  ${cmd} env claude-desktop|cursor|claude-code
-                                 print secret-free MCP client settings
   ${cmd} configure <integration> [--write] [--force]
-                                 preview or create a supported integration config
+                                 set up an integration: previews the config, and
+                                 --write creates it for aider|claude-desktop|cursor
+  ${cmd} env [integration]        print the same settings without writing anything
+                                 (defaults to generic)
+                                 <integration>: ${integrationChoices()}
   ${cmd} agent list               list agents
   ${cmd} agent create <name>      create an agent passport
   ${cmd} agent suspend <id>       suspend an agent
@@ -1412,9 +1414,7 @@ function printAgentPreset(name = "generic", opts = {}) {
       ]);
       break;
     default:
-      throw new Error(
-        "Usage: passcontrol env [generic|openhands|litellm|aider|cline|continue|claude-desktop|cursor|claude-code]"
-      );
+      throw new Error(`Usage: passcontrol env <${integrationChoices()}>`);
   }
 }
 
@@ -1433,6 +1433,14 @@ function aiderConfig(opts = {}) {
 function configureMcpClient(integration, opts = {}) {
   requireGlobalMcpPassport();
   if (integration === "claude-code") {
+    // Claude Code owns its MCP registry through its own CLI, so there is no
+    // config file for us to merge into. `--write` used to be accepted here and
+    // silently do nothing — refuse it and hand back the command that works.
+    if (opts.write) {
+      throw new Error(
+        `Claude Code manages MCP servers through its own CLI, so there is no file to write. Run:\n  ${CLAUDE_CODE_ADD_COMMAND}`
+      );
+    }
     console.log("Claude Code manages MCP servers through its CLI. Run:");
     console.log(CLAUDE_CODE_ADD_COMMAND);
     return;
@@ -1460,14 +1468,19 @@ async function configureCommand(rest, opts = {}) {
   const integration = String(rest[0] ?? "").toLowerCase();
   if (!integration) {
     throw new Error(
-      "Usage: passcontrol configure <aider|cline|continue|openhands|claude-desktop|cursor|claude-code> [--write] [--force]"
+      `Usage: passcontrol configure <${integrationChoices()}> [--write] [--force]`
+    );
+  }
+  if (!isIntegration(integration)) {
+    throw new Error(
+      `Unknown integration "${integration}". Use one of: ${integrationChoices()}.`
     );
   }
   if (isMcpIntegration(integration)) {
     configureMcpClient(integration, opts);
     return;
   }
-  if (integration !== "aider") {
+  if (!supportsWrite(integration)) {
     if (opts.write) throw new Error(`${integration} configuration is UI- or project-schema-specific; no file was written. Use the preview below.`);
     printAgentPreset(integration, opts);
     step("This integration is configured manually from the settings shown above. Aider is the current file-writing integration.");
