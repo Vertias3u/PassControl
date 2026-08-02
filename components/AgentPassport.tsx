@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import type { AgentPassportView } from "@/app/dashboard/agents/[id]/passport-data";
+import type { LogEntry } from "@/lib/log";
 import { createPassportSigil, passportIdForDisplay } from "@/lib/passport-art";
 import styles from "./AgentPassport.module.css";
 
@@ -92,17 +93,27 @@ function verdictClasses(status: string): string {
   return "border-border bg-secondary text-muted-foreground";
 }
 
+// Keyed by LogEntry["status"] rather than `string`, so a new audit status fails
+// to compile here instead of rendering as "Unknown". This map was a plain
+// Record<string, string> and had already missed blocked_policy — the third
+// place the same drift landed. `import type` is erased, so no server code
+// reaches the client.
+const VERDICT_LABELS: Record<LogEntry["status"], string> = {
+  ok: "Allowed",
+  blocked_budget: "Budget exceeded",
+  blocked_endpoint: "Endpoint blocked",
+  blocked_killed: "Kill switch",
+  blocked_suspended: "Agent suspended",
+  blocked_scope: "Scope violation",
+  blocked_policy: "Policy rule",
+  upstream_error: "Provider error",
+};
+
 function verdictLabel(status: string): string {
-  const labels: Record<string, string> = {
-    ok: "Allowed",
-    blocked_budget: "Budget exceeded",
-    blocked_endpoint: "Endpoint blocked",
-    blocked_killed: "Kill switch",
-    blocked_suspended: "Agent suspended",
-    blocked_scope: "Scope violation",
-    upstream_error: "Provider error",
-  };
-  return labels[status] ?? `Unknown · ${cleanedText(status, 28) || "unlabelled"}`;
+  return (
+    VERDICT_LABELS[status as LogEntry["status"]] ??
+    `Unknown · ${cleanedText(status, 28) || "unlabelled"}`
+  );
 }
 
 function slug(value: string): string {

@@ -211,6 +211,8 @@ export default function LandingPage() {
             <a href="#how-it-works">How it works</a>
             <a href="#live-demo">Live demo</a>
             <a href="#capabilities">Capabilities</a>
+            {/* The only surface here a stranger can use without an account. */}
+            <a href="/verify">Verify a passport</a>
             {showLogin && (
               <a className="pc-nav-login" href="/login">
                 Log in

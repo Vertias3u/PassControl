@@ -7,6 +7,8 @@ const {
   reconcileBudgetMock,
   getCachedKeyMock,
   setCachedKeyMock,
+  getCachedAgentPolicyMock,
+  setCachedAgentPolicyMock,
   readKillStateMock,
   isSuspendedMock,
   writeLogMock,
@@ -21,6 +23,8 @@ const {
     reconcileBudgetMock: vi.fn(),
     getCachedKeyMock: vi.fn(),
     setCachedKeyMock: vi.fn(),
+    getCachedAgentPolicyMock: vi.fn(),
+    setCachedAgentPolicyMock: vi.fn(),
     readKillStateMock: vi.fn(),
     isSuspendedMock: vi.fn(),
     writeLogMock: vi.fn(),
@@ -48,6 +52,8 @@ vi.mock("@/lib/state/redis", () => ({
   reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
+  getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
+  setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
   seedSpent: vi.fn(),
 }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
@@ -124,6 +130,8 @@ beforeEach(() => {
   reconcileBudgetMock.mockReset();
   getCachedKeyMock.mockReset();
   setCachedKeyMock.mockReset();
+  getCachedAgentPolicyMock.mockReset();
+  setCachedAgentPolicyMock.mockReset();
   readKillStateMock.mockReset();
   isSuspendedMock.mockReset();
   writeLogMock.mockReset();
@@ -138,6 +146,8 @@ beforeEach(() => {
   reconcileBudgetMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
   setCachedKeyMock.mockResolvedValue(undefined);
+  getCachedAgentPolicyMock.mockResolvedValue("{}");
+  setCachedAgentPolicyMock.mockResolvedValue(undefined);
   readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   writeLogMock.mockResolvedValue(undefined);

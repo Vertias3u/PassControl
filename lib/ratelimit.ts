@@ -39,3 +39,25 @@ export async function rateLimit(
     return { success: true, remaining: limit };
   }
 }
+
+/**
+ * Project whether the next call would pass this fixed window without consuming
+ * it. Decision traces use this for an agent's hourly policy counter; the trace
+ * endpoint has its own independently mutating limiter.
+ */
+export async function peekRateLimit(
+  key: string,
+  limit: number
+): Promise<RateLimitResult & { unreadable?: boolean }> {
+  try {
+    const count = Number((await redis().get<number>(`ratelimit:${key}`)) ?? 0);
+    const next = Math.max(0, count) + 1;
+    return {
+      success: next <= limit,
+      remaining: Math.max(0, limit - next),
+    };
+  } catch {
+    logFailOpen("ratelimit");
+    return { success: false, remaining: limit, unreadable: true };
+  }
+}

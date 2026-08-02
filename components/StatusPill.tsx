@@ -22,6 +22,9 @@ const CONFIG: Record<StatusType, { label: string; Icon: typeof CheckCircle2; ton
   suspended: { label: "Suspended", Icon: AlertCircle, tone: "warning" },
   blocked_budget: { label: "Budget exceeded", Icon: AlertCircle, tone: "warning" },
   blocked_scope: { label: "Scope violation", Icon: AlertCircle, tone: "warning" },
+  // Distinct from a scope violation: the visa's scope allowed this call and a
+  // policy rule on the agent refused it anyway.
+  blocked_policy: { label: "Policy rule", Icon: AlertCircle, tone: "warning" },
   upstream_error: { label: "Provider error", Icon: HelpCircle, tone: "warning" },
   blocked_endpoint: { label: "Endpoint blocked", Icon: AlertCircle, tone: "warning" },
   revoked: { label: "Revoked", Icon: XCircle, tone: "danger" },

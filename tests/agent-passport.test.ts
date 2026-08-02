@@ -29,6 +29,18 @@ const agentA: AgentPassportRow & { user_id: string } = {
     { provider: "openai", models: ["gpt-4.1*"] },
     { provider: "anthropic", models: ["claude-sonnet-4*"] },
   ],
+  policy: {
+    deny: [{ provider: "openai", models: ["gpt-4*"] }],
+    windows: [
+      {
+        days: ["mon", "tue", "wed", "thu", "fri"],
+        start: "09:00",
+        end: "18:00",
+        tz: "UTC",
+      },
+    ],
+    max_requests_per_hour: 100,
+  },
   created_at: "2026-07-20T08:00:00.000Z",
   last_seen_at: "2026-07-28T10:30:00.000Z",
 };
@@ -273,6 +285,39 @@ describe("Agent Passport provider stamps", () => {
 });
 
 describe("Agent Passport view model", () => {
+  it("surfaces validated policy rules read-only", () => {
+    const view = buildAgentPassportView(agentA, []);
+
+    expect(view.policy).toEqual({
+      configured: true,
+      valid: true,
+      deny: [{ provider: "openai", models: ["gpt-4*"] }],
+      windows: [
+        {
+          days: ["mon", "tue", "wed", "thu", "fri"],
+          start: "09:00",
+          end: "18:00",
+          tz: "UTC",
+        },
+      ],
+      maxRequestsPerHour: 100,
+    });
+
+    expect(buildAgentPassportView({ ...agentA, policy: null }, []).policy).toMatchObject({
+      configured: false,
+      valid: true,
+    });
+    expect(
+      buildAgentPassportView({ ...agentA, policy: { max_requests_per_hour: 0 } }, []).policy
+    ).toEqual({
+      configured: true,
+      valid: false,
+      deny: [],
+      windows: [],
+      maxRequestsPerHour: null,
+    });
+  });
+
   it("aggregates successful provider entries and preserves every recent verdict", () => {
     const view = buildAgentPassportView(agentA, logs.filter((log) => log.user_id === TENANT_A));
 

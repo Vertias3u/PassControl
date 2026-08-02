@@ -3,14 +3,14 @@
 // /v1/:provider/*  (OpenAI/Anthropic-shaped SDK traffic, Authorization: Bearer <visa>)
 //
 // Pipeline (target <15ms overhead before upstream on the cache-hit path):
-//   1 verify visa  2 kill switch  3 scope  4 budget reserve (atomic)
-//   5 resolve key (encrypted cache | Vault RPC)  6 inject + forward
-//   7 single pass-through stream tee  8 waitUntil reconcile + audit log
+//   1 verify visa  2 kill switch  3 scope + endpoint  4 current policy
+//   5 budget reserve (atomic)  6 resolve key (encrypted cache | Vault RPC)
+//   7 inject + forward  8 stream tee  9 waitUntil reconcile + audit log
 export const runtime = "edge";
 
 import { waitUntil } from "@vercel/functions";
 import { verifyVisa, extractVisaToken } from "@/lib/auth/visa";
-import { readKillState, blockedReason } from "@/lib/state/killswitch";
+import { readKillState } from "@/lib/state/killswitch";
 import {
   isSuspended,
   reserveBudget,
@@ -19,15 +19,23 @@ import {
   setCachedKey,
   seedSpent,
 } from "@/lib/state/redis";
+import { readCurrentAgentPolicy } from "@/lib/state/policy";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
-import { canonicalEndpointPath, isModelListing, scopeAllows } from "@/lib/scope";
+import { canonicalEndpointPath } from "@/lib/scope";
+import {
+  POLICY_UNREADABLE,
+  evaluateGate,
+  type GateInput,
+  type GatePolicyInput,
+  type GateRateLimitInput,
+} from "@/lib/gate";
 import { costMicrocents, estimateTokenUsage, MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { createUsageTransform, usageFromJson, type Usage } from "@/lib/usage/parseStream";
 import { writeLog, mirrorSpend } from "@/lib/log";
 import { isProvider, upstreamBaseUrl, authHeaders, usesOpenAiUsageShape, type ProviderId } from "@/lib/providers";
 import { rateLimit } from "@/lib/ratelimit";
-import { captureError, captureSecurityEvent } from "@/lib/observability";
+import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 
 // Per-agent request-rate cap (independent of the token budget): bounds raw call
 // volume so a runaway/abusive agent can't flood the gateway or upstream. Generous
@@ -36,6 +44,7 @@ const PROXY_RATE_LIMIT = Number(process.env.PROXY_RATE_LIMIT ?? "600");
 const PROXY_RATE_WINDOW_S = Number(process.env.PROXY_RATE_WINDOW_S ?? "60");
 
 const KEY_CACHE_TTL_S = 60;
+const POLICY_RATE_WINDOW_S = 60 * 60;
 const RESERVE_MARKER_TTL_S = 960; // > max visa TTL (900s) + buffer
 // Generous cap for an LLM request body (large prompts are legitimate) while still
 // bounding memory/CPU against an oversized payload DoS.
@@ -50,6 +59,77 @@ function err(status: number, code: string) {
 
 interface Ctx {
   params: Promise<{ provider: string; path: string[] }>;
+}
+
+type ServiceDatabase = ReturnType<typeof serviceClient>;
+type GateBaseInput = Omit<
+  GateInput,
+  "policy" | "policyFailClosed" | "policyRateLimit" | "budget"
+>;
+
+const BLOCKED_POLICY_STATUS = "blocked_policy" satisfies Parameters<typeof writeLog>[0]["status"];
+
+async function evaluateCurrentPolicyGate(
+  db: ServiceDatabase,
+  userId: string,
+  agentId: string,
+  base: GateBaseInput
+): Promise<{
+  gate: ReturnType<typeof evaluateGate>;
+  policy: GatePolicyInput;
+  policyRateLimit?: GateRateLimitInput;
+}> {
+  const currentPolicy = await readCurrentAgentPolicy(db, userId, agentId);
+  const policy: GatePolicyInput =
+    currentPolicy === POLICY_UNREADABLE
+      ? { kind: POLICY_UNREADABLE }
+      : { kind: "value", value: currentPolicy };
+
+  if (currentPolicy === POLICY_UNREADABLE) {
+    logFailOpen("policy_read");
+  }
+
+  let gate = evaluateGate({
+    ...base,
+    policy,
+    policyFailClosed: process.env.POLICY_FAIL_CLOSED === "true",
+  });
+  let policyRateLimit: GateRateLimitInput | undefined;
+  if (!gate.deniedBy && gate.policyRateLimitRequired !== null) {
+    policyRateLimit = await rateLimit(
+      `policy-hour:${userId}:${agentId}`,
+      gate.policyRateLimitRequired,
+      POLICY_RATE_WINDOW_S
+    );
+    gate = evaluateGate({
+      ...base,
+      policy,
+      policyFailClosed: process.env.POLICY_FAIL_CLOSED === "true",
+      policyRateLimit,
+    });
+  }
+
+  return { gate, policy, ...(policyRateLimit ? { policyRateLimit } : {}) };
+}
+
+function policyBlockDetails(gate: ReturnType<typeof evaluateGate>): {
+  reason: "deny" | "window" | "malformed" | "rate_limit" | "unreadable";
+  rule: string;
+  status: 403 | 429;
+} {
+  const step = gate.steps.find((candidate) => candidate.name === "policy");
+  const rule = step?.rule ?? "policy:malformed";
+  const reason =
+    rule === "policy:unreadable"
+      ? "unreadable"
+      : rule === "max_requests_per_hour"
+        ? "rate_limit"
+        : rule === "policy:malformed"
+          ? "malformed"
+          : rule === "windows:no_match"
+            ? "window"
+            : "deny";
+  return { reason, rule, status: step?.httpStatus === 429 ? 429 : 403 };
 }
 
 export async function POST(req: Request, ctx: Ctx) {
@@ -85,7 +165,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
 
   // Keyless demo provider (local "try it" stack + CI). Env-gated OFF by default,
   // so production has ZERO extra surface. It runs the full real governance
-  // pipeline (visa → kill → scope → budget); only the Vault-key resolution +
+  // pipeline (visa → kill → scope → policy → budget); only the Vault-key resolution +
   // upstream forward is replaced with a synthesized response — it never reaches
   // get_provider_key and never forwards anywhere.
   if (providerRaw === "demo") {
@@ -122,10 +202,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     return err(401, "invalid_visa");
   }
 
-  // Identity, ownership, and budget all travel in the (short-lived) visa, so the
-  // hot path needs no per-request `agents` SELECT. Status changes propagate
-  // within the visa TTL; instant revocation goes through the Redis suspend set
-  // and the Redis-backed kill switches checked below.
+  // Identity, ownership, and budget travel in the (short-lived) visa. Policy is
+  // intentionally current state and adds an `agents` SELECT only on its 60-second
+  // cache miss. Instant revocation remains Redis-backed below.
   const agentId = claims.agid;
   const passportId = claims.sub;
   const jti = claims.jti;
@@ -157,7 +236,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     });
   }
 
-  const db = serviceClient(); // used only on a key-cache miss (get_provider_key RPC)
+  // Used on a policy-cache miss and on a provider-key-cache miss.
+  const db = serviceClient();
 
   const logBlocked = (status: Parameters<typeof writeLog>[0]["status"], model?: string) =>
     waitUntil(
@@ -173,7 +253,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       })
     );
 
-  const captureBlocked = (code: string, status: number) =>
+  const captureBlocked = (code: string, status: number, controlScope?: string) =>
     waitUntil(
       captureSecurityEvent(`proxy.${code}`, {
         route: "api.proxy",
@@ -183,13 +263,23 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         agentId,
         jti,
         code,
+        controlScope,
       })
     );
 
   // ── 2. Kill switch (Redis: platform + this tenant + denylist; Redis per-agent suspend) ──
   const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
-  const blocked = blockedReason(kill, agentId, suspended);
-  if (blocked) {
+  const revocationGate = evaluateGate({
+    agentId,
+    killState: kill,
+    suspended,
+    provider,
+    method: req.method,
+    path,
+    model: "",
+  });
+  if (revocationGate.deniedBy === "kill" || revocationGate.deniedBy === "suspend") {
+    const blocked = revocationGate.deniedBy === "kill" ? "blocked_killed" : "blocked_suspended";
     // Log and alert on the control that actually fired; answer the wire with the
     // single opaque code so a caller still cannot probe which one it tripped.
     logBlocked(blocked);
@@ -223,16 +313,46 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // ── 3. Scope + endpoint allowlist ────────────────────────────────────────────
   // Per-model scope applies to model-bound calls; the read-only model-listing
   // endpoint carries no model, so it is gated by the endpoint allowlist instead.
-  if (!isModelListing(path) && !scopeAllows(claims.scope, provider, model)) {
+  const gateBase: GateBaseInput = {
+    agentId,
+    killState: kill,
+    suspended,
+    scopes: claims.scope,
+    provider,
+    method: req.method,
+    path,
+    model,
+    now: new Date(),
+  };
+  const prePolicyGate = evaluateGate(gateBase);
+  if (prePolicyGate.deniedBy === "scope") {
     logBlocked("blocked_scope", model);
     captureBlocked("blocked_scope", 403);
     return err(403, "blocked_scope");
   }
-  const upstreamPath = canonicalEndpointPath(provider, req.method, path);
-  if (!upstreamPath) {
+  if (prePolicyGate.deniedBy === "endpoint") {
     logBlocked("blocked_endpoint", model);
     captureBlocked("blocked_endpoint", 403);
     return err(403, "blocked_endpoint");
+  }
+  const upstreamPath = canonicalEndpointPath(provider, req.method, path);
+  if (!upstreamPath) {
+    // Defensive invariant: the shared evaluator and canonical path resolver use
+    // the same allowlist and must never disagree.
+    logBlocked("blocked_endpoint", model);
+    captureBlocked("blocked_endpoint", 403);
+    return err(403, "blocked_endpoint");
+  }
+
+  // ── 4. Current per-agent policy ────────────────────────────────────────────
+  // Policy is deliberately not a visa claim: an owner's change takes effect on
+  // the next cache refresh rather than waiting for the visa TTL.
+  const currentPolicyGate = await evaluateCurrentPolicyGate(db, userId, agentId, gateBase);
+  if (currentPolicyGate.gate.deniedBy === "policy") {
+    const policy = policyBlockDetails(currentPolicyGate.gate);
+    logBlocked(BLOCKED_POLICY_STATUS, model);
+    captureBlocked(`blocked_policy_${policy.reason}`, policy.status, policy.rule);
+    return err(policy.status, "blocked_policy");
   }
 
   // S5: ensure OpenAI-compatible streams report usage.
@@ -241,7 +361,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   }
   const forwardBody = JSON.stringify(bodyObj);
 
-  // ── 4. Budget reserve (atomic) ───────────────────────────────────────────────
+  // ── 5. Budget reserve (atomic) ───────────────────────────────────────────────
   const estimatedUsage = estimateTokenUsage(bodyObj);
   const estimate = estimatedUsage.totalTokens;
   const estimateMicrocents = costMicrocents(
@@ -262,7 +382,24 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     capMicrocents,
     markerTtlSeconds: RESERVE_MARKER_TTL_S,
   });
-  if (!reserve.ok) {
+  const finalGate = evaluateGate({
+    ...gateBase,
+    policy: currentPolicyGate.policy,
+    policyFailClosed: process.env.POLICY_FAIL_CLOSED === "true",
+    ...(currentPolicyGate.policyRateLimit
+      ? { policyRateLimit: currentPolicyGate.policyRateLimit }
+      : {}),
+    budget: {
+      ok: reserve.ok,
+      reason: reserve.reason,
+      estimateTokens: estimate,
+      estimateMicrocents,
+      reservedTokens: reserve.reserved,
+      reservedMicrocents: reserve.reservedMicrocents,
+      source: "atomic_reserve",
+    },
+  });
+  if (finalGate.deniedBy === "budget") {
     logBlocked("blocked_budget", model);
     captureBlocked("blocked_budget", 402);
     return err(402, "blocked_budget");
@@ -300,7 +437,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     return Promise.all(tasks);
   };
 
-  // ── 5. Resolve provider key (encrypted cache, else Vault RPC) ────────────────
+  // ── 6. Resolve provider key (encrypted cache, else Vault RPC) ────────────────
   let providerKey: string | null = null;
   const cached = await getCachedKey(agentId, provider);
   if (cached) providerKey = await open(cached);
@@ -322,7 +459,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     return err(409, "no_provider_key");
   }
 
-  // ── 6. Inject + forward ──────────────────────────────────────────────────────
+  // ── 7. Inject + forward ──────────────────────────────────────────────────────
   const targetUrl = `${upstreamBaseUrl(provider)}/${upstreamPath.join("/")}${new URL(req.url).search}`;
   const fwdHeaders = new Headers();
   fwdHeaders.set("content-type", "application/json");
@@ -371,7 +508,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     });
   }
 
-  // ── 7/8. Stream tee + reconcile, OR buffered JSON path ───────────────────────
+  // ── 8/9. Stream tee + reconcile, OR buffered JSON path ───────────────────────
   if (isStream && upstream.body) {
     const { stream, usage } = createUsageTransform(provider);
     // The monitored transform resolves usage exactly once on normal close or client cancel.
@@ -438,10 +575,6 @@ function demoText(body: any): string {
 }
 
 async function handleDemo(req: Request, path: string[], started: number): Promise<Response> {
-  // Demo serves only the chat-completions shape (what `passcontrol try` uses).
-  const isChat =
-    req.method === "POST" && path.length === 2 && path[0] === "chat" && path[1] === "completions";
-
   // 1. Verify visa — the same Ed25519/HS256 crypto as the real path.
   const visaToken = extractVisaToken(req.headers);
   if (!visaToken) return err(401, "missing_visa");
@@ -473,6 +606,20 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       })
     );
 
+  const capturePolicyBlocked = (reason: string, status: number, rule: string) =>
+    waitUntil(
+      captureSecurityEvent(`proxy.blocked_policy_${reason}`, {
+        route: "api.proxy",
+        method: req.method,
+        status,
+        provider: "demo",
+        agentId,
+        jti,
+        code: `blocked_policy_${reason}`,
+        controlScope: rule,
+      })
+    );
+
   // 2. Per-agent request-rate limit.
   const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
   if (!rl.success) {
@@ -484,8 +631,17 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
 
   // 3. Kill switch (platform + tenant + denylist; per-agent suspend).
   const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
-  const blocked = blockedReason(kill, agentId, suspended);
-  if (blocked) {
+  const revocationGate = evaluateGate({
+    agentId,
+    killState: kill,
+    suspended,
+    provider: "demo",
+    method: req.method,
+    path,
+    model: "",
+  });
+  if (revocationGate.deniedBy === "kill" || revocationGate.deniedBy === "suspend") {
+    const blocked = revocationGate.deniedBy === "kill" ? "blocked_killed" : "blocked_suspended";
     // Attribute in the log; keep the wire response opaque (see the other handler).
     logBlocked(blocked);
     return err(403, "blocked_suspended");
@@ -509,16 +665,38 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   const wantsStream = bodyObj?.stream === true;
 
   // 4. Scope (per-model) + endpoint allowlist.
-  if (!scopeAllows(claims.scope, "demo", model)) {
+  const gateBase: GateBaseInput = {
+    agentId,
+    killState: kill,
+    suspended,
+    scopes: claims.scope,
+    provider: "demo",
+    method: req.method,
+    path,
+    model,
+    now: new Date(),
+  };
+  const prePolicyGate = evaluateGate(gateBase);
+  if (prePolicyGate.deniedBy === "scope") {
     logBlocked("blocked_scope", model);
     return err(403, "blocked_scope");
   }
-  if (!isChat) {
+  if (prePolicyGate.deniedBy === "endpoint") {
     logBlocked("blocked_endpoint", model);
     return err(403, "blocked_endpoint");
   }
 
-  // 5. Budget reserve (atomic) — real, so the budget/kill demos are honest.
+  // 5. Current policy — real, because the demo promises the governance path.
+  const db = serviceClient();
+  const currentPolicyGate = await evaluateCurrentPolicyGate(db, userId, agentId, gateBase);
+  if (currentPolicyGate.gate.deniedBy === "policy") {
+    const policy = policyBlockDetails(currentPolicyGate.gate);
+    logBlocked(BLOCKED_POLICY_STATUS, model);
+    capturePolicyBlocked(policy.reason, policy.status, policy.rule);
+    return err(policy.status, "blocked_policy");
+  }
+
+  // 6. Budget reserve (atomic) — real, so the budget/kill demos are honest.
   const estimatedUsage = estimateTokenUsage(bodyObj);
   const estimate = estimatedUsage.totalTokens;
   const estimateMicrocents = estimate * DEMO_MICROCENTS_PER_TOKEN;
@@ -534,12 +712,29 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     capMicrocents,
     markerTtlSeconds: RESERVE_MARKER_TTL_S,
   });
-  if (!reserve.ok) {
+  const finalGate = evaluateGate({
+    ...gateBase,
+    policy: currentPolicyGate.policy,
+    policyFailClosed: process.env.POLICY_FAIL_CLOSED === "true",
+    ...(currentPolicyGate.policyRateLimit
+      ? { policyRateLimit: currentPolicyGate.policyRateLimit }
+      : {}),
+    budget: {
+      ok: reserve.ok,
+      reason: reserve.reason,
+      estimateTokens: estimate,
+      estimateMicrocents,
+      reservedTokens: reserve.reserved,
+      reservedMicrocents: reserve.reservedMicrocents,
+      source: "atomic_reserve",
+    },
+  });
+  if (finalGate.deniedBy === "budget") {
     logBlocked("blocked_budget", model);
     return err(402, "blocked_budget");
   }
 
-  // 6. Synthesize the response in place of Vault-key resolution + upstream forward.
+  // 7. Synthesize the response in place of Vault-key resolution + upstream forward.
   const text = demoText(bodyObj);
   const outputTokens = Math.max(1, Math.ceil(text.length / 4));
   const usage = { inputTokens: estimatedUsage.inputTokens, outputTokens };

@@ -6,8 +6,38 @@ import { MCP_INTEGRATIONS } from "./mcp/integration.mjs";
 // `configure` usage advertised seven presets while `printAgentPreset` handled
 // nine, so `passcontrol configure litellm` worked but was documented as invalid.
 
+/**
+ * Clients configured by typing a base URL into a settings form rather than by
+ * exporting environment variables. They all take the same three fields, so the
+ * value here is the display name — the preset body is identical for every one.
+ *
+ * These are the desktop chat apps people already keep their raw provider key
+ * in. Pointing one at the sidecar means the app holds a passport-minted visa
+ * instead, and never sees the key.
+ */
+export const GUI_PRESET_LABELS = {
+  cline: "Cline",
+  continue: "Continue",
+  chatbox: "Chatbox",
+  jan: "Jan",
+  msty: "Msty",
+  "cherry-studio": "Cherry Studio",
+  "open-webui": "Open WebUI",
+  librechat: "LibreChat",
+};
+
+export function isGuiPreset(name) {
+  return Object.hasOwn(GUI_PRESET_LABELS, String(name ?? "").toLowerCase());
+}
+
 /** Presets that print settings pointing an agent at the local sidecar bridge. */
-export const SIDECAR_PRESETS = ["generic", "openhands", "litellm", "aider", "cline", "continue"];
+export const SIDECAR_PRESETS = [
+  "generic",
+  "openhands",
+  "litellm",
+  "aider",
+  ...Object.keys(GUI_PRESET_LABELS),
+];
 
 /** MCP client targets. Shares the set the MCP config writer dispatches on. */
 export const MCP_PRESETS = [...MCP_INTEGRATIONS];

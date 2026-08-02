@@ -24,6 +24,7 @@ export interface LogEntry {
     | "blocked_killed"
     | "blocked_suspended"
     | "blocked_scope"
+    | "blocked_policy"
     | "upstream_error";
   latencyMs?: number;
 }

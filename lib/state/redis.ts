@@ -21,8 +21,10 @@ const k = {
   reserveMarker: (agid: string, reserveId: string) => `reserve:${agid}:${reserveId}`,
   reserveCostMarker: (agid: string, reserveId: string) => `reserve_cost:${agid}:${reserveId}`,
   key: (agid: string, provider: string) => `key:${agid}:${provider}`,
+  policy: (uid: string, agid: string) => `policy:${uid}:${agid}`,
   suspended: (agid: string) => `suspended:${agid}`,
   lastSeen: (agid: string) => `lastseen:${agid}`,
+  keyImport: (uid: string, id: string) => `keyimport:${uid}:${id}`,
 };
 
 // ── Replay nonces (Flow B) ────────────────────────────────────────────────────
@@ -71,6 +73,38 @@ export interface ReserveResult {
   reserved?: number;
   reservedMicrocents?: number;
   reason?: "tokens" | "cost";
+}
+
+export interface BudgetSnapshot {
+  reservedTokens: number;
+  spentTokens: number | null;
+  reservedMicrocents: number;
+  spentMicrocents: number | null;
+}
+
+/**
+ * Read the four counters used by the atomic reserve without changing them.
+ * Null spent values matter: the live route would seed those dimensions from
+ * its database snapshot before reserving, while an existing Redis value wins.
+ */
+export async function readBudgetSnapshot(agentId: string): Promise<BudgetSnapshot> {
+  const values = await redis().mget<[number | null, number | null, number | null, number | null]>(
+    k.reserved(agentId),
+    k.spent(agentId),
+    k.reservedCost(agentId),
+    k.spentCost(agentId)
+  );
+  const numberOr = (value: unknown, fallback: number | null): number | null => {
+    if (value === null || value === undefined) return fallback;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  return {
+    reservedTokens: numberOr(values[0], 0) ?? 0,
+    spentTokens: numberOr(values[1], null),
+    reservedMicrocents: numberOr(values[2], 0) ?? 0,
+    spentMicrocents: numberOr(values[3], null),
+  };
 }
 
 export async function reserveBudget(params: {
@@ -176,6 +210,26 @@ export async function setCachedKey(
   await redis().set(k.key(agentId, provider), sealed, { ex: ttlSeconds });
 }
 
+// ── Agent-policy cache ───────────────────────────────────────────────────────
+// Policy is not secret material, so cache its serialized JSON directly. Include
+// both tenant and agent identifiers even though agent UUIDs are globally unique:
+// tenant isolation must be visible in every hot-path key, not merely assumed.
+export async function getCachedAgentPolicy(
+  userId: string,
+  agentId: string
+): Promise<string | null> {
+  return redis().get<string>(k.policy(userId, agentId));
+}
+
+export async function setCachedAgentPolicy(
+  userId: string,
+  agentId: string,
+  serializedPolicy: string,
+  ttlSeconds = 60
+): Promise<void> {
+  await redis().set(k.policy(userId, agentId), serializedPolicy, { ex: ttlSeconds });
+}
+
 export async function purgeAgentCaches(agentId: string, providers: string[]): Promise<void> {
   const keys = providers.map((p) => k.key(agentId, p));
   if (keys.length) await redis().del(...keys);
@@ -205,4 +259,29 @@ export async function unsuspendAgent(agentId: string): Promise<void> {
 // ── last_seen (write-coalesced; flushed to Postgres by the reconcile cron) ────
 export async function touchLastSeen(agentId: string): Promise<void> {
   await redis().set(k.lastSeen(agentId), Date.now());
+}
+
+// ── Key-import handoff (dashboard on-ramp) ───────────────────────────────────
+// Holds an ALREADY-SEALED provider key between the probe step and the commit
+// step. The browser gets only the opaque id, never the material — so the raw
+// key, in any form, never leaves the server. Tenant is baked into the key so
+// one tenant can never redeem another's handoff even with a guessed id.
+export async function stashKeyImport(
+  userId: string,
+  id: string,
+  sealedKey: string,
+  ttlSeconds: number
+): Promise<void> {
+  await redis().set(k.keyImport(userId, id), sealedKey, { ex: ttlSeconds });
+}
+
+/**
+ * Redeem a handoff EXACTLY once. The delete is unconditional and happens even
+ * on a miss, so a captured id cannot be replayed for the rest of its TTL.
+ */
+export async function takeKeyImport(userId: string, id: string): Promise<string | null> {
+  const key = k.keyImport(userId, id);
+  const sealed = await redis().get<string>(key);
+  await redis().del(key);
+  return sealed ?? null;
 }

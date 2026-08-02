@@ -37,7 +37,13 @@ import {
   mcpServersDocument,
   writeMcpClientConfig,
 } from "../cli/mcp/integration.mjs";
-import { integrationChoices, isIntegration, supportsWrite } from "../cli/presets.mjs";
+import {
+  GUI_PRESET_LABELS,
+  integrationChoices,
+  isGuiPreset,
+  isIntegration,
+  supportsWrite,
+} from "../cli/presets.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
 
 const b64url = (bytes) =>
@@ -1373,6 +1379,18 @@ function printAgentPreset(name = "generic", opts = {}) {
   const sidecarStart = opts.port ? cliCommand(`sidecar --port ${opts.port}`) : cliCommand("sidecar");
 
   console.log(`# Start the bridge first: ${sidecarStart}`);
+
+  // Desktop / GUI clients: there is nothing to export, you type these into a
+  // settings form. The API-key field is required by the UI but ignored by the
+  // sidecar — that is the point. It is where your real provider key used to go.
+  if (isGuiPreset(preset)) {
+    console.log(`# ${GUI_PRESET_LABELS[preset]} settings:`);
+    console.log(`Base URL: ${baseUrl}`);
+    console.log(`API key:  ${apiKey}`);
+    console.log(`Model:    ${modelWithProvider}`);
+    return;
+  }
+
   switch (preset) {
     case "openhands":
       console.log("# OpenHands / LiteLLM-compatible starting point:");
@@ -1397,13 +1415,6 @@ function printAgentPreset(name = "generic", opts = {}) {
         ["OPENAI_API_KEY", apiKey],
         ["AIDER_MODEL", modelWithProvider],
       ]);
-      break;
-    case "cline":
-    case "continue":
-      console.log(`# ${preset} UI settings:`);
-      console.log(`Base URL: ${baseUrl}`);
-      console.log(`API key:  ${apiKey}`);
-      console.log(`Model:    ${modelWithProvider}`);
       break;
     case "generic":
       console.log("# Generic sidecar settings:");

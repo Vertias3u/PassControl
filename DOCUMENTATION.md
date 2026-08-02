@@ -151,11 +151,28 @@ passcontrol env continue
 passcontrol env litellm
 ```
 
+Desktop chat apps work the same way, and are the case where the sidecar earns its keep:
+each of these normally stores a raw provider key in local app storage.
+
+```bash
+passcontrol env chatbox
+passcontrol env jan
+passcontrol env msty
+passcontrol env cherry-studio
+passcontrol env open-webui
+passcontrol env librechat
+```
+
+These print three fields to type into the app's settings form. The API-key field is required
+by the UI and ignored by the sidecar — that field is exactly where your real key used to go.
+
 ### `configure` vs `env`
 
-Both accept the same integrations — `generic`, `openhands`, `litellm`, `aider`, `cline`,
-`continue`, `claude-desktop`, `cursor`, `claude-code` — and differ only in what they do
-with the result:
+Both accept the same integrations — the coding agents and desktop apps above, the catch-all
+`generic`, plus the MCP clients `claude-desktop`, `cursor` and `claude-code` — and differ
+only in what they do
+with the result. Run `passcontrol env` with an unknown name to print the authoritative list;
+it is generated from the CLI's own preset table, so it cannot drift from what is accepted:
 
 - **`passcontrol configure <integration>`** is the one to reach for. It previews the config,
   and `--write` creates it for the three integrations that own a config file

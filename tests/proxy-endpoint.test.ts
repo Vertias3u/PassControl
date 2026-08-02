@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { PROVIDERS, usesOpenAiUsageShape } from "@/lib/providers";
+
 const {
   verifyVisaMock,
   serviceClientMock,
@@ -7,6 +9,8 @@ const {
   reconcileBudgetMock,
   getCachedKeyMock,
   setCachedKeyMock,
+  getCachedAgentPolicyMock,
+  setCachedAgentPolicyMock,
   readKillStateMock,
   isSuspendedMock,
   writeLogMock,
@@ -21,6 +25,8 @@ const {
     reconcileBudgetMock: vi.fn(),
     getCachedKeyMock: vi.fn(),
     setCachedKeyMock: vi.fn(),
+    getCachedAgentPolicyMock: vi.fn(),
+    setCachedAgentPolicyMock: vi.fn(),
     readKillStateMock: vi.fn(),
     isSuspendedMock: vi.fn(),
     writeLogMock: vi.fn(),
@@ -48,6 +54,8 @@ vi.mock("@/lib/state/redis", () => ({
   reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
+  getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
+  setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
   seedSpent: vi.fn(),
 }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
@@ -110,6 +118,8 @@ beforeEach(() => {
   reconcileBudgetMock.mockReset();
   getCachedKeyMock.mockReset();
   setCachedKeyMock.mockReset();
+  getCachedAgentPolicyMock.mockReset();
+  setCachedAgentPolicyMock.mockReset();
   readKillStateMock.mockReset();
   isSuspendedMock.mockReset();
   writeLogMock.mockReset();
@@ -124,6 +134,8 @@ beforeEach(() => {
   reconcileBudgetMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
   setCachedKeyMock.mockResolvedValue(undefined);
+  getCachedAgentPolicyMock.mockResolvedValue("{}");
+  setCachedAgentPolicyMock.mockResolvedValue(undefined);
   readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   writeLogMock.mockResolvedValue(undefined);
@@ -190,6 +202,31 @@ describe("proxy endpoint allowlist", () => {
     expect(res.status).toBe(200);
     expect(fetchMock).toHaveBeenCalledWith(upstream, expect.objectContaining({ method: "POST" }));
   });
+
+  // Real clients disagree about where "/v1" lives. An SDK configured with
+  // baseURL=".../api/v1/openai" appends "chat/completions"; a desktop GUI that
+  // asks for a host instead appends the whole "v1/chat/completions". Both are
+  // the same call, so every OpenAI-shape provider must accept both — deepseek
+  // accepted only the first, so pointing a GUI at it returned blocked_endpoint.
+  //
+  // Driven off usesOpenAiUsageShape rather than a typed list: a provider added
+  // later is covered here the day it is added, without anyone remembering to.
+  // Deepseek's own upstream has no /v1, so the invariant is NOT "both end at
+  // /v1/chat/completions" — it is "both client shapes reach the SAME upstream".
+  // That is what the allowlist's upstreamPath indirection exists to do.
+  it.each(PROVIDERS.filter(usesOpenAiUsageShape))(
+    "accepts %s chat whichever side of the base URL /v1 lands on",
+    async (provider) => {
+      const bare = await callProxy(provider, ["chat", "completions"], "test-model");
+      const bareUrl = fetchMock.mock.calls.at(-1)?.[0];
+      const prefixed = await callProxy(provider, ["v1", "chat", "completions"], "test-model");
+      const prefixedUrl = fetchMock.mock.calls.at(-1)?.[0];
+
+      expect(bare.status).toBe(200);
+      expect(prefixed.status).toBe(200);
+      expect(prefixedUrl).toBe(bareUrl);
+    }
+  );
 
   it.each(["groq", "mistral", "together", "deepseek"])(
     "blocks %s from non-allowlisted file endpoints",

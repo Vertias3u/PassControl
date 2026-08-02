@@ -3,7 +3,7 @@ import { sanitizeValue } from "./seclog";
 type SentryEvent = Record<string, unknown>;
 type SentryModule = typeof import("@sentry/nextjs");
 type SafeScalar = string | number | boolean;
-type FailOpenScope = "kill_read" | "suspend_read" | "ratelimit";
+type FailOpenScope = "kill_read" | "suspend_read" | "ratelimit" | "policy_read";
 
 export interface ObservabilityContext {
   route: string;

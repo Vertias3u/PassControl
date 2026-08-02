@@ -201,6 +201,23 @@ passcontrol env continue
 passcontrol env litellm
 ```
 
+The same bridge works for desktop chat apps — Chatbox, Jan, Msty, Cherry Studio, Open WebUI
+and LibreChat. That is the case worth doing even if you never run an agent: those apps keep a
+raw provider key in local storage, and pointing one at the sidecar means it holds a
+five-minute visa instead and never sees the key.
+
+```bash
+passcontrol env chatbox        # prints Base URL / API key / Model for its settings form
+passcontrol env jan
+passcontrol env msty
+passcontrol env cherry-studio
+passcontrol env open-webui
+passcontrol env librechat
+```
+
+Anything else that takes a custom base URL works through `passcontrol env generic`.
+`passcontrol env` with an unknown name prints the full, current list of presets.
+
 Compatibility rule of thumb: PassControl proxies chat completions/messages and model-listing
 only. If a client tries OpenAI's newer `/responses` endpoint, embeddings, files, or
 fine-tuning, the gateway correctly returns `403 blocked_endpoint`. In Continue, set

@@ -24,6 +24,8 @@ const {
   mirrorSpendMock,
   fetchMock,
   demoPassportSecretMock,
+  getCachedAgentPolicyMock,
+  setCachedAgentPolicyMock,
 } = vi.hoisted(() => ({
   serviceClientMock: vi.fn(),
   fromMock: vi.fn(),
@@ -44,6 +46,8 @@ const {
   mirrorSpendMock: vi.fn(),
   fetchMock: vi.fn(),
   demoPassportSecretMock: vi.fn(),
+  getCachedAgentPolicyMock: vi.fn(),
+  setCachedAgentPolicyMock: vi.fn(),
 }));
 
 vi.mock("server-only", () => ({}));
@@ -69,6 +73,8 @@ vi.mock("@/lib/state/redis", () => ({
   seedSpent: (...args: unknown[]) => seedSpentMock(...args),
   getCachedKey: vi.fn(),
   setCachedKey: vi.fn(),
+  getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
+  setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
 }));
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
@@ -147,6 +153,8 @@ beforeEach(() => {
   mirrorSpendMock.mockReset();
   fetchMock.mockReset();
   demoPassportSecretMock.mockReset();
+  getCachedAgentPolicyMock.mockReset();
+  setCachedAgentPolicyMock.mockReset();
 
   fromMock.mockImplementation((table: string) => {
     expect(table).toBe("agents");
@@ -172,6 +180,8 @@ beforeEach(() => {
   seedSpentMock.mockResolvedValue(undefined);
   writeLogMock.mockResolvedValue(undefined);
   mirrorSpendMock.mockResolvedValue(undefined);
+  getCachedAgentPolicyMock.mockResolvedValue("{}");
+  setCachedAgentPolicyMock.mockResolvedValue(undefined);
 
   vi.stubGlobal("fetch", fetchMock);
   process.env.PASSCONTROL_DEMO = "1";

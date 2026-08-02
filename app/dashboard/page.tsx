@@ -5,6 +5,7 @@ import { readKillState } from "@/lib/state/killswitch";
 import { GlobalKillSwitchBar } from "@/components/GlobalKillSwitchBar";
 import { FleetOverviewCards } from "@/components/FleetOverviewCards";
 import { AgentFleetTable } from "@/components/AgentFleetTable";
+import { DeparturesBoard } from "@/components/DeparturesBoard";
 import { AuditLogTable } from "@/components/AuditLogTable";
 import { AdminAuditTable } from "@/components/AdminAuditTable";
 import { ApiKeysManager } from "@/components/ApiKeysManager";
@@ -15,8 +16,12 @@ import { redirect } from "next/navigation";
 import { SpendChart } from "@/components/SpendChart";
 import { PassportIssuanceModal } from "@/components/PassportIssuanceModal";
 import { ProviderKeysManager } from "@/components/ProviderKeysManager";
+import { KeyImportOnramp } from "@/components/KeyImportOnramp";
 import { signOut } from "@/app/actions/auth";
 import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
+// The shipped CLI is plain ESM and intentionally has no TypeScript declaration.
+// @ts-expect-error Import the preset source of truth on the server only.
+import { SIDECAR_PRESETS } from "@/cli/presets.mjs";
 
 export const dynamic = "force-dynamic";
 
@@ -87,12 +92,21 @@ export default async function ControlTowerPage() {
       <main className="mx-auto grid max-w-6xl gap-6 px-6 py-8">
         <GlobalKillSwitchBar initialArmed={kill.userKill} />
 
+        {/* Directly under the kill switch on purpose: arming it and watching the
+            next departures come back refused is the whole product in one frame.
+            Reuses the `logs` already fetched above — no second query. */}
+        <DeparturesBoard userId={user.id} initialRows={logs ?? []} />
+
         <FleetOverviewCards
           activeAgents={agentList.filter((a) => a.status === "active").length}
           totalAgents={agentList.length}
           spentMicrocents={agentList.reduce((s, a) => s + (a.spent_microcents ?? 0), 0)}
           blockedCalls={blockedCalls}
         />
+
+        <section className="rounded-lg border border-primary/40 bg-card p-6">
+          <KeyImportOnramp integrations={SIDECAR_PRESETS.map(String)} />
+        </section>
 
         <section className="rounded-lg border border-border bg-card p-6">
           <h2 className="mb-4 text-lg font-bold">Spend (live)</h2>

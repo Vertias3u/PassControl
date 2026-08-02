@@ -4,6 +4,21 @@ import { fail, ok, step } from "./config.mjs";
 import { createVisaClient } from "./visa-client.mjs";
 
 const STRIP_REQ = new Set(["authorization", "x-api-key", "host", "content-length", "accept-encoding", "connection"]);
+
+// The set above is a denylist over header NAMES, and a denylist over names loses
+// to spelling. A client that was previously configured with a raw provider key
+// sends it as whatever its vendor chose: `x-api-key` (Anthropic), `api-key`
+// (Azure style), `openai-api-key`, `x-goog-api-key`, or `proxy-authorization`.
+// Only the first was named, so the rest reached the gateway verbatim. The
+// gateway builds its upstream headers from scratch and never forwarded them on,
+// so no key ever reached a provider — but it had no business leaving the user's
+// machine at all, since not sending the key IS the sidecar.
+const CREDENTIAL_HEADER = /(^|[-_])(api[-_]?key|authorization|auth|token|secret|credentials?)$/i;
+
+function isStripped(name) {
+  const key = name.toLowerCase();
+  return STRIP_REQ.has(key) || CREDENTIAL_HEADER.test(key);
+}
 const STRIP_RES = new Set(["content-encoding", "content-length", "transfer-encoding", "connection"]);
 
 export function createSidecar({ gateway, passportId, passportSecret, port = 8788, host = "127.0.0.1", refreshSkewSeconds = 30 }) {
@@ -27,7 +42,7 @@ export function createSidecar({ gateway, passportId, passportSecret, port = 8788
   async function fetchUpstream(req, body, visa) {
     const headers = {};
     for (const [k, v] of Object.entries(req.headers)) {
-      if (!STRIP_REQ.has(k.toLowerCase()) && typeof v === "string") headers[k] = v;
+      if (!isStripped(k) && typeof v === "string") headers[k] = v;
     }
     headers["authorization"] = `Bearer ${visa}`;
     headers["accept-encoding"] = "identity";

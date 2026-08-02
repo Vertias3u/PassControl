@@ -1,9 +1,10 @@
 import { notFound as nextNotFound } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
+import { agentPolicyForDisplay, type AgentPolicyView } from "@/lib/scope";
 
 const AGENT_PASSPORT_COLUMNS =
-  "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, created_at, last_seen_at";
+  "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, policy, created_at, last_seen_at";
 const PASSPORT_LOG_COLUMNS = "id, provider, model, status, created_at";
 const RECENT_VERDICT_LIMIT = 50;
 const STAMP_PROVIDER_LIMIT = 16;
@@ -24,6 +25,7 @@ export interface AgentPassportRow extends Record<string, unknown> {
   spent_tokens: number;
   spent_microcents: number;
   allowed_scopes: unknown;
+  policy?: unknown;
   created_at: string;
   last_seen_at: string | null;
 }
@@ -81,6 +83,7 @@ export interface AgentPassportView {
     lastEntryAt: string | null;
   };
   visas: PassportVisaView[];
+  policy: AgentPolicyView;
   providerStamps: PassportProviderStampView[];
   recentVerdicts: PassportVerdictView[];
   budgets: {
@@ -220,6 +223,7 @@ export function buildAgentPassportView(
       lastEntryAt: timestamp(agent.last_seen_at),
     },
     visas: normalizeVisas(agent.allowed_scopes),
+    policy: agentPolicyForDisplay(agent.policy ?? null),
     providerStamps: lifetimeProviderStamps
       ? [...lifetimeProviderStamps]
       : buildProviderStamps(verdicts),

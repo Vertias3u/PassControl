@@ -110,6 +110,46 @@ paths:
         "200": { $ref: "#/components/responses/AgentStatusOk" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /agents/{id}/trace:
+    post:
+      summary: Evaluate a read-only gateway decision snapshot
+      operationId: traceAgentDecision
+      description: >
+        Evaluates kill, suspend, scope, endpoint, policy, and budget in proxy
+        order without reserving budget, consuming the agent's hourly policy
+        counter, resolving a provider key, or writing a gateway log. The result
+        is a point-in-time snapshot and is never cached.
+      parameters:
+        - { $ref: "#/components/parameters/AgentId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, model]
+              properties:
+                provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek] }
+                model: { type: string, minLength: 1, maxLength: 200 }
+                timestamp:
+                  type: string
+                  format: date-time
+                  description: Optional UTC policy-window clock; defaults to evaluation time.
+      responses:
+        "200":
+          description: Non-cacheable point-in-time decision snapshot.
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: "#/components/schemas/DecisionTrace" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
   /agents/{id}/resume:
     post:
       summary: Resume a suspended agent
@@ -300,6 +340,36 @@ components:
         scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
         budget_tokens: { type: [integer, "null"], minimum: 0 }
         budget_cents: { type: [integer, "null"], minimum: 0 }
+    GateStep:
+      type: object
+      required: [name, status, reason]
+      properties:
+        name: { type: string, enum: [kill, suspend, scope, endpoint, policy, budget] }
+        status: { type: string, enum: [pass, fail, skipped] }
+        reason: { type: string }
+        rule: { type: string }
+        httpStatus: { type: integer, enum: [402, 403, 429] }
+        presentation: { type: string, enum: [normal, warning] }
+    DecisionTrace:
+      type: object
+      required: [snapshot, evaluated_at, policy_time, agent_id, provider, model, method, path, verdict, steps]
+      properties:
+        snapshot: { type: boolean, const: true }
+        evaluated_at: { type: string, format: date-time }
+        policy_time: { type: string, format: date-time }
+        agent_id: { type: string, format: uuid }
+        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek] }
+        model: { type: string }
+        method: { type: string, const: POST }
+        path: { type: array, items: { type: string } }
+        verdict: { type: string, enum: [allow, deny] }
+        denied_by: { type: string, enum: [kill, suspend, scope, endpoint, policy, budget] }
+        policy:
+          type: object
+          properties:
+            outcome: { type: string, enum: [allow, deny_by_rule, unreadable] }
+            posture: { type: string, enum: [fail_open, fail_closed] }
+        steps: { type: array, items: { $ref: "#/components/schemas/GateStep" } }
     Log:
       type: object
       properties:

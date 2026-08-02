@@ -10,7 +10,10 @@ export default function robots(): MetadataRoute.Robots {
       {
         userAgent: "*",
         allow: "/",
-        disallow: ["/dashboard", "/login/verify", "/api/"],
+        // /verify/* is public and meant to be shared in a README or a ticket,
+        // but shareable is not indexable: a crawlable index of every passport
+        // id anyone ever linked to is not something to hand a search engine.
+        disallow: ["/dashboard", "/login/verify", "/api/", "/verify/"],
       },
     ],
     sitemap: `${BASE}/sitemap.xml`,

@@ -13,7 +13,11 @@ import {
   isPrerenderedPublicPath,
 } from "@/lib/csp";
 
-const PUBLIC_PATHS = ["/", "/login", "/signup", "/auth/callback"];
+// /verify is the public agent verification page (PAVP): a stranger with a
+// passport id and no account can ask whether we issued it. It is public but NOT
+// prerendered — it is dynamically rendered per request, so it carries a nonce
+// like every other dynamic page and must stay out of PRERENDERED_PUBLIC_PATHS.
+const PUBLIC_PATHS = ["/", "/login", "/signup", "/auth/callback", "/verify"];
 const CSP_HEADER = "Content-Security-Policy";
 
 function isPublic(pathname: string): boolean {

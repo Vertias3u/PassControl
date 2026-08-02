@@ -2019,3 +2019,34 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
   font-size: 0.98rem;
   line-height: 1.6;
 }
+
+/* Departures board — a new row flaps in the way a split-flap display does.
+   Only rows that arrive after mount get this class, so the movement always
+   means "this just happened" rather than "the page loaded". */
+@keyframes pc-departure-flap {
+  0% {
+    transform: perspective(400px) rotateX(-72deg);
+    opacity: 0;
+    background-color: rgba(251, 191, 36, 0.16);
+  }
+  60% {
+    transform: perspective(400px) rotateX(6deg);
+    opacity: 1;
+  }
+  100% {
+    transform: perspective(400px) rotateX(0deg);
+    opacity: 1;
+    background-color: transparent;
+  }
+}
+
+.pc-departure-new {
+  transform-origin: top center;
+  animation: pc-departure-flap 420ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pc-departure-new {
+    animation: none;
+  }
+}

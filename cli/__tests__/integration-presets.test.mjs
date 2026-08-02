@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  GUI_PRESET_LABELS,
   INTEGRATIONS,
   MCP_PRESETS,
   SIDECAR_PRESETS,
@@ -120,6 +121,30 @@ describe("integration presets", () => {
   // The two lists must stay disjoint and complete, or the dispatch in
   // printAgentPreset()/configureCommand() silently sends a preset down the
   // wrong branch.
+  // GUI presets are dispatched by a lookup, not by a switch case, so a key that
+  // is not also a sidecar preset would be unreachable — `env <it>` would reject
+  // the name before the lookup ever ran.
+  it("registers every GUI preset as a sidecar preset", () => {
+    for (const preset of Object.keys(GUI_PRESET_LABELS)) {
+      expect(SIDECAR_PRESETS, `"${preset}" is labelled but not advertised`).toContain(preset);
+    }
+  });
+
+  it.each(Object.entries(GUI_PRESET_LABELS))(
+    "`env %s` prints the three settings fields under its display name",
+    async (preset, label) => {
+      const { out } = await runCli(["env", preset]);
+      expect(out).toContain(`# ${label} settings:`);
+      for (const field of ["Base URL:", "API key:", "Model:"]) {
+        expect(out, `${preset} preset omits "${field}"`).toContain(field);
+      }
+      // The key field is a placeholder the sidecar ignores. If a real-looking
+      // key ever appears here, the preset is telling users to paste the thing
+      // the sidecar exists to keep out of the client.
+      expect(out).toMatch(/API key:\s+passcontrol$/m);
+    }
+  );
+
   it("splits sidecar and MCP presets without overlap", () => {
     expect(INTEGRATIONS).toEqual([...SIDECAR_PRESETS, ...MCP_PRESETS]);
     expect(SIDECAR_PRESETS.filter((p) => MCP_PRESETS.includes(p))).toEqual([]);

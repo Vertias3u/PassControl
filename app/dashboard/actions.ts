@@ -2,13 +2,27 @@
 // Control Tower server actions. Ownership is enforced via the user-scoped
 // Supabase client (RLS) before any privileged kill-switch / Redis write.
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { serviceClient } from "@/lib/supabase";
 import { userClient } from "@/lib/supabase/server";
-import { validateProviderKeyInput, validateRotateInput } from "@/lib/validate";
+import {
+  validateAgentInput,
+  validateProviderKeyInput,
+  validateRotateInput,
+} from "@/lib/validate";
 import { logSecurityEvent } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
 import { recordAdminAction } from "@/lib/audit";
 import { generateApiKey } from "@/lib/apikeys";
+import {
+  authHeaders,
+  isProvider,
+  modelListingUrl,
+  type ProviderId,
+} from "@/lib/providers";
+import { rateLimit } from "@/lib/ratelimit";
+import { open, seal } from "@/lib/crypto/aesgcm";
+import { stashKeyImport, takeKeyImport } from "@/lib/state/redis";
 import * as fleet from "@/lib/fleet";
 
 async function requireUser() {
@@ -20,14 +34,19 @@ async function requireUser() {
   return { db, user };
 }
 
-/** Log the real DB error server-side; surface a generic message to the caller so
- *  no database internals (table names, constraints, SQL) leak in a response.
- *  The message is sanitized (CR/LF/control chars stripped, bounded) so it can't
- *  forge or split log lines (log injection). */
-function failGeneric(context: string, error: { message?: string } | null): never {
-  const raw = error?.message ?? String(error);
-  const safe = raw.replace(/[\r\n\t\x00-\x1f\x7f]/g, " ").slice(0, 300);
-  console.error(`[dashboard:${context}]`, safe);
+/** Log only the DB machine code; surface a generic message to the caller so no
+ *  database internals or reflected credential material can leave this action. */
+function failGeneric(
+  context: string,
+  error: { code?: string; message?: string } | null
+): never {
+  // Error messages from a credential RPC are not a safe log input: a database
+  // or upstream can reflect submitted values. Keep only the bounded machine
+  // code, which is sufficient to correlate the failure without risking a key.
+  const safeCode = String(error?.code ?? "unknown")
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+    .slice(0, 40) || "unknown";
+  console.error(`[dashboard:${context}]`, safeCode);
   throw new Error("Something went wrong. Please try again.");
 }
 
@@ -124,6 +143,211 @@ export async function addProviderKey(input: { provider: string; label: string; k
     metadata: { provider: clean.provider, label: clean.label },
   });
   revalidatePath("/");
+}
+
+const KEY_IMPORT_TENANT_LIMIT = 5;
+const KEY_IMPORT_IP_LIMIT = 30;
+const KEY_IMPORT_PROBE_WINDOW_S = 60;
+const KEY_IMPORT_HANDOFF_TTL_S = 10 * 60;
+const KEY_IMPORT_HANDOFF_TTL_MS = KEY_IMPORT_HANDOFF_TTL_S * 1000;
+
+type ProbeSuccess = {
+  ok: true;
+  provider: ProviderId;
+  mode: "detected" | "manual";
+  models: string[];
+  handoff: string;
+};
+
+type ProbeFailure = {
+  ok: false;
+  error: "invalid_key" | "rate_limited";
+  message: string;
+};
+
+function clientIp(h: Headers): string {
+  return (
+    h.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    h.get("x-real-ip") ||
+    "unknown"
+  );
+}
+
+function modelIds(payload: unknown, rawKey: string): string[] {
+  const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+  const rows = Array.isArray(payload) ? payload : Array.isArray(record?.data) ? record.data : [];
+  const unique = new Set<string>();
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const id = String((row as { id?: unknown }).id ?? "").trim();
+    if (!id || id.length > 200 || id.includes(rawKey)) continue;
+    unique.add(id);
+    if (unique.size === 50) break;
+  }
+  return [...unique];
+}
+
+/**
+ * Authenticated dashboard-only provider probe. The raw key is sent only in the
+ * provider auth header. The browser receives model ids plus an encrypted,
+ * tenant-bound handoff, never the plaintext key or an upstream error body.
+ */
+export async function probeProviderKey(input: {
+  provider: string;
+  key: string;
+}): Promise<ProbeSuccess | ProbeFailure> {
+  const { user } = await requireUser();
+  const clean = validateProviderKeyInput({ provider: input?.provider, label: "", key: input?.key });
+  if (!isProvider(clean.provider)) throw new Error("Unknown provider.");
+  const provider = clean.provider;
+
+  const requestHeaders = await headers();
+  const ip = clientIp(requestHeaders);
+  const [tenantLimit, ipLimit] = await Promise.all([
+    rateLimit(
+      `key-import-probe:tenant:${user.id}`,
+      KEY_IMPORT_TENANT_LIMIT,
+      KEY_IMPORT_PROBE_WINDOW_S
+    ),
+    rateLimit(
+      `key-import-probe:ip:${ip}`,
+      KEY_IMPORT_IP_LIMIT,
+      KEY_IMPORT_PROBE_WINDOW_S
+    ),
+  ]);
+  if (!tenantLimit.success || !ipLimit.success) {
+    return {
+      ok: false,
+      error: "rate_limited",
+      message: "Too many detection attempts. Please wait a minute and try again.",
+    };
+  }
+
+  let mode: "detected" | "manual" = "manual";
+  let models: string[] = [];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
+  try {
+    const response = await fetch(modelListingUrl(provider), {
+      method: "GET",
+      headers: { accept: "application/json", ...authHeaders(provider, clean.key) },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (response.status === 401) {
+      return { ok: false, error: "invalid_key", message: "That key didn't work." };
+    }
+    if (response.ok) {
+      models = modelIds(await response.json(), clean.key);
+      mode = models.length ? "detected" : "manual";
+    }
+    // Any other status is intentionally manual-mode. In particular, a valid
+    // key may lack model-list permission; its raw upstream body is never read.
+  } catch {
+    // Network failures and timeouts degrade to manual model selection. Never
+    // log the exception: fetch implementations can reflect request details.
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // The sealed key stays SERVER-SIDE in Redis; the browser receives only an
+  // unguessable id. Sending the ciphertext to the client would put material
+  // encrypted under CACHE_ENC_KEY — the same long-lived key protecting the
+  // provider-key cache — into a JS heap, React DevTools, and any intermediary
+  // log, and would leave it replayable for the whole TTL.
+  const handoff = crypto.randomUUID();
+  await stashKeyImport(
+    user.id,
+    handoff,
+    await seal(JSON.stringify({
+      version: 1,
+      userId: user.id,
+      provider,
+      key: clean.key,
+      expiresAt: Date.now() + KEY_IMPORT_HANDOFF_TTL_MS,
+    })),
+    KEY_IMPORT_HANDOFF_TTL_S
+  );
+  return { ok: true, provider, mode, models, handoff };
+}
+
+interface KeyImportHandoff {
+  version: 1;
+  userId: string;
+  provider: ProviderId;
+  key: string;
+  expiresAt: number;
+}
+
+function parseKeyImportHandoff(value: string | null): KeyImportHandoff | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<KeyImportHandoff>;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.userId !== "string" ||
+      typeof parsed.provider !== "string" ||
+      !isProvider(parsed.provider) ||
+      typeof parsed.key !== "string" ||
+      typeof parsed.expiresAt !== "number"
+    ) {
+      return null;
+    }
+    return parsed as KeyImportHandoff;
+  } catch {
+    return null;
+  }
+}
+
+/** Complete a probed import through the existing Vault and fleet actions. */
+export async function completeKeyImport(input: {
+  handoff: string;
+  provider: string;
+  label: string;
+  name: string;
+  passportPubkey: string;
+  models: string[];
+}): Promise<{ provider: ProviderId; scope: { provider: ProviderId; models: string[] }[] }> {
+  const { user } = await requireUser();
+  // Redeem by id. takeKeyImport deletes unconditionally, so a replayed id after
+  // this point finds nothing — the handoff is single-use, not merely expiring.
+  const token = String(input?.handoff ?? "");
+  const sealed = token.length > 0 && token.length <= 200
+    ? await takeKeyImport(user.id, token)
+    : null;
+  const handoff = sealed ? parseKeyImportHandoff(await open(sealed)) : null;
+  if (
+    !handoff ||
+    handoff.userId !== user.id ||
+    handoff.provider !== input?.provider ||
+    handoff.expiresAt < Date.now()
+  ) {
+    throw new Error("This key import has expired. Start again.");
+  }
+
+  const keyInput = validateProviderKeyInput({
+    provider: input.provider,
+    label: input.label,
+    key: handoff.key,
+  });
+  const agentInput = validateAgentInput({
+    name: input.name,
+    passportPubkey: input.passportPubkey,
+    scopes: [{ provider: input.provider, models: input.models }],
+    budget_tokens: null,
+    budget_cents: null,
+  });
+  const provider = handoff.provider;
+  const scope = agentInput.scopes.map((entry) => ({
+    provider: entry.provider as ProviderId,
+    models: entry.models,
+  }));
+
+  // These are the existing sanctioned paths: store_provider_key via
+  // addProviderKey, then the canonical fleet mutation via createAgent.
+  await addProviderKey(keyInput);
+  await createAgent(agentInput);
+  return { provider, scope };
 }
 
 /** Rotate a provider key behind an owned credential row. */

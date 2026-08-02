@@ -73,7 +73,8 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 - 📒 **Append-only audit trail** per agent/passport (direct `UPDATE`/`DELETE`/`TRUNCATE` rejected
   by the database)
 - 🧰 **Drop-in for your SDK** (OpenAI, Anthropic, and OpenAI-compatible Groq / Mistral / Together /
-  DeepSeek) — **or any agent** via the visa sidecar (OpenHands, Aider, Cline, Continue…)
+  DeepSeek) — **or any agent or desktop chat app** via the visa sidecar (OpenHands, Aider,
+  Cline, Continue, Chatbox, Jan, Msty, Cherry Studio, Open WebUI, LibreChat…)
 - 🔌 **Local MCP server** for Claude Desktop, Cursor, and Claude Code — governed `chat` and
   `list_models` tools with no provider key or passport secret in the client config
 - 🪪 **Agent passport page** — a per-agent identity document: a sigil derived from the
@@ -166,8 +167,11 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:8788/api/v1/anthropic"   # or /api/v
 export ANTHROPIC_API_KEY="passcontrol"   # ignored — the sidecar injects a live visa
 ```
 
-The agent never holds a real key or a long-lived token. Presets ship for **openhands, aider, cline,
-continue, litellm** and a catch-all **generic** (`passcontrol env <preset>`), and
+The agent never holds a real key or a long-lived token. Presets ship for coding agents
+(**openhands, aider, cline, continue, litellm**), for the desktop chat apps you would otherwise
+paste a raw provider key into (**chatbox, jan, msty, cherry-studio, open-webui, librechat**), and
+a catch-all **generic** (`passcontrol env <preset>`). `passcontrol env` with an unknown name
+prints the current list, which is generated — it cannot drift from what the CLI accepts. Also,
 **[Hermes Agent](docs/integrations/hermes.md)** works through the generic settings with no custom
 code. A single long streaming completion also works
 directly — it's verified once at the start, so it finishes even if it runs past the visa TTL; only
