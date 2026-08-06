@@ -355,6 +355,99 @@ describe("passcontrol CLI", () => {
     });
   }, 10000);
 
+  // `start` was the mirror image of the bug `stop` already fixed: stop took the
+  // dashboard, Supabase and Redis down together, while start raised only the
+  // dashboard. The result is worse than a plain failure — the Control Tower comes
+  // back up and every page on it errors, because the Postgres it reads and the
+  // Redis holding the kill switch are both still stopped, and nothing on screen
+  // says so.
+  describe("`start` raises the whole stack, not just the dashboard", () => {
+    const source = () => fs.readFile(CLI, "utf8");
+    const bodyOf = async (name: string) => {
+      const src = await source();
+      const from = src.indexOf(`async function ${name}`);
+      expect(from).toBeGreaterThan(-1);
+      const next = src.indexOf("\nasync function ", from + 1);
+      return src.slice(from, next === -1 ? undefined : next);
+    };
+
+    it("documents start as covering the stack", async () => {
+      const { stdout } = await runCli(["help"], { env: { NO_COLOR: "1" } });
+      const line = stdout.split("\n").find((l) => /^\s*passcontrol start\b/.test(l)) ?? "";
+      expect(line).toMatch(/stack|everything/i);
+      expect(line).toContain("--dashboard-only");
+    }, 10000);
+
+    it("brings Supabase and Redis up before spawning the dev server", async () => {
+      const body = await bodyOf("startDashboard");
+      expect(body).toContain("startLocalServices()");
+      expect(body.indexOf("startLocalServices()")).toBeLessThan(body.indexOf('"run", "dev:docker"'));
+    });
+
+    it("honours --dashboard-only, the same escape hatch stop has", async () => {
+      const body = await bodyOf("startDashboard");
+      expect(body).toMatch(/opts\.dashboardOnly/);
+    });
+
+    it("checks the stack is configured before it starts any container", async () => {
+      // Reaching Docker first would mean `start` on an unconfigured checkout
+      // spends a minute booting Postgres only to then refuse to use it.
+      const body = await bodyOf("startDashboard");
+      expect(body.indexOf(".env.docker")).toBeLessThan(body.indexOf("startLocalServices()"));
+    });
+
+    it("does not call it a day just because the dev server is answering", async () => {
+      // The whole point of the change: "the dashboard is up" is not the same
+      // claim as "PassControl is up". An early return on the gateway health
+      // check would leave a running Control Tower talking to a stopped Postgres
+      // — exactly the state this command exists to prevent.
+      const body = await bodyOf("startDashboard");
+      expect(body.indexOf("startLocalServices()")).toBeLessThan(body.indexOf("already online"));
+    });
+
+    it("raises exactly what stop lowered — no migrations, no seeding, no env rewrite", async () => {
+      // The tempting shortcut is `npm run dev:stack`, which also rewrites
+      // .env.docker, applies every migration and seeds a dev user. Those are
+      // first-run steps and they belong to `setup`; running them on every start
+      // makes a routine restart a schema event.
+      const body = await bodyOf("startLocalServices");
+      expect(body).not.toContain("dev:stack");
+      expect(body).not.toContain("seed");
+      expect(body).toContain('"start", "-x", "studio"');
+      expect(body).toContain('"up", "-d"');
+    });
+
+    it("never reaches for a volume-destroying compose flag", async () => {
+      const body = await bodyOf("startLocalServices");
+      expect(body).not.toContain('"-v"');
+      expect(body).not.toContain("--no-backup");
+    });
+
+    it("starts Redis on the port .env.docker actually points at", async () => {
+      // `setup --port-offset N` moves SRH. Starting compose on the default 8079
+      // while the app reads 8179 gives a Redis that is up and unreachable: every
+      // nonce, budget reservation and kill-switch read fails against a container
+      // that looks healthy in `docker ps`.
+      const body = await bodyOf("startLocalServices");
+      expect(body).toContain("PASSCONTROL_SRH_PORT");
+      expect(body).toContain("localRedisPort()");
+      expect(body).not.toMatch(/8079/);
+    });
+
+    it("tells an unconfigured checkout to run setup instead of starting containers", async () => {
+      const checkout = await makeCheckout(path.join(tmp, "unconfigured"));
+      await expect(
+        // A port nothing is listening on, so the result does not depend on
+        // whether the developer running the suite has a dev server up.
+        runCli(["start", "--yes", "--app-dir", checkout], {
+          env: { NO_COLOR: "1", PASSCONTROL_GATEWAY: "http://localhost:3987" },
+        })
+      ).rejects.toMatchObject({
+        stderr: expect.stringMatching(/not configured[\s\S]*passcontrol setup/i),
+      });
+    }, 15000);
+  });
+
   it("reports when there is no CLI-managed dashboard to stop", async () => {
     const { stdout } = await runCli(["stop"]);
     expect(stdout).toContain("No CLI-managed local dashboard is running.");

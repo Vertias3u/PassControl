@@ -120,7 +120,7 @@ real call → audited.
 ```bash
 passcontrol status                 # cockpit: config, gateway, next commands
 passcontrol doctor --fix           # recover a stopped local dashboard
-passcontrol start                  # start the CLI-managed local dashboard
+passcontrol start                  # dashboard + Supabase + Redis (--dashboard-only for just the app)
 passcontrol restart                # replace the CLI-managed dashboard process
 passcontrol local-logs --follow    # stream local dashboard output
 passcontrol mcp                    # local stdio MCP server (chat + list_models)

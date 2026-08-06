@@ -261,7 +261,7 @@ The primary interface is `passcontrol <command>`. Highlights:
 | Check a receipt or agent token (no account needed) | `passcontrol verify receipt <jws> --issuer <origin>` |
 | Arm / release the tenant kill switch | `passcontrol kill on` · `passcontrol kill off` |
 | Prepare or repair local services | `passcontrol setup` · `passcontrol doctor --fix` |
-| Manage the local dashboard | `passcontrol start` · `passcontrol stop` · `passcontrol restart` |
+| Start / stop the whole local stack | `passcontrol start` · `passcontrol stop` · `passcontrol restart` (add `--dashboard-only` to leave Supabase and Redis alone) |
 | Follow local dashboard logs | `passcontrol local-logs --follow` |
 | Point the CLI at a different checkout | `passcontrol setup --app-dir <path>` |
 | Forget the remembered checkout | `passcontrol unlink` |

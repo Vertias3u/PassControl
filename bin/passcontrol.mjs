@@ -131,7 +131,7 @@ ${heading("Usage:")}
   ${cmd}                         show cockpit status
   ${cmd} init [--global]          create a config profile
   ${cmd} status [--no-network]    show active config
-  ${cmd} start                    start the configured local dashboard
+  ${cmd} start [--dashboard-only] start the whole local stack (dashboard + Supabase + Redis)
   ${cmd} stop [--dashboard-only]  stop the whole local stack (dashboard + Supabase + Redis)
   ${cmd} restart                  restart the CLI-managed local dashboard
   ${cmd} local-logs [--follow]    show local dashboard logs
@@ -478,11 +478,93 @@ async function ensureAppRoot({ clone = false, appDir, yes = false } = {}) {
   return appRoot;
 }
 
-function localComposeProjectName() {
+// The Supabase project id setup baked into supabase/config.toml. Read it back
+// rather than re-deriving it from the directory name and a --port-offset: the
+// offset is a setup-time flag nobody passes again on `start`, and config.toml is
+// what the Supabase CLI itself will use.
+function localSupabaseProjectId() {
   const configPath = path.join(appRoot, "supabase", "config.toml");
   const configText = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
-  const projectId = configText.match(/^project_id\s*=\s*"([^"]+)"\s*$/m)?.[1] ?? path.basename(appRoot);
-  return `passcontrol_${projectId.replace(/[^A-Za-z0-9]/g, "_").toLowerCase()}`;
+  return configText.match(/^project_id\s*=\s*"([^"]+)"\s*$/m)?.[1] ?? path.basename(appRoot);
+}
+
+function localComposeProjectName() {
+  return `passcontrol_${localSupabaseProjectId().replace(/[^A-Za-z0-9]/g, "_").toLowerCase()}`;
+}
+
+// Same container filter scripts/dev-stack.sh uses to find the DB to migrate.
+function localSupabaseIsRunning() {
+  try {
+    return Boolean(
+      execFileSync(
+        "docker",
+        ["ps", "-q", "--filter", `label=com.supabase.cli.project=${localSupabaseProjectId()}`, "--filter", "name=supabase_db"],
+        { encoding: "utf8" }
+      ).trim()
+    );
+  } catch {
+    return false;
+  }
+}
+
+// The port the dashboard will actually reach Redis on, read from the env file
+// rather than assumed. `setup --port-offset N` moves SRH, and bringing compose
+// up on the compose default while the app reads the offset port gives you a
+// Redis that is up and unreachable — every nonce, budget reservation and
+// kill-switch read failing against a container that looks healthy in `docker ps`.
+function localRedisPort() {
+  const compose = fs.readFileSync(path.join(appRoot, "docker", "compose.yml"), "utf8");
+  const fallback = Number(compose.match(/PASSCONTROL_SRH_PORT:-(\d+)/)?.[1] ?? 8079);
+  try {
+    const envText = fs.readFileSync(path.join(appRoot, ".env.docker"), "utf8");
+    const port = Number(new URL(envText.match(/^UPSTASH_REDIS_REST_URL=(.*)$/m)?.[1]?.trim()).port);
+    if (Number.isInteger(port) && port > 0 && port < 65536) return port;
+  } catch {
+    // An unreadable or malformed env file is reported by the caller's own
+    // configuration check; fall back rather than failing here.
+  }
+  return fallback;
+}
+
+// The other half of `passcontrol start`. `stop` takes the dashboard, Supabase and
+// Redis down together; a start that raised only the dashboard left that pair
+// asymmetric, and the result is worse than a plain failure — the Control Tower
+// comes back up and every page on it errors, because the Postgres it reads and
+// the Redis holding the kill switch are both still stopped. Nothing on screen
+// names the cause.
+//
+// Deliberately NOT `npm run dev:stack`. That script also rewrites .env.docker,
+// applies every migration and seeds a dev user: first-run work that belongs to
+// `setup`, and that would turn a routine restart into a schema event. `start`
+// raises exactly what `stop` lowered, and nothing else.
+async function startLocalServices() {
+  for (const check of [checkDockerInstalled(), checkDockerDaemon(), checkSupabaseInstalled()]) {
+    if (!check.ok) throw new Error(check.message);
+  }
+
+  if (localSupabaseIsRunning()) {
+    ok("Supabase already running");
+  } else {
+    step("Starting Supabase (Postgres, Vault, Auth)…");
+    // -x studio mirrors scripts/dev-stack.sh: Studio's image is flaky enough
+    // here to fail its health check and roll the whole stack back, and nothing
+    // depends on it — PassControl ships its own dashboard.
+    await runLocalCommand("supabase", ["start", "-x", "studio"]);
+    ok("Supabase running");
+  }
+
+  const redisPort = localRedisPort();
+  if (await portIsListening(redisPort)) {
+    ok(`Redis already running on port ${redisPort}`);
+  } else {
+    step("Starting Redis…");
+    await runLocalCommand("docker", ["compose", "-f", "docker/compose.yml", "up", "-d"], {
+      ...process.env,
+      COMPOSE_PROJECT_NAME: localComposeProjectName(),
+      PASSCONTROL_SRH_PORT: String(redisPort),
+    });
+    ok(`Redis running on port ${redisPort}`);
+  }
 }
 
 function localDashboard() {
@@ -639,9 +721,23 @@ async function runLocalPrerequisiteChecks({ offset = 0, report = false, enforce 
   return results;
 }
 
+// `passcontrol start` — one command for "start PassControl", the mirror of what
+// `stop` already does. The configuration check and the services come BEFORE the
+// gateway health check on purpose: "the dashboard is answering" is not the same
+// claim as "PassControl is up", and returning early on it is how you end up with
+// a Control Tower talking to a stopped database.
 async function startDashboard(opts = {}) {
   await ensureAppRoot({ clone: true, appDir: opts.appDir, yes: opts.yes });
   const dashboard = localDashboard();
+
+  const envFile = path.join(appRoot, ".env.docker");
+  if (!fs.existsSync(envFile)) {
+    throw new Error(`Local stack is not configured. Run \`${cliCommand("setup")}\` in ${appRoot} first.`);
+  }
+
+  if (opts.dashboardOnly) step("Leaving Supabase and Redis alone (--dashboard-only).");
+  else await startLocalServices();
+
   if ((await gatewayStatus(false)).ok) {
     ok(`dashboard already online at ${dashboard.url}`);
     return dashboard;
@@ -655,11 +751,6 @@ async function startDashboard(opts = {}) {
       return dashboard;
     }
     throw new Error(`CLI-managed dashboard (PID ${running.pid}) did not become ready. See ${running.logPath}.`);
-  }
-
-  const envFile = path.join(appRoot, ".env.docker");
-  if (!fs.existsSync(envFile)) {
-    throw new Error(`Local stack is not configured. Run \`${cliCommand("setup")}\` in ${appRoot} first.`);
   }
 
   const statePath = dashboardStatePath();
@@ -890,7 +981,10 @@ async function setupLocal(opts = {}) {
     ...process.env,
     PASSCONTROL_PORT_OFFSET: String(offset),
   });
-  await startDashboard(opts);
+  // dev:stack has just brought Supabase and Redis up (and would have exited
+  // non-zero if it hadn't), so skip start's own service pass rather than print
+  // two "already running" lines under a banner that just said the stack is up.
+  await startDashboard({ ...opts, dashboardOnly: true });
   if (!opts.noOpen) await openDashboard(opts);
   console.log(`\n${formatLabel("Local dashboard", dashboard.url, 19)}`);
   console.log(formatLabel("Login", "the account you created during setup", 19));
