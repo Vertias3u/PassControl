@@ -81,6 +81,10 @@ jobs:
       - name: Audit a fresh install of the published artifact
         run: |
           set -euo pipefail
+          # Built here rather than leaned on from the previous step: dist-cli is
+          # gitignored, so a fresh checkout has none, and a gate that dies on
+          # `cd: no such file` fails red for the wrong reason.
+          npm run build:cli
           tgz="$(cd dist-cli && npm pack --silent --pack-destination "$RUNNER_TEMP")"
           mkdir -p "$RUNNER_TEMP/install-check"
           cd "$RUNNER_TEMP/install-check"
