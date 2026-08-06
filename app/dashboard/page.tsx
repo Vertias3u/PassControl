@@ -5,18 +5,16 @@ import { readKillState } from "@/lib/state/killswitch";
 import { GlobalKillSwitchBar } from "@/components/GlobalKillSwitchBar";
 import { FleetOverviewCards } from "@/components/FleetOverviewCards";
 import { AgentFleetTable } from "@/components/AgentFleetTable";
+import { visaTtlSeconds } from "@/lib/auth/visa";
 import { DeparturesBoard } from "@/components/DeparturesBoard";
 import { AuditLogTable } from "@/components/AuditLogTable";
 import { AdminAuditTable } from "@/components/AdminAuditTable";
-import { ApiKeysManager } from "@/components/ApiKeysManager";
-import { MfaManager } from "@/components/MfaManager";
-import { getMfaStatus } from "@/app/dashboard/mfa-actions";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { redirect } from "next/navigation";
 import { SpendChart } from "@/components/SpendChart";
 import { PassportIssuanceModal } from "@/components/PassportIssuanceModal";
-import { ProviderKeysManager } from "@/components/ProviderKeysManager";
 import { KeyImportOnramp } from "@/components/KeyImportOnramp";
+import Link from "next/link";
 import { signOut } from "@/app/actions/auth";
 import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
 // The shipped CLI is plain ESM and intentionally has no TypeScript declaration.
@@ -44,7 +42,8 @@ export default async function ControlTowerPage() {
   // step-up (aal2) before the Control Tower. Non-MFA users pass straight through.
   if (await needsMfaStepUp(db)) redirect("/login/verify");
 
-  const [{ data: agents }, { data: logs }, { data: adminAudit }, kill] = await Promise.all([
+  const [{ data: agents }, { data: logs }, { data: adminAudit }, kill, providerKeys] =
+    await Promise.all([
     db.from("agents").select("*").order("created_at", { ascending: false }),
     db.from("agent_logs").select("*").order("created_at", { ascending: false }).limit(100),
     db
@@ -53,18 +52,19 @@ export default async function ControlTowerPage() {
       .order("created_at", { ascending: false })
       .limit(100),
     readKillState(user.id),
+    // Head-only count: the on-ramp is a first-run affordance and needs to know
+    // whether first run is over, not what the keys are. Joined into the same
+    // Promise.all rather than awaited after it — the two serial round trips
+    // that used to follow (api_keys, then getMfaStatus) were pure TTFB for
+    // panels that now live on /dashboard/settings.
+    db.from("provider_credentials").select("id", { count: "exact", head: true }),
   ]);
-
-  // API keys — metadata only; key_hash is never selected.
-  const { data: apiKeys } = await db
-    .from("api_keys")
-    .select("id, name, key_prefix, scope, last_used_at, revoked_at, created_at")
-    .order("created_at", { ascending: false });
-
-  const mfaStatus = await getMfaStatus();
 
   const agentList = agents ?? [];
   const blockedCalls = (logs ?? []).filter((l) => l.status.startsWith("blocked")).length;
+  // A count of null (the query errored) is treated as "set up": showing a
+  // getting-started card because a count failed is the more annoying wrong guess.
+  const needsFirstKey = (providerKeys.count ?? 1) === 0;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -77,6 +77,12 @@ export default async function ControlTowerPage() {
           </div>
           <div className="flex items-center gap-3">
             <PassportIssuanceModal />
+            <Link
+              href="/dashboard/settings"
+              className="rounded-md border border-border bg-secondary px-3 py-1.5 text-sm font-semibold text-foreground no-underline hover:bg-secondary/80"
+            >
+              Settings
+            </Link>
             <form action={signOut}>
               <button
                 type="submit"
@@ -104,9 +110,11 @@ export default async function ControlTowerPage() {
           blockedCalls={blockedCalls}
         />
 
-        <section className="rounded-lg border border-primary/40 bg-card p-6">
-          <KeyImportOnramp integrations={SIDECAR_PRESETS.map(String)} />
-        </section>
+        {needsFirstKey ? (
+          <section className="rounded-lg border border-primary/40 bg-card p-6">
+            <KeyImportOnramp integrations={SIDECAR_PRESETS.map(String)} />
+          </section>
+        ) : null}
 
         <section className="rounded-lg border border-border bg-card p-6">
           <h2 className="mb-4 text-lg font-bold">Spend (live)</h2>
@@ -114,30 +122,9 @@ export default async function ControlTowerPage() {
         </section>
 
         <section className="rounded-lg border border-border bg-card p-6">
-          <h2 className="mb-4 text-lg font-bold">Security · two-factor auth</h2>
-          <MfaManager status={mfaStatus} />
-        </section>
-
-        <section className="rounded-lg border border-border bg-card p-6">
-          <h2 className="mb-4 text-lg font-bold">Provider keys</h2>
-          <ProviderKeysManager />
-        </section>
-
-        <section className="rounded-lg border border-border bg-card p-6">
-          <h2 className="mb-1 text-lg font-bold">API keys</h2>
-          <p className="mb-4 text-sm text-muted-foreground">
-            Developer keys for the control-plane API (<code>/api/control/v1</code>). Scope
-            <code> read</code> or <code>write</code>; shown once, hashed at rest, revocable.
-          </p>
-          <div className="overflow-x-auto">
-            <ApiKeysManager keys={apiKeys ?? []} />
-          </div>
-        </section>
-
-        <section className="rounded-lg border border-border bg-card p-6">
           <h2 className="mb-4 text-lg font-bold">Fleet</h2>
           <div className="overflow-x-auto">
-            <AgentFleetTable agents={agentList} />
+            <AgentFleetTable agents={agentList} visaTtlSeconds={visaTtlSeconds()} />
           </div>
         </section>
 

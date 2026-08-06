@@ -42,7 +42,17 @@ export function extractVisaToken(headers: Headers): string {
   return (headers.get("x-api-key") ?? "").trim();
 }
 
-function ttlSeconds(): number {
+/**
+ * A visa's lifetime, in seconds. Default 300, clamped to [300, 900].
+ *
+ * Exported because the visa carries a SNAPSHOT of the agent's scope (see
+ * `mintVisa` below) and the proxy gates on `claims.scope`, not on the row. So
+ * an edit to an agent's scope does not bite until the visa holding the old one
+ * expires — and any UI explaining that delay must render this number rather
+ * than say "5 minutes", which is wrong on any deployment that raised
+ * VISA_TTL_SECONDS. Same rule as the advertised version string.
+ */
+export function visaTtlSeconds(): number {
   const raw = Number(process.env.VISA_TTL_SECONDS ?? "300");
   if (!Number.isFinite(raw)) return 300;
   return Math.min(900, Math.max(300, Math.floor(raw)));
@@ -83,7 +93,7 @@ export interface MintVisaInput {
 }
 
 export async function mintVisa(input: MintVisaInput): Promise<{ token: string; expSeconds: number }> {
-  const ttl = ttlSeconds();
+  const ttl = visaTtlSeconds();
   const token = await new SignJWT({
     agid: input.agentId,
     uid: input.userId,

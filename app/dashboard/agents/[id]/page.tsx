@@ -7,6 +7,7 @@ import { needsMfaStepUp } from "@/lib/mfa";
 import { userClient } from "@/lib/supabase/server";
 import { requireAgentPassport } from "./passport-data";
 import type { AgentPolicyView } from "@/lib/scope";
+import { visaTtlSeconds } from "@/lib/auth/visa";
 import { DecisionTracePanel } from "./DecisionTracePanel";
 
 export const dynamic = "force-dynamic";
@@ -129,7 +130,7 @@ export default async function AgentPassportPage({
       </header>
 
       <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
-        <AgentPassport passport={passport} />
+        <AgentPassport passport={passport} visaTtlSeconds={visaTtlSeconds()} />
         <AgentPolicySummary policy={passport.policy} />
         <DecisionTracePanel
           agentId={passport.agent.id}

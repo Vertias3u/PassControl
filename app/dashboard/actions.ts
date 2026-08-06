@@ -126,6 +126,54 @@ export async function updateAgentBudgets(
   revalidatePath("/");
 }
 
+/**
+ * Change what an agent is permitted to call.
+ *
+ * `userId` is taken from the session and is deliberately NOT a parameter — it
+ * is the whole tenant boundary here, and `fleet.updateAgent` filters on it.
+ *
+ * The change does not take effect instantly: the proxy gates on the scope
+ * SNAPSHOT carried in the visa, so an agent holding a live visa keeps its old
+ * scope until that visa expires. The editor renders that delay from
+ * `visaTtlSeconds()`. Use suspend or the kill switch when you need "now".
+ */
+export async function updateAgentScopes(
+  agentId: string,
+  scopes: { provider: string; models: string[] }[]
+) {
+  const { db, user } = await requireUser();
+  // Read the current value first, so the audit row can answer "what was this
+  // widened FROM". `fields: "allowed_scopes"` records that something changed
+  // and nothing about whether someone opened an agent up to `*`.
+  const { data: before } = await db
+    .from("agents")
+    .select("allowed_scopes")
+    .eq("user_id", user.id)
+    .eq("id", agentId)
+    .maybeSingle();
+
+  const r = await fleet.updateAgent(db, user.id, agentId, { scopes });
+  if (!r.ok) {
+    console.error("[dashboard:updateAgentScopes]", r.code, r.message ?? "");
+    throw new Error(r.message ?? "Something went wrong. Please try again.");
+  }
+  await recordAdminAction({
+    userId: user.id,
+    action: "agent.update",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: {
+      fields: "allowed_scopes",
+      from: JSON.stringify(before?.allowed_scopes ?? null),
+      to: JSON.stringify(scopes),
+    },
+  });
+  // The editor lives on the agent's own page; revalidating "/" alone would
+  // leave the value the operator just changed still on screen.
+  revalidatePath(`/dashboard/agents/${agentId}`);
+  revalidatePath("/");
+}
+
 /** Add a provider key via the SECURITY DEFINER RPC (plaintext never stored in app tables). */
 export async function addProviderKey(input: { provider: string; label: string; key: string }) {
   const { db, user } = await requireUser();

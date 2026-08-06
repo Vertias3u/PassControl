@@ -4,6 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import type { AgentPassportView } from "@/app/dashboard/agents/[id]/passport-data";
 import type { LogEntry } from "@/lib/log";
 import { createPassportSigil, passportIdForDisplay } from "@/lib/passport-art";
+import { ScopeEditor } from "./ScopeEditor";
 import styles from "./AgentPassport.module.css";
 
 const SVG_SIZE = 960;
@@ -788,8 +789,18 @@ function MobilePassportCard({
   );
 }
 
-export function AgentPassport({ passport }: { passport: AgentPassportView }) {
+export function AgentPassport({
+  passport,
+  visaTtlSeconds,
+}: {
+  passport: AgentPassportView;
+  // Passed in rather than read here: this is a client component and the TTL
+  // comes from a server-side env var. See ScopeEditor for why it is never typed
+  // as a literal.
+  visaTtlSeconds: number;
+}) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const [editingScopes, setEditingScopes] = useState(false);
   const [showFullId, setShowFullId] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [downloadState, setDownloadState] = useState<
@@ -979,15 +990,29 @@ export function AgentPassport({ passport }: { passport: AgentPassportView }) {
         className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6"
         aria-labelledby="passport-visas-heading"
       >
-        <div>
-          <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-            Capability record
-          </p>
-          <h2 id="passport-visas-heading" className="mt-2 text-lg font-bold">
-            Visas
-          </h2>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+              Capability record
+            </p>
+            <h2 id="passport-visas-heading" className="mt-2 text-lg font-bold">
+              Visas
+            </h2>
+          </div>
+          {editingScopes ? null : (
+            <button type="button" className="ghost" onClick={() => setEditingScopes(true)}>
+              Edit scopes
+            </button>
+          )}
         </div>
-        {passport.visas.length === 0 ? (
+        {editingScopes ? (
+          <ScopeEditor
+            agentId={passport.agent.id}
+            scopes={passport.visas}
+            ttlSeconds={visaTtlSeconds}
+            onClose={() => setEditingScopes(false)}
+          />
+        ) : passport.visas.length === 0 ? (
           <div className="rounded-lg border border-warning/30 bg-warning/10 p-4">
             <p className="m-0 font-semibold text-warning">
               No scopes — this passport can reach nothing.

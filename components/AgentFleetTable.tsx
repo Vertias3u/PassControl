@@ -2,6 +2,8 @@
 import { Fragment, type FormEvent, useState, useTransition } from "react";
 import Link from "next/link";
 import { setAgentSuspended, updateAgentBudgets } from "@/app/dashboard/actions";
+import { ScopeEditor } from "./ScopeEditor";
+import { toScopeRows } from "@/lib/scope-rows";
 import {
   formatCentsAsUsdDisplay,
   formatCentsAsUsdInput,
@@ -20,11 +22,23 @@ interface Agent {
   spent_tokens: number;
   spent_microcents: number;
   last_seen_at: string | null;
+  allowed_scopes: unknown;
 }
 
-export function AgentFleetTable({ agents }: { agents: Agent[] }) {
+type EditorKind = "budgets" | "scopes";
+
+export function AgentFleetTable({
+  agents,
+  visaTtlSeconds,
+}: {
+  agents: Agent[];
+  // Server-side env value; this is a client component. See ScopeEditor.
+  visaTtlSeconds: number;
+}) {
   const [pending, start] = useTransition();
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; kind: EditorKind } | null>(null);
+  const toggle = (id: string, kind: EditorKind) =>
+    setEditing((prev) => (prev?.id === id && prev.kind === kind ? null : { id, kind }));
   if (!agents.length) return <p className="muted">No agents yet. Issue a passport to begin.</p>;
 
   return (
@@ -72,8 +86,15 @@ export function AgentFleetTable({ agents }: { agents: Agent[] }) {
                     >
                       View passport
                     </Link>
-                    <button className="ghost" onClick={() => setEditingId(editingId === a.id ? null : a.id)}>
+                    <button className="ghost" onClick={() => toggle(a.id, "budgets")}>
                       Budgets
+                    </button>
+                    <button
+                      className="ghost"
+                      disabled={a.status === "revoked"}
+                      onClick={() => toggle(a.id, "scopes")}
+                    >
+                      Scopes
                     </button>
                     <button
                       className="ghost"
@@ -85,10 +106,19 @@ export function AgentFleetTable({ agents }: { agents: Agent[] }) {
                   </div>
                 </td>
               </tr>
-              {editingId === a.id ? (
+              {editing?.id === a.id ? (
                 <tr>
                   <td colSpan={7}>
-                    <BudgetEditor agent={a} onClose={() => setEditingId(null)} />
+                    {editing.kind === "budgets" ? (
+                      <BudgetEditor agent={a} onClose={() => setEditing(null)} />
+                    ) : (
+                      <ScopeEditor
+                        agentId={a.id}
+                        scopes={toScopeRows(a.allowed_scopes)}
+                        ttlSeconds={visaTtlSeconds}
+                        onClose={() => setEditing(null)}
+                      />
+                    )}
                   </td>
                 </tr>
               ) : null}
