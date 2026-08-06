@@ -68,6 +68,13 @@ export interface ReceiptInput {
   status: LogEntry["status"];
   httpStatus: number;
   startedAt: number;
+  // The WHOLE request, not the gateway's own overhead: every caller computes it
+  // as `Date.now() - started` where `started` is the top of the handler, and the
+  // success path evaluates it inside reconcile() — which runs in waitUntil,
+  // after the response is already with the client. So it spans the pre-checks,
+  // the provider call, and some post-response bookkeeping. On an approved call
+  // the provider dominates it completely. Never render this as "gateway
+  // latency"; that reads as overhead we added. tests/public-receipt-page pins it.
   latencyMs: number;
   owner?: OwnerClaim | null;
 }

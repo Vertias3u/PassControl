@@ -366,7 +366,7 @@ Names are abbreviated deliberately — a receipt travels in URLs and QR codes.
 | `cost` | int | **Micro-cents.** $ = `cost` / 100,000,000. `61` is $0.00000061, not $61. |
 | `res` | `{status,http}` | The gateway's verdict and the HTTP status. |
 | `t0` | int | Call start (Unix **milliseconds**). |
-| `lat` | int | Gateway latency in ms. |
+| `lat` | int | **Total** elapsed ms for the whole request, measured at the gateway — pre-checks, the provider call, and post-response bookkeeping. **Not** the gateway's own overhead: on an approved call the provider dominates it. On a refusal nothing goes upstream, so it really is gateway time. |
 | `ver` | int | Receipt schema version. |
 | `req` | `{alg,dig,len}` | SHA-256 over the exact request bytes, and their length. **Omitted** when the gateway refused before reading the body — absent means "never read", whereas a digest of `""` would mean "the client sent nothing". |
 | `own` | `{kind,sub,tier,vat}` | Who operates this deployment, if a binding is published. **Per tenant, not per agent.** Read `tier`, not `kind`. Omitted when none is bound. |

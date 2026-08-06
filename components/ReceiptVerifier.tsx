@@ -525,7 +525,12 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
             </dd>
           </div>
           <Fact label="Signed">{formatSignedAt(claims.iat)}</Fact>
-          <Fact label="Gateway latency">{claims.lat.toLocaleString("en-GB")} ms</Fact>
+          <Fact label="Total time">
+            <span className="font-semibold">{claims.lat.toLocaleString("en-GB")} ms</span>
+            <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+              measured by the gateway · provider time included
+            </span>
+          </Fact>
           <div className="sm:col-span-2">
             <dt className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
               Owner

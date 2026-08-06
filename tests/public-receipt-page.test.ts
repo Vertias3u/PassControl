@@ -172,4 +172,17 @@ describe("motion is honest and optional", () => {
     expect(component).toMatch(/queue\.reduce\(\(sum, step\) => sum \+ step\.ms, 0\)/);
     expect(component).not.toContain("performance.now() - startedAt");
   });
+
+  it("never calls the receipt's elapsed time 'gateway latency'", () => {
+    // `lat` is `Date.now() - started` evaluated inside reconcile(), which the
+    // proxy runs in waitUntil — so it spans the whole request INCLUDING the
+    // provider call and the post-response bookkeeping. Labelled "Gateway
+    // latency" it told a reader the gateway added 2.8s to a call the provider
+    // spent 2.8s generating: the worst possible number to misattribute on a
+    // drop-in proxy. The negative assertion is the load-bearing one — a
+    // positive-only guard still passes if a second, wrong label appears.
+    expect(component).not.toMatch(/[Gg]ateway latency/);
+    expect(component).toMatch(/label="Total time"/);
+    expect(component).toMatch(/provider time included/);
+  });
 });
