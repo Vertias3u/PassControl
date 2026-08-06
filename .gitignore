@@ -1,6 +1,9 @@
 node_modules/
 .next/
 out/
+# Generated npm artifact for the CLI (scripts/build-cli-package.mjs). Derived from
+# the root manifest on every build; committing it would let it go stale.
+/dist-cli/
 .env
 .env.local
 .env*.local

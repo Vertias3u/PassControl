@@ -73,6 +73,22 @@ jobs:
       - name: Verify npm package allowlist
         run: npm run check:npm-pack
 
+      # The audit above measures this repo, where `overrides` pins postcss and
+      # sharp. npm honours overrides only from the ROOT project, so an installer
+      # gets none of that: 0.5.2 was green here and reported 4 high advisories on
+      # a fresh `npm i -g passcontrol`. Green CI and a clean install are two
+      # different claims, and only this step makes the second one.
+      - name: Audit a fresh install of the published artifact
+        run: |
+          set -euo pipefail
+          tgz="$(cd dist-cli && npm pack --silent --pack-destination "$RUNNER_TEMP")"
+          mkdir -p "$RUNNER_TEMP/install-check"
+          cd "$RUNNER_TEMP/install-check"
+          npm init -y > /dev/null
+          npm install "$RUNNER_TEMP/$tgz" --no-audit --no-fund > /dev/null
+          npm audit --audit-level=high
+          ./node_modules/.bin/passcontrol --version
+
   local-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20

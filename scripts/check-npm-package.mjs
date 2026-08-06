@@ -1,9 +1,34 @@
 #!/usr/bin/env node
+// Gate on the artifact that actually ships. Two independent checks:
+//
+//   1. The file list matches an allowlist — nothing sneaks into the tarball.
+//   2. The declared dependencies and the scanned imports agree *in both
+//      directions*.
+//
+// The second direction is the one worth having. A dependency nothing imports is
+// invisible to every other check: 0.5.0 shipped `shadcn` — a scaffolding CLI no
+// file references — and with it undici and five advisories. 0.5.1 shipped `next`,
+// `react` and the whole dashboard for the same reason. Neither is a missing
+// import, so nothing would ever fail; the package just quietly installs 563 MB.
+//
+// This runs against dist-cli, built by scripts/build-cli-package.mjs. Pointing it
+// at the repo root instead would verify a tarball nobody publishes — the same
+// mistake as `npm audit` passing in CI while a fresh install is red.
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { importedPackages } from "./build-cli-package.mjs";
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const packageDir = path.resolve(process.argv[2] ?? path.join(repoRoot, "dist-cli"));
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const [pack] = JSON.parse(execFileSync(npm, ["pack", "--dry-run", "--json"], { encoding: "utf8" }));
-const files = pack.files.map(({ path }) => path).sort();
+
+if (!fs.existsSync(path.join(packageDir, "package.json"))) {
+  console.error(`No package to check at ${packageDir}. Run \`npm run build:cli\` first.`);
+  process.exit(1);
+}
+
 const allowed = new Set([
   "LICENSE",
   "README.md",
@@ -23,13 +48,45 @@ const allowed = new Set([
   "cli/sidecar.mjs",
   "cli/visa-client.mjs",
 ]);
+
+const [pack] = JSON.parse(execFileSync(npm, ["pack", "--dry-run", "--json"], { cwd: packageDir, encoding: "utf8" }));
+const files = pack.files.map(({ path: file }) => file).sort();
+
+const problems = [];
 const unexpected = files.filter((file) => !allowed.has(file));
 const missing = [...allowed].filter((file) => !files.includes(file));
+if (unexpected.length) problems.push(`Unexpected npm package files:\n${unexpected.map((f) => `  - ${f}`).join("\n")}`);
+if (missing.length) problems.push(`Missing npm package files:\n${missing.map((f) => `  - ${f}`).join("\n")}`);
 
-if (unexpected.length || missing.length) {
-  if (unexpected.length) console.error(`Unexpected npm package files:\n${unexpected.map((file) => `  - ${file}`).join("\n")}`);
-  if (missing.length) console.error(`Missing npm package files:\n${missing.map((file) => `  - ${file}`).join("\n")}`);
+const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8"));
+const declared = Object.keys(manifest.dependencies ?? {}).sort();
+const imported = importedPackages(files, packageDir);
+
+const undeclared = imported.filter((name) => !declared.includes(name));
+const unused = declared.filter((name) => !imported.includes(name));
+if (undeclared.length) {
+  problems.push(`Imported but not declared (the package would crash on use):\n${undeclared.map((n) => `  - ${n}`).join("\n")}`);
+}
+if (unused.length) {
+  problems.push(`Declared but never imported (every installer downloads these for nothing):\n${unused.map((n) => `  - ${n}`).join("\n")}`);
+}
+
+// The dashboard's runtime has no business in a CLI tarball, and these are the
+// packages that dragged the advisories in. Named explicitly so the failure says
+// what went wrong rather than just "unused".
+const APP_ONLY = ["next", "react", "react-dom", "@sentry/nextjs", "sharp", "postcss", "shadcn"];
+const leaked = APP_ONLY.filter((name) => declared.includes(name));
+if (leaked.length) {
+  problems.push(`Dashboard-only packages in the CLI manifest:\n${leaked.map((n) => `  - ${n}`).join("\n")}`);
+}
+
+if (manifest.scripts) {
+  problems.push("The published manifest must declare no scripts — the root's prepublishOnly guard would block its own publish.");
+}
+
+if (problems.length) {
+  console.error(problems.join("\n\n"));
   process.exit(1);
 }
 
-console.log(`✓ npm package allowlist verified (${files.length} files)`);
+console.log(`✓ npm package verified — ${files.length} files, ${declared.length} dependencies (${declared.join(", ")})`);

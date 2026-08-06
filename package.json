@@ -1,6 +1,6 @@
 {
   "name": "passcontrol",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Secure Agent Control Plane & Passport Vault — identity-aware reverse proxy for AI agent credentials.",
   "license": "BUSL-1.1",
   "homepage": "https://github.com/Vertias3u/PassControl#readme",
@@ -53,7 +53,10 @@
     "seed": "node scripts/seed.mjs",
     "sidecar": "node examples/visa-sidecar.mjs",
     "test:rls": "psql -v ON_ERROR_STOP=1 -f db/tests/rls_invariants.sql \"$DATABASE_URL\"",
-    "check:npm-pack": "node scripts/check-npm-package.mjs",
+    "build:cli": "node scripts/build-cli-package.mjs",
+    "check:npm-pack": "npm run build:cli && node scripts/check-npm-package.mjs",
+    "release:cli": "npm run check:npm-pack && npm publish ./dist-cli",
+    "prepublishOnly": "node -e \"console.error('Publish the CLI package, not the app manifest: npm run release:cli');process.exit(1)\"",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
