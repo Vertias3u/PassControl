@@ -128,6 +128,8 @@ passcontrol sidecar                # local bridge for OpenHands/Aider/Cline/etc.
 passcontrol agent list             # managed passports
 passcontrol spend                  # fleet and per-agent spend
 passcontrol logs --limit 20        # recent gateway calls
+passcontrol keygen instance        # signing key for receipts + agent tokens
+passcontrol verify receipt <jws> --issuer <origin>  # check a receipt; needs no account
 passcontrol kill on                # emergency tenant stop
 passcontrol kill off               # release the tenant stop
 passcontrol configure aider        # preview an Aider project config
@@ -159,13 +161,179 @@ call estimated over 1¢, e.g. `max_tokens` ≥ 2000.)*
 
 **Scope is capability, not just a model.** An agent scoped to chat can only reach the chat
 and model-listing endpoints — it **cannot** use your key for `/v1/files`, fine-tuning,
-batches, embeddings, etc. Try it (via the sidecar in §5) and you'll get
+batches, embeddings, etc. Try it (via the sidecar in §6) and you'll get
 `403 blocked_endpoint`. That's what turns "here's a key" into "here's a key that can only do
 one thing."
 
 ---
 
-## 5. Use it with a real agent (OpenHands, Aider, Cline, …)
+## 5. Prove a call happened — signed receipts
+
+The audit log tells **you** what your agents did. It convinces nobody else.
+
+If a client asks *"prove that call really happened, and that you didn't edit the cost
+afterwards"*, a row in your own database is not an answer — you control that database.
+
+A **receipt** is an answer. A governed call is recorded in one — approvals and refusals
+alike — signed with your deployment's private key. Anyone can check it without an account, without
+your database, and without asking your permission.
+
+### a. Turn receipts on
+
+They need a signing key. Generate one:
+
+```bash
+passcontrol keygen instance
+```
+
+```
+✓ Generated an Ed25519 instance signing key.
+→ This key signs call receipts and agent-to-agent tokens. Store the seed like a password:
+  INSTANCE_SIGNING_KEY=z5FGsNv8ePcsqpCkC1BsaB7Py3Lr2Ie6RsZOH7Y5OvA
+
+→ Its public half publishes at /.well-known/jwks.json as kid HSfKNc1qYaWCqi87LOEs6RFlwjP…
+```
+
+Put that in your environment, plus the origin this deployment answers on:
+
+```bash
+INSTANCE_SIGNING_KEY=<the seed above>
+PASSCONTROL_ISSUER=http://localhost:3000     # your https origin, in a real deployment
+```
+
+**Which file?** For the local Docker stack from §2 that's **`.env.docker`** in the checkout
+(`~/passcontrol` if `passcontrol setup` cloned it for you) — `scripts/dev-stack.sh` reads that
+file back and preserves these values across runs, so they survive a restart. Start the app with
+`npm run dev:docker`, which loads it. For a deployed instance, set them wherever that host keeps
+environment variables.
+
+> Plain `npm run dev` loads `.env.local` instead, which has no signing key — so the app starts
+> fine and publishes an empty key set. That failure looks like broken signing and is really a
+> wrong env file.
+
+Restart, then check the public half is actually being published:
+
+```bash
+curl -s $PASSCONTROL_ISSUER/.well-known/jwks.json
+```
+
+```json
+{"keys":[{"kty":"OKP","crv":"Ed25519","x":"kMtk4JHLIW2…","alg":"EdDSA","use":"sig","kid":"uqcSRpjIq2Y9…"}]}
+```
+
+> **If you see `{"keys":[]}`, stop here.** The signing key isn't loaded. Receipts will be
+> signed by nothing, and every attempt to check one fails with *"the issuer does not publish
+> this signing key"* — which looks exactly like a forgery and isn't one.
+
+### b. Get a receipt
+
+Make a call, then look up the log row it wrote and pull its receipt:
+
+```bash
+passcontrol call "Say hi in 3 words"
+
+# The call id comes from the logs endpoint; the receipt is fetched one at a time,
+# because a receipt is ~700 bytes and would bloat every page of results.
+CALL_ID=$(curl -s -H "Authorization: Bearer $PASSCONTROL_API_KEY" \
+  "$PASSCONTROL_ISSUER/api/control/v1/logs?limit=1" | jq -r '.data[0].id')
+
+curl -s -H "Authorization: Bearer $PASSCONTROL_API_KEY" \
+  "$PASSCONTROL_ISSUER/api/control/v1/receipts/$CALL_ID" | jq -r '.data.receipt'
+```
+
+You get one long line with two dots in it. That whole string **is** the receipt — there is
+nothing else to send with it.
+
+*(Fetching a receipt requires your API key: the receipt is meant to be handed to a stranger,
+but **you** decide which stranger. If `receipt` comes back `null` with
+`reason: "receipts_not_enabled"`, revisit step a.)*
+
+### c. Check it the way an outsider would
+
+This command needs no account, no API key and no passport. It is the one command someone
+runs against **your** deployment:
+
+```bash
+passcontrol verify receipt "<paste the receipt>" --issuer https://passcontrol.example.com
+```
+
+```
+✓ Receipt is valid.
+→ Issuer:   http://localhost:3000
+→ Passport: kZCFp7d2x4VDruiulJ21gogYbczBDAGZa-OuwR3qgh8
+→ Call:     POST chat/completions → demo/demo-1
+→ Verdict:  ok (HTTP 200)
+→ Usage:    15 in / 46 out · 61 µ¢
+→ Request:  sha-256 VizsbKJwhtYoTNBv_XkJSf4ihWpdQWQfpXVvuDA6usM (105 bytes)
+```
+
+Now change one character anywhere in the receipt — a digit in the cost, a letter in the
+model — and run it again:
+
+```
+✗ Not valid: signature does not verify against the issuer's published key
+```
+
+That is the whole point. The numbers cannot be edited after the fact by you, by us, or by
+whoever you send it to.
+
+You must pass `--issuer` yourself. If you omit it:
+
+```
+✗ Set --issuer <https origin> (or PASSCONTROL_ISSUER). A verifier that trusts whatever
+  issuer the artifact names is not verifying anything.
+```
+
+A receipt names its own issuer, and a forger can write anything there. Saying which issuer
+you expect is what makes the check mean something.
+
+### d. For someone who doesn't have a terminal
+
+Your deployment serves a page at **`/verify/receipt`**. Paste a receipt, get an answer — no
+install, no account. The checking runs **in the visitor's browser**: the receipt is never
+uploaded, and the only network request is to the issuer's own `/.well-known/jwks.json` for
+its public keys.
+
+There's a **Copy shareable link** button. It puts the receipt after the `#` in the URL, and
+URL fragments are never sent to a server — so you can email the link to an accountant and
+the receipt still never touches anyone's server on the way.
+
+### What a receipt does and does not say
+
+This matters more than the mechanics, because the failure mode is someone believing more
+than the receipt claims:
+
+| It says | It does not say |
+|---|---|
+| This deployment signed this record | That the deployment is trustworthy — anyone can run PassControl. Checking a signature tells you it is genuine **for the issuer it names**; whether to trust that issuer is your call |
+| Nothing in it has changed since signing | What the provider actually replied — a receipt covers the **request** and the **gateway's decision**, never the response body |
+| This call was allowed / refused, and why | That a call without a receipt didn't happen. Receipt writing is best-effort by design, so **absence proves nothing** — a receipt is evidence, not a complete ledger |
+
+A refused call is signed exactly like an approved one. "The gateway blocked this agent from
+touching that model, here's the proof" is often the more useful document of the two.
+
+### Rotating the signing key — read this first
+
+Receipts **never expire**. They are checked by matching the key id in the receipt against the
+keys your deployment publishes right now. So regenerating your signing key doesn't just
+affect new receipts — **it silently invalidates every receipt you have ever signed.**
+
+The safe rotation keeps the old public key published while you switch:
+
+```bash
+INSTANCE_SIGNING_KEY_PREV=<your current seed>   # move the old one here FIRST
+INSTANCE_SIGNING_KEY=<the new seed>
+```
+
+> Note this is **backwards from `VISA_SECRET_PREV`**, and getting them confused is the
+> expensive mistake. Nothing is ever *signed* with `INSTANCE_SIGNING_KEY_PREV` — it is there
+> purely so its **public** half stays in the JWKS and old receipts keep verifying. Publish
+> both, wait one JWKS `max-age` window (5 minutes) so caches catch up, then remove the old
+> one when you no longer care about receipts signed before the rotation.
+
+---
+
+## 6. Use it with a real agent (OpenHands, Aider, Cline, …)
 
 Most agents want a **static API key**, but a visa expires in minutes. The **visa sidecar**
 bridges that: it holds your passport, mints/refreshes the visa in the background, and injects
@@ -233,7 +401,7 @@ curl -s -X POST http://127.0.0.1:8788/api/v1/anthropic/v1/files \
 
 ---
 
-## 6. Connect an MCP client
+## 7. Connect an MCP client
 
 Claude Desktop, Cursor, and Claude Code can call PassControl's governed `chat` and
 `list_models` tools over local stdio. Put the passport in the global owner-only profile so
@@ -251,7 +419,7 @@ kill-switch checks. Run without `--write` for a preview.
 
 ---
 
-## 7. Revoke a running agent (the kill switch)
+## 8. Revoke a running agent (the kill switch)
 
 This is the part a raw API key can't do. With an agent mid-task:
 
@@ -261,12 +429,12 @@ This is the part a raw API key can't do. With an agent mid-task:
 3. **Disarm**, and it runs again.
 
 No key rotation, no redeploy, no re-issuing the passport. One toggle severs a live agent and
-another restores it. (Note: instant in-flight revocation relies on Redis; see §8. A call
+another restores it. (Note: instant in-flight revocation relies on Redis; see §9. A call
 *already in flight* when you flip the switch completes — new calls are blocked immediately.)
 
 ---
 
-## 8. Going to production
+## 9. Going to production
 
 The Docker stack is for local dev. To self-host for real:
 
@@ -301,6 +469,8 @@ Production checklist:
   [`sdk/README.md`](./sdk/README.md) and [`DOCUMENTATION.md`](./DOCUMENTATION.md).
 - **More example agents** — [`examples/`](./examples) (chat agent, tool-using starter agent,
   fleet-admin CLI, the visa sidecar).
+- **Receipt claim reference** — every claim name and what it means, plus the JWKS endpoint and
+  agent-to-agent tokens: [`DOCUMENTATION.md`](./DOCUMENTATION.md).
 - **Security model + responsible disclosure** — [`SECURITY.md`](./SECURITY.md).
 
 Found a rough edge or a security issue? See `SECURITY.md` — we'd rather you tell us.

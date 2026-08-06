@@ -23,6 +23,7 @@ There are three surfaces:
 | **Data plane** — proxy your model calls | agents (runtime) | work-visa |
 | **Agent auth** — mint a visa | agents | Ed25519 signature |
 | **Control plane** — manage your fleet | developers / backends | API key |
+| **Verification** — check a receipt or token someone handed you | anyone, incl. people with no account | none |
 
 Base URL (self-host or hosted): `https://<your-gateway>`  ·  all paths below are relative to it.
 
@@ -249,9 +250,214 @@ provider secrets are never returned by the API and are never accepted by the con
 ### Observability
 | Method | Path | Scope | Description |
 |---|---|---|---|
-| GET | `/logs` | read | Gateway calls; filter by `agent_id`, `status`, and `limit`. |
+| GET | `/logs` | read | Gateway calls; filter by `agent_id`, `status`, and `limit`. Returns each call's `id`. |
 | GET | `/audit` | read | Admin-action trail. |
 | GET | `/spend` | read | Per-agent + fleet totals (micro-cents; $ = µ¢ / 100,000,000). |
+| GET | `/receipts/{id}` | read | One call **plus its signed receipt**. See [Receipts](#receipts--portable-proof-a-call-happened). |
+
+`/receipts/{id}` takes a call `id` from `/logs`. Receipts are fetched one at a time rather
+than folded into `/logs`, because a receipt is ~700 bytes of JWS and would bloat every page
+of results for the one caller in a hundred who wants a proof.
+
+```json
+{ "data": { "id": "…", "provider": "anthropic", "status": "ok", "cost_microcents": 61,
+            "receipt": "eyJhbGciOiJFZERTQSIs…" } }
+```
+
+If `receipt` is `null`, the response carries `"reason": "receipts_not_enabled"` — the
+deployment has no `INSTANCE_SIGNING_KEY`. That's a configuration answer, not missing data.
+
+A 404 is returned for another tenant's call id rather than a 403, so the endpoint can't be
+used to discover which ids exist.
+
+### Ownership
+Declares **who a tenant's passports belong to**, so a receipt can carry *"this agent is
+operated by X"*.
+
+**The binding is per tenant, not per agent.** There is no agent id in these paths: one owner
+applies to every passport under your account. `own` on a receipt therefore identifies the
+operator of the deployment, not one particular bot.
+
+| Method | Path | Scope | Description |
+|---|---|---|---|
+| GET | `/owner` | read | The current binding, its tier, and whether it is published. |
+| PUT | `/owner` | write | Declare a claim. Body: `kind` (`self_attested` \| `domain`), `subject`, `published?`. **Always lands at tier `unverified`**, even for `kind: "domain"` — claiming a domain and proving control of it are different events. |
+| PATCH | `/owner` | write | Publish or unpublish an existing binding. Body: `published` (boolean). |
+| POST | `/owner/verify` | write | Run the domain check now. On success stamps tier `domain`. |
+
+For `kind: "domain"`, `PUT` returns the instructions inline — where to publish the token and
+what to call next — rather than making you find them in docs.
+
+**A caller never sets `tier` or `verified_at`.** You say what you claim; the server records
+what it has actually proven. `kind` is the method attempted, `tier` is the result, and they
+are stored separately on purpose.
+
+| Tier | Means |
+|---|---|
+| `unverified` | Self-declared. Someone typed it. **Proves nothing** — render it as a claim, never as a fact. |
+| `domain` | Proven by publishing a token at a domain the claimant controls. |
+| `idv` | Proven by an identity check. |
+
+Only **published** bindings appear on the public verification pages or in a receipt's `own`
+claim.
+
+Anything that renders an owner must key its wording off `tier`, not `kind` — otherwise a
+self-attested claim renders as a verified one, which defeats the entire mechanism.
+
+---
+
+## Receipts — portable proof a call happened
+
+Your logs convince you. They don't convince a counterparty, because you control your own
+database. A **receipt** is a record of one call that a third party can check without an
+account, without your database, and without your cooperation.
+
+It's a compact JWS (`typ: passcontrol-receipt+jwt`) signed with your deployment's Ed25519
+key. Governed calls are receipted — **refusals as well as approvals.** "The gateway stopped
+this agent from touching that model, here is the proof" is often the more useful document.
+
+### Enabling them
+
+| Variable | Purpose |
+|---|---|
+| `INSTANCE_SIGNING_KEY` | 32-byte base64url seed. Signs receipts and agent tokens. `passcontrol keygen instance` generates one. |
+| `INSTANCE_SIGNING_KEY_PREV` | **Never signs anything.** Its public half stays published so receipts signed before a rotation still verify. |
+| `PASSCONTROL_ISSUER` | This deployment's https origin. Becomes the `iss` claim and the address others fetch your keys from. |
+
+Without both `INSTANCE_SIGNING_KEY` and `PASSCONTROL_ISSUER`, no receipt is signed — an
+unverifiable `iss` is worse than no receipt, because it looks authoritative and resolves to
+no key set.
+
+### `GET /.well-known/jwks.json`
+
+Public, unauthenticated, no rate limit. The public halves of your signing keys — this is what
+anyone verifying a receipt fetches.
+
+```json
+{"keys":[{"kty":"OKP","crv":"Ed25519","x":"kMtk4JHLIW2GLbTw2GPORDQyOE5UspTaUSQK9fUhq7U",
+          "alg":"EdDSA","use":"sig","kid":"uqcSRpjIq2Y9UdUic3BebzbubwDfZoezMpkUlCwWSfA"}]}
+```
+
+Served with `Cache-Control: public, max-age=300, stale-while-revalidate=86400`
+(`max-age` is configurable via `JWKS_MAX_AGE_SECONDS`). CORS is open and the global
+`Cross-Origin-Resource-Policy` is relaxed here — this is the one document other deployments
+exist to read.
+
+`{"keys":[]}` means no signing key is configured. Every verification against that deployment
+will then fail with `unknown_key`, which reads like a forgery and is not one.
+
+### Claims
+
+Names are abbreviated deliberately — a receipt travels in URLs and QR codes.
+
+| Claim | Type | Meaning |
+|---|---|---|
+| `iss` | string | Issuing deployment's origin. Its JWKS is at `{iss}/.well-known/jwks.json`. |
+| `sub` | string | Agent passport id (its public key). |
+| `jti` | uuid | Receipt id — the same id as the call's log row. |
+| `iat` | int | Signed at (Unix seconds). |
+| `agid` | uuid | Agent id. |
+| `vjti` | uuid | The work-visa the call was made with. |
+| `prov` | string | Provider (`anthropic`, `openai`, …). |
+| `mdl` | string \| null | Model, when one was named. |
+| `mth` | string | HTTP method. |
+| `path` | string | Upstream path called. |
+| `use` | `{in,out}` | Input / output tokens. |
+| `cost` | int | **Micro-cents.** $ = `cost` / 100,000,000. `61` is $0.00000061, not $61. |
+| `res` | `{status,http}` | The gateway's verdict and the HTTP status. |
+| `t0` | int | Call start (Unix **milliseconds**). |
+| `lat` | int | Gateway latency in ms. |
+| `ver` | int | Receipt schema version. |
+| `req` | `{alg,dig,len}` | SHA-256 over the exact request bytes, and their length. **Omitted** when the gateway refused before reading the body — absent means "never read", whereas a digest of `""` would mean "the client sent nothing". |
+| `own` | `{kind,sub,tier,vat}` | Who operates this deployment, if a binding is published. **Per tenant, not per agent.** Read `tier`, not `kind`. Omitted when none is bound. |
+
+Versioning is additive: a verifier refuses a receipt **newer** than it understands, but
+ignores unknown claims within a supported version. That's what lets you add a field without
+invalidating verifiers already in the field.
+
+### Verifying one
+
+Three ways, all running the same checks in the same order:
+
+```bash
+# 1. CLI — needs no config, no passport, no API key.
+passcontrol verify receipt "<jws>" --issuer https://passcontrol.example.com
+```
+
+```js
+// 2. SDK — the same function the CLI and the web page call.
+//    Copied from the repo's sdk/ directory; it has no dependencies beyond
+//    @noble/curves and runs in Node, Deno, Bun, workers and the browser.
+import { verifyReceipt } from "./sdk/verify";
+const result = await verifyReceipt(jws, { trustedIssuers: ["https://passcontrol.example.com"] });
+// { ok: true, claims } | { ok: false, reason }
+```
+
+3. **The web page** at `/verify/receipt` on your own deployment — paste-and-check, no install.
+   Verification runs **in the visitor's browser**; the receipt is never uploaded. "Copy
+   shareable link" puts the receipt in the URL fragment, which browsers never send to a
+   server.
+
+`trustedIssuers` (or `--issuer`) is required and has no default. A verifier that accepts
+whatever issuer the artifact names is not verifying anything — the `iss` claim is attacker-
+controlled until a signature says otherwise.
+
+**What a successful verification means:** the named issuer signed this record and nothing in
+it has changed since. It does **not** mean the issuer is trustworthy — anyone can run
+PassControl — and it does **not** describe the provider's reply, only the request and the
+gateway's decision about it. The absence of a receipt proves nothing: receipt writing is
+best-effort by design.
+
+Failure reasons are the `VerifyFailure` union exported by `sdk/verify.ts`; the CLI maps them
+to sentences in `FAILURE_REASONS` (`cli/verify.mjs`). Two worth knowing:
+
+- `unknown_key` — the key id isn't in the issuer's JWKS. Before reporting this the verifier
+  refetches once bypassing the HTTP cache, because a cached key list can be up to a day old
+  and would otherwise make a genuine post-rotation receipt look forged.
+- `jwks_unreachable` — the key set couldn't be fetched. **Not** a statement that the receipt
+  is bad; it means the check never completed.
+
+### Rotating the signing key
+
+Receipts have **no expiry**. They're checked against the keys you publish *now*, so replacing
+your signing key retroactively invalidates every receipt you have ever signed.
+
+```bash
+INSTANCE_SIGNING_KEY_PREV=<the old seed>   # move it here first
+INSTANCE_SIGNING_KEY=<the new seed>
+```
+
+This is **inverted relative to `VISA_SECRET_PREV`.** Nothing is ever signed with
+`INSTANCE_SIGNING_KEY_PREV`; it exists only so its public half remains in the JWKS. Publish
+both, wait one `max-age` window (5 minutes) for caches, then start signing with the new key.
+Drop the old one only when receipts predating the rotation no longer matter.
+
+---
+
+## Agent-to-agent tokens
+
+`POST /api/auth/agent-token` mints a short-lived EdDSA token (`typ:
+passcontrol-agent+jwt`) that one agent presents to **another service** — as opposed to a
+work-visa, which is only ever for the gateway.
+
+The agent signs a payload with its passport private key:
+
+```
+{ payload: base64url(JSON{ passport_id, ts, nonce, aud, ttl? }), signature }
+```
+
+**`aud` lives inside the signed payload**, not beside it. The agent cryptographically
+authorises which audience it is minting for; an `aud` passed as a sibling of the signature
+could be swapped in transit.
+
+The receiving service verifies it with the same JWKS as a receipt — but must pin the
+audience it expects:
+
+```bash
+passcontrol verify token "<jwt>" --audience my-service --issuer https://passcontrol.example.com
+```
+
+Unlike receipts, agent tokens **do** carry `exp` and are checked for expiry and audience.
 
 ---
 
@@ -278,3 +484,11 @@ provider secrets are never returned by the API and are never accepted by the con
 - Instant revocation assumes Redis is configured for persistence/no-eviction behavior. If
   Redis evicts suspend/kill keys, enforcement falls back to short visa TTLs and durable agent
   status checks at the next mint.
+- Receipts are **best-effort**: signing failures never abort a call, so the absence of a receipt
+  is not evidence a call did not happen. They are proof of what did occur, not a complete ledger.
+- A receipt covers the request and the gateway's decision. It does **not** record the provider's
+  response body, so it cannot prove what a model replied.
+- Verifying a receipt proves the named issuer signed it. It says nothing about whether that
+  issuer is honest — anyone can run PassControl, and deciding whom to trust stays with the reader.
+- Owner bindings at tier `unverified` are self-declared and prove nothing. Only `domain` and
+  `idv` reflect a completed check.

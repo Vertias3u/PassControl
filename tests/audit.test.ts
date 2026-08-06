@@ -62,6 +62,12 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "apikey.revoke",
         "mfa.enroll",
         "mfa.disable",
+        // Owner binding (migration 0017). Declaring an owner, publishing it to
+        // the public /verify page, and running the domain check are all
+        // privileged: each one changes what a stranger reads about this tenant.
+        "owner.set",
+        "owner.publish",
+        "owner.verify",
       ].sort()
     );
   });

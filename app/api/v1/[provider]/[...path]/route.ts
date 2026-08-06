@@ -33,6 +33,8 @@ import {
 import { costMicrocents, estimateTokenUsage, MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { createUsageTransform, usageFromJson, type Usage } from "@/lib/usage/parseStream";
 import { writeLog, mirrorSpend } from "@/lib/log";
+import { signReceipt, type OwnerClaim } from "@/lib/receipt";
+import { readCurrentOwner } from "@/lib/owner/current";
 import { isProvider, upstreamBaseUrl, authHeaders, usesOpenAiUsageShape, type ProviderId } from "@/lib/providers";
 import { rateLimit } from "@/lib/ratelimit";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
@@ -209,6 +211,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   const passportId = claims.sub;
   const jti = claims.jti;
   const reserveId = crypto.randomUUID();
+  // Named here so the id can travel in a response header before the log row —
+  // and the signed receipt inside it — exists. The proof is built and signed
+  // later, in waitUntil; the hot path costs one uuid and one header.
+  const receiptId = crypto.randomUUID();
   const userId: string = claims.uid;
   const capTokens: number | null = claims.bt ?? null;
   const capMicrocents: number | null =
@@ -230,6 +236,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         code: "rate_limited",
       })
     );
+    // No receipt id: the rate limit fires before any gate runs and writes no
+    // row, so there would be nothing for the id to name.
     return new Response(JSON.stringify({ error: "rate_limited" }), {
       status: 429,
       headers: { "content-type": "application/json", "retry-after": String(PROXY_RATE_WINDOW_S) },
@@ -239,18 +247,82 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // Used on a policy-cache miss and on a provider-key-cache miss.
   const db = serviceClient();
 
-  const logBlocked = (status: Parameters<typeof writeLog>[0]["status"], model?: string) =>
+  // Names the receipt for a GOVERNED decision — one where the gate ran and a row
+  // is written. Used only on paths that also call logBlocked/reconcile, so the
+  // id in the header always resolves at /api/control/v1/receipts/{id}.
+  //
+  // Deliberately NOT used for malformed-request rejections (415/413/400) or the
+  // rate limit: those write no row, so advertising an id there would hand the
+  // caller a reference that 404s. The header's contract is "this id names a
+  // decision the gateway recorded", and it has to stay true to be worth having.
+  const errR = (status: number, code: string) =>
+    new Response(JSON.stringify({ error: code }), {
+      status,
+      headers: { "content-type": "application/json", "x-passcontrol-receipt-id": receiptId },
+    });
+
+  // The revocation gate runs before the body is read, deliberately. A receipt
+  // written from there has no request to digest, and must say so by omitting the
+  // digest rather than reporting one over "". Assigned once the body is read.
+  let capturedBody: string | null = null;
+
+  // signReceipt already swallows its own failures, but this call sits INSIDE the
+  // argument list of writeLog inside reconcile(). If it ever throws, the tasks
+  // array is destroyed before Promise.all forms: the budget reservation is never
+  // released and the audit row is lost. Never make a governance path depend on a
+  // signing path staying well-behaved — belt and braces, one line.
+  const safeReceipt = (input: Parameters<typeof signReceipt>[0]): string | null => {
+    try {
+      return signReceipt(input);
+    } catch {
+      return null;
+    }
+  };
+
+  // Read at most once per request, and only if a receipt is actually written.
+  // Redis-cached for 300s, so the common case costs nothing; resolves to null on
+  // any failure, because a receipt with no owner claim is still a valid receipt.
+  let ownerRead: Promise<OwnerClaim | null> | null = null;
+  const currentOwner = () =>
+    (ownerRead ??= readCurrentOwner(db, userId).catch(() => null));
+
+  const logBlocked = (
+    status: Parameters<typeof writeLog>[0]["status"],
+    model?: string,
+    httpStatus = 403
+  ) =>
     waitUntil(
-      writeLog({
-        agentId,
-        userId,
-        passportId,
-        jti,
-        provider,
-        model,
-        status,
-        latencyMs: Date.now() - started,
-      })
+      (async () =>
+        writeLog({
+          id: receiptId,
+          receipt: safeReceipt({
+            receiptId,
+            passportId,
+            agentId,
+            visaJti: jti,
+            provider,
+            model,
+            method: req.method,
+            path: path.join("/"),
+            rawBody: capturedBody,
+            inputTokens: 0,
+            outputTokens: 0,
+            costMicrocents: 0,
+            status,
+            httpStatus,
+            startedAt: started,
+            latencyMs: Date.now() - started,
+            owner: await currentOwner(),
+          }),
+          agentId,
+          userId,
+          passportId,
+          jti,
+          provider,
+          model,
+          status,
+          latencyMs: Date.now() - started,
+        }))()
     );
 
   const captureBlocked = (code: string, status: number, controlScope?: string) =>
@@ -284,7 +356,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // single opaque code so a caller still cannot probe which one it tripped.
     logBlocked(blocked);
     captureBlocked(blocked, 403);
-    return err(403, "blocked_suspended");
+    return errR(403, "blocked_suspended");
   }
 
   // ── Read body once (small); extract model + stream; mutate for usage ─────────
@@ -299,6 +371,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   }
   let bodyObj: any = {};
   const rawBody = await req.text();
+  // From here a receipt can bind what the client actually sent. Note this is
+  // rawBody, never forwardBody: the proxy injects stream_options.include_usage
+  // below and re-serialises, and the verifier holds the client's bytes.
+  capturedBody = rawBody;
   if (rawBody.length > MAX_BODY_BYTES) return err(413, "payload_too_large");
   if (rawBody) {
     try {
@@ -328,12 +404,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   if (prePolicyGate.deniedBy === "scope") {
     logBlocked("blocked_scope", model);
     captureBlocked("blocked_scope", 403);
-    return err(403, "blocked_scope");
+    return errR(403, "blocked_scope");
   }
   if (prePolicyGate.deniedBy === "endpoint") {
     logBlocked("blocked_endpoint", model);
     captureBlocked("blocked_endpoint", 403);
-    return err(403, "blocked_endpoint");
+    return errR(403, "blocked_endpoint");
   }
   const upstreamPath = canonicalEndpointPath(provider, req.method, path);
   if (!upstreamPath) {
@@ -341,7 +417,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // the same allowlist and must never disagree.
     logBlocked("blocked_endpoint", model);
     captureBlocked("blocked_endpoint", 403);
-    return err(403, "blocked_endpoint");
+    return errR(403, "blocked_endpoint");
   }
 
   // ── 4. Current per-agent policy ────────────────────────────────────────────
@@ -350,9 +426,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   const currentPolicyGate = await evaluateCurrentPolicyGate(db, userId, agentId, gateBase);
   if (currentPolicyGate.gate.deniedBy === "policy") {
     const policy = policyBlockDetails(currentPolicyGate.gate);
-    logBlocked(BLOCKED_POLICY_STATUS, model);
+    logBlocked(BLOCKED_POLICY_STATUS, model, policy.status);
     captureBlocked(`blocked_policy_${policy.reason}`, policy.status, policy.rule);
-    return err(policy.status, "blocked_policy");
+    return errR(policy.status, "blocked_policy");
   }
 
   // S5: ensure OpenAI-compatible streams report usage.
@@ -400,24 +476,62 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     },
   });
   if (finalGate.deniedBy === "budget") {
-    logBlocked("blocked_budget", model);
+    logBlocked("blocked_budget", model, 402);
     captureBlocked("blocked_budget", 402);
-    return err(402, "blocked_budget");
+    return errR(402, "blocked_budget");
   }
 
   // From here a reservation is held; it MUST be reconciled on every exit path.
-  const reconcile = (usage: Usage, status: Parameters<typeof writeLog>[0]["status"]) => {
+  const reconcile = async (
+    usage: Usage,
+    status: Parameters<typeof writeLog>[0]["status"],
+    httpStatus = 200
+  ) => {
     const cost = costMicrocents(model, usage.inputTokens, usage.outputTokens, provider);
+
+    // Release the reservation FIRST and hold its promise. Everything after this
+    // line — receipt signing included — is then structurally unable to prevent
+    // it. Built inline in the tasks array instead, a throw while assembling the
+    // writeLog argument would destroy the array before reconcileBudget was ever
+    // called, leaking the reservation until its marker expires 960s later and
+    // silently shrinking the agent's budget in the meantime.
+    const budget = reconcileBudget({
+      agentId,
+      reserveId,
+      estimate,
+      estimateMicrocents,
+      actualTokens: usage.inputTokens + usage.outputTokens,
+      actualMicrocents: cost,
+    });
+
+    // Signed here, inside waitUntil, so the hot path pays nothing for it.
+    // signReceipt never throws — it returns null on any failure, including an
+    // unconfigured deployment.
+    const receipt = safeReceipt({
+      receiptId,
+      passportId,
+      agentId,
+      visaJti: jti,
+      provider,
+      model,
+      method: req.method,
+      path: path.join("/"),
+      rawBody: capturedBody,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      costMicrocents: cost,
+      status,
+      httpStatus,
+      startedAt: started,
+      latencyMs: Date.now() - started,
+      owner: await currentOwner(),
+    });
+
     const tasks: Promise<unknown>[] = [
-      reconcileBudget({
-        agentId,
-        reserveId,
-        estimate,
-        estimateMicrocents,
-        actualTokens: usage.inputTokens + usage.outputTokens,
-        actualMicrocents: cost,
-      }),
+      budget,
       writeLog({
+        id: receiptId,
+        receipt,
         agentId,
         userId,
         passportId,
@@ -455,8 +569,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   if (!providerKey) {
     // No usage; release the reservation by reconciling with the estimate as spend
     // would over-count, so release exactly the reserve and log zero usage.
-    waitUntil(reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error"));
-    return err(409, "no_provider_key");
+    waitUntil(reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error", 409));
+    return errR(409, "no_provider_key");
   }
 
   // ── 7. Inject + forward ──────────────────────────────────────────────────────
@@ -492,8 +606,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         code: "upstream_unreachable",
       })
     );
-    waitUntil(reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error"));
-    return err(502, "upstream_unreachable");
+    waitUntil(reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error", 502));
+    return errR(502, "upstream_unreachable");
   }
 
   const contentType = upstream.headers.get("content-type") ?? "";
@@ -501,10 +615,13 @@ async function handle(req: Request, params: { provider: string; path: string[] }
 
   // Surface upstream errors verbatim (never leak the key); reconcile by releasing.
   if (!upstream.ok) {
-    waitUntil(reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error"));
+    waitUntil(reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error", upstream.status));
     return new Response(upstream.body, {
       status: upstream.status,
-      headers: { "content-type": contentType || "application/json" },
+      headers: {
+        "content-type": contentType || "application/json",
+        "x-passcontrol-receipt-id": receiptId,
+      },
     });
   }
 
@@ -519,6 +636,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
         connection: "keep-alive",
+        // The id, not the receipt: on a stream the response headers are already
+        // committed before usage resolves, so a usage-bound proof cannot ride
+        // here. Same shape on the buffered path so callers have one rule.
+        "x-passcontrol-receipt-id": receiptId,
       },
     });
   }
@@ -529,7 +650,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   waitUntil(reconcile(usage, "ok"));
   return new Response(JSON.stringify(json), {
     status: 200,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-passcontrol-receipt-id": receiptId },
   });
 }
 
@@ -586,24 +707,88 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   const passportId = claims.sub;
   const jti = claims.jti;
   const reserveId = crypto.randomUUID();
+  // The demo signs receipts on the same terms as the real path. The synthesized
+  // reply is the ONLY fake thing here: which agent called, which gate answered,
+  // what it cost and when are all real, and those are the only things a receipt
+  // ever claims. Withholding one would make the demo misrepresent the product in
+  // the one direction that matters — it is the only surface reachable without a
+  // key, so for most people it is the only receipt they will ever see.
+  const receiptId = crypto.randomUUID();
   const capTokens: number | null = claims.bt ?? null;
   const capMicrocents: number | null =
     claims.bc == null ? null : Math.round(Number(claims.bc) * MICROCENTS_PER_CENT);
   const spentSnapshot: number = Number(claims.st ?? 0);
   const spentMicrocentsSnapshot: number = Number(claims.sc ?? 0);
 
-  const logBlocked = (status: Parameters<typeof writeLog>[0]["status"], model?: string) =>
+  // Created up here rather than at the policy step below, because the owner read
+  // needs it and the first receipt can be written before policy is ever reached.
+  // serviceClient() builds a client object; it opens nothing.
+  const db = serviceClient();
+
+  // Same contract as the real path: the header names a decision that WAS
+  // recorded, so it only rides on responses that write a row. See the comment on
+  // `errR` in handle().
+  const errR = (status: number, code: string) =>
+    new Response(JSON.stringify({ error: code }), {
+      status,
+      headers: { "content-type": "application/json", "x-passcontrol-receipt-id": receiptId },
+    });
+
+  // The revocation gate runs before the body is read; a receipt written there
+  // omits the digest rather than reporting one over "".
+  let capturedBody: string | null = null;
+
+  let ownerRead: Promise<OwnerClaim | null> | null = null;
+  const currentOwner = () => (ownerRead ??= readCurrentOwner(db, userId).catch(() => null));
+
+  // Wrapped for the same reason as in handle(): this call sits inside the
+  // argument list of writeLog, and a throw there destroys the surrounding tasks
+  // array before the budget reconcile is ever awaited.
+  const safeReceipt = (input: Parameters<typeof signReceipt>[0]): string | null => {
+    try {
+      return signReceipt(input);
+    } catch {
+      return null;
+    }
+  };
+
+  const logBlocked = (
+    status: Parameters<typeof writeLog>[0]["status"],
+    model?: string,
+    httpStatus = 403
+  ) =>
     waitUntil(
-      writeLog({
-        agentId,
-        userId,
-        passportId,
-        jti,
-        provider: "demo",
-        model,
-        status,
-        latencyMs: Date.now() - started,
-      })
+      (async () =>
+        writeLog({
+          id: receiptId,
+          receipt: safeReceipt({
+            receiptId,
+            passportId,
+            agentId,
+            visaJti: jti,
+            provider: "demo",
+            model,
+            method: req.method,
+            path: path.join("/"),
+            rawBody: capturedBody,
+            inputTokens: 0,
+            outputTokens: 0,
+            costMicrocents: 0,
+            status,
+            httpStatus,
+            startedAt: started,
+            latencyMs: Date.now() - started,
+            owner: await currentOwner(),
+          }),
+          agentId,
+          userId,
+          passportId,
+          jti,
+          provider: "demo",
+          model,
+          status,
+          latencyMs: Date.now() - started,
+        }))()
     );
 
   const capturePolicyBlocked = (reason: string, status: number, rule: string) =>
@@ -644,7 +829,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     const blocked = revocationGate.deniedBy === "kill" ? "blocked_killed" : "blocked_suspended";
     // Attribute in the log; keep the wire response opaque (see the other handler).
     logBlocked(blocked);
-    return err(403, "blocked_suspended");
+    return errR(403, "blocked_suspended");
   }
 
   // Parse body (model + stream).
@@ -654,6 +839,9 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   let bodyObj: any = {};
   const rawBody = await req.text();
   if (rawBody.length > MAX_BODY_BYTES) return err(413, "payload_too_large");
+  // Digest the bytes the client actually sent. From here on a receipt can bind
+  // the request; before it, `capturedBody` stays null and the digest is omitted.
+  capturedBody = rawBody;
   if (rawBody) {
     try {
       bodyObj = JSON.parse(rawBody);
@@ -679,21 +867,20 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   const prePolicyGate = evaluateGate(gateBase);
   if (prePolicyGate.deniedBy === "scope") {
     logBlocked("blocked_scope", model);
-    return err(403, "blocked_scope");
+    return errR(403, "blocked_scope");
   }
   if (prePolicyGate.deniedBy === "endpoint") {
     logBlocked("blocked_endpoint", model);
-    return err(403, "blocked_endpoint");
+    return errR(403, "blocked_endpoint");
   }
 
   // 5. Current policy — real, because the demo promises the governance path.
-  const db = serviceClient();
   const currentPolicyGate = await evaluateCurrentPolicyGate(db, userId, agentId, gateBase);
   if (currentPolicyGate.gate.deniedBy === "policy") {
     const policy = policyBlockDetails(currentPolicyGate.gate);
-    logBlocked(BLOCKED_POLICY_STATUS, model);
+    logBlocked(BLOCKED_POLICY_STATUS, model, policy.status);
     capturePolicyBlocked(policy.reason, policy.status, policy.rule);
-    return err(policy.status, "blocked_policy");
+    return errR(policy.status, "blocked_policy");
   }
 
   // 6. Budget reserve (atomic) — real, so the budget/kill demos are honest.
@@ -730,8 +917,8 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     },
   });
   if (finalGate.deniedBy === "budget") {
-    logBlocked("blocked_budget", model);
-    return err(402, "blocked_budget");
+    logBlocked("blocked_budget", model, 402);
+    return errR(402, "blocked_budget");
   }
 
   // 7. Synthesize the response in place of Vault-key resolution + upstream forward.
@@ -742,30 +929,61 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   const cost = totalTokens * DEMO_MICROCENTS_PER_TOKEN;
 
   waitUntil(
-    Promise.all([
-      reconcileBudget({
+    (async () => {
+      // Release the reservation FIRST and hold its promise — the same ordering
+      // rule as reconcile() on the real path. Built inline in the array below,
+      // a throw while assembling the writeLog argument would destroy the array
+      // before reconcileBudget was ever called, leaking the reservation until
+      // its marker expires ~960s later and quietly shrinking the agent's budget.
+      const budget = reconcileBudget({
         agentId,
         reserveId,
         estimate,
         estimateMicrocents,
         actualTokens: totalTokens,
         actualMicrocents: cost,
-      }),
-      writeLog({
-        agentId,
-        userId,
+      });
+
+      const receipt = safeReceipt({
+        receiptId,
         passportId,
-        jti,
+        agentId,
+        visaJti: jti,
         provider: "demo",
         model,
+        method: req.method,
+        path: path.join("/"),
+        rawBody: capturedBody,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         costMicrocents: cost,
         status: "ok",
+        httpStatus: 200,
+        startedAt: started,
         latencyMs: Date.now() - started,
-      }),
-      mirrorSpend(agentId, totalTokens, cost),
-    ])
+        owner: await currentOwner(),
+      });
+
+      return Promise.all([
+        budget,
+        writeLog({
+          id: receiptId,
+          receipt,
+          agentId,
+          userId,
+          passportId,
+          jti,
+          provider: "demo",
+          model,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          costMicrocents: cost,
+          status: "ok",
+          latencyMs: Date.now() - started,
+        }),
+        mirrorSpend(agentId, totalTokens, cost),
+      ]);
+    })()
   );
 
   const id = `demo-${crypto.randomUUID()}`;
@@ -786,6 +1004,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       headers: {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
+        "x-passcontrol-receipt-id": receiptId,
       },
     });
   }
@@ -803,6 +1022,9 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
         total_tokens: totalTokens,
       },
     }),
-    { status: 200, headers: { "content-type": "application/json" } }
+    {
+      status: 200,
+      headers: { "content-type": "application/json", "x-passcontrol-receipt-id": receiptId },
+    }
   );
 }

@@ -51,6 +51,104 @@ describe("gateway accounting writes", () => {
     );
   });
 
+  // The caller now supplies `id` so it can put the receipt id in a response
+  // header before the row exists. That makes the blind retry collidable for the
+  // first time: if the first insert actually landed but the response was lost,
+  // the retry hits the primary key and would report a healthy write as a failure.
+  it("treats a duplicate key on the RETRY as success and reports nothing", async () => {
+    insert
+      .mockResolvedValueOnce({ error: { message: "network blip" } })
+      .mockResolvedValueOnce({ error: { code: "23505", message: "duplicate key value" } });
+
+    await writeLog({
+      id: "receipt-1",
+      agentId: "agent-1",
+      userId: "user-1",
+      passportId: "passport-1",
+      jti: "visa-1",
+      status: "ok",
+    });
+
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(captureErrorMock).not.toHaveBeenCalled();
+  });
+
+  // ...but a duplicate on the FIRST attempt is not a lost response. Something
+  // else already wrote that id, which means reconcile ran twice. Swallowing it
+  // would hide exactly the bug worth knowing about.
+  it("still reports a duplicate key on the FIRST attempt", async () => {
+    insert.mockResolvedValue({ error: { code: "23505", message: "duplicate key value" } });
+
+    await writeLog({
+      id: "receipt-1",
+      agentId: "agent-1",
+      userId: "user-1",
+      passportId: "passport-1",
+      jti: "visa-1",
+      status: "ok",
+    });
+
+    expect(captureErrorMock).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ code: "agent_log_insert_failed" })
+    );
+  });
+
+  it("persists the supplied id and receipt so the row can be named before it exists", async () => {
+    insert.mockResolvedValue({ error: null });
+
+    await writeLog({
+      id: "receipt-1",
+      agentId: "agent-1",
+      userId: "user-1",
+      passportId: "passport-1",
+      jti: "visa-1",
+      status: "ok",
+      receipt: "header.payload.signature",
+    });
+
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "receipt-1", receipt: "header.payload.signature" })
+    );
+  });
+
+  // PostgREST rejects the ENTIRE insert when a named column does not exist. So
+  // naming `receipt` unconditionally would mean a deployment running this code
+  // against a pre-0016 schema writes no audit rows at all — silently, on every
+  // call, because agent_logs writes are best-effort and swallow their errors.
+  // Omitting the key is what lets the code ship ahead of the migration.
+  it("never names the receipt column when there is no receipt to store", async () => {
+    insert.mockResolvedValue({ error: null });
+
+    await writeLog({
+      agentId: "agent-1",
+      userId: "user-1",
+      passportId: "passport-1",
+      jti: "visa-1",
+      status: "ok",
+    });
+
+    const row = insert.mock.calls[0]![0] as Record<string, unknown>;
+    expect(row).not.toHaveProperty("id");
+    expect(row).not.toHaveProperty("receipt");
+  });
+
+  it("does not name the receipt column when the receipt is explicitly null", async () => {
+    insert.mockResolvedValue({ error: null });
+
+    await writeLog({
+      id: "receipt-1",
+      agentId: "agent-1",
+      userId: "user-1",
+      passportId: "passport-1",
+      jti: "visa-1",
+      status: "ok",
+      receipt: null,
+    });
+
+    expect(insert.mock.calls[0]![0]).not.toHaveProperty("receipt");
+  });
+
   it("reports a failed spend mirror RPC instead of dropping it", async () => {
     rpc.mockResolvedValue({ error: { message: "database unavailable" } });
 

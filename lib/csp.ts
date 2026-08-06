@@ -30,7 +30,11 @@ export function createCspNonce(): string {
  * stack (http/ws on 127.0.0.1) alike, and stays tighter than a *.supabase.co
  * wildcard. Falls back to the hosted wildcard if the URL is unset/unparseable.
  */
-function connectSources(supabaseUrl: string | undefined, isProduction: boolean): string[] {
+function connectSources(
+  supabaseUrl: string | undefined,
+  isProduction: boolean,
+  allowExternalJwks: boolean
+): string[] {
   let supabase: string[];
   try {
     const url = new URL(supabaseUrl ?? "");
@@ -41,7 +45,36 @@ function connectSources(supabaseUrl: string | undefined, isProduction: boolean):
   }
   // Next's HMR socket only exists in dev.
   const hmr = isProduction ? [] : ["ws://localhost:*", "ws://127.0.0.1:*"];
-  return ["'self'", ...supabase, ...hmr];
+  // See EXTERNAL_JWKS_PATHS. A self-hosted issuer on the local stack serves over
+  // loopback http, which is already covered by 'self' in development.
+  const jwks = allowExternalJwks ? ["https:"] : [];
+  return ["'self'", ...supabase, ...hmr, ...jwks];
+}
+
+/**
+ * Routes allowed to fetch a JWK Set from an issuer we cannot know in advance.
+ *
+ * Exactly one: the public receipt-verification page, which verifies in the
+ * BROWSER. That is the point of it — the pasted receipt never reaches Vertias,
+ * and the page runs the same sdk/verify.ts a third party runs on their own
+ * machine. To check a signature it must fetch the issuer's published keys, and
+ * the issuer is whatever the receipt names, including a self-hosted deployment.
+ *
+ * Why widening here is acceptable where it would not be elsewhere: the page
+ * holds no session, no cookie and no secret, and the only data on it is a
+ * receipt the visitor pasted themselves. The alternative — proxying the key
+ * fetch through our own server — creates an anonymous SSRF surface AND puts our
+ * server back in the trust path, where a compromised or lying server could
+ * serve a key that makes a forgery verify. Removing exactly that dependency is
+ * the reason the page exists.
+ *
+ * Matched EXACTLY (see needsExternalJwks). A prefix test would hand the same
+ * relaxation to /verify/receipt-anything.
+ */
+export const EXTERNAL_JWKS_PATHS: readonly string[] = ["/verify/receipt"];
+
+export function needsExternalJwks(pathname: string): boolean {
+  return EXTERNAL_JWKS_PATHS.includes(pathname);
 }
 
 /**
@@ -72,6 +105,12 @@ export interface CspOptions {
   supabaseUrl?: string;
   /** True for statically prerendered pages — see PRERENDERED_PUBLIC_PATHS. */
   prerendered?: boolean;
+  /**
+   * Let connect-src reach any https origin, for the one route that verifies a
+   * third party's signature in the browser. See EXTERNAL_JWKS_PATHS. This widens
+   * where the page may TALK; it never touches what may RUN.
+   */
+  allowExternalJwks?: boolean;
 }
 
 export function buildContentSecurityPolicy({
@@ -79,6 +118,7 @@ export function buildContentSecurityPolicy({
   isProduction = process.env.NODE_ENV === "production",
   supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL,
   prerendered = false,
+  allowExternalJwks = false,
 }: CspOptions): string {
   // 'self' is retained alongside 'strict-dynamic' deliberately: CSP3 browsers
   // ignore it once 'strict-dynamic' is present, and CSP2-only browsers ignore
@@ -112,7 +152,7 @@ export function buildContentSecurityPolicy({
     // execution, so this stays until the framework offers a nonced path.
     "style-src 'self' 'unsafe-inline'",
     `script-src ${scriptSrc.join(" ")}`,
-    `connect-src ${connectSources(supabaseUrl, isProduction).join(" ")}`,
+    `connect-src ${connectSources(supabaseUrl, isProduction, allowExternalJwks).join(" ")}`,
     ...(isProduction ? ["upgrade-insecure-requests"] : []),
   ].join("; ");
 }

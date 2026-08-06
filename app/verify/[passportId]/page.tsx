@@ -162,6 +162,47 @@ function Sigil({ passportId }: { passportId: string }) {
   );
 }
 
+/**
+ * The owner row, worded off `tier` and never off `kind`.
+ *
+ * kind records the method that was attempted; tier records what was actually
+ * proven. A self-attested owner is a name somebody typed into a form — if this
+ * component ever renders that as "verified", the entire ladder is theatre and
+ * the page becomes a way to launder an unchecked claim through our domain.
+ */
+function OwnerValue({ owner }: { owner: PublicPassportView["owner"] }) {
+  if (!owner) {
+    return (
+      <dd className="mt-1 mb-0 text-muted-foreground">
+        Not published. The operator has not bound a public owner to this passport.
+      </dd>
+    );
+  }
+
+  if (owner.tier === "unverified") {
+    return (
+      <dd className="mt-1 mb-0">
+        <span className="font-semibold text-foreground">{owner.subject}</span>
+        <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+          Self-declared by the operator. We have not verified this claim.
+        </span>
+      </dd>
+    );
+  }
+
+  return (
+    <dd className="mt-1 mb-0">
+      <span className="font-semibold text-foreground">{owner.subject}</span>
+      <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+        {owner.tier === "domain"
+          ? "Verified by control of this domain"
+          : "Verified by identity check"}
+        {owner.verifiedAt ? ` · last confirmed ${formatIssued(owner.verifiedAt)}` : ""}
+      </span>
+    </dd>
+  );
+}
+
 function PassportCard({ passport }: { passport: PublicPassportView }) {
   const presentation = STATUS[passport.status];
 
@@ -209,13 +250,19 @@ function PassportCard({ passport }: { passport: PublicPassportView }) {
               {formatIssued(passport.issuedAt)}
             </dd>
           </div>
+          <div className="sm:col-span-2">
+            <dt className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              Owner
+            </dt>
+            <OwnerValue owner={passport.owner} />
+          </div>
         </dl>
 
         <p className="m-0 rounded-lg border border-border bg-secondary px-4 py-3 text-xs leading-5 text-muted-foreground">
-          This page reports issuance and revocation only. It is not a live authorization decision
-          and says nothing about the agent&rsquo;s owner, spending, permissions, or call history —
-          those stay private to the operator. The sigil is derived from the public key, so the same
-          passport always draws the same mark.
+          This page reports issuance, revocation, and any owner the operator has chosen to publish.
+          It is not a live authorization decision, and it says nothing about the agent&rsquo;s
+          spending, permissions, or call history — those stay private to the operator. The sigil is
+          derived from the public key, so the same passport always draws the same mark.
         </p>
       </div>
     </section>

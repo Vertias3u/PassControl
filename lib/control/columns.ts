@@ -9,5 +9,12 @@ export const AGENT_COLS =
 export const LOG_COLS =
   "id, agent_id, passport_id, jti, provider, model, input_tokens, output_tokens, cost_microcents, status, latency_ms, created_at";
 
+// A single call plus its signed receipt. Deliberately NOT folded into LOG_COLS:
+// a receipt is ~600-900 bytes of JWS, and adding it to the list endpoint would
+// bloat every page of results for the one caller in a hundred who wants a proof.
+// Fetched one at a time, by id, from /api/control/v1/receipts/{id}.
+export const RECEIPT_COLS =
+  "id, agent_id, passport_id, jti, provider, model, input_tokens, output_tokens, cost_microcents, status, latency_ms, created_at, receipt";
+
 // Admin-action audit fields.
 export const AUDIT_COLS = "id, action, target_type, target_id, metadata, created_at";

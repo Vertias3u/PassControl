@@ -10,6 +10,11 @@ const allowed = new Set([
   "package.json",
   "bin/passcontrol.mjs",
   "cli/config.mjs",
+  // Verification is deliberately shipped in the CLI: `passcontrol verify` is the
+  // one command a stranger runs against someone else's deployment, so it must
+  // work from a bare `npm i -g passcontrol` with no config and no account.
+  "cli/instance-key.mjs",
+  "cli/verify.mjs",
   "cli/mcp/gateway.mjs",
   "cli/mcp/integration.mjs",
   "cli/mcp/README.md",

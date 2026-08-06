@@ -23,6 +23,7 @@ const k = {
   key: (agid: string, provider: string) => `key:${agid}:${provider}`,
   policy: (uid: string, agid: string) => `policy:${uid}:${agid}`,
   suspended: (agid: string) => `suspended:${agid}`,
+  owner: (uid: string) => `owner:${uid}`,
   lastSeen: (agid: string) => `lastseen:${agid}`,
   keyImport: (uid: string, id: string) => `keyimport:${uid}:${id}`,
 };
@@ -228,6 +229,26 @@ export async function setCachedAgentPolicy(
   ttlSeconds = 60
 ): Promise<void> {
   await redis().set(k.policy(userId, agentId), serializedPolicy, { ex: ttlSeconds });
+}
+
+// ── Owner-binding cache ──────────────────────────────────────────────────────
+// The owner claim on a receipt is read per call, so it is cached like policy.
+// Owner bindings change far less often than policy, hence the longer TTL. Not
+// secret material — a published owner is public by definition.
+export async function getCachedOwner(userId: string): Promise<string | null> {
+  return redis().get<string>(k.owner(userId));
+}
+
+export async function setCachedOwner(
+  userId: string,
+  serializedOwner: string,
+  ttlSeconds = 300
+): Promise<void> {
+  await redis().set(k.owner(userId), serializedOwner, { ex: ttlSeconds });
+}
+
+export async function purgeOwnerCache(userId: string): Promise<void> {
+  await redis().del(k.owner(userId));
 }
 
 export async function purgeAgentCaches(agentId: string, providers: string[]): Promise<void> {

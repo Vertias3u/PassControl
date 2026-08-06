@@ -45,6 +45,12 @@ import {
   supportsWrite,
 } from "../cli/presets.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
+import {
+  checkIssuerPublishesKey,
+  generateInstanceKey,
+  instanceKidFromSeed,
+} from "../cli/instance-key.mjs";
+import { FAILURE_REASONS, verifyAgentToken, verifyReceipt } from "../cli/verify.mjs";
 
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -155,6 +161,11 @@ ${heading("Usage:")}
   ${cmd} audit [--limit 20]        show admin audit trail
   ${cmd} logs [--limit 20]         show gateway call logs
   ${cmd} kill on|off              toggle tenant kill switch
+  ${cmd} keygen instance          generate the deployment's receipt-signing key
+  ${cmd} verify receipt <jws> --issuer <origin>
+                                 check a signed call receipt (no account needed)
+  ${cmd} verify token <jwt> --audience <aud> --issuer <origin>
+                                 check an agent-to-agent token
   ${cmd} open                     start (if needed) and open the dashboard
 
 ${heading("Config:")}
@@ -1569,6 +1580,114 @@ async function doctorCommand(opts = {}) {
   } else {
     step("Skipping control API check: no PASSCONTROL_API_KEY configured.");
   }
+
+  await checkInstanceSigningKey();
+}
+
+// Receipts and agent tokens are signed by a key the DEPLOYMENT owns. A missing
+// key is loud (nothing is signed), but a PASSCONTROL_ISSUER pointing somewhere
+// that does not serve this deployment's JWKS fails silently: every receipt then
+// carries an `iss` whose key set cannot verify it. Check it explicitly.
+async function checkInstanceSigningKey() {
+  const seed = process.env.INSTANCE_SIGNING_KEY;
+  const issuer = process.env.PASSCONTROL_ISSUER;
+
+  if (!seed) {
+    step(
+      "Instance signing key not set in this shell — receipts and agent tokens are disabled " +
+        `(run \`${cliCommand("keygen instance")}\` to create one).`
+    );
+    return;
+  }
+
+  let kid;
+  try {
+    kid = instanceKidFromSeed(seed);
+  } catch {
+    fail("INSTANCE_SIGNING_KEY is set but is not a valid 32-byte base64url seed.");
+    return;
+  }
+  ok(`Instance signing key configured (kid ${kid})`);
+
+  if (!issuer) {
+    fail("PASSCONTROL_ISSUER is not set — receipts would be signed with no verifiable issuer.");
+    return;
+  }
+
+  const result = await checkIssuerPublishesKey({ issuer, kid });
+  (result.ok ? ok : fail)(`Issuer check: ${result.reason}`);
+}
+
+// `passcontrol verify` needs no config, no passport, and no API key — it is the
+// one command a stranger runs against someone else's deployment.
+async function verifyCommand(rest, opts) {
+  const what = rest[0];
+  const artifact = rest[1];
+  const issuer = String(opts.issuer || process.env.PASSCONTROL_ISSUER || "");
+
+  if ((what !== "token" && what !== "receipt") || !artifact) {
+    throw new Error(
+      "Usage: passcontrol verify token <jwt> --audience <aud> --issuer <origin>\n" +
+        "       passcontrol verify receipt <jws> --issuer <origin>"
+    );
+  }
+  if (!issuer) {
+    throw new Error(
+      "Set --issuer <https origin> (or PASSCONTROL_ISSUER). A verifier that trusts " +
+        "whatever issuer the artifact names is not verifying anything."
+    );
+  }
+
+  const result =
+    what === "token"
+      ? await verifyAgentToken(artifact, { issuer, audience: String(opts.audience || "") })
+      : await verifyReceipt(artifact, { issuer });
+
+  if (!result.ok) {
+    fail(`Not valid: ${FAILURE_REASONS[result.reason] ?? result.reason}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const c = result.claims;
+  ok(what === "token" ? "Token is valid." : "Receipt is valid.");
+  step(`Issuer:   ${c.iss}`);
+  step(`Passport: ${c.sub}`);
+  if (what === "token") {
+    step(`Audience: ${c.aud}`);
+    step(`Expires:  ${new Date(c.exp * 1000).toISOString()}`);
+  } else {
+    step(`Call:     ${c.mth} ${c.path} → ${c.prov}${c.mdl ? `/${c.mdl}` : ""}`);
+    step(`Verdict:  ${c.res?.status} (HTTP ${c.res?.http})`);
+    step(`Usage:    ${c.use?.in ?? 0} in / ${c.use?.out ?? 0} out · ${c.cost ?? 0} µ¢`);
+    if (c.req) step(`Request:  ${c.req.alg} ${c.req.dig} (${c.req.len} bytes)`);
+  }
+  if (c.own) {
+    step(
+      `Owner:    ${c.own.sub} (${c.own.tier === "unverified" ? "self-declared, unverified" : c.own.tier})`
+    );
+  }
+}
+
+async function keygenCommand(rest) {
+  const target = rest[0];
+  if (target !== "instance") {
+    throw new Error(`Usage: ${cliCommand("keygen instance")}`);
+  }
+
+  const { seed, kid } = generateInstanceKey();
+  ok("Generated an Ed25519 instance signing key.");
+  step("This key signs call receipts and agent-to-agent tokens. Store the seed like a password:");
+  console.log(`  INSTANCE_SIGNING_KEY=${seed}`);
+  console.log("");
+  step(`Its public half publishes at /.well-known/jwks.json as kid ${kid}.`);
+  step("Also set PASSCONTROL_ISSUER to this deployment's https origin — it becomes the");
+  step("`iss` claim, and the origin other deployments use to find this one's JWKS.");
+  step("");
+  step("Rotating? Move the current value to INSTANCE_SIGNING_KEY_PREV and keep it there.");
+  step("Unlike VISA_SECRET_PREV we never sign with it — its public key stays published so");
+  step("receipts signed before the rotation still verify. Publish the new key, wait one");
+  step("JWKS max-age window, then start signing with it.");
 }
 
 async function openDashboard(opts = {}) {
@@ -1672,6 +1791,12 @@ async function main() {
       break;
     case "open":
       await openDashboard(opts);
+      break;
+    case "keygen":
+      await keygenCommand(commandRest);
+      break;
+    case "verify":
+      await verifyCommand(commandRest, opts);
       break;
     default:
       throw new Error(`Unknown command "${command}". Run \`passcontrol help\`.`);

@@ -3,12 +3,13 @@ import type { MetadataRoute } from "next";
 const BASE = "https://passcontrol.vertias.eu";
 
 // Emitted at /sitemap.xml. The marketing page's sections are in-page anchors,
-// which sitemaps don't enumerate, so only two URLs are listed: the marketing
-// page and the public verification entry point.
+// which sitemaps don't enumerate, so only the entry points are listed: the
+// marketing page and the two public verification surfaces.
 //
-// /verify itself is indexable — it's a lookup form with no passport in it. The
-// individual /verify/<passport-id> pages are not, and robots.ts disallows that
-// prefix: shareable is not the same as crawlable.
+// /verify and /verify/receipt are both indexable — they are paste boxes with
+// nothing private in the URL. The individual /verify/<passport-id> pages are
+// not, and robots.ts disallows that prefix: shareable is not the same as
+// crawlable.
 export default function sitemap(): MetadataRoute.Sitemap {
   return [
     {
@@ -19,6 +20,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
     },
     {
       url: `${BASE}/verify`,
+      lastModified: new Date(),
+      changeFrequency: "monthly",
+      priority: 0.5,
+    },
+    {
+      url: `${BASE}/verify/receipt`,
       lastModified: new Date(),
       changeFrequency: "monthly",
       priority: 0.5,

@@ -18,6 +18,7 @@ vi.mock("@/lib/ratelimit", () => ({
 
 import {
   PUBLIC_PASSPORT_FIELDS,
+  PUBLIC_OWNER_FIELDS,
   PUBLIC_VERIFY_LIMIT,
   PUBLIC_VERIFY_WINDOW_SECONDS,
   buildPublicPassportView,
@@ -57,6 +58,31 @@ describe("the public field set", () => {
     const view = buildPublicPassportView(row());
     expect(view).not.toBeNull();
     expect(Object.keys(view!).sort()).toEqual([...PUBLIC_PASSPORT_FIELDS].sort());
+  });
+
+  // The assertion above pins the BUILDER against the CONSTANT, so it catches
+  // drift between them — but widening the surface means editing both in one
+  // move, and it stays green. It did exactly that when `owner` was added.
+  //
+  // This list is the change detector: it is duplicated on purpose, so putting a
+  // new field on the internet takes a second, deliberate edit in a file whose
+  // whole subject is what strangers can read.
+  it("publishes this exact surface, and widening it is a deliberate act", () => {
+    expect([...PUBLIC_PASSPORT_FIELDS].sort()).toEqual([
+      "displayId",
+      "issuedAt",
+      "owner",
+      "passportId",
+      "status",
+    ]);
+    expect([...PUBLIC_OWNER_FIELDS].sort()).toEqual(["kind", "subject", "tier", "verifiedAt"]);
+  });
+
+  it("exposes exactly the advertised owner fields", () => {
+    const view = buildPublicPassportView(
+      row({ owner_subject: "acme.com", owner_kind: "domain", owner_tier: "domain" })
+    );
+    expect(Object.keys(view!.owner!).sort()).toEqual([...PUBLIC_OWNER_FIELDS].sort());
   });
 
   it("drops private columns even when the row carries them", () => {
@@ -201,5 +227,83 @@ describe("the public lookup", () => {
     );
 
     expect(result).toEqual({ ok: false, reason: "unavailable" });
+  });
+});
+
+describe("the owner assertion", () => {
+  it("is absent when no owner is bound", () => {
+    expect(buildPublicPassportView(row())!.owner).toBeNull();
+  });
+
+  // The SQL function LEFT JOINs `and o.published`, so an unpublished owner comes
+  // back as NULL columns. Publication is opt-in and defaults to false: binding an
+  // owner privately must never put a name on a public URL.
+  it("is absent when the owner has not published", () => {
+    const view = buildPublicPassportView(
+      row({ owner_subject: null, owner_kind: null, owner_tier: null, owner_verified_at: null })
+    );
+    expect(view!.owner).toBeNull();
+  });
+
+  it("renders a domain-verified owner with its tier and date", () => {
+    const view = buildPublicPassportView(
+      row({
+        owner_subject: "acme.com",
+        owner_kind: "domain",
+        owner_tier: "domain",
+        owner_verified_at: "2026-08-01T00:00:00.000Z",
+      })
+    );
+
+    expect(view!.owner).toEqual({
+      kind: "domain",
+      subject: "acme.com",
+      tier: "domain",
+      verifiedAt: "2026-08-01T00:00:00.000Z",
+    });
+  });
+
+  // The load-bearing one. `kind` records the method attempted; `tier` records
+  // what was proven. A self-attested owner is a name someone typed — if the page
+  // could word that as verified, the whole ladder would be theatre.
+  it("never labels a self-attested owner as verified", () => {
+    const view = buildPublicPassportView(
+      row({
+        owner_subject: "Definitely Real Bank",
+        owner_kind: "self_attested",
+        owner_tier: "unverified",
+        owner_verified_at: "2026-08-01T00:00:00.000Z",
+      })
+    );
+
+    expect(view!.owner!.tier).toBe("unverified");
+    // No date either: a verification date on an unverified claim reads as proof.
+    expect(view!.owner!.verifiedAt).toBeNull();
+  });
+
+  it("resolves an unrecognised tier downward, never upward", () => {
+    const view = buildPublicPassportView(
+      row({ owner_subject: "acme.com", owner_kind: "domain", owner_tier: "platinum" })
+    );
+    expect(view!.owner!.tier).toBe("unverified");
+  });
+
+  it("never lets a forged tier column promote a self-attested claim", () => {
+    const view = buildPublicPassportView(
+      row({ owner_subject: "acme.com", owner_kind: "idv", owner_tier: "" })
+    );
+    expect(view!.owner!.tier).toBe("unverified");
+  });
+
+  it("still never leaks the tenant id alongside an owner", () => {
+    const view = buildPublicPassportView(
+      row({
+        owner_subject: "acme.com",
+        owner_kind: "domain",
+        owner_tier: "domain",
+        user_id: "9f1d0c7a-0000-0000-0000-000000000000",
+      })
+    );
+    expect(JSON.stringify(view)).not.toContain("9f1d0c7a");
   });
 });

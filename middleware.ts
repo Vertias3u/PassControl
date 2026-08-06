@@ -11,6 +11,7 @@ import {
   buildContentSecurityPolicy,
   createCspNonce,
   isPrerenderedPublicPath,
+  needsExternalJwks,
 } from "@/lib/csp";
 
 // /verify is the public agent verification page (PAVP): a stranger with a
@@ -33,6 +34,10 @@ export async function middleware(request: NextRequest) {
   const csp = buildContentSecurityPolicy({
     nonce,
     prerendered: isPrerenderedPublicPath(request.nextUrl.pathname),
+    // Exactly one route verifies a third party's signature in the browser and
+    // therefore has to reach an issuer we cannot know in advance. Exact match —
+    // see EXTERNAL_JWKS_PATHS for why this is narrow on purpose.
+    allowExternalJwks: needsExternalJwks(request.nextUrl.pathname),
   });
 
   // Rebuilt per call rather than captured once: Supabase's setAll mutates
@@ -92,7 +97,12 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   // Exclude API routes (visa/secret-authenticated), static assets, and images.
+  // .well-known is excluded for the same reason as llms.txt: it is a public
+  // machine-readable document. Gating the JWKS would 302 every verifier of our
+  // receipts and agent tokens to /login. Excluded here rather than added to
+  // PUBLIC_PATHS because a PUBLIC_PATHS entry still runs supabase.auth.getUser()
+  // — a network round trip on a document meant to be fetched and cached.
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|llms.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api|\\.well-known|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|llms.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

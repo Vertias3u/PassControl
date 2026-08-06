@@ -51,6 +51,18 @@ coverage/
 /CODEX_P1_FIXES.md
 /firstnpmsetup.md
 /GIF_SCRIPT.md
+# Local scratch: rendered media and one-off working dirs. None of it is imported
+# by the app. videos/ alone is ~1.1 GB, so an accidental `git add -A` here is
+# expensive and hard to undo — which is why commits use explicit paths.
+/brag-output/
+/brag-output-cinematic/
+/brag-output-deadpan/
+/videos/
+/fable/
+/marketing/
+/skills/
+/hardening/
+
 # Catch-all for stray env files (belt and braces over the specific rules above).
 # The *.example templates must stay tracked — they are the documented starting
 # point for a self-host and ship in the public mirror, so negate them here or a

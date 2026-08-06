@@ -16,6 +16,10 @@ run the same call again, and watch it get blocked at the gateway. The demo runs 
 pipeline — passport → work-visa → scope + budget checks → kill switch — and only the model
 response is synthesized, by a keyless provider that never touches a vault.
 
+> The hosted demo predates **signed receipts** and does not have them yet — it runs the kill
+> switch, scopes and budgets, but `/verify/receipt` is not live there. To try receipts, run
+> the stack locally (below) or on your own deployment.
+
 ![PassControl kill switch — a live agent's calls flip from 200 OK to 403 BLOCKED the instant the kill switch is armed, then back when it's released](docs/demo/kill-switch.gif)
 
 *Instant, per-agent revocation — the kill switch cuts off a live agent mid-run (`200 OK` → `403 BLOCKED`) and restores it, with no key rotation and no redeploy. Real traffic through the gateway; the status codes and timestamps are live.*
@@ -72,6 +76,14 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 - ⛔ **Instant, layered kill switch** + per-agent suspend/revoke — stop a running agent mid-task
 - 📒 **Append-only audit trail** per agent/passport (direct `UPDATE`/`DELETE`/`TRUNCATE` rejected
   by the database)
+- 🧾 **Signed call receipts** — a governed call, allowed *or* blocked, is recorded in an
+  Ed25519-signed artifact a counterparty can check without an account, your database, or your
+  permission ([details below](#signed-call-receipts))
+- 🌐 **Paste-and-check verification page** at `/verify/receipt` — runs entirely in the visitor's
+  browser; the receipt is never uploaded
+- 👤 **Owner binding** — declare who your agents are operated by, so a receipt can say *whose*
+  agent made the call. Self-declared by default; provable by domain control or an identity
+  check, and the two are stored and rendered separately so a claim never passes as a fact
 - 🧰 **Drop-in for your SDK** (OpenAI, Anthropic, and OpenAI-compatible Groq / Mistral / Together /
   DeepSeek) — **or any agent or desktop chat app** via the visa sidecar (OpenHands, Aider,
   Cline, Continue, Chatbox, Jan, Msty, Cherry Studio, Open WebUI, LibreChat…)
@@ -89,7 +101,7 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 
 ```bash
 npm install -g passcontrol
-passcontrol --version     # 0.4.0
+passcontrol --version     # confirms the install
 passcontrol setup         # prereq checks → fetches the stack → boots it → opens the dashboard
 ```
 
@@ -182,6 +194,54 @@ window, but the sidecar is the real answer for long sessions.
 > `/chat/completions` — PassControl intentionally proxies only chat/messages and model-listing
 > endpoints.
 
+## Signed call receipts
+
+Your audit log convinces **you**. It convinces nobody else — you control that database.
+
+A **receipt** is one call's record, signed with your deployment's Ed25519 key. Anyone can
+check it with no account, no access to your database, and no cooperation from you. Approvals
+and refusals are both signed; *"the gateway stopped this agent from touching that model,
+here's the proof"* is often the more useful document.
+
+```bash
+passcontrol keygen instance     # generates INSTANCE_SIGNING_KEY; set PASSCONTROL_ISSUER too
+```
+
+Then anyone you hand a receipt to runs:
+
+```bash
+passcontrol verify receipt "<receipt>" --issuer https://passcontrol.example.com
+```
+
+```
+✓ Receipt is valid.
+→ Issuer:   http://localhost:3000
+→ Passport: kZCFp7d2x4VDruiulJ21gogYbczBDAGZa-OuwR3qgh8
+→ Call:     POST chat/completions → demo/demo-1
+→ Verdict:  ok (HTTP 200)
+→ Usage:    15 in / 46 out · 61 µ¢
+→ Request:  sha-256 VizsbKJwhtYoTNBv_XkJSf4ihWpdQWQfpXVvuDA6usM (105 bytes)
+```
+
+Change one character and it fails. No terminal? Your deployment serves a paste-and-check page
+at **`/verify/receipt`** (self-hosted or local — the hosted demo does not have it yet) — verification runs in the visitor's browser, the receipt is never
+uploaded, and the shareable link carries it in the URL fragment, which browsers never send to
+a server.
+
+**What it does and doesn't prove.** A valid signature means the named issuer signed this
+record and nothing in it has changed. It does *not* vouch for the issuer — anyone can run
+PassControl, so trusting it is the reader's call. It covers the **request and the gateway's
+decision**, never the provider's reply. And the absence of a receipt proves nothing: receipt
+writing is best-effort, so this is evidence, not a complete ledger.
+
+> **Rotating the signing key is the one dangerous operation.** Receipts never expire, so
+> replacing the key retroactively invalidates every receipt you have ever signed. Move the old
+> seed to `INSTANCE_SIGNING_KEY_PREV` **first** — nothing is ever signed with it; it exists so
+> its public half stays published. This is inverted relative to `VISA_SECRET_PREV`.
+
+Full claim reference and the JWKS endpoint: [`DOCUMENTATION.md`](./DOCUMENTATION.md) ·
+walkthrough: [`TUTORIAL.md`](./TUTORIAL.md).
+
 ## CLI command center
 
 The primary interface is `passcontrol <command>`. Highlights:
@@ -197,6 +257,8 @@ The primary interface is `passcontrol <command>`. Highlights:
 | List / create agents | `passcontrol agent list` · `passcontrol agent create billing-bot` |
 | Suspend, resume, or revoke an agent | `passcontrol agent suspend <id>` |
 | Inspect spend, logs, and audit history | `passcontrol spend` · `passcontrol logs` · `passcontrol audit` |
+| Generate this deployment's receipt signing key | `passcontrol keygen instance` |
+| Check a receipt or agent token (no account needed) | `passcontrol verify receipt <jws> --issuer <origin>` |
 | Arm / release the tenant kill switch | `passcontrol kill on` · `passcontrol kill off` |
 | Prepare or repair local services | `passcontrol setup` · `passcontrol doctor --fix` |
 | Manage the local dashboard | `passcontrol start` · `passcontrol stop` · `passcontrol restart` |

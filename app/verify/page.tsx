@@ -125,12 +125,25 @@ export default async function VerifyIndexPage({
       </section>
 
       <footer className="grid gap-3 border-t border-border pt-6 text-sm text-muted-foreground">
-        <Link
-          href="/"
-          className="font-semibold text-primary no-underline hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-        >
-          What is PassControl? →
-        </Link>
+        <p className="m-0">
+          Been handed a signed <strong className="text-foreground">receipt</strong> for a
+          particular call rather than a passport? That is checked on its own page — in your
+          browser, without sending it to us.
+        </p>
+        <div className="flex flex-wrap gap-x-6 gap-y-2">
+          <Link
+            href="/verify/receipt"
+            className="font-semibold text-primary no-underline hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            Verify a call receipt →
+          </Link>
+          <Link
+            href="/"
+            className="font-semibold text-primary no-underline hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            What is PassControl? →
+          </Link>
+        </div>
       </footer>
     </main>
   );

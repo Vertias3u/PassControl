@@ -23,7 +23,16 @@ export const PUBLIC_PASSPORT_FIELDS = [
   "displayId",
   "status",
   "issuedAt",
+  "owner",
 ] as const;
+
+/**
+ * The complete public owner field set, pinned the same way. `tier` is the one
+ * that matters: it says how much the binding is worth, and it is the ONLY thing
+ * the page may key a "verified" label off. `kind` records the method attempted,
+ * which is not the same claim.
+ */
+export const PUBLIC_OWNER_FIELDS = ["kind", "subject", "tier", "verifiedAt"] as const;
 
 /** Anonymous callers get a modest budget; the page is cheap and cacheable-by-eye. */
 export const PUBLIC_VERIFY_LIMIT = 30;
@@ -45,11 +54,30 @@ const DISPLAY_EDGE = 8;
 
 export type PublicPassportStatus = "active" | "suspended" | "revoked" | "unknown";
 
+/** How the owner was established. Records the method, NOT the proof — see tier. */
+export type PublicOwnerKind = "self_attested" | "domain" | "idv";
+
+/**
+ * What was actually proven. `unverified` means an operator typed a name and
+ * nothing was checked. Anything the page words as "verified" must come from
+ * here, never from kind.
+ */
+export type PublicOwnerTier = "unverified" | "domain" | "idv";
+
+export interface PublicOwnerView {
+  kind: PublicOwnerKind;
+  subject: string;
+  tier: PublicOwnerTier;
+  verifiedAt: string | null;
+}
+
 export interface PublicPassportView {
   passportId: string;
   displayId: string;
   status: PublicPassportStatus;
   issuedAt: string | null;
+  /** null when no owner is bound, or when the owner has not published one. */
+  owner: PublicOwnerView | null;
 }
 
 export type PublicPassportResult =
@@ -106,6 +134,42 @@ function issueDate(value: unknown): string | null {
 }
 
 /**
+ * Only the tiers the schema defines are named, and anything else resolves to
+ * `unverified` — never upward. An unrecognised tier is schema drift, and drift
+ * that renders as "verified" would be a false claim about someone's identity on
+ * a public page. Same discipline as normalizeStatus.
+ */
+function normalizeTier(value: unknown): PublicOwnerTier {
+  return value === "domain" || value === "idv" ? value : "unverified";
+}
+
+function normalizeKind(value: unknown): PublicOwnerKind {
+  return value === "domain" || value === "idv" ? value : "self_attested";
+}
+
+/**
+ * Build the owner view by naming every field, exactly as the passport view does.
+ *
+ * Returns null unless the row actually carries an owner: the SQL function
+ * LEFT JOINs a published owner, so every column is NULL when there is none, or
+ * when the owner has chosen not to publish.
+ */
+export function buildPublicOwnerView(row: Record<string, unknown>): PublicOwnerView | null {
+  const subject = typeof row.owner_subject === "string" ? row.owner_subject.trim() : "";
+  if (!subject) return null;
+
+  const tier = normalizeTier(row.owner_tier);
+  return {
+    kind: normalizeKind(row.owner_kind),
+    subject,
+    tier,
+    // A tier that proves nothing has no verification date to show. Reporting one
+    // would dress a self-attested claim as a checked one.
+    verifiedAt: tier === "unverified" ? null : issueDate(row.owner_verified_at),
+  };
+}
+
+/**
  * Build the public view by naming every field, never by spreading the row. A
  * column added to the SQL function later is dropped here silently rather than
  * leaking through.
@@ -122,6 +186,7 @@ export function buildPublicPassportView(row: unknown): PublicPassportView | null
     displayId: abbreviate(passportId),
     status: normalizeStatus(row.status),
     issuedAt: issueDate(row.created_at),
+    owner: buildPublicOwnerView(row),
   };
 }
 

@@ -57,6 +57,18 @@ const nextConfig = {
         source: "/api/:path*",
         headers: [noStore, { key: "Content-Security-Policy", value: apiCsp }],
       },
+      // The JWKS is the one document other deployments are meant to fetch, so
+      // the global Cross-Origin-Resource-Policy: same-origin above must not
+      // apply to it. The route handler sets these too; this entry keeps the
+      // config from contradicting it. Deliberately NOT under /api/:path*, which
+      // would attach no-store to a document that should be cached.
+      {
+        source: "/.well-known/:path*",
+        headers: [
+          { key: "Cross-Origin-Resource-Policy", value: "cross-origin" },
+          { key: "Content-Security-Policy", value: apiCsp },
+        ],
+      },
       { source: "/login", headers: [noStore] },
       { source: "/signup", headers: [noStore] },
     ];
