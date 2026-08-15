@@ -2,13 +2,19 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { AgentPassport } from "@/components/AgentPassport";
-import { VertiasLogo } from "@/components/VertiasLogo";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { userClient } from "@/lib/supabase/server";
 import { requireAgentPassport } from "./passport-data";
 import type { AgentPolicyView } from "@/lib/scope";
 import { visaTtlSeconds } from "@/lib/auth/visa";
 import { DecisionTracePanel } from "./DecisionTracePanel";
+import { PolicyShadowPanel } from "@/components/PolicyShadowPanel";
+import { PassportLifecycle } from "@/components/PassportLifecycle";
+import { BreakGlassPanel } from "@/components/BreakGlassPanel";
+import { DashboardShell } from "@/components/dashboard/DashboardShell";
+import { StatusPill, type StatusType } from "@/components/StatusPill";
+import { DirectAgentKeyPanel } from "@/components/DirectAgentKeyPanel";
+import { betaOperatorEmails } from "@/lib/beta-launch";
 
 export const dynamic = "force-dynamic";
 
@@ -106,38 +112,94 @@ export default async function AgentPassportPage({
   const firstVisa = passport.visas[0];
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <header className="border-b border-border bg-background/90 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-          <Link
-            href="/dashboard"
-            className="inline-flex min-w-0 items-center gap-2 text-foreground no-underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
-            aria-label="Return to Control Tower"
-          >
-            <VertiasLogo size={22} />
-            <span className="truncate text-sm font-bold">
-              Ver<span className="text-primary">tias</span>
-              <span className="font-normal text-muted-foreground"> / Control Tower</span>
-            </span>
-          </Link>
-          <Link
-            href="/dashboard"
-            className="shrink-0 rounded-lg border border-border bg-secondary px-3 py-2 text-xs font-semibold text-foreground no-underline transition-colors hover:bg-secondary/80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:text-sm"
-          >
-            ← Fleet
-          </Link>
-        </div>
-      </header>
+    <DashboardShell
+      userId={user.id}
+      showBetaOperator={betaOperatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
+      active="fleet"
+      eyebrow="Agent workspace"
+      title={passport.agent.name || "Unnamed agent"}
+      description={
+        <span className="pc-agent-header-meta">
+          <StatusPill status={passport.agent.status as StatusType} />
+          {passport.agent.passportId ? (
+            <code title={passport.agent.passportId}>{passport.agent.passportId.slice(0, 18)}…</code>
+          ) : (
+            <code>Direct Agent Key identity</code>
+          )}
+          {passport.breakGlass ? <strong>Temporary elevation active</strong> : null}
+        </span>
+      }
+      actions={
+        <Link href="/dashboard#fleet" className="pc-back-link">
+          ← Back to fleet
+        </Link>
+      }
+      contentClassName="pc-agent-content"
+    >
+        <nav className="pc-agent-subnav" aria-label="Agent sections">
+          <a href="#agent-overview">Overview</a>
+          <a href="#agent-identity">Identity</a>
+          <a href="#agent-policy">Live policy</a>
+          <a href="#agent-policy-lab">Policy lab</a>
+          <a href="#agent-activity">Activity</a>
+          <a href="#agent-emergency">Emergency access</a>
+          <a href="#agent-trace">Decision trace</a>
+        </nav>
 
-      <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6 sm:px-6 sm:py-8">
+        <section id="agent-overview" className="scroll-mt-40">
+        <div id="agent-identity" className="scroll-mt-40">
         <AgentPassport passport={passport} visaTtlSeconds={visaTtlSeconds()} />
+        </div>
+        </section>
+        {/* Directly under the passport itself: expiry and rotation are facts
+            about this key, not about what it is allowed to reach. */}
+        {passport.agent.passportId ? <div id="agent-lifecycle" className="scroll-mt-40">
+        <PassportLifecycle
+          agentId={passport.agent.id}
+          status={passport.agent.status}
+          expiresAt={passport.agent.expiresAt}
+          previousPassportId={passport.agent.previousPassportId}
+          previousValidUntil={passport.agent.previousValidUntil}
+          currentPassportId={passport.agent.passportId}
+          visaTtlSeconds={visaTtlSeconds()}
+        />
+        </div> : null}
+        <DirectAgentKeyPanel
+          agentId={passport.agent.id}
+          agentName={passport.agent.name}
+          status={passport.agent.status}
+          keys={passport.directKeys}
+        />
+        <div id="agent-policy" className="scroll-mt-40">
         <AgentPolicySummary policy={passport.policy} />
+        </div>
+        {/* Directly below the live policy, because the pair is the point: what
+            decides now, and what would decide if you promoted the draft. */}
+        <div id="agent-policy-lab" className="scroll-mt-40">
+        <PolicyShadowPanel
+          agentId={passport.agent.id}
+          shadow={passport.shadow}
+          liveConfigured={passport.policy.configured}
+          livePolicy={passport.policyDocument}
+        />
+        </div>
+        {/* Below the policy it cannot widen, and above the trace that now
+            accounts for it. */}
+        <div id="agent-emergency" className="scroll-mt-40">
+        <BreakGlassPanel
+          agentId={passport.agent.id}
+          status={passport.agent.status}
+          grant={passport.breakGlass}
+          visaTtlSeconds={visaTtlSeconds()}
+        />
+        </div>
+        <div id="agent-trace" className="scroll-mt-40">
         <DecisionTracePanel
           agentId={passport.agent.id}
           initialProvider={firstVisa?.provider}
           initialModel={firstVisa?.models[0]}
         />
-      </main>
-    </div>
+        </div>
+    </DashboardShell>
   );
 }

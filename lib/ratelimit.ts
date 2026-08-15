@@ -2,7 +2,7 @@
 // dependency-free. One Lua script increments and ensures a TTL in the same Redis
 // operation so a lost EXPIRE cannot wedge a key forever. Chosen over
 // @upstash/ratelimit for simplicity + testability — upgrade to its sliding window
-// later if burst-at-the-window-boundary becomes a real concern (see DECISIONS.md).
+// later if burst-at-the-window-boundary becomes a measured concern.
 import { redis } from "./state/redis";
 import { logFailOpen } from "./observability";
 
@@ -37,6 +37,26 @@ export async function rateLimit(
   } catch {
     logFailOpen("ratelimit");
     return { success: true, remaining: limit };
+  }
+}
+
+/**
+ * The unauthenticated Direct Agent Key edge is different from the challenge
+ * endpoint above: every admitted random key causes an indexed Supabase lookup.
+ * If Redis is unreadable, admitting the request defeats the limiter's only job
+ * and lets an attacker move the outage to the shared database. Fail closed.
+ */
+export async function rateLimitFailClosed(
+  key: string,
+  limit: number,
+  windowSeconds: number
+): Promise<RateLimitResult & { unreadable?: boolean }> {
+  const k = `ratelimit:${key}`;
+  try {
+    const count = Number(await redis().eval(RATE_LIMIT_LUA, [k], [String(windowSeconds)]));
+    return { success: count <= limit, remaining: Math.max(0, limit - count) };
+  } catch {
+    return { success: false, remaining: 0, unreadable: true };
   }
 }
 

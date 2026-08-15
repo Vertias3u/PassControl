@@ -1,13 +1,15 @@
 # PassControl
 
 **An identity & credential gateway for AI agents.** Stop pasting your OpenAI / Anthropic /
-Groq / Mistral / Together / DeepSeek keys into agent runtimes. Give each agent a cryptographic
-**passport**; it signs a challenge to mint a short-lived **work-visa**; the gateway injects your
+Groq / Mistral / Together / DeepSeek keys into agent runtimes. Start with a named,
+revocable **Direct Agent Key**, or give the agent a higher-assurance cryptographic
+**passport** that signs challenges for short-lived **work-visas**. The gateway injects your
 *real* provider key from a vault and proxies the call — so **the agent never holds the key**.
 You get per-agent budgets, capability scopes, an instant kill switch, and a per-agent audit trail.
 
 A [Vertias](https://vertias.eu) project. **Bring-your-own-key** — your provider key stays in your
-own vault. Self-host it today; a managed version comes later.
+own vault when self-hosted, or in the managed server-side Vault in PassControl Cloud. Cloud is
+currently a free private beta; [request access](https://passcontrol.vertias.eu/beta).
 
 ### ▶ [See it work in 60 seconds →](https://passcontrol.vertias.eu)
 
@@ -16,9 +18,13 @@ run the same call again, and watch it get blocked at the gateway. The demo runs 
 pipeline — passport → work-visa → scope + budget checks → kill switch — and only the model
 response is synthesized, by a keyless provider that never touches a vault.
 
-> The hosted demo predates **signed receipts** and does not have them yet — it runs the kill
-> switch, scopes and budgets, but `/verify/receipt` is not live there. To try receipts, run
-> the stack locally (below) or on your own deployment.
+The hosted demo includes the public **signed-receipt verifier** at
+[`/verify/receipt`](https://passcontrol.vertias.eu/verify/receipt). Verification runs in your
+browser; the receipt is never uploaded to PassControl.
+
+**Hermes Agent:** the dashboard prints Hermes's current custom-provider YAML for a reveal-once
+Direct Agent Key. The self-hosted CLI prints the passport-sidecar form with `passcontrol env
+hermes`. See [`docs/integrations/hermes.md`](./docs/integrations/hermes.md).
 
 ![PassControl kill switch — a live agent's calls flip from 200 OK to 403 BLOCKED the instant the kill switch is armed, then back when it's released](docs/demo/kill-switch.gif)
 
@@ -48,9 +54,9 @@ in front of it.
 
 ## How it works
 
-1. **Passport** — each agent holds only an Ed25519 private key. It *only ever signs*; the key
-   never travels over the wire.
-2. **Work-visa** — the agent signs a challenge (timestamp + single-use nonce) and mints a
+1. **Identity** — use a reveal-once Direct Agent Key in the provider-native SDK or compatible client, or a
+   passport whose Ed25519 private key only signs and never travels over the wire.
+2. **Work-visa (passport mode)** — the agent signs a challenge (timestamp + single-use nonce) and mints a
    short-lived (~5 min) token carrying its identity, scope, and budget snapshot.
 3. **Inject & proxy** — a request arrives bearing a visa. The gateway verifies it → checks the
    kill switch → checks scope (provider + model **and** endpoint) → reserves budget atomically →
@@ -70,6 +76,8 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 
 - 🔑 **Agents never hold your provider key** — BYOK; the key stays vaulted, injected in-flight only
 - 🪪 **Per-agent cryptographic identity** (Ed25519) with short-lived, revocable visas
+- 🔌 **Direct Agent Keys** — named, independently revocable installation credentials for a
+  fast provider-native on-ramp, with receipts that never mislabel them as passports
 - 💸 **Enforced per-agent token + cost (USD) budgets** — reserved pre-flight, reconciled after
 - 🎯 **Capability scoping** — a visa is scoped to specific models *and* endpoints, so a
   chat-scoped agent can't reach files, fine-tuning, batches, embeddings, etc. with your key
@@ -85,8 +93,10 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
   agent made the call. Self-declared by default; provable by domain control or an identity
   check, and the two are stored and rendered separately so a claim never passes as a fact
 - 🧰 **Drop-in for your SDK** (OpenAI, Anthropic, and OpenAI-compatible Groq / Mistral / Together /
-  DeepSeek) — **or any agent or desktop chat app** via the visa sidecar (OpenHands, Aider,
-  Cline, Continue, Chatbox, Jan, Msty, Cherry Studio, Open WebUI, LibreChat…)
+  DeepSeek) — **or any agent or desktop chat app** that takes a base URL and a key (OpenHands,
+  Aider, Cline, Continue, Chatbox, Jan, Msty, Cherry Studio, Open WebUI, LibreChat…): a Cloud
+  Direct Agent Key on the hosted service, or the self-hosted visa sidecar. None of them has
+  native passport support; the sidecar is what supplies passport identity locally
 - 🔌 **Local MCP server** for Claude Desktop, Cursor, and Claude Code — governed `chat` and
   `list_models` tools with no provider key or passport secret in the client config
 - 🪪 **Agent passport page** — a per-agent identity document: a sigil derived from the
@@ -162,6 +172,13 @@ gateway's identity, scope, budget, endpoint, and kill-switch checks. Preview wit
 
 ## Real agents & the visa sidecar
 
+> **This is the self-hosted / advanced path.** On PassControl Cloud, a tool that accepts only a
+> base URL and an API key gets a **Direct Agent Key** — issued reveal-once from the dashboard,
+> bound to one agent, with no local process to run. Reach for the sidecar when you are
+> self-hosting, or when you specifically want passport identity inside a static-key tool. If you
+> control the application's JavaScript, neither applies: use the SDK
+> ([`docs/integrations/passport-sdk.md`](./docs/integrations/passport-sdk.md)).
+
 A visa is deliberately short-lived so it's revocable — but a real coding agent runs a **long,
 multi-call session** that would outlive a single visa. The **sidecar** solves this: a tiny local
 proxy that mints, caches, and auto-refreshes the visa (and re-mints instantly on expiry), so your
@@ -224,7 +241,7 @@ passcontrol verify receipt "<receipt>" --issuer https://passcontrol.example.com
 ```
 
 Change one character and it fails. No terminal? Your deployment serves a paste-and-check page
-at **`/verify/receipt`** (self-hosted or local — the hosted demo does not have it yet) — verification runs in the visitor's browser, the receipt is never
+at **`/verify/receipt`** (including on the hosted demo) — verification runs in the visitor's browser, the receipt is never
 uploaded, and the shareable link carries it in the URL fragment, which browsers never send to
 a server.
 
@@ -288,12 +305,12 @@ clean slate.
 
 ## Using it from your own code
 
-The client SDK (vendored in [`./sdk`](./sdk)) hides the visa dance — point your provider SDK at the
+The client SDK exported at `passcontrol/sdk` hides the visa dance — point your provider SDK at the
 gateway and visas auto-refresh:
 
 ```ts
 import OpenAI from "openai";
-import { PassControl } from "./sdk";
+import { PassControl } from "passcontrol/sdk";
 
 const pc = new PassControl({ gateway, passportId, passportSecret });
 const openai = new OpenAI(pc.clientOptions("openai")); // baseURL + auth wired; visas auto-refresh
@@ -302,21 +319,28 @@ const openai = new OpenAI(pc.clientOptions("openai")); // baseURL + auth wired; 
 Manage the fleet programmatically with the control-plane SDK + an API key:
 
 ```ts
-import { ControlClient } from "./sdk";
+import { ControlClient } from "passcontrol/sdk";
 const cp = new ControlClient({ gateway, apiKey: process.env.PASSCONTROL_API_KEY! });
 await cp.agents.list();
 await cp.killSwitch.set(true);
 ```
 
-The SDK is not a separately published npm package yet. Full API reference:
-[`openapi.yaml`](./openapi.yaml) and [`DOCUMENTATION.md`](./DOCUMENTATION.md). Runnable example
+Both credential-bearing clients enforce the same `gateway` boundary — a bare HTTPS origin, plain
+HTTP only on loopback — and refuse anything else at construction, before any request.
+
+The compiled ESM SDK ships in npm version 0.6.0. Keep Passport secrets **and `pc_` control keys**
+in trusted server runtimes, never browser-exposed variables. See the
+[Cloud Passport SDK guide](./docs/integrations/passport-sdk.md).
+Full API reference: [`openapi.yaml`](./openapi.yaml) and [`DOCUMENTATION.md`](./DOCUMENTATION.md). Runnable example
 agents live in [`examples/`](./examples).
 
 ## Self-host
 
 Stack: **Next.js** (App Router, edge routes) · **Supabase** (Postgres + Vault + Auth) · **Upstash /
-any Redis**. Deploy on Vercel or any Node host (`next start`). No Vercel-proprietary services are
-required — the kill switch is Redis-backed.
+any Redis**. Deploy on Vercel, Cloudflare Workers through the tested OpenNext path, or any Node host
+(`next start`). No Vercel-proprietary services are required — the kill switch is Redis-backed. See
+[`docs/deployment/cloudflare.md`](./docs/deployment/cloudflare.md) for the Cloud build, production
+Auth/SMTP checklist, five-minute Cron Trigger, local `workerd` preview, and owner-only deploy handoff.
 
 ### Local (Docker) — the fastest path
 
@@ -348,7 +372,7 @@ npm run dev                                       # or build + `next start` on a
 ```
 
 See [`.env.example`](./.env.example) for the full config (Supabase URL/keys, `VISA_SECRET`,
-`CACHE_ENC_KEY`, Redis, `CRON_SECRET`, `INVITE_CODE`). Apply migrations `0001 → …` in order;
+`CACHE_ENC_KEY`, Redis, `CRON_SECRET`, `PASSCONTROL_SIGNUP_MODE`, `INVITE_CODE`). Apply migrations `0001 → …` in order;
 [`db/tests/rls_invariants.sql`](./db/tests/rls_invariants.sql) checks tenant isolation and the
 privileged-column locks on your database.
 

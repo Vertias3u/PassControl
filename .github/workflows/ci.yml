@@ -63,6 +63,9 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
 
+      - name: Verify release metadata and public claims
+        run: npm run check:release
+
       # Fail only on high/critical advisories. The 2 remaining moderates are
       # build-time tooling bundled inside Next with no in-range fix (documented
       # in the security pass); blocking on them would just flap the gate. A new
@@ -156,6 +159,9 @@ jobs:
 
       - name: RLS invariant test
         run: psql -v ON_ERROR_STOP=1 -f db/tests/rls_invariants.sql "$DB_URL"
+
+      - name: Invite-beta database invariant test
+        run: psql -v ON_ERROR_STOP=1 -f db/tests/beta_launch_invariants.sql "$DB_URL"
 
       - name: Stop Supabase
         if: always()

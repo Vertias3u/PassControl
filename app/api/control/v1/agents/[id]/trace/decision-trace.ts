@@ -12,6 +12,7 @@ import { peekRateLimit } from "@/lib/ratelimit";
 import { costMicrocents, estimateTokenUsage, MICROCENTS_PER_CENT } from "@/lib/pricing";
 import type { ProviderId } from "@/lib/providers";
 import type { ScopeEntry } from "@/lib/auth/visa";
+import { readLiveGrant, unionScopes } from "@/lib/break-glass";
 
 const TRACE_AGENT_COLUMNS =
   "id, status, allowed_scopes, budget_tokens, budget_cents, spent_tokens, spent_microcents";
@@ -36,6 +37,18 @@ export interface DecisionTrace {
   method: "POST";
   path: string[];
   verdict: GateEvaluation["verdict"];
+  /**
+   * Present only while a break-glass elevation is live.
+   *
+   * The trace reads `allowed_scopes` off the row, but the proxy gates on the
+   * scope snapshot inside the visa — which, during an elevation, is wider. A
+   * simulator that ignored the grant would report "denied by scope" for calls
+   * that actually succeed, and it would do so exactly when someone is most
+   * likely to be consulting it. So the grant is folded into the evaluation AND
+   * declared here, because a trace that silently agreed would be answering a
+   * different question from the one printed on it.
+   */
+  break_glass?: { expires_at: string; reason: string };
   denied_by?: GateEvaluation["deniedBy"];
   policy?: GateEvaluation["policy"];
   steps: GateEvaluation["steps"];
@@ -166,11 +179,14 @@ export async function evaluateDecisionTrace(
   if (!isRecord(data)) return { ok: false, status: 500, code: "query_failed" };
   const agent = data as unknown as TraceAgentRow;
 
-  const [killState, suspended, budgetSnapshot, currentPolicy] = await Promise.all([
+  const [killState, suspended, budgetSnapshot, currentPolicy, grant] = await Promise.all([
     readKillState(input.userId),
     isSuspended(input.agentId),
     readBudgetSnapshot(input.agentId),
     readCurrentAgentPolicy(input.db, input.userId, input.agentId, { cacheOnMiss: false }),
+    // Null on any failure, as everywhere else this is read: for break-glass,
+    // closed means no elevation.
+    readLiveGrant(input.db, input.userId, input.agentId),
   ]);
   const path = defaultChatPath(input.provider);
   const budget = projectBudget(agent, budgetSnapshot, input.provider, input.model);
@@ -178,7 +194,12 @@ export async function evaluateDecisionTrace(
     agentId: input.agentId,
     killState,
     suspended,
-    scopes: scopes(agent.allowed_scopes),
+    // What a visa minted right now would actually carry — the challenge route
+    // does the same union. Using allowed_scopes alone would make this simulator
+    // disagree with the gateway for the whole duration of an elevation.
+    scopes: grant
+      ? unionScopes(scopes(agent.allowed_scopes), grant.scopes)
+      : scopes(agent.allowed_scopes),
     provider: input.provider,
     method: "POST",
     path,
@@ -214,6 +235,7 @@ export async function evaluateDecisionTrace(
       method: "POST",
       path,
       verdict: gate.verdict,
+      ...(grant ? { break_glass: { expires_at: grant.expiresAt, reason: grant.reason } } : {}),
       ...(gate.deniedBy ? { denied_by: gate.deniedBy } : {}),
       ...(gate.policy ? { policy: gate.policy } : {}),
       steps: gate.steps,

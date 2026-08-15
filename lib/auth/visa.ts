@@ -58,24 +58,81 @@ export function visaTtlSeconds(): number {
   return Math.min(900, Math.max(300, Math.floor(raw)));
 }
 
-function secretBytes(name: "VISA_SECRET" | "VISA_SECRET_PREV", value: string): Uint8Array {
-  const bytes = utf8ToBytes(value);
-  if (bytes.length < 32) {
-    throw new Error(`${name} must be at least 32 bytes for HS256 visa signing`);
+export const VISA_SECRET_MIN_BYTES = 32;
+
+/**
+ * The secret as actually used for signing: surrounding whitespace is an artefact
+ * of how the value was set (`openssl rand -base64 32 | pbcopy`, a dashboard
+ * paste), not part of the secret. Returns null if there is no usable secret.
+ *
+ * Why this matters, given that reading it raw is self-consistent: VISA_SECRET_PREV
+ * is set by a human copying the old value. If the old value carried a trailing
+ * newline and the copy loses it, _PREV is a DIFFERENT key and every visa minted
+ * before the rotation fails — the precise outage zero-downtime rotation exists to
+ * prevent. Same class of trap as the CACHE_ENC_KEY newline (see aesgcm.ts).
+ *
+ * The floor is measured on the trimmed value because whitespace is not entropy.
+ * The raw fallback exists only so that a deployment whose secret satisfies the
+ * floor TODAY cannot be pushed below it by this change — that would throw on the
+ * hot path and take mint and verify down together.
+ *
+ * Shared with lib/auth/passwordRecovery.ts, which reads the same variable and had
+ * always trimmed it. tests/visa-secret-normalisation.test.ts pins the parity.
+ */
+export function normaliseVisaSecret(value: string | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (utf8ToBytes(trimmed).length >= VISA_SECRET_MIN_BYTES) return trimmed;
+  if (utf8ToBytes(value).length >= VISA_SECRET_MIN_BYTES) return value;
+  return null;
+}
+
+/**
+ * Every key a token signed under `value` could legitimately carry: the
+ * normalised form first (what we sign with), then the raw form when it differs.
+ * Accepting the raw form is what makes deploying this change safe — a visa
+ * minted moments ago by the previous build was signed with the untrimmed bytes
+ * and must keep verifying until it expires. Both forms come from the same
+ * operator-set material, so this grants no new capability to a forger.
+ */
+export function visaSecretCandidates(value: string | undefined): Uint8Array[] {
+  const chosen = normaliseVisaSecret(value);
+  if (chosen === null || value === undefined) return [];
+  const out = [utf8ToBytes(chosen)];
+  if (value !== chosen) out.push(utf8ToBytes(value));
+  return out;
+}
+
+/** Non-empty by construction: the throw is the only path out of an unusable secret. */
+function secretVariants(
+  name: "VISA_SECRET" | "VISA_SECRET_PREV",
+  value: string,
+): [Uint8Array, ...Uint8Array[]] {
+  const [primary, ...rest] = visaSecretCandidates(value);
+  if (!primary) {
+    throw new Error(`${name} must be at least ${VISA_SECRET_MIN_BYTES} bytes for HS256 visa signing`);
   }
-  return bytes;
+  return [primary, ...rest];
 }
 
 function currentSecret(): Uint8Array {
   const s = process.env.VISA_SECRET;
   if (!s) throw new Error("VISA_SECRET is not set");
-  return secretBytes("VISA_SECRET", s);
+  return secretVariants("VISA_SECRET", s)[0];
 }
 
 function acceptedSecrets(): Uint8Array[] {
-  const secrets = [currentSecret()];
-  if (process.env.VISA_SECRET_PREV) {
-    secrets.push(secretBytes("VISA_SECRET_PREV", process.env.VISA_SECRET_PREV));
+  const s = process.env.VISA_SECRET;
+  if (!s) throw new Error("VISA_SECRET is not set");
+  const secrets: Uint8Array[] = secretVariants("VISA_SECRET", s);
+  // A whitespace-only _PREV means "no rotation in progress", not "broken secret".
+  // Blanking a dashboard field leaves "" or "\n" far more often than it deletes
+  // the variable, and `"\n"` is truthy — so testing the raw value here used to
+  // enter the branch and throw. That throw is on the VERIFY path, which would
+  // 500 every agent call. A cleared secret reads as absent.
+  const prev = process.env.VISA_SECRET_PREV;
+  if (prev && prev.trim()) {
+    secrets.push(...secretVariants("VISA_SECRET_PREV", prev));
   }
   return secrets;
 }

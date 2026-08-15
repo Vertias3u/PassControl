@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error — plain .mjs build script, no types
@@ -69,10 +70,134 @@ describe("the CLI package is built from the shipped files, not the app manifest"
     expect(manifest.bin).toEqual(rootManifest.bin);
     expect(manifest.license).toBe(rootManifest.license);
     expect(manifest.engines).toEqual(rootManifest.engines);
+    expect(manifest.type).toBe("module");
+    expect(manifest.exports["./sdk"]).toEqual({
+      types: "./sdk/index.d.ts",
+      import: "./sdk/index.js",
+    });
   });
 
-  it("stages the same file list the root allowlist produces", () => {
-    expect(shippedFiles(built.outDir)).toEqual(shippedFiles(repoRoot));
+  it("adds only the compiled SDK surface to the root CLI packlist", () => {
+    const rootFiles = shippedFiles(repoRoot);
+    const builtFiles = shippedFiles(built.outDir);
+    expect(builtFiles.filter((file: string) => !rootFiles.includes(file))).toEqual([
+      "sdk/README.md",
+      "sdk/control.d.ts",
+      "sdk/control.js",
+      "sdk/gateway.d.ts",
+      "sdk/gateway.js",
+      "sdk/index.d.ts",
+      "sdk/index.js",
+      "sdk/passcontrol.d.ts",
+      "sdk/passcontrol.js",
+      "sdk/verify.d.ts",
+      "sdk/verify.js",
+    ]);
+  }, 15000);
+
+  // ── What `build:cli` prints (was F9) ──────────────────────────────────────
+  //
+  // The returned count used to be the ROOT packlist that merely seeded the build,
+  // so the console line under-reported the artifact by everything added after that
+  // list — the whole compiled SDK. An operator reading "14 files" against a release
+  // gate counting 23 has no way to tell a build bug from a stale number.
+  //
+  // Equality with the root packlist is precisely the reverted state, so the
+  // inequality is the regression that matters, not the absolute number.
+  it("reports the artifact's own file count, not the root packlist that seeded it", () => {
+    const onDisk: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else onDisk.push(relative(built.outDir, full).split(sep).join("/"));
+      }
+    };
+    walk(built.outDir);
+
+    expect(built.files.slice().sort()).toEqual(onDisk.sort());
+    expect(built.files.length).toBeGreaterThan(shippedFiles(repoRoot).length);
+    // package.json is written into the artifact, never copied from the root list.
+    expect(built.files).toContain("package.json");
+  }, 15000);
+
+  // ── What the manifest exposes (was F10) ───────────────────────────────────
+  //
+  // Declaring ANY exports map makes every unlisted subpath unreachable, so the
+  // map is the whole public surface. `./package.json` is listed because bundlers,
+  // version probes and license scanners read it routinely and the registry
+  // publishes it anyway; withholding it only breaks tooling.
+  it("exports ./package.json alongside the SDK, and nothing else", () => {
+    expect(manifest.exports["./package.json"]).toBe("./package.json");
+    // Recorded deliberately: the root entry point and the CLI internals are NOT
+    // importable subpaths. The CLI is consumed through `bin`, not through an
+    // import, and no root export has ever been documented — so adding "." here to
+    // make an old report's wording true would create a support surface, not fix one.
+    expect(Object.keys(manifest.exports).sort()).toEqual(["./package.json", "./sdk"]);
+    // (asserted by key, not toHaveProperty — "." reads as a property PATH there)
+    expect(Object.keys(manifest.exports)).not.toContain(".");
+    expect(manifest.main).toBeUndefined();
+    expect(manifest.bin).toEqual(rootManifest.bin);
+  });
+
+  it("ships a runtime-importable SDK rather than repository-only TypeScript", async () => {
+    const sdk = await import(new URL(`file://${built.outDir}/sdk/index.js`).href);
+    expect(typeof sdk.PassControl).toBe("function");
+    expect(typeof sdk.verifyReceipt).toBe("function");
+    expect(shippedFiles(built.outDir).some((file: string) => file.endsWith(".ts") && !file.endsWith(".d.ts"))).toBe(false);
+  });
+
+  // The gateway boundary has to hold in the ARTIFACT, not just in the repository
+  // TypeScript the suite normally imports. `passcontrol/sdk` resolves to the
+  // compiled `sdk/index.js` below; a stale or wrongly-compiled dist would ship an
+  // installable ControlClient that still hands a `pc_` key to a cleartext host.
+  it("enforces the ControlClient gateway boundary in the package that ships", async () => {
+    // Resolved through the manifest's own `./sdk` export, so this cannot pass by
+    // importing a file the published package does not actually point at.
+    const sdk = await import(new URL(manifest.exports["./sdk"].import, `file://${built.outDir}/`).href);
+    const seen: string[] = [];
+    const authorization: (string | null)[] = [];
+    const transport = async (url: string, init: any = {}) => {
+      seen.push(String(url));
+      authorization.push(new Headers(init?.headers ?? {}).get("authorization"));
+      return new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const fakeKey = `pc_${"f".repeat(40)}`;
+
+    for (const gateway of [
+      "http://gateway.example",
+      "https://trusted.example@attacker.example",
+      "https://gw.example.com/control",
+    ]) {
+      expect(() => new sdk.ControlClient({ gateway, apiKey: fakeKey, fetch: transport })).toThrow(
+        /bare HTTPS origin/
+      );
+    }
+    expect(seen).toEqual([]); // refused before the transport was ever reached
+
+    const client = new sdk.ControlClient({
+      gateway: "https://gw.example.com",
+      apiKey: fakeKey,
+      fetch: transport,
+    });
+    await client.agents.list({ status: "active" });
+    expect(seen).toEqual(["https://gw.example.com/api/control/v1/agents?status=active"]);
+    expect(authorization).toEqual([`Bearer ${fakeKey}`]);
+  });
+
+  it("rewrites repository-only README links instead of publishing package 404s", () => {
+    const readme = readFileSync(`${built.outDir}/README.md`, "utf8");
+    expect(readme).toContain(
+      "https://github.com/Vertias3u/PassControl/blob/main/docs/integrations/hermes.md",
+    );
+    expect(readme).toContain(
+      "https://github.com/Vertias3u/PassControl/blob/main/docs/deployment/cloudflare.md",
+    );
+    expect(readme).not.toMatch(/\]\((?:\.\/)?docs\//u);
+    expect(readme).toContain("](./LICENSE)");
   });
 });
 

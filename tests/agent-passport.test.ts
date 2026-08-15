@@ -248,12 +248,28 @@ describe("Agent Passport provider stamps", () => {
     const { db, calls, rpcCalls } = makeRlsDb(TENANT_A);
     const passport = await requireAgentPassport(db as never, TENANT_A, AGENT_A);
 
-    expect(rpcCalls).toHaveLength(1);
-    expect(rpcCalls[0]?.name).toBe("agent_provider_stamps");
-    expect(rpcCalls[0]?.args).toEqual({ p_agent_id: AGENT_A, p_user_id: TENANT_A });
+    expect(rpcCalls).toHaveLength(2);
+    expect(rpcCalls.find((call) => call.name === "agent_provider_stamps")?.args).toEqual({
+      p_agent_id: AGENT_A,
+      p_user_id: TENANT_A,
+    });
+    expect(rpcCalls.find((call) => call.name === "agent_access_key_activity")?.args).toEqual({
+      p_agent_id: AGENT_A,
+      p_user_id: TENANT_A,
+    });
 
-    // One agents lookup plus one recent-history query. No per-provider fan-out.
-    expect(calls.filter((call) => call.table === "agent_logs")).toHaveLength(1);
+    // No per-provider fan-out, which is what this count exists to pin. Two
+    // agent_logs queries, both issued in parallel and both bounded:
+    //   1. the recent verdict list (50 rows, columns the page renders)
+    //   2. the shadow-mode sample (a wider window, two columns)
+    //
+    // The second is deliberately NOT folded into the first. Naming
+    // policy_shadow_would in the query the page cannot survive without would
+    // couple the whole passport page to migration 0020; kept separate, a
+    // pre-0020 schema loses the shadow counts and keeps the page. Raise this
+    // number only for a query that is similarly bounded — never for one that
+    // scales with providers, agents or rows.
+    expect(calls.filter((call) => call.table === "agent_logs")).toHaveLength(2);
 
     expect(passport.providerStamps).toEqual([
       {
@@ -271,7 +287,7 @@ describe("Agent Passport provider stamps", () => {
     const { db, rpcCalls } = makeRlsDb(TENANT_A, "missing");
     const passport = await requireAgentPassport(db as never, TENANT_A, AGENT_A);
 
-    expect(rpcCalls).toHaveLength(1);
+    expect(rpcCalls).toHaveLength(2);
     expect(passport.providerStamps.map((stamp) => stamp.provider)).toEqual(["openai"]);
     expect(passport.agent.name).toBe("Aster Relay");
   });
@@ -285,6 +301,40 @@ describe("Agent Passport provider stamps", () => {
 });
 
 describe("Agent Passport view model", () => {
+  it("represents a direct-first agent honestly and carries derived key activity", () => {
+    const view = buildAgentPassportView(
+      { ...agentA, passport_pubkey: null },
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      null,
+      [
+        {
+          id: "key-1",
+          name: "CI runner",
+          suffix: "AbCd1234",
+          createdAt: "2026-08-01T00:00:00.000Z",
+          expiresAt: null,
+          revokedAt: null,
+          lastUsedAt: "2026-08-02T00:00:00.000Z",
+          recordedCalls: 12,
+        },
+      ]
+    );
+
+    expect(view.agent.passportId).toBe("");
+    expect(view.directKeys).toEqual([
+      expect.objectContaining({
+        id: "key-1",
+        suffix: "AbCd1234",
+        lastUsedAt: "2026-08-02T00:00:00.000Z",
+        recordedCalls: 12,
+      }),
+    ]);
+  });
+
   it("surfaces validated policy rules read-only", () => {
     const view = buildAgentPassportView(agentA, []);
 

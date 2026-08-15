@@ -20,8 +20,15 @@ function importKey(): Promise<CryptoKey> {
   if (cachedKey) return cachedKey;
   const raw = process.env.CACHE_ENC_KEY;
   if (!raw) throw new Error("CACHE_ENC_KEY is not set");
-  // CACHE_ENC_KEY is base64 (standard) of 32 random bytes.
-  const keyBytes = base64urlToBytes(raw.replace(/\+/g, "-").replace(/\//g, "_"));
+  // CACHE_ENC_KEY is base64 (standard) of 32 random bytes. `.trim()` is
+  // load-bearing, not cosmetic: base64urlToBytes derives padding from
+  // `length % 4`, so a trailing newline — which `openssl rand -base64 32 |
+  // pbcopy` and most dashboard pastes leave behind — shifts the length, appends
+  // `=` AFTER the newline, and makes atob throw InvalidCharacterError. This is
+  // the same normalisation instanceKey.ts:decodeSeed applies, and its comment
+  // already claimed the two matched; tests/cache-enc-key-normalisation.test.ts
+  // now pins that parity.
+  const keyBytes = base64urlToBytes(raw.trim().replace(/\+/g, "-").replace(/\//g, "_"));
   if (keyBytes.length !== 32) throw new Error("CACHE_ENC_KEY must decode to 32 bytes");
   cachedKey = crypto.subtle.importKey("raw", ab(keyBytes), { name: "AES-GCM" }, false, [
     "encrypt",

@@ -25,6 +25,14 @@ describe("extractVisaToken — accept the visa from the provider's native header
     expect(extractVisaToken(h)).toBe("visa-auth");
   });
 
+  it("keeps Bearer precedence when x-api-key contains a Direct Agent Key", () => {
+    const h = new Headers({
+      authorization: "Bearer passport-visa",
+      "x-api-key": `pc_agent_${"A".repeat(43)}`,
+    });
+    expect(extractVisaToken(h)).toBe("passport-visa");
+  });
+
   it("returns empty string when neither header carries a usable token", () => {
     expect(extractVisaToken(new Headers())).toBe("");
     expect(extractVisaToken(new Headers({ authorization: "Basic abc" }))).toBe("");

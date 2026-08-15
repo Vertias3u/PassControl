@@ -5,7 +5,11 @@ import type { AgentPassportView } from "@/app/dashboard/agents/[id]/passport-dat
 import type { LogEntry } from "@/lib/log";
 import { createPassportSigil, passportIdForDisplay } from "@/lib/passport-art";
 import { ScopeEditor } from "./ScopeEditor";
+import { FallbackEditor } from "./FallbackEditor";
+import { CapabilityHistory } from "./CapabilityHistory";
+import { DirectAgentIdentity } from "./DirectAgentIdentity";
 import styles from "./AgentPassport.module.css";
+import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 
 const SVG_SIZE = 960;
 const EXPORT_SCALE = 2;
@@ -41,19 +45,6 @@ function machineText(value: string, maxLength: number): string {
     .replace(/[^A-Z0-9]/g, "<")
     .replace(/<+/g, "<");
   return ascii.slice(0, maxLength).padEnd(maxLength, "<");
-}
-
-function formatDate(value: string | null, includeTime = false): string {
-  if (!value) return "No entry recorded";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Unknown";
-  return new Intl.DateTimeFormat("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    ...(includeTime ? { hour: "2-digit", minute: "2-digit", hour12: false } : {}),
-    timeZone: "UTC",
-  }).format(date);
 }
 
 function formatUsdFromMicrocents(value: number): string {
@@ -107,6 +98,8 @@ const VERDICT_LABELS: Record<LogEntry["status"], string> = {
   blocked_suspended: "Agent suspended",
   blocked_scope: "Scope violation",
   blocked_policy: "Policy rule",
+  provider_exhausted: "Provider out of credit",
+  no_provider_key: "No provider key stored",
   upstream_error: "Provider error",
 };
 
@@ -206,6 +199,7 @@ function PassportSvg({
   showFullId: boolean;
   svgRef: React.RefObject<SVGSVGElement>;
 }) {
+  const { format } = useDashboardTime();
   const sigil = useMemo(
     () => createPassportSigil(passport.agent.passportId),
     [passport.agent.passportId]
@@ -422,7 +416,7 @@ function PassportSvg({
         fontSize="20"
         fontWeight="700"
       >
-        {formatDate(passport.agent.issuedAt)}
+        {format(passport.agent.issuedAt, "date")}
       </text>
       <text
         x="382"
@@ -454,7 +448,7 @@ function PassportSvg({
         fontSize="18"
         fontWeight="700"
       >
-        {formatDate(passport.agent.lastEntryAt, true)}
+        {format(passport.agent.lastEntryAt)}
       </text>
       <text
         x="650"
@@ -671,6 +665,7 @@ function MobilePassportCard({
   passport: AgentPassportView;
   showFullId: boolean;
 }) {
+  const { format } = useDashboardTime();
   const sigil = useMemo(
     () => createPassportSigil(passport.agent.passportId),
     [passport.agent.passportId]
@@ -750,14 +745,14 @@ function MobilePassportCard({
         <div className="grid grid-cols-2 gap-3">
           <div>
             <dt className="font-bold uppercase tracking-[0.12em] text-muted-foreground">Issued</dt>
-            <dd className="mt-1 text-foreground">{formatDate(passport.agent.issuedAt)}</dd>
+            <dd className="mt-1 text-foreground">{format(passport.agent.issuedAt, "date")}</dd>
           </div>
           <div>
             <dt className="font-bold uppercase tracking-[0.12em] text-muted-foreground">
               Last authenticated
             </dt>
             <dd className="mt-1 text-foreground">
-              {formatDate(passport.agent.lastEntryAt, true)}
+              {format(passport.agent.lastEntryAt)}
             </dd>
           </div>
         </div>
@@ -799,8 +794,10 @@ export function AgentPassport({
   // as a literal.
   visaTtlSeconds: number;
 }) {
+  const { format } = useDashboardTime();
   const svgRef = useRef<SVGSVGElement>(null);
   const [editingScopes, setEditingScopes] = useState(false);
+  const [editingFallbacks, setEditingFallbacks] = useState(false);
   const [showFullId, setShowFullId] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [downloadState, setDownloadState] = useState<
@@ -890,18 +887,19 @@ export function AgentPassport({
 
   return (
     <>
+      {passport.agent.passportId ? (
       <section className="grid gap-4" aria-labelledby="agent-passport-heading">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div className="min-w-0">
             <p className="m-0 text-xs font-semibold uppercase tracking-[0.18em] text-primary">
               Agent identity registry
             </p>
-            <h1
+            <h2
               id="agent-passport-heading"
               className="mt-2 break-words text-2xl font-bold tracking-tight text-foreground sm:text-3xl"
             >
               {cleanedText(passport.agent.name, 80) || "Unnamed agent"}
-            </h1>
+            </h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
               A public-key identity document. Registry status is separate from tenant and
               platform kill-switch state.
@@ -962,9 +960,9 @@ export function AgentPassport({
           <dt>Registry status</dt>
           <dd>{passport.agent.status}</dd>
           <dt>Issued</dt>
-          <dd>{formatDate(passport.agent.issuedAt)}</dd>
+          <dd>{format(passport.agent.issuedAt, "date")}</dd>
           <dt>Last authenticated</dt>
-          <dd>{formatDate(passport.agent.lastEntryAt, true)}</dd>
+          <dd>{format(passport.agent.lastEntryAt)}</dd>
           <dt>Token limit</dt>
           <dd>
             {passport.budgets.tokens.capTokens == null
@@ -985,6 +983,9 @@ export function AgentPassport({
           sigil remains a stable fingerprint of the public key.
         </p>
       </section>
+      ) : (
+        <DirectAgentIdentity passport={passport} />
+      )}
 
       <section
         className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6"
@@ -1039,6 +1040,70 @@ export function AgentPassport({
         )}
       </section>
 
+      <section
+        className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6"
+        aria-labelledby="passport-fallbacks-heading"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+              Onward routing
+            </p>
+            <h2 id="passport-fallbacks-heading" className="mt-2 text-lg font-bold">
+              Fallback providers
+            </h2>
+          </div>
+          {editingFallbacks ? null : (
+            <button type="button" className="ghost" onClick={() => setEditingFallbacks(true)}>
+              {passport.fallbacks.length === 0 ? "Set up failover" : "Edit fallbacks"}
+            </button>
+          )}
+        </div>
+        {editingFallbacks ? (
+          <FallbackEditor
+            agentId={passport.agent.id}
+            fallbacks={passport.fallbacks}
+            scopes={passport.visas}
+            onClose={() => setEditingFallbacks(false)}
+          />
+        ) : passport.fallbacks.length === 0 ? (
+          <p className="m-0 rounded-lg border border-dashed border-border p-5 text-sm text-muted-foreground">
+            None. A call this passport&rsquo;s provider refuses comes straight back to the agent.
+          </p>
+        ) : (
+          <ol className="m-0 grid list-none gap-3 p-0 md:grid-cols-2 xl:grid-cols-3">
+            {passport.fallbacks.map((fallback, index) => (
+              <li
+                key={`${fallback.provider}-${index}`}
+                className="min-w-0 rounded-lg border border-border bg-secondary/40 p-4"
+              >
+                <p className="m-0 text-xs font-bold uppercase tracking-[0.14em] text-primary">
+                  {index + 1} · {cleanedText(fallback.provider, 40)}
+                </p>
+                <p className="mt-2 break-words text-sm leading-6 text-foreground">
+                  {cleanedText(fallback.model, 100)}
+                </p>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
+
+      <section
+        className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6"
+        aria-labelledby="passport-history-heading"
+      >
+        <div>
+          <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+            What was changed, and when
+          </p>
+          <h2 id="passport-history-heading" className="mt-2 text-lg font-bold">
+            Amendments
+          </h2>
+        </div>
+        <CapabilityHistory history={passport.history} />
+      </section>
+
       <section className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6">
         <div>
           <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
@@ -1069,13 +1134,13 @@ export function AgentPassport({
                   <div className="flex justify-between gap-4">
                     <dt className="text-muted-foreground">First use</dt>
                     <dd className="m-0 text-right text-foreground">
-                      {formatDate(stamp.firstSeenAt, true)}
+                      {format(stamp.firstSeenAt)}
                     </dd>
                   </div>
                   <div className="flex justify-between gap-4">
                     <dt className="text-muted-foreground">Last use</dt>
                     <dd className="m-0 text-right text-foreground">
-                      {formatDate(stamp.lastSeenAt, true)}
+                      {format(stamp.lastSeenAt)}
                     </dd>
                   </div>
                   <div className="flex justify-between gap-4">
@@ -1091,7 +1156,7 @@ export function AgentPassport({
         )}
       </section>
 
-      <section className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6">
+      <section id="agent-activity" className="scroll-mt-40 grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
@@ -1125,7 +1190,7 @@ export function AgentPassport({
                     {entry.model ? ` · ${cleanedText(entry.model, 100)}` : ""}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {formatDate(entry.createdAt, true)}
+                    {format(entry.createdAt)}
                   </p>
                 </div>
                 <span

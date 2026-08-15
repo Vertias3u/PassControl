@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -91,6 +92,7 @@ describe("passcontrol CLI", () => {
     expect(stdout).toContain("passcontrol doctor [--deep] [--fix]");
     expect(stdout).toContain("passcontrol call \"hi\"");
     expect(stdout).toContain("passcontrol spend");
+    expect(stdout).toContain("passcontrol agent rotate <id>");
     // Help lists every supported integration by name — see
     // cli/__tests__/integration-presets.test.mjs, which asserts the full set.
     expect(stdout).toContain("passcontrol env [integration]");
@@ -101,7 +103,36 @@ describe("passcontrol CLI", () => {
     expect(stdout).toContain("Gateway:   not checked  http://localhost:3000");
     expect(stdout).toContain("Dashboard: local server not checked");
     expect(stdout).toContain("Passport:  missing");
-    expect(stdout).toContain("passcontrol spend");
+    expect(stdout).toContain("passcontrol init");
+    expect(stdout).toContain("passcontrol agent create <name>");
+    expect(stdout.match(/^\s+passcontrol /gm) ?? []).toHaveLength(3);
+  }, 10000);
+
+  it("emits one undecorated, secret-free JSON status value", async () => {
+    const { stdout } = await runCli(["status", "--no-network", "--json"], {
+      env: {
+        NO_COLOR: "1",
+        PASSPORT_ID: "public-passport-id",
+        PASSPORT_SECRET: "private-passport-secret",
+        PASSCONTROL_API_KEY: "private-control-key",
+      },
+    });
+    const value = JSON.parse(stdout);
+    expect(value.gateway).toMatchObject({ url: "http://localhost:3000", state: "not checked", healthy: null });
+    expect(value.config).toMatchObject({ passport_configured: true, control_api_key_configured: true });
+    expect(stdout).not.toContain("private-passport-secret");
+    expect(stdout).not.toContain("private-control-key");
+    expect(stdout).not.toMatch(/\x1b\[/);
+  }, 10000);
+
+  it("shows consequence-aware agent help from either help spelling", async () => {
+    const direct = await runCli(["help", "agent"], { env: { NO_COLOR: "1" } });
+    const flag = await runCli(["agent", "--help"], { env: { NO_COLOR: "1" } });
+    for (const output of [direct.stdout, flag.stdout]) {
+      expect(output).toContain("agent rotate <id> [--grace <seconds>]");
+      expect(output).toContain("Only the\npublic key crosses the control API");
+      expect(output).toContain("Revocation is permanent; suspension is reversible");
+    }
   }, 10000);
 
   // Opts out of the force-installed default so `start` gets past ensureAppRoot and
@@ -156,6 +187,14 @@ describe("passcontrol CLI", () => {
     expect(output).toContain("Node.js");
     expect(output).toContain("Local stack ports");
   }, 10000);
+
+  it("bounds the Docker daemon probe so doctor cannot hang on a wedged Desktop socket", () => {
+    const source = readFileSync(path.join(process.cwd(), "bin/passcontrol.mjs"), "utf8");
+    const start = source.indexOf("function checkDockerDaemon");
+    const body = source.slice(start, source.indexOf("function checkSupabaseInstalled", start));
+    expect(body).toContain('execFileSync("docker", ["info"]');
+    expect(body).toMatch(/timeout:\s*2_000/);
+  });
 
   it("refuses to clone the app into a non-empty directory", async () => {
     const dir = path.join(tmp, "occupied");

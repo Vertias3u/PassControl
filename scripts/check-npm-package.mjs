@@ -47,6 +47,20 @@ const allowed = new Set([
   "cli/presets.mjs",
   "cli/sidecar.mjs",
   "cli/visa-client.mjs",
+  "sdk/README.md",
+  "sdk/control.d.ts",
+  "sdk/control.js",
+  // Internal, and unreachable through the exports map — but it carries the
+  // bare-origin rule both credential-bearing clients import, so it must be in
+  // the tarball or the published SDK cannot load at all.
+  "sdk/gateway.d.ts",
+  "sdk/gateway.js",
+  "sdk/index.d.ts",
+  "sdk/index.js",
+  "sdk/passcontrol.d.ts",
+  "sdk/passcontrol.js",
+  "sdk/verify.d.ts",
+  "sdk/verify.js",
 ]);
 
 const [pack] = JSON.parse(execFileSync(npm, ["pack", "--dry-run", "--json"], { cwd: packageDir, encoding: "utf8" }));
@@ -57,6 +71,24 @@ const unexpected = files.filter((file) => !allowed.has(file));
 const missing = [...allowed].filter((file) => !files.includes(file));
 if (unexpected.length) problems.push(`Unexpected npm package files:\n${unexpected.map((f) => `  - ${f}`).join("\n")}`);
 if (missing.length) problems.push(`Missing npm package files:\n${missing.map((f) => `  - ${f}`).join("\n")}`);
+
+// npm renders the packaged README, not the full repository tree. A relative
+// link to docs/ or examples/ can therefore pass every file/dependency check and
+// still send the first installer to a 404. Relative targets are allowed only
+// when the referenced file or directory is actually present in the artifact.
+const markdownLink = /!?\[[^\]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)/gu;
+for (const markdownFile of files.filter((file) => file.endsWith(".md"))) {
+  const markdown = fs.readFileSync(path.join(packageDir, markdownFile), "utf8");
+  for (const [, target] of markdown.matchAll(markdownLink)) {
+    if (target.startsWith("#") || target.startsWith("//") || /^[a-z][a-z0-9+.-]*:/iu.test(target)) continue;
+    const clean = target.replace(/^\.\//u, "").split(/[?#]/u, 1)[0];
+    const resolved = path.resolve(packageDir, path.dirname(markdownFile), clean);
+    const withinPackage = resolved === packageDir || resolved.startsWith(`${packageDir}${path.sep}`);
+    if (!withinPackage || !fs.existsSync(resolved)) {
+      problems.push(`Broken relative link in npm artifact: ${markdownFile} -> ${target}`);
+    }
+  }
+}
 
 const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8"));
 const declared = Object.keys(manifest.dependencies ?? {}).sort();
@@ -82,6 +114,9 @@ if (leaked.length) {
 
 if (manifest.scripts) {
   problems.push("The published manifest must declare no scripts — the root's prepublishOnly guard would block its own publish.");
+}
+if (manifest.type !== "module" || manifest.exports?.["./sdk"]?.import !== "./sdk/index.js" || manifest.exports?.["./sdk"]?.types !== "./sdk/index.d.ts") {
+  problems.push("The generated manifest must expose the compiled ESM SDK and its declarations at passcontrol/sdk.");
 }
 
 if (problems.length) {

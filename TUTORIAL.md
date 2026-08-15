@@ -124,7 +124,7 @@ passcontrol start                  # dashboard + Supabase + Redis (--dashboard-o
 passcontrol restart                # replace the CLI-managed dashboard process
 passcontrol local-logs --follow    # stream local dashboard output
 passcontrol mcp                    # local stdio MCP server (chat + list_models)
-passcontrol sidecar                # local bridge for OpenHands/Aider/Cline/etc.
+passcontrol sidecar                # local bridge for Hermes/OpenHands/Aider/Cline/etc.
 passcontrol agent list             # managed passports
 passcontrol spend                  # fleet and per-agent spend
 passcontrol logs --limit 20        # recent gateway calls
@@ -189,9 +189,9 @@ passcontrol keygen instance
 ```
 ✓ Generated an Ed25519 instance signing key.
 → This key signs call receipts and agent-to-agent tokens. Store the seed like a password:
-  INSTANCE_SIGNING_KEY=z5FGsNv8ePcsqpCkC1BsaB7Py3Lr2Ie6RsZOH7Y5OvA
+  INSTANCE_SIGNING_KEY=<base64url-encoded-32-byte-seed>
 
-→ Its public half publishes at /.well-known/jwks.json as kid HSfKNc1qYaWCqi87LOEs6RFlwjP…
+→ Its public half publishes at /.well-known/jwks.json as kid <derived-key-id>…
 ```
 
 Put that in your environment, plus the origin this deployment answers on:
@@ -333,7 +333,7 @@ INSTANCE_SIGNING_KEY=<the new seed>
 
 ---
 
-## 6. Use it with a real agent (OpenHands, Aider, Cline, …)
+## 6. Use it with a real agent (Hermes, OpenHands, Aider, Cline, …)
 
 Most agents want a **static API key**, but a visa expires in minutes. The **visa sidecar**
 bridges that: it holds your passport, mints/refreshes the visa in the background, and injects

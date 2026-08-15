@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { userClient } from "@/lib/supabase/server";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { MfaLoginForm } from "@/components/auth/MfaLoginForm";
+import { AuthShell } from "@/components/auth/AuthShell";
 
 export const dynamic = "force-dynamic";
 
@@ -17,12 +18,12 @@ export default async function MfaVerifyPage() {
   if (!(await needsMfaStepUp(supabase))) redirect("/dashboard");
 
   return (
-    <main className="mx-auto mt-[12vh] grid max-w-md gap-4 rounded-lg border border-border bg-card p-6">
-      <h1 className="m-0 text-xl font-bold">Two-factor verification</h1>
-      <p className="m-0 text-sm text-muted-foreground">
-        Enter the 6-digit code from your authenticator app to finish signing in.
-      </p>
+    <AuthShell
+      eyebrow="Security checkpoint"
+      title="Two-factor verification"
+      description="Confirm this operator session with your authenticator or a recovery code."
+    >
       <MfaLoginForm />
-    </main>
+    </AuthShell>
   );
 }

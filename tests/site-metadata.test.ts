@@ -22,7 +22,7 @@ describe("site metadata (social card surface)", () => {
 
   // The regression this file exists for: a page-level `twitter` block replaces the
   // root layout's wholesale, so a card type set correctly in the layout can still
-  // ship as the wrong one. The attached image is 2400x1254 — `summary` renders it as
+  // ship as the wrong one. The attached image is 1200x630 — `summary` renders it as
   // a thumbnail and wastes the asset.
   it("requests a large twitter card on the page that owns the card image", async () => {
     const home = await source("app/page.tsx");
@@ -51,6 +51,26 @@ describe("site metadata (social card surface)", () => {
       expect((await source(path)).trim().length).toBeGreaterThan(20);
     }
   );
+
+  it.each(["app/opengraph-image.png", "app/twitter-image.png"])(
+    "keeps %s at the standard 1200x630 social-card size",
+    async (path) => {
+      const png = await readFile(new URL(`../${path}`, import.meta.url));
+      expect(png.subarray(1, 4).toString("ascii")).toBe("PNG");
+      expect(png.readUInt32BE(16)).toBe(1200);
+      expect(png.readUInt32BE(20)).toBe(630);
+    }
+  );
+
+  it("ships browser and Apple icon assets through Next's metadata file conventions", async () => {
+    for (const path of ["app/favicon.ico", "app/icon.svg", "app/apple-icon.png"]) {
+      await expect(access(new URL(`../${path}`, import.meta.url))).resolves.toBeUndefined();
+    }
+
+    const apple = await readFile(new URL("../app/apple-icon.png", import.meta.url));
+    expect(apple.readUInt32BE(16)).toBe(180);
+    expect(apple.readUInt32BE(20)).toBe(180);
+  });
 });
 
 // Every public version string was typed by hand, so they drifted independently: at

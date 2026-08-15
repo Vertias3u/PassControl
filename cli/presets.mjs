@@ -36,6 +36,7 @@ export const SIDECAR_PRESETS = [
   "openhands",
   "litellm",
   "aider",
+  "hermes",
   ...Object.keys(GUI_PRESET_LABELS),
 ];
 

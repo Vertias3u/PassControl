@@ -8,7 +8,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { VertiasLogo } from "@/components/VertiasLogo";
-import { SEEDED_DEMO_PASSPORT_ID } from "@/lib/demo/identity";
+import { demoPassportId } from "@/lib/demo/identity";
 import { isPassportIdShape } from "@/lib/verify/passport";
 
 export const dynamic = "force-dynamic";
@@ -96,7 +96,7 @@ export default async function VerifyIndexPage({
         <p className="mt-6 mb-0 text-sm text-muted-foreground">
           No passport to hand? Try the{" "}
           <Link
-            href={`/verify/${SEEDED_DEMO_PASSPORT_ID}`}
+            href={`/verify/${demoPassportId()}`}
             className="font-semibold text-primary no-underline hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >
             public demo passport

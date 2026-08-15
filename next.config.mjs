@@ -70,6 +70,7 @@ const nextConfig = {
         ],
       },
       { source: "/login", headers: [noStore] },
+      { source: "/login/:path*", headers: [noStore] },
       { source: "/signup", headers: [noStore] },
     ];
   },

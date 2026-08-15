@@ -16,6 +16,8 @@ import { type FormEvent, useState } from "react";
 import { updateAgentScopes } from "@/app/dashboard/actions";
 import { PROVIDERS, type ProviderId } from "@/lib/providers";
 import { describeDelay, parseModels, type ScopeRow } from "@/lib/scope-rows";
+import { prospectiveAgentChange } from "@/lib/impact-preview";
+import { ImpactPreview } from "@/components/ImpactPreview";
 
 export function ScopeEditor({
   agentId,
@@ -42,6 +44,7 @@ export function ScopeEditor({
     .map((r) => ({ provider: r.provider, models: parseModels(r.models) }))
     .filter((r) => r.models.length > 0);
   const reachesNothing = effective.length === 0;
+  const preview = prospectiveAgentChange("allowed_scopes", scopes, effective);
 
   const setRow = (index: number, patch: Partial<{ provider: string; models: string }>) =>
     setRows((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -116,6 +119,8 @@ export function ScopeEditor({
         prefix. An exact name must match exactly — <code>claude-haiku-4-5</code> does not cover{" "}
         <code>claude-haiku-4-5-20251001</code>.
       </p>
+
+      <ImpactPreview change={preview} title="Scope impact" />
 
       {reachesNothing ? (
         <div

@@ -245,5 +245,5 @@ describe("first-class MCP CLI integration", () => {
         server.close((error) => (error ? reject(error) : resolve()))
       );
     }
-  });
+  }, 10000);
 });

@@ -112,4 +112,10 @@ describe("the receipt stays off the list endpoint", () => {
     expect(RECEIPT_COLS).toContain("receipt");
     expect(selectCalls).toContain(RECEIPT_COLS);
   });
+
+  it("returns the stored authentication identity needed to audit a direct call", () => {
+    for (const column of ["auth_method", "agent_access_key_id", "credential_use_id"]) {
+      expect(RECEIPT_COLS).toContain(column);
+    }
+  });
 });

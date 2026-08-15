@@ -11,7 +11,8 @@ const BODY = `# PassControl
 > a sign-only Ed25519 "passport" and mints short-lived, scoped "work-visas"; the
 > gateway verifies the request, enforces per-agent budgets and a kill switch,
 > injects the real provider key from a vault, and proxies the call — so the agent
-> never holds your API key. Built by Vertias (Sofia, Bulgaria). Early (${RELEASE_SERIES}),
+> never holds your API key. Built by Kristiyan Ivanov under the Vertias name in Sofia,
+> Bulgaria. Early (${RELEASE_SERIES}),
 > solo-built, self-hostable, and not yet independently audited.
 
 ## What it is
@@ -37,7 +38,7 @@ budget-scoped token. Revocation is instant and per-agent; every call is audited.
 - Providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek.
 - Stack: Next.js, Supabase (Postgres/Vault/Auth), Redis.
 - Status: ${RELEASE_SERIES}, built solo, not independently audited — run it against a non-critical key
-  first. Self-host only; no hosted version yet.
+  first. PassControl Cloud is a free, invite-only beta; self-hosting is available now.
 - By design the gateway sees plaintext provider traffic (it must, to inject the key), so the
   boundary is "the agent doesn't hold the key," not "nobody does." Self-hosted, the vault and
   gateway are your own infrastructure.
@@ -55,7 +56,8 @@ budget-scoped token. Revocation is instant and per-agent; every call is audited.
 - Live keyless demo (no signup, no key): https://passcontrol.vertias.eu
 - Source code: https://github.com/Vertias3u/PassControl
 - Security policy: https://github.com/Vertias3u/PassControl/blob/main/SECURITY.md
-- Company: https://vertias.eu
+- Builder: https://vertias.eu
+- Legal notices: https://passcontrol.vertias.eu/legal
 - Contact: hello@vertias.eu
 `;
 

@@ -7,6 +7,7 @@ import { AGENT_COLS } from "@/lib/control/columns";
 import { revokeAgent, updateAgent } from "@/lib/fleet";
 import { readJsonBody } from "@/lib/control/body";
 import { recordAdminAction } from "@/lib/audit";
+import { purgeAgentFallbacks } from "@/lib/state/redis";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -62,6 +63,15 @@ const patchHandler = control("write", async ({ req, userId, db, params, keyId, r
 
   const r = await updateAgent(db, userId, id, parsed.body);
   if (!r.ok) return errorResponse(r.status, r.code, requestId);
+
+  // The gateway caches this column for 60 seconds. The direction that matters is
+  // REMOVAL — a caller taking a provider off the list is stopping calls being
+  // billed there — so the write purges rather than waiting the window out. Same
+  // reasoning as updateAgentFallbacks in the dashboard; best-effort for the same
+  // reason, since a Redis failure must not fail a save that already committed.
+  if (parsed.body && typeof parsed.body === "object" && "fallbacks" in parsed.body) {
+    await purgeAgentFallbacks(userId, id).catch(() => {});
+  }
 
   await recordAdminAction({
     userId,

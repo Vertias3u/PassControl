@@ -116,7 +116,7 @@ beforeEach(() => {
   serviceClientMock.mockReturnValue({ rpc: vi.fn(async () => ({ data: null, error: null })) });
   reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 1 });
   reconcileBudgetMock.mockResolvedValue(undefined);
-  getCachedAgentPolicyMock.mockResolvedValue("{}");
+  getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   writeLogMock.mockResolvedValue(undefined);

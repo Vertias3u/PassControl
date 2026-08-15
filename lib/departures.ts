@@ -7,15 +7,23 @@ import type { LogEntry } from "@/lib/log";
 
 export interface DepartureRow {
   id: string;
+  agent_id?: string | null;
+  user_id?: string | null;
   created_at: string | null;
   passport_id: string | null;
   jti: string | null;
+  auth_method?: "passport" | "direct_key" | null;
+  agent_access_key_id?: string | null;
+  credential_use_id?: string | null;
   provider: string | null;
   model: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cost_microcents: number | null;
   status: string | null;
+  latency_ms?: number | null;
+  receipt?: string | null;
+  policy_shadow_would?: string | null;
 }
 
 export type DepartureTone = "clear" | "held" | "denied";
@@ -33,6 +41,14 @@ export const DEPARTURE_VERDICT: Record<
   ok: { word: "CLEARED", tone: "clear" },
   upstream_error: { word: "DIVERTED", tone: "held" },
   blocked_budget: { word: "NO FUNDS", tone: "held" },
+  // Deliberately not a variant of NO FUNDS. That word means PassControl's own
+  // budget stopped the call; this one means the call went out and the PROVIDER
+  // said the account is empty. An operator who reads them as the same thing
+  // raises a limit that was never the constraint.
+  provider_exhausted: { word: "NO CREDIT", tone: "held" },
+  // Not DIVERTED: nothing was ever forwarded. The gateway holds the call at the
+  // gate because it has no credential to travel on.
+  no_provider_key: { word: "NO KEY", tone: "held" },
   blocked_scope: { word: "NO VISA", tone: "held" },
   blocked_endpoint: { word: "NO ROUTE", tone: "held" },
   blocked_policy: { word: "POLICY", tone: "held" },
@@ -69,9 +85,9 @@ export function departureTime(value: string | null): string {
  * readable at a glance, and it reveals nothing the audit log does not already
  * show the owner of these rows.
  */
-export function flightCode(row: Pick<DepartureRow, "provider" | "jti">): string {
+export function flightCode(row: Pick<DepartureRow, "provider" | "jti" | "credential_use_id">): string {
   const carrier = (row.provider ?? "??").slice(0, 2).toUpperCase();
-  const number = (row.jti ?? "")
+  const number = (row.jti ?? row.credential_use_id ?? "")
     .replace(/[^0-9a-f]/gi, "")
     .slice(0, 4)
     .toUpperCase();

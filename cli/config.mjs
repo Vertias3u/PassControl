@@ -253,6 +253,101 @@ export function requireControlApiKey(current = config) {
   return current.apiKey;
 }
 
+/**
+ * The only hosts allowed to speak plain HTTP. Exact matches, never a prefix or
+ * suffix: `localhost.`, `localhost.example` and `127.0.0.1.attacker.example` are
+ * other people's hostnames. Compared against the parsed `hostname`, which the URL
+ * parser has already lowercased and canonicalised (`127.1` → `127.0.0.1`), so
+ * shorthand loopback spellings land here instead of slipping past a string test.
+ */
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Validate a gateway value and return the origin to build URLs from.
+ *
+ * A bare HTTPS origin — scheme, host, optional port — with no path beyond `/`,
+ * no query, fragment, username or password. HTTP only on loopback. The value is
+ * parsed and the result re-derived from `URL.origin`, so no path material
+ * survives into a request URL and `https://trusted.example@attacker.example`
+ * cannot pose as the host it imitates.
+ *
+ * **This is deliberately the same rule as `sdk/gateway.ts`'s
+ * `requireGatewayOrigin`, and deliberately a second implementation of it.** The
+ * SDK is TypeScript that only becomes JavaScript after `tsc`; `cli/` is plain
+ * .mjs run straight from the repository, so importing across that line works in
+ * the published package and breaks every CLI invocation in a checkout. The two
+ * are held in agreement by `tests/cli-control-gateway.test.ts`, which runs one
+ * table through both — if you change one, that test fails until you change both.
+ *
+ * Throws rather than `die`s: `bin/passcontrol.mjs` has a top-level handler that
+ * prints the message and exits 1, and `doctor` catches it to report a failed
+ * check instead of vanishing mid-diagnosis. The message never quotes the value,
+ * because a rejected gateway can itself carry credentials.
+ */
+export function bareGatewayOrigin(gateway, label = "PASSCONTROL_GATEWAY") {
+  let url;
+  try {
+    url = new URL(String(gateway ?? ""));
+  } catch {
+    throw new Error(
+      `${label} must be an absolute URL (for example https://passcontrol.example.com).`
+    );
+  }
+  const loopback = LOOPBACK_HOSTNAMES.has(url.hostname);
+  if (
+    (url.protocol !== "https:" && !(loopback && url.protocol === "http:")) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
+  ) {
+    throw new Error(
+      `${label} must be a bare HTTPS origin — scheme, host and optional port, with no path, ` +
+        "query, fragment or embedded credentials. Plain HTTP is accepted only for localhost, " +
+        "127.0.0.1 and [::1]. The configured value is refused and is not printed here, because " +
+        "a gateway URL can itself contain a credential."
+    );
+  }
+  return url.origin;
+}
+
+/**
+ * The gateway guard for the control plane, beside the key guard above.
+ *
+ * A `pc_` key is long-lived and manages the whole fleet, so where it is sent is
+ * part of the credential's security, not configuration taste. Every `api()` call
+ * resolves its destination through this, never through the raw config string.
+ */
+export function requireControlGateway(current = config) {
+  assertConfigLoaded();
+  return bareGatewayOrigin(current.gateway);
+}
+
+/**
+ * The same guard for the passport paths — `call`, `try`, `doctor --deep`,
+ * `sidecar`, `mcp`.
+ *
+ * It exists as its own name because the two credentials fail differently, not
+ * because the rule differs: it is `bareGatewayOrigin` in both cases, so the two
+ * cannot drift. A `pc_` key is long-lived and manages the fleet; what travels
+ * here is an Ed25519 challenge signature and the short-lived visa minted from
+ * it. That signature is the passport proving itself, and
+ * `app/api/auth/challenge/route.ts` binds it to no audience — so a copy taken
+ * off the wire replays against the REAL gateway for as long as its `SKEW_MS`
+ * window allows, and mints a genuine visa carrying the agent's scope and budget.
+ *
+ * Which is why this must be called BEFORE the credentials are read, before the
+ * signature is computed, and before the destination is echoed to the terminal.
+ * Every caller resolves its URLs from the returned origin, never from
+ * `config.gateway`; `tests/cli-passport-gateway.test.ts` pins both the ordering
+ * and the absence of raw-string interpolation.
+ */
+export function requirePassportGateway(current = config) {
+  assertConfigLoaded();
+  return bareGatewayOrigin(current.gateway);
+}
+
 export function redact(value, keep = 4) {
   if (!value) return "missing";
   const s = String(value);

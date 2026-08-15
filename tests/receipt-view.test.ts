@@ -3,6 +3,8 @@ import { verifyReceipt, type VerifyFailure, type VerifyStep } from "@/sdk/verify
 import {
   ALL_FAILURES,
   describeCall,
+  describeReceiptAuthentication,
+  describeFailover,
   describeFailure,
   describeOwner,
   describeVerdict,
@@ -12,6 +14,34 @@ import {
   peekArtifact,
   preflight,
 } from "@/lib/verify/receipt-view";
+
+describe("receipt authentication wording", () => {
+  it("calls a passport receipt cryptographic passport proof", () => {
+    expect(
+      describeReceiptAuthentication({ sub: "passport-1", agid: "agent-1" })
+    ).toMatchObject({
+      label: "Passport verified",
+      subjectLabel: "Agent passport",
+      subject: "passport-1",
+    });
+  });
+
+  it("calls a direct receipt bearer possession and never a passport signature", () => {
+    const copy = describeReceiptAuthentication({
+      sub: "agent-1",
+      agid: "agent-1",
+      auth: { kind: "direct_key", kid: "key-1", use: "use-1" },
+    });
+    expect(copy).toMatchObject({
+      label: "Direct Agent Key accepted",
+      subjectLabel: "Agent identity",
+      subject: "agent-1",
+      keyId: "key-1",
+    });
+    expect(copy.detail.toLowerCase()).toContain("bearer");
+    expect(copy.detail.toLowerCase()).not.toContain("passport signed");
+  });
+});
 
 // Presentation for the public receipt page. Pure — no React, no DOM — because
 // the judgements encoded here are the ones worth testing, and none of them need
@@ -294,6 +324,20 @@ describe("the verdict a receipt records", () => {
     expect(describeVerdict("ok", 200).tone).toBe("clear");
   });
 
+  // VERDICTS is Record<string, …> on purpose, so the compiler cannot catch a
+  // missing entry the way it does for the departures board. This is that guard.
+  it("recognises a provider-credit refusal, and never calls it over budget", () => {
+    const verdict = describeVerdict("provider_exhausted", 402);
+    expect(verdict.label).not.toMatch(/recorded as/i);
+    // Same HTTP status as blocked_budget, opposite meaning. The reader is a
+    // counterparty reconciling a bill: telling them the agent hit its own
+    // spending limit, when the provider's account was empty, is a wrong answer
+    // about whose money ran out.
+    expect(verdict.label).not.toMatch(/over budget/i);
+    expect(verdict.detail).toMatch(/provider/i);
+    expect(verdict.detail).not.toMatch(/spending limit/i);
+  });
+
   it.each(["blocked_suspended", "blocked_killed"])("treats %s as a hard denial", (status) => {
     expect(describeVerdict(status, 403).tone).toBe("denied");
   });
@@ -359,5 +403,58 @@ describe("timestamps", () => {
   it("does not invent a date for a missing or absurd value", () => {
     expect(formatSignedAt(0)).toBe("Not recorded");
     expect(formatSignedAt(Number.NaN)).toBe("Not recorded");
+  });
+});
+
+describe("the failover chain", () => {
+  // `why` is the claim that makes the double-billing exposure legible. It is
+  // rendered for a reader who may be holding two bills for one request and
+  // needs to know whether that is expected.
+  it("names each reason in words a stranger can act on", () => {
+    for (const why of ["credit_exhausted", "rate_limited", "upstream_5xx", "unreachable"]) {
+      const f = describeFailover(why)!;
+      expect(f.label).toBeTruthy();
+      expect(f.detail).toBeTruthy();
+      expect(f.label).not.toBe(why);
+      expect(f.recognised).toBe(true);
+    }
+  });
+
+  // The split that matters. After a 5xx or a dropped connection the provider
+  // may already have RUN the call and billed it; the gateway cannot tell. A
+  // reader reconciling invoices has to be told which case they are in.
+  it("says plainly when the earlier attempt may already have been charged", () => {
+    for (const why of ["upstream_5xx", "unreachable"]) {
+      expect(describeFailover(why)!.mayHaveBeenCharged).toBe(true);
+      expect(describeFailover(why)!.detail).toMatch(/may (already )?have|might already/i);
+    }
+    for (const why of ["credit_exhausted", "rate_limited"]) {
+      expect(describeFailover(why)!.mayHaveBeenCharged).toBe(false);
+    }
+  });
+
+  // The receipt is signed by whatever issuer the reader chose to trust — not
+  // necessarily this deployment, and not necessarily this version of it. An
+  // unknown reason must be shown as itself, never resolved to a friendly
+  // wording that is a guess, and never resolved to "nothing was charged".
+  it("shows an unrecognised reason as itself, and does not vouch for the billing", () => {
+    const f = describeFailover("some_future_reason")!;
+    expect(f.label).toContain("some_future_reason");
+    expect(f.recognised).toBe(false);
+    expect(f.mayHaveBeenCharged).toBe(true);
+  });
+
+  it("ignores a reason that is not a string", () => {
+    for (const value of [null, undefined, 42, {}, ""]) {
+      expect(describeFailover(value)).toBeNull();
+    }
+  });
+
+  // A failed attempt records cost 0 because that is what the provider REPORTED,
+  // not because the gateway knows nothing was spent. The wording on the zero
+  // must not close a question the receipt cannot answer.
+  it("never lets a zero cost read as a guarantee that nothing was charged", () => {
+    expect(formatCost(0).primary).not.toMatch(/free|no charge for|nothing/i);
+    expect(formatCost(0).primary.toLowerCase()).toContain("recorded");
   });
 });

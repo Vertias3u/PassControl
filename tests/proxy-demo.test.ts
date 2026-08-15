@@ -126,7 +126,7 @@ beforeEach(() => {
   reconcileBudgetMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
   setCachedKeyMock.mockResolvedValue(undefined);
-  getCachedAgentPolicyMock.mockResolvedValue("{}");
+  getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   setCachedAgentPolicyMock.mockResolvedValue(undefined);
   readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);

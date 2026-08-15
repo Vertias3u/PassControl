@@ -5,22 +5,33 @@
 // redirect()s on success.
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
+import { cookies } from "next/headers";
 import { userClient } from "@/lib/supabase/server";
-import { validateInviteCode } from "@/lib/invite-code";
+import { inviteSource, signupMode, validateSignupAccess } from "@/lib/invite-code";
+import { hashBetaInviteToken } from "@/lib/beta-launch";
+import { serviceClient } from "@/lib/supabase";
+import { captureError } from "@/lib/observability";
 import { validatePassword } from "@/lib/password";
+import { authEmailRedirect } from "@/lib/auth/emailRedirect";
+import {
+  PASSWORD_RECOVERY_COOKIE,
+  verifyPasswordRecoveryTicket,
+} from "@/lib/auth/passwordRecovery";
 import { rateLimit } from "@/lib/ratelimit";
 import { isLockedOut, recordLoginFailure, clearLoginFailures } from "@/lib/auth/lockout";
 import { logSecurityEvent, maskEmail } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
 import { needsMfaStepUp } from "@/lib/mfa";
 
-type FormState = { error?: string } | undefined;
+type FormState = { error?: string; success?: string } | undefined;
 
 // Throttle thresholds. Strict enough to stop automated guessing, loose enough
 // that a real user mistyping a few times is unaffected.
 const LOGIN_IP_LIMIT = 30; // bursts of attempts from one network per window
 const LOGIN_EMAIL_LIMIT = 8; // attempts against a single account per window
 const LOGIN_WINDOW_S = 300; // 5-minute fixed window
+const PASSWORD_RESET_EMAIL_LIMIT = 3;
+const PASSWORD_RESET_WINDOW_S = 15 * 60;
 
 async function clientIp(): Promise<string> {
   const h = await headers();
@@ -91,9 +102,10 @@ export async function signup(_prev: FormState, formData: FormData): Promise<Form
   if (botDetected(formData)) {
     return { error: "Could not create the account. Please try again." };
   }
-  const email = String(formData.get("email") ?? "");
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
   const inviteCode = String(formData.get("invite_code") ?? "");
+  const inviteToken = String(formData.get("invite_token") ?? "");
 
   // Throttle signup by IP (invite-gated already, but stops automated probing of
   // the invite code and email-send abuse).
@@ -103,25 +115,171 @@ export async function signup(_prev: FormState, formData: FormData): Promise<Form
     return { error: "Too many attempts. Please wait a few minutes and try again." };
   }
 
-  const codeError = validateInviteCode(inviteCode, process.env.INVITE_CODE ?? "");
-  if (codeError) return { error: codeError };
-
   // Server-side password strength gate (Supabase stores the hash but does not
   // enforce a policy). Runs regardless of any client-side check.
   const pwError = validatePassword(password);
   if (pwError) return { error: pwError };
 
+  const mode = signupMode();
+  const source = inviteSource();
+  let claimedInviteId: string | null = null;
+  if (mode === "invite" && source === "database") {
+    if (!/^[A-Za-z0-9_-]{43}$/u.test(inviteToken)) {
+      return { error: "This invitation is invalid, expired, or already used." };
+    }
+    const { data, error } = await serviceClient().rpc("claim_beta_invite", {
+      p_token_hash: hashBetaInviteToken(inviteToken),
+      p_email: email,
+    });
+    const claimed = Array.isArray(data) ? data[0] : null;
+    if (error || !claimed?.invite_id) {
+      return { error: "This invitation is invalid, expired, or already used." };
+    }
+    claimedInviteId = String(claimed.invite_id);
+  } else {
+    const codeError = validateSignupAccess(mode, inviteCode, process.env.INVITE_CODE ?? "");
+    if (codeError) return { error: codeError };
+  }
+
   const supabase = await userClient();
-  const { error } = await supabase.auth.signUp({ email, password });
+  const emailRedirectTo = authEmailRedirect();
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+    ...((emailRedirectTo || claimedInviteId) ? {
+      options: {
+        ...(emailRedirectTo ? { emailRedirectTo } : {}),
+        ...(claimedInviteId ? {
+          data: { passcontrol_beta_invite_id: claimedInviteId },
+        } : {}),
+      },
+    } : {}),
+  });
   if (error) return { error: "Could not create the account. Please try again." };
+
+  if (claimedInviteId) {
+    const isNewIdentity = Boolean(data.user?.id && (data.user.identities?.length ?? 0) > 0);
+    if (!isNewIdentity) {
+      return { error: "Could not create the account. Ask for a new invitation and try again." };
+    }
+    const { data: redeemed, error: redeemError } = await serviceClient().rpc(
+      "redeem_beta_invite",
+      { p_invite_id: claimedInviteId, p_user_id: data.user!.id }
+    );
+    if (redeemError || redeemed !== true) {
+      // The database Auth hook is the authoritative admission control. Cleanup
+      // is still mandatory: it prevents a misconfigured deployment (hook not
+      // enabled) or a later linking failure from leaving a confusing, usable
+      // Auth identity behind.
+      const { error: deleteError } = await serviceClient().auth.admin.deleteUser(data.user!.id);
+      const { error: signOutError } = await supabase.auth.signOut({ scope: "global" });
+      await captureError(new Error("beta invite redemption failed after Auth signup"), {
+        route: "/signup",
+        method: "POST",
+        code: deleteError || signOutError ? "invite_redeem_cleanup_failed" : "invite_redeem_failed",
+      });
+      return {
+        error: "Invitation setup did not finish. Ask for a new invitation before retrying.",
+      };
+    }
+  }
 
   logSecurityEvent("auth.signup.success", { email: maskEmail(email), ip });
 
-  // If email confirmation is ON in Supabase, no session exists yet and the user
-  // must confirm via email first. For local dev you can disable confirmation
-  // (Supabase → Auth → Providers → Email → "Confirm email" off) so this lands
-  // straight on the dashboard.
+  // Supabase returns no session while email confirmation is pending. Do not send
+  // the operator to a protected route that immediately bounces back to login.
+  if (!data.session) {
+    return {
+      success: "Check your email to confirm the account, then return here to sign in.",
+    };
+  }
+
   redirect("/dashboard");
+}
+
+export async function requestPasswordReset(
+  _prev: FormState,
+  formData: FormData
+): Promise<FormState> {
+  const genericSuccess =
+    "If an account exists for that email, a password-reset link is on its way.";
+  if (botDetected(formData)) return { success: genericSuccess };
+
+  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const ip = await clientIp();
+  const [ipRl, emailRl] = await Promise.all([
+    rateLimit(`password-reset:ip:${ip}`, LOGIN_IP_LIMIT, LOGIN_WINDOW_S),
+    email
+      ? rateLimit(
+          `password-reset:email:${email}`,
+          PASSWORD_RESET_EMAIL_LIMIT,
+          PASSWORD_RESET_WINDOW_S
+        )
+      : Promise.resolve({ success: true, remaining: PASSWORD_RESET_EMAIL_LIMIT }),
+  ]);
+  if (!ipRl.success || !emailRl.success) return { success: genericSuccess };
+
+  const redirectTo = authEmailRedirect("/login/reset");
+  if (!redirectTo) {
+    logSecurityEvent("auth.password_reset.misconfigured", { ip });
+    return { error: "Password recovery is not configured on this deployment." };
+  }
+
+  const supabase = await userClient();
+  const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+  logSecurityEvent(error ? "auth.password_reset.failure" : "auth.password_reset.requested", {
+    email: maskEmail(email),
+    ip,
+  });
+
+  // Deliberately identical for unknown accounts and provider failures: the form
+  // must not become an account-enumeration oracle.
+  return { success: genericSuccess };
+}
+
+export async function resetPassword(
+  _prev: FormState,
+  formData: FormData
+): Promise<FormState> {
+  if (botDetected(formData)) return { error: "This recovery link is invalid or expired." };
+
+  const password = String(formData.get("password") ?? "");
+  const confirmation = String(formData.get("password_confirmation") ?? "");
+  const pwError = validatePassword(password);
+  if (pwError) return { error: pwError };
+  if (password !== confirmation) return { error: "Passwords do not match." };
+
+  const ip = await clientIp();
+  const rl = await rateLimit(`password-update:ip:${ip}`, LOGIN_EMAIL_LIMIT, LOGIN_WINDOW_S);
+  if (!rl.success) {
+    return { error: "Too many attempts. Please wait a few minutes and try again." };
+  }
+
+  const supabase = await userClient();
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+  if (userError || !user) {
+    return { error: "This recovery link is invalid or expired. Request a new one." };
+  }
+
+  const cookieStore = await cookies();
+  const recoveryTicket = cookieStore.get(PASSWORD_RECOVERY_COOKIE)?.value;
+  if (!(await verifyPasswordRecoveryTicket(recoveryTicket, user.id))) {
+    return { error: "This recovery link is invalid or expired. Request a new one." };
+  }
+
+  const { error } = await supabase.auth.updateUser({ password });
+  if (error) return { error: "Could not update the password. Request a new recovery link." };
+
+  logSecurityEvent("auth.password_reset.completed", {
+    email: maskEmail(user.email ?? ""),
+    ip,
+  });
+  cookieStore.delete(PASSWORD_RECOVERY_COOKIE);
+  await supabase.auth.signOut({ scope: "global" });
+  redirect("/login?reset=success");
 }
 
 export async function signOut(): Promise<never> {

@@ -148,6 +148,11 @@ export async function setOwnerPublished(
  * tier is only demoted after OWNER_FAILURE_LIMIT consecutive failures, and even
  * then the SUBJECT and the original verified_at are kept — degrade the label,
  * never silently delete someone's binding because their web server had a bad day.
+ *
+ * Returns 409 `owner_changed` if the binding was re-declared while the check was
+ * in flight. Nothing is written in that case: the result belongs to a claim that
+ * no longer exists, and applying it to its replacement is how an unproven domain
+ * gets a proven label. See the note at the update below.
  */
 export async function verifyOwnerDomain(
   db: OwnerDatabase,
@@ -170,14 +175,45 @@ export async function verifyOwnerDomain(
     ? { tier: "domain", verified_at: now, last_checked_at: now, failure_count: 0 }
     : nextFailureState(owner, now);
 
+  // Compare-and-set on the claim that was actually checked.
+  //
+  // Everything above this line happened BEFORE an HTTPS fetch of a host the
+  // owner named — and the owner of that host decides how long it takes. Hold
+  // the response open and the tenant has an arbitrarily long window in which to
+  // re-declare, which resets the tier and issues a new token. `user_id` alone
+  // then lands this patch on whatever row is there now: a valid proof for
+  // acme.com promoting a brand-new claim on some other domain to `tier:
+  // "domain"`, which /verify and every signed receipt then assert to strangers.
+  // The UI's pending state is not the control — a Server Action is addressable
+  // over HTTP by its id, extractable from the built client chunks.
+  //
+  // So the write states the row it believes it is patching. `subject` and
+  // `verification_token` are both required: re-declaring the SAME domain keeps
+  // the subject and rotates only the token (setOwner above), and that re-declare
+  // is precisely the reset a stale success would undo. No new column, no
+  // migration — the token already IS a per-declaration nonce.
+  //
+  // Both branches are conditioned. A stale FAILURE is the same defect wearing
+  // the other face: it would spend one of three strikes against a binding
+  // nothing has checked yet, and three of them demote it.
   const { data, error } = await db
     .from("agent_owners")
     .update(patch)
-    .eq("user_id", userId)
+    .eq("user_id", userId) // tenant boundary — service_role bypasses RLS
+    .eq("kind", owner.kind)
+    .eq("subject", owner.subject)
+    .eq("verification_token", owner.verification_token)
     .select(PUBLIC_COLS)
     .maybeSingle();
 
-  if (error || !data) return { ok: false, status: 500, code: "write_failed" };
+  // Order matters: a database that is down is not a row that moved. Reporting
+  // one as the other would tell an operator their binding changed when it did
+  // not, and would bury a real outage under a reassuring message.
+  if (error) return { ok: false, status: 500, code: "write_failed" };
+  // No match, no error: the row is no longer the row that was proven. Say so
+  // and change nothing. The evidence gathered was real — it was just about a
+  // claim this tenant has since withdrawn, and re-checking is one click.
+  if (!data) return { ok: false, status: 409, code: "owner_changed" };
   await dropOwnerCache(userId);
 
   return {

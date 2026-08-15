@@ -23,6 +23,10 @@ shadow_port = ${port(54320)}
 [auth]
 site_url = "http://localhost:${dashboardPort}"
 
+[auth.hook.before_user_created]
+enabled = true
+uri = "pg-functions://postgres/public/hook_authorize_beta_signup"
+
 [studio]
 port = ${port(54323)}
 

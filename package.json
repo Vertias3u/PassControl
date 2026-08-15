@@ -1,9 +1,9 @@
 {
   "name": "passcontrol",
-  "version": "0.5.3",
-  "description": "Secure Agent Control Plane & Passport Vault — identity-aware reverse proxy for AI agent credentials.",
+  "version": "0.6.0",
+  "description": "Identity, scope and budget controls for AI agents while provider keys stay server-side.",
   "license": "BUSL-1.1",
-  "homepage": "https://github.com/Vertias3u/PassControl#readme",
+  "homepage": "https://passcontrol.vertias.eu",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Vertias3u/PassControl.git"
@@ -43,6 +43,8 @@
     "cli": "node bin/passcontrol.mjs",
     "dev": "next dev",
     "build": "next build",
+    "build:cloudflare": "node scripts/build-cloudflare.mjs",
+    "preview:cloudflare": "opennextjs-cloudflare preview",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
@@ -53,8 +55,14 @@
     "seed": "node scripts/seed.mjs",
     "sidecar": "node examples/visa-sidecar.mjs",
     "test:rls": "psql -v ON_ERROR_STOP=1 -f db/tests/rls_invariants.sql \"$DATABASE_URL\"",
+    "test:beta-launch-db": "psql -v ON_ERROR_STOP=1 -f db/tests/beta_launch_invariants.sql \"$DATABASE_URL\"",
     "build:cli": "node scripts/build-cli-package.mjs",
-    "check:npm-pack": "npm run build:cli && node scripts/check-npm-package.mjs",
+    "check:release": "node scripts/check-release-integrity.mjs",
+    "check:legal": "node scripts/check-legal-readiness.mjs",
+    "check:paid-legal": "node scripts/check-legal-readiness.mjs --paid-commercial-launch",
+    "check:cloud-beta": "npm run check:legal && node scripts/check-cloud-beta-readiness.mjs",
+    "canary:cloud-beta": "node scripts/cloud-beta-canary.mjs",
+    "check:npm-pack": "npm run check:release && npm run build:cli && node scripts/check-npm-package.mjs",
     "release:cli": "npm run check:npm-pack && npm publish ./dist-cli",
     "prepublishOnly": "node -e \"console.error('Publish the CLI package, not the app manifest: npm run release:cli');process.exit(1)\"",
     "prepare": "git config core.hooksPath .githooks || true"
@@ -71,6 +79,7 @@
     "@vercel/functions": "^1.4.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "d3-force": "^3.0.0",
     "jose": "^5.9.3",
     "lucide-react": "^1.20.0",
     "next": "^15.0.0",
@@ -81,19 +90,26 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.112.4",
+    "@opennextjs/cloudflare": "^1.20.2",
     "@tailwindcss/postcss": "^4.3.1",
+    "@types/d3-force": "^3.0.10",
     "@types/node": "^22.5.5",
     "@types/react": "^18.3.8",
     "@types/react-dom": "^18.3.0",
+    "openai": "^6.49.0",
     "postcss": "^8.5.24",
     "shadcn": "^4.11.0",
     "tailwindcss": "^4.3.1",
     "typescript": "^5.6.2",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "wrangler": "^4.120.0"
   },
   "overrides": {
     "postcss": "$postcss",
     "sharp": "^0.35.3",
-    "@hono/node-server": "^2.0.5"
+    "@hono/node-server": "^2.0.5",
+    "js-yaml": "^4.3.1",
+    "nanoid": "^3.3.17"
   }
 }

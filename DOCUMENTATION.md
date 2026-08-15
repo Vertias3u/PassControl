@@ -150,7 +150,12 @@ passcontrol env aider
 passcontrol env cline
 passcontrol env continue
 passcontrol env litellm
+passcontrol env hermes
 ```
+
+Hermes uses its current `custom` model provider. The printed YAML points at the
+local sidecar and uses `api_key: passcontrol` as a placeholder; the real provider
+key never enters Hermes.
 
 Desktop chat apps work the same way, and are the case where the sidecar earns its keep:
 each of these normally stores a raw provider key in local app storage.

@@ -1,10 +1,11 @@
 "use client";
 
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ed25519 } from "@noble/curves/ed25519";
-import { Copy, KeyRound, Upload } from "lucide-react";
+import { ArrowRight, Check, KeyRound, ShieldCheck, Upload, X } from "lucide-react";
 import { completeKeyImport, probeProviderKey } from "@/app/dashboard/actions";
-import { buildConfigureSnippet } from "@/app/dashboard/key-import-snippet";
+import { clientModelIsUsable, DEFAULT_CLIENT_MODELS } from "@/lib/agent-connect";
 import { bytesToBase64url } from "@/lib/encoding";
 import {
   PROVIDERS,
@@ -13,13 +14,24 @@ import {
   type ProviderId,
 } from "@/lib/providers";
 import { buttonVariants } from "@/components/ui/button";
+import { PassportStoreAndConnect } from "@/components/PassportStoreAndConnect";
+import { scopeAllows } from "@/lib/scope";
 
 type Stage = "key" | "scope" | "done";
 
-export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
-  const defaultIntegration = integrations.includes("generic")
-    ? "generic"
-    : integrations[0] ?? "";
+export function KeyImportOnramp({
+  userId,
+  integrations,
+  onRevealChange,
+}: {
+  userId: string;
+  integrations: string[];
+  /** Fired while this component is displaying a passport secret that exists
+   *  nowhere else. The parent renders it inside a stage branch, so it must not
+   *  advance that stage until this goes false. */
+  onRevealChange?: (revealing: boolean) => void;
+}) {
+  const router = useRouter();
   const [stage, setStage] = useState<Stage>("key");
   const [key, setKey] = useState("");
   const [provider, setProvider] = useState<ProviderId>("anthropic");
@@ -27,14 +39,25 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
   const [handoff, setHandoff] = useState("");
   const [probeMode, setProbeMode] = useState<"detected" | "manual">("manual");
   const [models, setModels] = useState("");
+  const [clientModel, setClientModel] = useState(DEFAULT_CLIENT_MODELS.anthropic);
   const [name, setName] = useState("");
   const [label, setLabel] = useState("imported");
   const [passportId, setPassportId] = useState("");
   const [passportSecret, setPassportSecret] = useState("");
-  const [integration, setIntegration] = useState(defaultIntegration);
+  const [agentId, setAgentId] = useState("");
+  const [issuedAt, setIssuedAt] = useState("");
   const [stored, setStored] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Through a ref so an inline arrow from the parent cannot re-fire the effect on
+  // every render.
+  const revealRef = useRef(onRevealChange);
+  revealRef.current = onRevealChange;
+  useEffect(() => {
+    revealRef.current?.(stage === "done" && Boolean(passportSecret));
+  }, [stage, passportSecret]);
+  useEffect(() => () => revealRef.current?.(false), []);
 
   const guess = useMemo(() => detectProviderFromKey(key), [key]);
   const selectedModels = useMemo(
@@ -50,11 +73,13 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
     setHandoff("");
     setProbeMode("manual");
     setModels("");
+    setClientModel(DEFAULT_CLIENT_MODELS.anthropic);
     setName("");
     setLabel("imported");
     setPassportId("");
     setPassportSecret("");
-    setIntegration(defaultIntegration);
+    setAgentId("");
+    setIssuedAt("");
     setStored(false);
     setError(null);
   };
@@ -76,6 +101,7 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
       setHandoff(result.handoff);
       setProbeMode(result.mode);
       setModels(result.models.join(", "));
+      setClientModel(result.models.find(clientModelIsUsable) ?? DEFAULT_CLIENT_MODELS[provider]);
       setStage("scope");
     } catch (cause) {
       setError((cause as Error).message || "Something went wrong. Please try again.");
@@ -90,13 +116,18 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
       setError("Choose at least one model before creating the agent.");
       return;
     }
+    const concreteModel = clientModel.trim();
+    if (!clientModelIsUsable(concreteModel) || !scopeAllows([{ provider, models: selectedModels }], provider, concreteModel)) {
+      setError("Model to call must be a concrete provider model id covered by the allowed models.");
+      return;
+    }
     setBusy(true);
     setError(null);
     const privateKey = ed25519.utils.randomPrivateKey();
     try {
       const publicKey = ed25519.getPublicKey(privateKey);
       const publicId = bytesToBase64url(publicKey);
-      await completeKeyImport({
+      const result = await completeKeyImport({
         handoff,
         provider,
         label: label.trim() || "imported",
@@ -106,6 +137,8 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
       });
       setPassportId(publicId);
       setPassportSecret(bytesToBase64url(privateKey));
+      setAgentId(result.agentId);
+      setIssuedAt(result.createdAt);
       setHandoff("");
       setStage("done");
     } catch (cause) {
@@ -116,23 +149,21 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
     }
   };
 
-  const snippet =
-    stage === "done" && passportId && passportSecret && selectedModels[0] && integration
-      ? buildConfigureSnippet({
-          passportId,
-          passportSecret,
-          provider,
-          model: selectedModels[0],
-          integration,
-          allowedIntegrations: integrations,
-        })
-      : "";
+  const removeModel = (modelToRemove: string) => {
+    setModels(selectedModels.filter((model) => model !== modelToRemove).join(", "));
+  };
+
+  const acknowledgeStored = () => {
+    if (!stored) return;
+    reset();
+    router.refresh();
+  };
 
   const labelClass = "grid gap-1 text-sm";
   const labelText = "text-xs uppercase tracking-wide text-muted-foreground";
 
   return (
-    <div className="grid gap-5">
+    <div className="pc-onramp">
       <div>
         <h2 className="mb-1 flex items-center gap-2 text-lg font-bold">
           <Upload className="h-5 w-5 text-primary" /> Import an existing provider key
@@ -143,8 +174,32 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
         </p>
       </div>
 
+      <ol className="pc-onramp__steps" aria-label="Provider import progress">
+        {[
+          ["key", "Provider key"],
+          ["scope", "Capability"],
+          ["done", "Connect agent"],
+        ].map(([id, text], index) => {
+          const current = ["key", "scope", "done"].indexOf(stage);
+          const complete = index < current;
+          return (
+            <li key={id} data-state={complete ? "complete" : stage === id ? "current" : "upcoming"}>
+              <span>{complete ? <Check aria-hidden="true" /> : index + 1}</span>
+              {text}
+            </li>
+          );
+        })}
+      </ol>
+
       {stage === "key" ? (
         <form onSubmit={probe} className="grid gap-4">
+          <div className="pc-onramp__boundary" aria-label="Provider credential boundary">
+            <div><span>Browser</span><small>paste once</small></div>
+            <ArrowRight aria-hidden="true" />
+            <div className="is-control"><ShieldCheck aria-hidden="true" /><span>PassControl</span><small>probe, then clear</small></div>
+            <ArrowRight aria-hidden="true" />
+            <div><span>Vault</span><small>encrypted only after review</small></div>
+          </div>
           <label className={labelClass}>
             <span className={labelText}>Provider key</span>
             <input
@@ -156,7 +211,7 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
                 if (!providerOverridden) setProvider(resolveProviderSelection(next));
               }}
               placeholder="Paste the key your agent already uses"
-              autoComplete="off"
+              autoComplete="new-password"
               spellCheck={false}
             />
             <span className="text-xs text-muted-foreground">
@@ -171,6 +226,7 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
               value={provider}
               onChange={(event) => {
                 setProvider(event.target.value as ProviderId);
+                setClientModel(DEFAULT_CLIENT_MODELS[event.target.value as ProviderId]);
                 setProviderOverridden(true);
               }}
             >
@@ -181,12 +237,17 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
               ))}
             </select>
             {key ? (
-              <span className="text-xs text-muted-foreground">
+              <span className="text-xs text-muted-foreground" aria-live="polite">
                 {guess.ambiguous
-                  ? "The key shape is ambiguous. Confirm or override the provider before continuing."
-                  : `Key shape suggests ${guess.suggested}. You can override it.`}
+                  ? `Low-confidence match${guess.candidates.length < PROVIDERS.length ? `: ${guess.candidates.join(" or ")}` : ""}. Confirm the provider manually.`
+                  : `High-confidence key-shape match: ${guess.suggested}. You can still override it.`}
               </span>
             ) : null}
+          </label>
+          <label className={labelClass}>
+            <span className={labelText}>Model to call · exact provider ID</span>
+            <input value={clientModel} onChange={(event) => setClientModel(event.target.value)} />
+            <span className="text-xs text-muted-foreground">Allowed models are authorization. This separate concrete ID is sent to the provider; wildcards are rejected.</span>
           </label>
 
           {error ? <p className="m-0 text-sm text-destructive">{error}</p> : null}
@@ -243,6 +304,26 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
               This is the passport&apos;s capability grant. Remove anything the agent does not need.
             </span>
           </label>
+          {selectedModels.length ? (
+            <div className="pc-onramp__models" aria-label={`${selectedModels.length} selected models`}>
+              {selectedModels.map((model) => (
+                <span key={model}>
+                  <code>{model}</code>
+                  <button type="button" onClick={() => removeModel(model)} aria-label={`Remove ${model}`}>
+                    <X aria-hidden="true" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          <div className="pc-onramp__review">
+            <p className="pc-kicker">Before you continue</p>
+            <p>
+              Store one <strong>{provider}</strong> key as <strong>{label.trim() || "imported"}</strong>,
+              issue <strong>{name.trim() || "the named agent"}</strong> a browser-generated passport,
+              and grant exactly {selectedModels.length} model{selectedModels.length === 1 ? "" : "s"}.
+            </p>
+          </div>
           {error ? <p className="m-0 text-sm text-destructive">{error}</p> : null}
           <div className="flex justify-between gap-3">
             <button type="button" className="ghost" onClick={reset} disabled={busy}>
@@ -250,7 +331,7 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
             </button>
             <button
               type="submit"
-              disabled={!name.trim() || !selectedModels.length || busy}
+              disabled={!name.trim() || !selectedModels.length || !clientModelIsUsable(clientModel) || busy}
               className={buttonVariants({ size: "sm" })}
             >
               <KeyRound className="h-4 w-4" />
@@ -260,60 +341,20 @@ export function KeyImportOnramp({ integrations }: { integrations: string[] }) {
         </form>
       ) : null}
 
-      {stage === "done" ? (
-        <div className="grid gap-4">
-          <div>
-            <h3 className="m-0 text-base font-bold">Your governed agent is ready</h3>
-            <p className="m-0 mt-1 text-sm text-muted-foreground">
-              The private passport below is shown once. It was generated in this browser and
-              was never sent to the server.
-            </p>
-          </div>
-          <label className={labelClass}>
-            <span className={labelText}>Integration preset</span>
-            <select value={integration} onChange={(event) => setIntegration(event.target.value)}>
-              {integrations.map((preset) => (
-                <option key={preset} value={preset}>
-                  {preset}
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="grid gap-1">
-            <span className={labelText}>Paste into a private terminal</span>
-            <pre className="overflow-x-auto rounded-sm border border-destructive/60 bg-destructive/5 p-3 text-xs">
-              {snippet}
-            </pre>
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <button
-              type="button"
-              onClick={() => navigator.clipboard.writeText(snippet)}
-              className="inline-flex items-center gap-1 rounded-md border border-border bg-secondary px-3 py-1.5 text-sm font-semibold text-foreground hover:bg-secondary/80"
-            >
-              <Copy className="h-4 w-4" /> Copy setup snippet
-            </button>
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                className="w-auto"
-                checked={stored}
-                onChange={(event) => setStored(event.target.checked)}
-              />
-              I&apos;ve stored this securely
-            </label>
-          </div>
-          <div className="flex justify-end">
-            <button
-              type="button"
-              disabled={!stored}
-              onClick={reset}
-              className={buttonVariants({ size: "sm" })}
-            >
-              Done
-            </button>
-          </div>
-        </div>
+      {stage === "done" && agentId && issuedAt && passportId && passportSecret ? (
+        <PassportStoreAndConnect
+          userId={userId}
+          agentId={agentId}
+          issuedAt={issuedAt}
+          provider={provider}
+          model={clientModel.trim()}
+          passportId={passportId}
+          passportSecret={passportSecret}
+          integrations={integrations}
+          stored={stored}
+          onStoredChange={setStored}
+          onFinish={acknowledgeStored}
+        />
       ) : null}
     </div>
   );

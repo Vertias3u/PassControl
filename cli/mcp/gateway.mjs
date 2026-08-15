@@ -1,10 +1,8 @@
 import { decodeJwt } from "jose";
-import { OPENAI_SHAPE_PROVIDERS, formatProxyError } from "../config.mjs";
+import { OPENAI_SHAPE_PROVIDERS, bareGatewayOrigin, formatProxyError } from "../config.mjs";
 import { createVisaClient } from "../visa-client.mjs";
 
 const DEFAULT_ANTHROPIC_MAX_TOKENS = 1024;
-
-const trimSlash = (value) => String(value ?? "").replace(/\/+$/, "");
 
 function requestFor({ provider, model, messages, max_tokens, temperature }) {
   if (provider === "anthropic") {
@@ -110,7 +108,9 @@ export function createGatewayClient({
   randomUUID = () => globalThis.crypto.randomUUID(),
   refreshSkewSeconds = 30,
 }) {
-  const baseUrl = trimSlash(gateway);
+  // `trimSlash` tidied a string; it never judged the destination. Every proxied
+  // call below carries a bearer visa, so the base is the validated origin.
+  const baseUrl = bareGatewayOrigin(gateway);
   const visas = createVisaClient({
     gateway: baseUrl,
     passportId,

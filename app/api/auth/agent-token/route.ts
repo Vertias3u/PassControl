@@ -32,6 +32,7 @@ import { serviceClient } from "@/lib/supabase";
 import { instanceIssuer, loadInstanceSigner } from "@/lib/crypto/instanceKey";
 import { AGENT_TOKEN_TYP, AGENT_TOKEN_VER, signCompactJws } from "@/lib/crypto/jws";
 import { readCurrentOwner } from "@/lib/owner/current";
+import { findAuthenticatablePassport } from "@/lib/auth/passport";
 import { rateLimit } from "@/lib/ratelimit";
 import { captureError, captureSecurityEvent } from "@/lib/observability";
 
@@ -153,18 +154,22 @@ async function handlePost(req: Request) {
   const issuer = instanceIssuer();
   if (!signer || !issuer) return fail(501, "signing_not_configured");
 
+  // Status, expiry and the retired-key deadline, through the SAME helper the
+  // work-visa route uses. This door matters at least as much for expiry: a visa
+  // is spent against this gateway and lasts minutes, while the token minted
+  // below asserts identity to a third party who verifies it offline against the
+  // JWKS. A passport its owner has retired must not be able to keep making
+  // assertions about itself out in the world.
   const db = serviceClient();
-  const { data: agent, error } = await db
-    .from("agents")
-    .select("id, user_id, status")
-    .eq("passport_pubkey", payload.passport_id)
-    .maybeSingle();
-  if (error) return fail(500, "lookup_failed");
-  if (!agent) return securityFail(401, "unknown_passport");
-  if (agent.status !== "active") {
-    return securityFail(403, "agent_not_active", { agentId: agent.id });
+  const found = await findAuthenticatablePassport(db, payload.passport_id, "id, user_id, status");
+  if (!found.ok) {
+    if (found.code === "lookup_failed") return fail(500, "lookup_failed");
+    return securityFail(found.status, found.code, { agentId: found.agentId });
   }
+  const agent = found.agent;
 
+  // Against the presented key — the one the lookup matched on — never a field
+  // of the row. See lib/auth/passport.ts.
   const pubkey = passportIdToPublicKey(payload.passport_id);
   if (!pubkey) return securityFail(400, "bad_passport_id");
   const verified = verifySignature(
@@ -194,7 +199,7 @@ async function handlePost(req: Request) {
       iat: now,
       exp: now + ttl,
       agid: agent.id,
-      own: await readCurrentOwner(db, agent.user_id),
+      own: await readCurrentOwner(db, agent.user_id as string),
       ver: AGENT_TOKEN_VER,
     },
   });

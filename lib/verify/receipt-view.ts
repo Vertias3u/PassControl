@@ -307,6 +307,25 @@ const VERDICTS: Record<string, VerdictPresentation> = {
     detail: "The call would have taken the agent past the spending limit set for it.",
     tone: "held",
   },
+  // A reader of this page is checking someone else's receipt, so the distinction
+  // from blocked_budget carries real weight: one says the operator's own limit
+  // stopped the call, the other says the call was permitted and the provider's
+  // account had run dry. Nothing here may read as "over budget".
+  provider_exhausted: {
+    label: "Allowed, then refused by the provider for credit",
+    detail:
+      "The gateway permitted this call and forwarded it. The provider rejected it because the account it was billed to had no credit left.",
+    tone: "held",
+  },
+  // A reader of someone else's receipt must not confuse this with the line
+  // above. That one was forwarded and rejected; this one never left the gateway
+  // at all, so it says nothing about the provider's account or availability.
+  no_provider_key: {
+    label: "Refused — no provider credential was stored",
+    detail:
+      "The gateway had no stored credential for this provider, so it refused the call before forwarding it. The provider never received this request.",
+    tone: "held",
+  },
   blocked_endpoint: {
     label: "Refused — endpoint not allowed",
     detail: "The agent may use this provider, but not this particular endpoint.",
@@ -340,6 +359,87 @@ export function describeVerdict(status: string, http: number): VerdictPresentati
   };
 }
 
+// ── The failover chain ───────────────────────────────────────────────────────
+//
+// A receipt carrying `prev` is one attempt in a chain: an earlier provider
+// failed in an allowlisted way and the gateway retried on another. `why` says
+// which way.
+//
+// The reason a stranger needs this at all is money. After a server error or a
+// dropped connection the FIRST provider may already have run the call and billed
+// it — the gateway cannot tell, and does not pretend to. So one client request
+// can appear on two invoices, and this copy is what tells the person holding
+// both that it is expected rather than a duplicate charge.
+//
+// The mapping is deliberately duplicated here rather than imported from
+// lib/providers/fallbacks.ts. That module is the gateway; this page verifies
+// receipts issued by ANY deployment the reader chooses to trust, including ones
+// running a different version, so it must not be coupled to our current enum —
+// and must resolve an unknown value downward, never dressing it up.
+
+export interface FailoverPresentation {
+  label: string;
+  detail: string;
+  /**
+   * Whether the attempt this receipt REPLACED may already have been billed.
+   *
+   * An unrecognised reason resolves to `true`. That is the safe direction: it
+   * tells a reader to go and check, which costs them a look at an invoice,
+   * where the other direction would tell them not to bother about a charge that
+   * might be real.
+   */
+  mayHaveBeenCharged: boolean;
+  /** False when the page is showing the raw value because it does not know it. */
+  recognised: boolean;
+}
+
+const FAILOVERS: Record<string, Omit<FailoverPresentation, "recognised">> = {
+  credit_exhausted: {
+    label: "The first provider had no credit left",
+    detail:
+      "The provider the agent asked for refused the call because the account it would have been billed to was empty. It refused before doing any work, so there is nothing to pay for on that attempt.",
+    mayHaveBeenCharged: false,
+  },
+  rate_limited: {
+    label: "The first provider was rate limiting",
+    detail:
+      "The provider the agent asked for was refusing calls for being too frequent. It refused before doing any work, so there is nothing to pay for on that attempt.",
+    mayHaveBeenCharged: false,
+  },
+  upstream_5xx: {
+    label: "The first provider returned a server error",
+    detail:
+      "The provider the agent asked for failed on its own side. It may already have run this call before failing, so it may have charged for it — check that provider's bill as well as this one.",
+    mayHaveBeenCharged: true,
+  },
+  unreachable: {
+    label: "The first provider could not be reached",
+    detail:
+      "The connection to the provider the agent asked for failed. There is no way to tell whether the call arrived, so it may have run and been charged for — check that provider's bill as well as this one.",
+    mayHaveBeenCharged: true,
+  },
+};
+
+/**
+ * Describe a `why` claim, or null when there is nothing to describe.
+ *
+ * An unrecognised value is shown exactly as the receipt records it, the same
+ * rule describeVerdict follows: this page never invents a friendlier meaning for
+ * a claim signed by someone else.
+ */
+export function describeFailover(why: unknown): FailoverPresentation | null {
+  if (typeof why !== "string" || !why) return null;
+  const known = FAILOVERS[why];
+  if (known) return { ...known, recognised: true };
+  return {
+    label: `Recorded as ${why}`,
+    detail:
+      "This page does not recognise that reason, so it is shown exactly as the receipt records it. Whether the earlier attempt was charged for cannot be told from here — check the other provider's bill.",
+    mayHaveBeenCharged: true,
+    recognised: false,
+  };
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 export function describeCall(
@@ -347,6 +447,42 @@ export function describeCall(
 ): string {
   const target = claims.mdl ? `${claims.prov}/${claims.mdl}` : claims.prov;
   return `${claims.mth} ${claims.path} → ${target}`;
+}
+
+export interface ReceiptAuthenticationPresentation {
+  label: "Passport verified" | "Direct Agent Key accepted";
+  detail: string;
+  subjectLabel: "Agent passport" | "Agent identity";
+  subject: string;
+  keyId: string | null;
+}
+
+/**
+ * The receipt signature proves what the gateway attests. It does not upgrade a
+ * bearer credential into cryptographic agent identity, so the two modes get
+ * deliberately different words everywhere this artifact is rendered.
+ */
+export function describeReceiptAuthentication(
+  claims: Pick<ReceiptClaims, "sub" | "agid" | "auth">
+): ReceiptAuthenticationPresentation {
+  if (claims.auth?.kind === "direct_key") {
+    return {
+      label: "Direct Agent Key accepted",
+      detail:
+        "The gateway accepted possession of a bearer Direct Agent Key for this agent. This is not a claim that the agent signed with a passport.",
+      subjectLabel: "Agent identity",
+      subject: claims.agid || claims.sub,
+      keyId: typeof claims.auth.kid === "string" && claims.auth.kid ? claims.auth.kid : null,
+    };
+  }
+  return {
+    label: "Passport verified",
+    detail:
+      "The gateway accepted a short-lived visa minted from this agent passport's Ed25519 proof.",
+    subjectLabel: "Agent passport",
+    subject: claims.sub,
+    keyId: null,
+  };
 }
 
 export interface CostPresentation {

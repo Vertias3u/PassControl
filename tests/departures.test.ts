@@ -34,6 +34,14 @@ describe("verdict vocabulary", () => {
     expect(new Set(words).size).toBe(words.length);
   });
 
+  it("separates our budget refusing a call from the provider's account being empty", () => {
+    // Both are about money and both come back as a 402, but the fix is opposite:
+    // one is a limit the operator set here, the other is a balance to top up at
+    // the provider. An operator who reads them as one word raises the wrong dial.
+    expect(verdictFor("blocked_budget").word).toBe("NO FUNDS");
+    expect(verdictFor("provider_exhausted").word).toBe("NO CREDIT");
+  });
+
   it("separates a kill switch from an agent suspend — they answer the wire alike", () => {
     // The proxy deliberately returns one opaque code for both. The audit row is
     // where they diverge, and the board is where an operator reads that.
@@ -79,6 +87,16 @@ describe("row rendering", () => {
     expect(flightCode({ provider: null, jti: null })).toBe("?? ----");
   });
 
+  it("uses the stored credential-use id for a direct-key call with no visa jti", () => {
+    expect(
+      flightCode({
+        provider: "openai",
+        jti: null,
+        credential_use_id: "ab12cd34-0000-4000-8000-000000000001",
+      })
+    ).toBe("OP AB12");
+  });
+
   it("shows a dash rather than $0.0000 for an unmetered call", () => {
     expect(fare(null)).toBe("—");
     expect(fare(0)).toBe("—");
@@ -116,7 +134,7 @@ describe("the board reads the data the Control Tower already fetched", () => {
   it("adds no second query for logs", () => {
     // A parallel query is how the board and the audit log start disagreeing.
     const page = readFileSync(join(process.cwd(), "app/dashboard/page.tsx"), "utf8");
-    expect(page).toMatch(/<DeparturesBoard[^>]*initialRows=\{logs \?\? \[\]\}/);
+    expect(page).toMatch(/<DeparturesBoard[^>]*initialRows=\{displayLogs\}/);
     expect(page.match(/from\("agent_logs"\)/g) ?? []).toHaveLength(1);
   });
 });

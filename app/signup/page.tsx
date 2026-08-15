@@ -1,23 +1,39 @@
 import { SignupForm } from "@/components/auth/SignupForm";
-import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
+import { AuthShell } from "@/components/auth/AuthShell";
+import { inviteSource, signupMode } from "@/lib/invite-code";
 
-export const metadata = { title: "Create account — PassControl by Vertias" };
+export const metadata = { title: "Create account" };
 
 export default function SignupPage() {
+  const mode = signupMode();
+  const source = inviteSource();
+  if (mode === "closed") {
+    return (
+      <AuthShell
+        eyebrow="Operator access"
+        title="Signups are closed"
+        description="This deployment is not accepting new operator accounts. Existing operators can still sign in."
+      >
+        <p className="pc-auth-form__switch"><a href="/login">Return to sign in</a></p>
+      </AuthShell>
+    );
+  }
+
   return (
-    <main className="mx-auto mt-[12vh] grid max-w-sm gap-4 px-4">
-      <div className="grid justify-items-center gap-2">
-        <VertiasLogo size={48} />
-        <VertiasWordmark size={22} />
-        <div className="text-center">
-          <h1 className="m-0 text-lg font-bold">PassControl</h1>
-          <p className="mt-0.5 text-sm text-muted-foreground">Create your account</p>
-        </div>
-      </div>
-      <div className="rounded-lg border border-border bg-card p-6">
-        <SignupForm />
-      </div>
-    </main>
+    <AuthShell
+      eyebrow={mode === "invite" ? "Invite-only access" : "Operator signup"}
+      title="Create your control plane"
+      description={
+        mode === "invite"
+          ? source === "database"
+            ? "Open your personal invitation link, then create the operator account bound to that invitation."
+            : "Use the invite issued for this deployment to create an operator account."
+          : "Create an operator account. You may need to confirm your email before signing in."
+      }
+      showAccountTerms
+    >
+      <SignupForm mode={mode} inviteSource={source} />
+    </AuthShell>
   );
 }
 

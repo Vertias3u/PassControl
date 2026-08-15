@@ -1,5 +1,5 @@
 import { ed25519 } from "@noble/curves/ed25519";
-import { formatChallengeError } from "./config.mjs";
+import { bareGatewayOrigin, formatChallengeError } from "./config.mjs";
 
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -16,6 +16,14 @@ export function createVisaClient({
   refreshSkewSeconds = 30,
   missingVisaMessage = "Challenge returned no visa.",
 }) {
+  // Both callers (`sidecar`, `mcp`) already hand this a validated origin, and it
+  // is validated AGAIN here on purpose. This is the one function in the CLI that
+  // signs with the passport private key, so the guard belongs where the
+  // signature is produced rather than only where the caller happened to
+  // remember it — that omission is exactly how the passport paths ended up on
+  // the raw string while the control plane was guarded. Idempotent: an origin
+  // that passed the rule passes it unchanged.
+  const origin = bareGatewayOrigin(gateway);
   const skewMs = Math.max(0, Number(refreshSkewSeconds) * 1000);
   let cached = null;
   let inflight = null;
@@ -24,7 +32,7 @@ export function createVisaClient({
     const payloadObject = { passport_id: passportId, ts: now(), nonce: randomUUID() };
     const payload = b64url(new TextEncoder().encode(JSON.stringify(payloadObject)));
     const signature = b64url(ed25519.sign(fromB64url(payload), fromB64url(passportSecret)));
-    const response = await fetchImpl(`${gateway}/api/auth/challenge`, {
+    const response = await fetchImpl(`${origin}/api/auth/challenge`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ payload, signature }),

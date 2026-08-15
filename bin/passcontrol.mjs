@@ -24,6 +24,8 @@ import {
   ok,
   redact,
   requireControlApiKey,
+  requireControlGateway,
+  requirePassportGateway,
   requirePassport,
   step,
   warn,
@@ -125,48 +127,64 @@ function cliCommand(args = "") {
 
 function usage() {
   const cmd = cliPrefix();
-  return `${heading("PassControl")}
+  return `${heading(`PassControl ${CLI_VERSION}`)}
+Governed identity and credentials for AI agents.
 
 ${heading("Usage:")}
   ${cmd}                         show cockpit status
-  ${cmd} init [--global]          create a config profile
-  ${cmd} status [--no-network]    show active config
+  ${cmd} <command> [options]
+
+${heading("Quick start")}
+  ${cmd} init [--global]          configure this project
   ${cmd} start [--dashboard-only] start the whole local stack (dashboard + Supabase + Redis)
+  ${cmd} open                     start if needed and open the Control Tower
+  ${cmd} try                      run the 60-second keyless guided demo
+
+${heading("Operate")}
+  ${cmd} status [--no-network] [--json]
+                                 show active config and instance state
+  ${cmd} doctor [--deep] [--fix]  diagnose setup and repair a stopped dashboard
+  ${cmd} call "hi"                mint a visa and make a governed model call
+  ${cmd} sidecar [--port 8788]    start the local agent bridge
+
+${heading("Manage")}
+  ${cmd} agent list [--json]      list agents
+  ${cmd} agent create <name>      create an agent passport
+  ${cmd} agent rotate <id> [--grace <seconds>]
+                                 rotate locally and reveal the new secret once
+  ${cmd} agent suspend <id>       suspend an agent
+  ${cmd} agent resume <id>        resume an agent
+  ${cmd} agent revoke <id>        permanently revoke an agent
+  ${cmd} spend [--json]           show fleet and per-agent spend
+  ${cmd} audit [--limit 20] [--json]
+                                 show operator audit history
+  ${cmd} logs [--limit 20] [--json]
+                                 show governed call logs
+  ${cmd} kill on|off              toggle the tenant kill switch
+
+${heading("Integrate")}
+  ${cmd} env [integration]        print settings without writing anything
+  ${cmd} configure <integration> [--write] [--force]
+                                 preview or write integration config
+  ${cmd} mcp                      start the stdio MCP server
+  integrations: ${integrationChoices()}
+
+${heading("Trust")}
+  ${cmd} keygen instance          create the receipt-signing key
+  ${cmd} verify receipt <jws> --issuer <origin>
+                                 verify a signed call receipt
+  ${cmd} verify token <jwt> --audience <aud> --issuer <origin>
+                                 verify an agent-to-agent token
+
+${heading("Local stack")}
+  ${cmd} setup [--no-open] [--port-offset N] [--app-dir DIR]
+                                 clone if needed, start services, open dashboard
   ${cmd} stop [--dashboard-only]  stop the whole local stack (dashboard + Supabase + Redis)
   ${cmd} restart                  restart the CLI-managed local dashboard
   ${cmd} local-logs [--follow]    show local dashboard logs
-  ${cmd} doctor [--deep] [--fix]  check local setup and repair a stopped dashboard
   ${cmd} reset --local --confirm RESET
                                  destroy and recreate the local stack
-  ${cmd} setup [--no-open] [--port-offset N] [--app-dir DIR]
-                                 clone the app (if needed), start local services, open the dashboard
-                                 --app-dir repoints the CLI and is remembered
   ${cmd} unlink                   forget the remembered app checkout
-  ${cmd} try                      60-second demo: governed keyless call + kill switch (no key)
-  ${cmd} call "hi"                mint a visa and call a model
-  ${cmd} sidecar [--port 8788]    start the local agent bridge
-  ${cmd} mcp                      start the local stdio MCP server
-  ${cmd} configure <integration> [--write] [--force]
-                                 set up an integration: previews the config, and
-                                 --write creates it for aider|claude-desktop|cursor
-  ${cmd} env [integration]        print the same settings without writing anything
-                                 (defaults to generic)
-                                 <integration>: ${integrationChoices()}
-  ${cmd} agent list               list agents
-  ${cmd} agent create <name>      create an agent passport
-  ${cmd} agent suspend <id>       suspend an agent
-  ${cmd} agent resume <id>        resume an agent
-  ${cmd} agent revoke <id>        revoke an agent
-  ${cmd} spend                    show fleet + per-agent spend
-  ${cmd} audit [--limit 20]        show admin audit trail
-  ${cmd} logs [--limit 20]         show gateway call logs
-  ${cmd} kill on|off              toggle tenant kill switch
-  ${cmd} keygen instance          generate the deployment's receipt-signing key
-  ${cmd} verify receipt <jws> --issuer <origin>
-                                 check a signed call receipt (no account needed)
-  ${cmd} verify token <jwt> --audience <aud> --issuer <origin>
-                                 check an agent-to-agent token
-  ${cmd} open                     start (if needed) and open the dashboard
 
 ${heading("Config:")}
   Env vars win, then nearest .passcontrol, then ~/.config/passcontrol/config.
@@ -175,6 +193,30 @@ ${heading("Config:")}
     --app-dir DIR → PASSCONTROL_APP_ROOT → surrounding checkout → remembered
     checkout in ~/.config/passcontrol/app.json (survives npm uninstall; clear
     it with \`${cmd} unlink\`).
+`;
+}
+
+function agentUsage() {
+  const cmd = cliPrefix();
+  return `${heading("Manage agent passports")}
+
+${heading("Usage:")}
+  ${cmd} agent list
+  ${cmd} agent create <name> [--provider <provider>] [--scope <model-pattern>]
+  ${cmd} agent rotate <id> [--grace <seconds>]
+  ${cmd} agent suspend <id>
+  ${cmd} agent resume <id>
+  ${cmd} agent revoke <id>
+
+${heading("Examples")}
+  ${cmd} agent create prod-summarizer --provider anthropic --scope 'claude-*'
+  ${cmd} agent rotate <id> --grace 3600
+  ${cmd} agent suspend <id>
+
+Create and rotate generate the Ed25519 private key on this machine. Only the
+public key crosses the control API. The private key is shown once; store it
+before leaving the command. During rotation grace, both old and new keys work.
+Revocation is permanent; suspension is reversible.
 `;
 }
 
@@ -211,34 +253,61 @@ async function gatewayStatus(noNetwork = false) {
   }
 }
 
-async function printCockpit({ noNetwork = false } = {}) {
+async function printCockpit({ noNetwork = false, json = false } = {}) {
   const gateway = await gatewayStatus(noNetwork);
   const passportConfigured = Boolean(config.passportId && config.passportSecret);
   const adminConfigured = Boolean(config.apiKey);
+  const dashboard = dashboardStatusLabel(gateway, noNetwork);
+  const app = appRootLabel();
+  const configFile = configPathLabel(config.sources);
+
+  if (json) {
+    console.log(JSON.stringify({
+      version: CLI_VERSION,
+      gateway: { url: config.gateway, state: gateway.label, healthy: gateway.ok },
+      dashboard: { state: dashboard },
+      app: { state: app },
+      config: {
+        source: configFile,
+        provider: config.provider,
+        model: config.model,
+        passport_configured: passportConfigured,
+        control_api_key_configured: adminConfigured,
+      },
+    }, null, 2));
+    return;
+  }
 
   console.log(`${heading("PassControl")}\n`);
   console.log(formatLabel("Gateway", `${gateway.label}  ${config.gateway}`));
-  console.log(formatLabel("Dashboard", dashboardStatusLabel(gateway, noNetwork)));
-  console.log(formatLabel("App", appRootLabel()));
-  console.log(formatLabel("Config", configPathLabel(config.sources)));
+  console.log(formatLabel("Dashboard", dashboard));
+  console.log(formatLabel("App", app));
+  console.log(formatLabel("Config", configFile));
   console.log(formatLabel("Provider", config.provider));
   console.log(formatLabel("Model", config.model));
   console.log(formatLabel("Passport", passportConfigured ? redact(config.passportId) : "missing"));
   console.log(formatLabel("Admin key", adminConfigured ? redact(config.apiKey, 6) : "missing"));
   console.log(`${formatLabel("Sidecar", `foreground command (\`${cliCommand("sidecar")}\`)`)}\n`);
-  console.log(heading("Next commands:"));
-  console.log(`  ${cliCommand("start")}             start the local dashboard`);
-  console.log(`  ${cliCommand("stop")}              stop the local dashboard`);
-  console.log(`  ${cliCommand("restart")}           restart the local dashboard`);
-  console.log(`  ${cliCommand("local-logs --follow")}  follow local dashboard logs`);
-  console.log(`  ${cliCommand("init")}              configure this project`);
-  console.log(`  ${cliCommand('call "hi"')}         test a governed model call`);
-  console.log(`  ${cliCommand("sidecar")}           start the local agent bridge`);
-  console.log(`  ${cliCommand("agent list")}        list agents`);
-  console.log(`  ${cliCommand("spend")}             show fleet spend`);
-  console.log(`  ${cliCommand("env openhands")}     print agent settings`);
-  console.log(`  ${cliCommand("doctor")}            check setup`);
-  console.log(`  ${cliCommand("open")}              open dashboard`);
+  const next = [];
+  if (config.sources.length === 0) {
+    next.push(["init", "configure this project"]);
+  }
+  if (gateway.ok === false) {
+    next.push(["start", "start the local control plane"]);
+    next.push(["doctor", "diagnose why the gateway is unavailable"]);
+  } else if (!passportConfigured) {
+    next.push(["agent create <name>", "issue a governed agent passport"]);
+    next.push(["open", "finish setup in the Control Tower"]);
+  } else {
+    next.push(['call "hi"', "test a governed model call"]);
+    next.push(["agent list", "inspect the configured fleet"]);
+    next.push(["open", "open the Control Tower"]);
+  }
+
+  console.log(heading("Next:"));
+  for (const [command, description] of next.slice(0, 3)) {
+    console.log(`  ${cliCommand(command).padEnd(34)} ${description}`);
+  }
 }
 
 function appConfigDir(env = process.env) {
@@ -359,7 +428,10 @@ function checkDockerDaemon() {
     };
   }
   try {
-    execFileSync("docker", ["info"], { stdio: "ignore" });
+    // Docker Desktop can leave its CLI socket present while the engine is
+    // wedged. A diagnostic command must report that state, not hang every
+    // onboarding/release check indefinitely.
+    execFileSync("docker", ["info"], { stdio: "ignore", timeout: 2_000 });
     return { ok: true, message: "Docker daemon: running." };
   } catch {
     return {
@@ -1039,12 +1111,17 @@ async function initCommand(opts) {
   }
 }
 
+// Destination first, passport second. The signature this produces is the
+// passport proving itself and carries no audience, so handing it to the wrong
+// host is the whole compromise — see `requirePassportGateway`. Validating here
+// covers every minting caller, `doctor --deep` and `try` included.
 async function mintVisa(current = config) {
+  const origin = requirePassportGateway(current);
   const { passportId, passportSecret } = requirePassport(current);
   const payloadObj = { passport_id: passportId, ts: Date.now(), nonce: crypto.randomUUID() };
   const payload = b64url(new TextEncoder().encode(JSON.stringify(payloadObj)));
   const signature = b64url(ed25519.sign(fromB64url(payload), fromB64url(passportSecret)));
-  const res = await fetch(`${current.gateway}/api/auth/challenge`, {
+  const res = await fetch(`${origin}/api/auth/challenge`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ payload, signature }),
@@ -1109,15 +1186,19 @@ async function callCommand(rest, opts) {
   assertProvider(provider);
   const model = activeModel(provider, opts);
   const prompt = rest.join(" ") || process.env.PROMPT || "Say hello in exactly 3 words.";
+  // Before `requirePassport`, and before the banner: this line used to print
+  // `config.gateway` verbatim, so `https://admin:hunter2@host` put the password
+  // on the terminal and into any log scraping it.
+  const origin = requirePassportGateway(config);
   requirePassport(config);
-  step(`${provider}/${model} via ${config.gateway}`);
+  step(`${provider}/${model} via ${origin}`);
   step(`prompt: ${prompt}\n`);
 
   const { visa, expires_in } = await mintVisa(config);
   ok(`minted visa (expires in ${expires_in ?? 300}s)`);
 
   const { path: proxyPath, body } = requestFor(provider, model, prompt);
-  const res = await fetch(`${config.gateway}/api/v1/${provider}/${proxyPath}`, {
+  const res = await fetch(`${origin}/api/v1/${provider}/${proxyPath}`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${visa}` },
     body: JSON.stringify(body),
@@ -1132,7 +1213,9 @@ async function callCommand(rest, opts) {
 // keyless `demo` provider, then arms the kill switch to show the same call
 // blocked. Everything is real (visa, scope, budget, kill) except the model.
 async function tryCommand() {
-  const gateway = config.gateway;
+  // Covers the demo proxy call AND the kill-switch PUT below, which builds its
+  // own control-plane URL rather than going through the guarded `api()`.
+  const gateway = requirePassportGateway(config);
   const demo = { gateway, passportId: DEMO_PASSPORT_ID, passportSecret: DEMO_PASSPORT_SECRET };
 
   const demoCall = async () => {
@@ -1204,7 +1287,7 @@ async function tryCommand() {
   const json = await res.json().catch(() => ({}));
   const text = json?.choices?.[0]?.message?.content ?? JSON.stringify(json);
   const usage = json?.usage ?? {};
-  ok("Governed keyless call succeeded — the passport signed a visa, the gateway enforced scope + budget, and no key was needed:");
+  ok("Governed keyless call succeeded — the passport signed the challenge, the gateway issued a short-lived visa and enforced scope + budget, and no key was needed:");
   console.log(`\n  ${text}\n`);
   step(`tokens: ${usage.total_tokens ?? "?"} (prompt ${usage.prompt_tokens ?? "?"} + completion ${usage.completion_tokens ?? "?"})`);
 
@@ -1230,8 +1313,13 @@ async function tryCommand() {
 }
 
 async function api(method, pathPart, body) {
+  // Destination first, key second — same order and same reason as the SDK's
+  // ControlClient. `config.gateway` is whatever PASSCONTROL_GATEWAY said, and
+  // this is the one place a long-lived fleet-wide `pc_` key goes on the wire, so
+  // the URL is built from the validated origin rather than from that string.
+  const origin = requireControlGateway(config);
   const apiKey = requireControlApiKey(config);
-  const res = await fetch(`${config.gateway}/api/control/v1${pathPart}`, {
+  const res = await fetch(`${origin}/api/control/v1${pathPart}`, {
     method,
     headers: {
       authorization: `Bearer ${apiKey}`,
@@ -1278,15 +1366,15 @@ async function agentCommand(rest, opts) {
   switch (sub) {
     case "list": {
       const agents = await api("GET", "/agents");
-      console.table(
-        agents.map((a) => ({
+      const rows = agents.map((a) => ({
           id: a.id,
           name: a.name,
           status: a.status,
           tokens: a.spent_tokens,
           usd: a.spent_microcents === undefined ? undefined : usd(a.spent_microcents),
-        }))
-      );
+        }));
+      if (opts.json) console.log(JSON.stringify(rows, null, 2));
+      else console.table(rows);
       break;
     }
     case "create": {
@@ -1322,13 +1410,57 @@ async function agentCommand(rest, opts) {
       if (!args[0]) throw new Error("Usage: passcontrol agent revoke <id>");
       console.log(await api("DELETE", `/agents/${encodeURIComponent(args[0])}`));
       break;
+    // Retire this agent's key and install a new one, keeping the agent — its id,
+    // budgets, audit history and receipts all stay put.
+    //
+    // The keypair is generated HERE, on the operator's machine, and only the
+    // PUBLIC half is sent. That is the product: the gateway has never held a
+    // passport private key and this command must not be the first thing to
+    // change that.
+    case "rotate": {
+      if (!args[0]) {
+        throw new Error("Usage: passcontrol agent rotate <id> [--grace <seconds>]");
+      }
+      const grace = opts.grace === undefined ? undefined : Number(opts.grace);
+      if (grace !== undefined && (!Number.isFinite(grace) || grace < 0)) {
+        throw new Error("--grace must be a non-negative number of seconds.");
+      }
+      const priv = ed25519.utils.randomPrivateKey();
+      const passportId = b64url(ed25519.getPublicKey(priv));
+      const result = await api("POST", `/agents/${encodeURIComponent(args[0])}/rotate`, {
+        passportPubkey: passportId,
+        ...(grace === undefined ? {} : { graceSeconds: grace }),
+      });
+
+      ok(`rotated agent ${args[0]}`);
+      // Printed BEFORE the deadline, and never written to a file. A rotation
+      // that silently overwrote .passcontrol would destroy the only copy of the
+      // key that is still working — mid-window, which is the outage the window
+      // exists to prevent. The operator moves it deliberately.
+      step("Store these - the secret is shown once and is the agent's new passport:");
+      console.log(`  PASSPORT_ID=${passportId}`);
+      console.log(`  PASSPORT_SECRET=${b64url(priv)}`);
+      const until = result?.previous_valid_until;
+      step(
+        until
+          ? `The OLD key keeps working until ${until}. Both keys authenticate until then — deploy the new one before it passes.`
+          : "The old key stops working immediately."
+      );
+      break;
+    }
     default:
-      throw new Error("Usage: passcontrol agent list|create <name>|suspend <id>|resume <id>|revoke <id>");
+      throw new Error(
+        "Usage: passcontrol agent list|create <name>|suspend <id>|resume <id>|revoke <id>|rotate <id> [--grace <seconds>]"
+      );
   }
 }
 
-async function spendCommand() {
+async function spendCommand(opts = {}) {
   const data = await api("GET", "/spend");
+  if (opts.json) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
   console.log(`fleet: ${data.fleet.spent_tokens} tokens · ${usd(data.fleet.spent_microcents)}`);
   console.table(
     data.agents.map((agent) => ({
@@ -1342,6 +1474,10 @@ async function spendCommand() {
 
 async function auditCommand(opts) {
   const events = await api("GET", controlPath("/audit", { limit: safeLimit(opts.limit) }));
+  if (opts.json) {
+    console.log(JSON.stringify(events, null, 2));
+    return;
+  }
   console.table(
     events.map((event) => ({
       at: event.created_at,
@@ -1361,6 +1497,10 @@ async function logsCommand(opts) {
       status: opts.status,
     })
   );
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
   console.table(
     rows.map((row) => {
       const input = typeof row.input_tokens === "number" && Number.isFinite(row.input_tokens)
@@ -1398,12 +1538,16 @@ async function sidecarCommand(rest, opts) {
     return;
   }
 
+  // Validate before the passport is read and before the listener binds: the
+  // sidecar mints on demand for the lifetime of the process, so a bad
+  // destination has to be refused at start, not at the first proxied request.
+  const gateway = requirePassportGateway(config);
   const { passportId, passportSecret } = requirePassport(config);
   startSidecar({
-    gateway: config.gateway,
+    gateway,
     passportId,
     passportSecret,
-    port: Number(opts.port ?? process.env.SIDECAR_PORT ?? 8788),
+    port: sidecarPort(opts),
     host: String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1"),
     refreshSkewSeconds: Number(opts.refreshSkewSeconds ?? process.env.REFRESH_SKEW_SECONDS ?? 30),
   });
@@ -1415,21 +1559,31 @@ async function sidecarCommand(rest, opts) {
 }
 
 async function mcpCommand() {
+  const gateway = requirePassportGateway(config);
   const { passportId, passportSecret } = requirePassport(config);
   const { startMcpServer } = await import("../cli/mcp/server.mjs");
-  await startMcpServer({ gateway: config.gateway, passportId, passportSecret });
+  await startMcpServer({ gateway, passportId, passportSecret });
+}
+
+function sidecarPort(opts = {}) {
+  const port = Number(opts.port ?? process.env.SIDECAR_PORT ?? 8788);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("--port must be an integer from 1 to 65535.");
+  }
+  return port;
 }
 
 function sidecarBaseUrl(opts = {}) {
   const provider = String(opts.provider || config.provider);
   assertProvider(provider);
   const host = String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1");
-  const port = Number(opts.port ?? process.env.SIDECAR_PORT ?? 8788);
+  const port = sidecarPort(opts);
   return {
     provider,
     model: activeModel(provider, opts),
     apiKey: "passcontrol",
     baseUrl: `http://${host}:${port}/api/v1/${provider}`,
+    port,
   };
 }
 
@@ -1479,9 +1633,11 @@ function printAgentPreset(name = "generic", opts = {}) {
     return;
   }
 
-  const { provider, model, apiKey, baseUrl } = sidecarBaseUrl(opts);
+  const { provider, model, apiKey, baseUrl, port } = sidecarBaseUrl(opts);
   const modelWithProvider = `${provider}/${model}`;
-  const sidecarStart = opts.port ? cliCommand(`sidecar --port ${opts.port}`) : cliCommand("sidecar");
+  const sidecarStart = opts.port != null || process.env.SIDECAR_PORT != null
+    ? cliCommand(`sidecar --port ${port}`)
+    : cliCommand("sidecar");
 
   console.log(`# Start the bridge first: ${sidecarStart}`);
 
@@ -1497,6 +1653,16 @@ function printAgentPreset(name = "generic", opts = {}) {
   }
 
   switch (preset) {
+    case "hermes":
+      console.log("# Hermes Agent custom provider (verified against Hermes 0.18.2):");
+      console.log("# Merge this model block into ~/.hermes/config.yaml:");
+      console.log("model:");
+      console.log(`  default: ${JSON.stringify(model)}`);
+      console.log("  provider: custom");
+      console.log(`  base_url: ${JSON.stringify(`${baseUrl}/v1`)}`);
+      console.log(`  api_key: ${JSON.stringify(apiKey)}`);
+      console.log("# The placeholder key is stripped by the sidecar. Keep `passcontrol sidecar` running.");
+      break;
     case "openhands":
       console.log("# OpenHands / LiteLLM-compatible starting point:");
       printExports([
@@ -1809,7 +1975,8 @@ async function main() {
   const [command, ...commandRest] = rest;
 
   if (opts.help || command === "help") {
-    console.log(usage());
+    const target = command === "help" ? commandRest[0] : command;
+    console.log(target === "agent" || target === "fleet" ? agentUsage() : usage());
     return;
   }
   if (opts.version || command === "version") {
@@ -1820,7 +1987,7 @@ async function main() {
   switch (command) {
     case undefined:
     case "status":
-      await printCockpit({ noNetwork: Boolean(opts.noNetwork) });
+      await printCockpit({ noNetwork: Boolean(opts.noNetwork), json: Boolean(opts.json) });
       break;
     case "init":
       await initCommand(opts);
@@ -1872,7 +2039,7 @@ async function main() {
       await agentCommand(commandRest, opts);
       break;
     case "spend":
-      await spendCommand();
+      await spendCommand(opts);
       break;
     case "audit":
       await auditCommand(opts);

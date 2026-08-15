@@ -25,6 +25,8 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(repoRoot, "dist-cli");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const tsc = path.join(repoRoot, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
+const publicRepoBase = "https://github.com/Vertias3u/PassControl";
 
 // The single source of truth for "what ships": npm's own file resolution against
 // the root `files` allowlist. Re-deriving it from a glob here would let the
@@ -56,6 +58,39 @@ export function importedPackages(files, cwd = repoRoot) {
   return [...found].sort();
 }
 
+function filesBelow(root, current = root) {
+  return fs.readdirSync(current, { withFileTypes: true }).flatMap((entry) => {
+    const absolute = path.join(current, entry.name);
+    return entry.isDirectory()
+      ? filesBelow(root, absolute)
+      : [path.relative(root, absolute).split(path.sep).join("/")];
+  }).sort();
+}
+
+/** npm ships a deliberately tiny CLI artifact, while the canonical README also
+ * links to app docs, examples and source files that are not in that tarball.
+ * Turn only those absent relative targets into stable public-repository URLs;
+ * links such as ./LICENSE that really ship stay local to the package. */
+export function rewriteNpmReadmeLinks(readme, sourceRoot = repoRoot, packageRoot = outDir) {
+  return readme.replace(/(!?\[[^\]]*\]\()((?:\.\/)?[^)#\s][^)]*?)(\))/gu, (whole, prefix, rawTarget, suffix) => {
+    const target = rawTarget.trim();
+    if (/^[a-z][a-z0-9+.-]*:/iu.test(target) || target.startsWith("//")) return whole;
+
+    const clean = target.replace(/^\.\//u, "").split(/[?#]/u, 1)[0];
+    if (!clean || clean.startsWith("../")) return whole;
+    if (fs.existsSync(path.join(packageRoot, clean))) return whole;
+
+    const sourcePath = path.join(sourceRoot, clean);
+    if (!fs.existsSync(sourcePath)) return whole;
+    const encodedPath = clean.split("/").map(encodeURIComponent).join("/");
+    if (prefix.startsWith("!")) {
+      return `${prefix}https://raw.githubusercontent.com/Vertias3u/PassControl/main/${encodedPath}${suffix}`;
+    }
+    const view = fs.statSync(sourcePath).isDirectory() ? "tree" : "blob";
+    return `${prefix}${publicRepoBase}/${view}/main/${encodedPath}${suffix}`;
+  });
+}
+
 // Field-by-field from an explicit allowlist, never a spread-and-delete. Copying
 // `scripts` wholesale would carry the root's own prepublishOnly guard into the
 // staged manifest and the real publish would refuse itself.
@@ -76,8 +111,31 @@ const CARRIED_FIELDS = [
 function build() {
   const rootManifest = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const files = shippedFiles();
-  const needed = importedPackages(files);
 
+  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.mkdirSync(outDir, { recursive: true });
+
+  for (const file of files) {
+    if (file === "package.json") continue;
+    const target = path.join(outDir, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, file), target);
+  }
+
+  // The repository SDK is TypeScript source and is deliberately absent from
+  // the root app packlist. Compile it into the generated package so external
+  // users receive runnable ESM plus declarations, never raw .ts files.
+  execFileSync(tsc, ["-p", "tsconfig.sdk.json"], { cwd: repoRoot, stdio: "inherit" });
+  fs.copyFileSync(path.join(repoRoot, "sdk", "README.md"), path.join(outDir, "sdk", "README.md"));
+
+  const readmePath = path.join(outDir, "README.md");
+  fs.writeFileSync(
+    readmePath,
+    rewriteNpmReadmeLinks(fs.readFileSync(readmePath, "utf8"), repoRoot, outDir),
+  );
+
+  const artifactFiles = filesBelow(outDir);
+  const needed = importedPackages(artifactFiles, outDir);
   const dependencies = {};
   const missing = [];
   for (const name of needed) {
@@ -93,24 +151,28 @@ function build() {
     );
   }
 
-  fs.rmSync(outDir, { recursive: true, force: true });
-  fs.mkdirSync(outDir, { recursive: true });
-
-  for (const file of files) {
-    if (file === "package.json") continue;
-    const target = path.join(outDir, file);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(path.join(repoRoot, file), target);
-  }
-
   const manifest = {};
   for (const field of CARRIED_FIELDS) {
     if (rootManifest[field] !== undefined) manifest[field] = rootManifest[field];
   }
+  manifest.type = "module";
+  manifest.exports = {
+    "./sdk": {
+      types: "./sdk/index.d.ts",
+      import: "./sdk/index.js",
+    },
+    // Declaring any `exports` map makes every other subpath unreachable, including
+    // this one. Bundlers, version probes and license scanners read it routinely, and
+    // withholding it buys nothing — the manifest is public on the registry anyway.
+    "./package.json": "./package.json",
+  };
   manifest.dependencies = dependencies;
 
   fs.writeFileSync(path.join(outDir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  return { files, dependencies, outDir };
+  // Report what the ARTIFACT contains, not the root packlist that seeded it — the
+  // compiled SDK is added after that list and the difference is most of the gap
+  // between "14 files" and the 23 the release gate counts.
+  return { files: filesBelow(outDir), dependencies, outDir };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

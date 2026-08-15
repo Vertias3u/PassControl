@@ -30,7 +30,7 @@ const { store, ttls, redisMock, logFailOpenMock } = vi.hoisted(() => {
 vi.mock("../lib/state/redis", () => ({ redis: () => redisMock }));
 vi.mock("../lib/observability", () => ({ logFailOpen: logFailOpenMock }));
 
-import { rateLimit } from "../lib/ratelimit";
+import { rateLimit, rateLimitFailClosed } from "../lib/ratelimit";
 
 beforeEach(() => {
   store.clear();
@@ -92,5 +92,15 @@ describe("rate limiter — /api/auth/challenge brute-force guard", () => {
     });
     expect(logFailOpenMock).toHaveBeenCalledOnce();
     expect(logFailOpenMock).toHaveBeenCalledWith("ratelimit");
+  });
+
+  it("can fail closed before an unauthenticated database lookup", async () => {
+    redisMock.eval.mockRejectedValueOnce(new Error("redis down"));
+
+    await expect(rateLimitFailClosed("direct-key-ip:1.2.3.4", 5, 60)).resolves.toEqual({
+      success: false,
+      remaining: 0,
+      unreadable: true,
+    });
   });
 });

@@ -7,6 +7,7 @@ import {
   runDecisionTrace,
   type DecisionTraceActionState,
 } from "./trace-action";
+import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 
 function SubmitButton() {
   const { pending } = useFormStatus();
@@ -91,6 +92,7 @@ export function DecisionTracePanel({
   initialProvider?: string;
   initialModel?: string;
 }) {
+  const { format } = useDashboardTime();
   const action = runDecisionTrace.bind(null, agentId);
   const [state, formAction] = useFormState<DecisionTraceActionState | undefined, FormData>(
     action,
@@ -173,7 +175,7 @@ export function DecisionTracePanel({
                 Snapshot · {trace.verdict === "allow" ? "ALLOW" : "DENY"}
               </p>
               <p className="mt-2 text-sm leading-6 text-foreground">
-                Evaluated {new Date(trace.evaluated_at).toLocaleString()} · policy clock {new Date(trace.policy_time).toLocaleString()} UTC
+                Evaluated {format(trace.evaluated_at)} · policy clock {format(trace.policy_time)}
               </p>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
                 This is a point-in-time snapshot, not a standing verdict. Refreshing the page clears it;
@@ -184,6 +186,27 @@ export function DecisionTracePanel({
               {trace.method} /{trace.path.join("/")} · {trace.provider}/{trace.model}
             </code>
           </div>
+          {/* Declared, not silently folded in. This snapshot was evaluated
+              against the WIDER scope a visa would carry right now, so a reader
+              comparing it against the agent's stored scope would otherwise be
+              unable to explain the result. */}
+          {trace.break_glass ? (
+            <p
+              className="m-0 mt-4 rounded-lg border p-3 text-xs leading-5"
+              style={{
+                borderColor: "var(--warning)",
+                background: "color-mix(in srgb, var(--warning) 10%, transparent)",
+              }}
+              data-state="break-glass"
+            >
+              <strong style={{ color: "var(--warning)" }}>
+                Evaluated with a break-glass elevation in force.
+              </strong>{" "}
+              This agent is temporarily allowed more than its stored scope, until{" "}
+              {format(trace.break_glass.expires_at)}. Reason given:{" "}
+              {trace.break_glass.reason}
+            </p>
+          ) : null}
           <ol className="mt-4 grid list-none gap-2 p-0">
             {trace.steps.map((step, index) => (
               <TraceStep key={step.name} step={step} index={index} />

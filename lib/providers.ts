@@ -81,6 +81,33 @@ export function authHeaders(provider: ProviderId, key: string): Record<string, s
   }
 }
 
+/**
+ * Which request body/path shape a client must send to this provider.
+ *
+ * Deliberately its own function rather than a reuse of `usesOpenAiUsageShape`.
+ * That predicate answers "where do I read usage out of the RESPONSE"; this one
+ * answers "what shape must the client's REQUEST be". They happen to split the
+ * six providers the same five-to-one way today, and that agreement is a
+ * coincidence, not a contract — collapsing them would make a future divergence
+ * silently wrong in whichever caller was borrowing the other's meaning.
+ *
+ * Anthropic is alone here, which is why cross-family failover cannot be done
+ * without translating both the request and response—a boundary the gateway
+ * deliberately does not cross.
+ */
+export function requestShapeFamily(provider: ProviderId): "openai" | "anthropic" {
+  switch (provider) {
+    case "openai":
+    case "groq":
+    case "mistral":
+    case "together":
+    case "deepseek":
+      return "openai";
+    case "anthropic":
+      return "anthropic";
+  }
+}
+
 export function usesOpenAiUsageShape(provider: ProviderId): boolean {
   switch (provider) {
     case "openai":

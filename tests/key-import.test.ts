@@ -45,6 +45,10 @@ const mocks = vi.hoisted(() => {
       stash.delete(key);
       return value;
     }),
+    // Adding a key changes which providers an exhausted call can fail over to,
+    // so addProviderKey drops that cache. Asserted below rather than merely
+    // stubbed — an import that leaves the list stale advertises the wrong set.
+    purgeProviderKeysCache: vi.fn(async (_userId: string) => {}),
     createAgent: vi.fn(async (_db: unknown, _userId: string, _input: unknown) => ({
       ok: true,
       value: { id: "agent-1", name: "Imported agent" },
@@ -89,6 +93,7 @@ vi.mock("@/lib/crypto/aesgcm", () => ({ seal: mocks.seal, open: mocks.open }));
 vi.mock("@/lib/state/redis", () => ({
   stashKeyImport: mocks.stashKeyImport,
   takeKeyImport: mocks.takeKeyImport,
+  purgeProviderKeysCache: mocks.purgeProviderKeysCache,
 }));
 vi.mock("@/lib/audit", () => ({ recordAdminAction: mocks.recordAdminAction }));
 vi.mock("@/lib/seclog", () => ({ logSecurityEvent: vi.fn() }));
@@ -299,6 +304,7 @@ describe("server-side provider model probe", () => {
     });
 
     expect(completed).toEqual({
+      agentId: "agent-1",
       provider: "anthropic",
       scope: [{ provider: "anthropic", models: ["claude-sonnet-*"] }],
     });
@@ -307,6 +313,10 @@ describe("server-side provider model probe", () => {
       p_label: "imported",
       p_plaintext: RAW_KEY,
     });
+    // The tenant's provider list is cached for 5 minutes to answer "what could
+    // this agent fail over to". An import that does not drop it advertises the
+    // wrong set for the next five minutes.
+    expect(mocks.purgeProviderKeysCache).toHaveBeenCalledWith("tenant-a");
     expect(mocks.createAgent).toHaveBeenCalledWith(
       mocks.db,
       "tenant-a",
@@ -316,6 +326,25 @@ describe("server-side provider model probe", () => {
         scopes: [{ provider: "anthropic", models: ["claude-sonnet-*"] }],
       })
     );
+  });
+
+  it("does not revalidate while the browser holds the reveal-once passport secret", async () => {
+    const probed = await probeProviderKey({ provider: "anthropic", key: RAW_KEY });
+    if (!probed.ok) throw new Error("expected a successful probe");
+
+    await completeKeyImport({
+      handoff: probed.handoff,
+      provider: "anthropic",
+      label: "imported",
+      name: "Imported agent",
+      passportPubkey: PASSPORT_ID,
+      models: ["claude-a"],
+    });
+
+    // A server revalidation remounts KeyImportOnramp before it can commit the
+    // locally generated private key to React state. Refresh belongs after the
+    // operator acknowledges storing the reveal-once setup snippet.
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
   });
 });
 
@@ -344,6 +373,7 @@ describe("key import secret and tenant boundaries", () => {
     expect(result.scope).toEqual([
       { provider: "anthropic", models: ["claude-a", "claude-b"] },
     ]);
+    expect(result.agentId).toBe("agent-1");
     expect(mocks.rpc).toHaveBeenCalledTimes(1);
     expect(mocks.createAgent).toHaveBeenCalledTimes(1);
     expect(mocks.createAgent.mock.calls[0]?.[1]).toBe("tenant-a");

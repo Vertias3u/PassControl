@@ -2,6 +2,14 @@
 // files (which may only export the HTTP verbs + Next route config).
 
 // Agent fields safe to return over the API (no secrets; passport_pubkey is public).
+//
+// `fallbacks` is deliberately ABSENT even though PATCH accepts it — the same
+// write-without-readback asymmetry `policy` already has. Naming a column here
+// makes its migration a hard prerequisite for the whole control plane: PostgREST
+// errors the select, so a deployment that has not applied 0018 loses
+// GET /agents *and* GET /agents/{id} — the list endpoint, not one page. No test
+// catches that, because the test schema is not the deployed schema. Add it once
+// 0018 has been applied everywhere that matters.
 export const AGENT_COLS =
   "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, created_at, last_seen_at";
 
@@ -14,7 +22,7 @@ export const LOG_COLS =
 // bloat every page of results for the one caller in a hundred who wants a proof.
 // Fetched one at a time, by id, from /api/control/v1/receipts/{id}.
 export const RECEIPT_COLS =
-  "id, agent_id, passport_id, jti, provider, model, input_tokens, output_tokens, cost_microcents, status, latency_ms, created_at, receipt";
+  "id, agent_id, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, status, latency_ms, created_at, receipt";
 
 // Admin-action audit fields.
 export const AUDIT_COLS = "id, action, target_type, target_id, metadata, created_at";

@@ -12,6 +12,8 @@ import { verifySignature, passportIdToPublicKey } from "@/lib/crypto/ed25519";
 import { claimNonce, touchLastSeen } from "@/lib/state/redis";
 import { serviceClient } from "@/lib/supabase";
 import { mintVisa, type ScopeEntry } from "@/lib/auth/visa";
+import { findAuthenticatablePassport } from "@/lib/auth/passport";
+import { readLiveGrant, unionScopes } from "@/lib/break-glass";
 import { rateLimit } from "@/lib/ratelimit";
 import { captureError, captureSecurityEvent } from "@/lib/observability";
 
@@ -123,28 +125,40 @@ async function handlePost(req: Request) {
   // 3. Burn the nonce (replay protection). Must precede expensive work.
   if (!(await claimNonce(payload.nonce, NONCE_TTL_S))) return securityFail(401, "replay_detected");
 
-  // 4. Look up the agent by passport.
+  // 4. Look up the agent by passport, and decide whether it may authenticate at
+  // all — status, expiry, and (after a rotation) the retired key's deadline.
+  // Shared with /api/auth/agent-token so the two doors cannot drift; see
+  // lib/auth/passport.ts for why the two columns are matched sequentially and
+  // why the stored key is deliberately not selected.
   const db = serviceClient();
-  const { data: agent, error } = await db
-    .from("agents")
-    .select("id, user_id, status, allowed_scopes, budget_tokens, budget_cents, spent_tokens, spent_microcents")
-    .eq("passport_pubkey", payload.passport_id)
-    .maybeSingle();
-  if (error) {
-    waitUntil(
-      captureError(new Error("challenge lookup failed"), {
-        route: "api.auth.challenge",
-        method: "POST",
-        status: 500,
-        code: "lookup_failed",
-      })
-    );
-    return fail(500, "lookup_failed");
+  const found = await findAuthenticatablePassport(
+    db,
+    payload.passport_id,
+    "id, user_id, status, allowed_scopes, budget_tokens, budget_cents, spent_tokens, spent_microcents"
+  );
+  if (!found.ok) {
+    if (found.code === "lookup_failed") {
+      waitUntil(
+        captureError(new Error("challenge lookup failed"), {
+          route: "api.auth.challenge",
+          method: "POST",
+          status: 500,
+          code: "lookup_failed",
+        })
+      );
+      return fail(500, "lookup_failed");
+    }
+    return securityFail(found.status, found.code, { agentId: found.agentId });
   }
-  if (!agent) return securityFail(401, "unknown_passport");
-  if (agent.status !== "active") return securityFail(403, "agent_not_active", { agentId: agent.id });
+  const agent = found.agent;
 
   // 5. Verify the Ed25519 signature over the raw payload bytes.
+  //
+  // Against the key the CALLER PRESENTED, which is the key the lookup matched
+  // on — never against a field of the row. After a rotation both the current
+  // and the retired key can match, and deriving from the row would accept the
+  // old key forever or reject the new one. The helper cannot return the stored
+  // key, so this stays true by construction.
   const pubkey = passportIdToPublicKey(payload.passport_id);
   if (!pubkey) return securityFail(400, "bad_passport_id");
   const ok = verifySignature(
@@ -155,12 +169,61 @@ async function handlePost(req: Request) {
   if (!ok) return securityFail(401, "bad_signature", { agentId: agent.id });
 
   // 6. Mint the visa.
+  //
+  // The scope snapshot is the agent's stored capability UNION any live
+  // break-glass grant. Three things about where this lives:
+  //
+  //  * It is HERE, not in findAuthenticatablePassport. /api/auth/agent-token
+  //    shares that helper and deliberately carries no scope at all — an
+  //    elevation must never leak into an identity assertion handed to a third
+  //    party, who has no way to know it was temporary.
+  //  * A failed read means NO ELEVATION, never an error and never an assumed
+  //    one. readLiveGrant returns null on every failure path: an unreachable
+  //    grants table must not be an outage for every agent, and a database blip
+  //    must not be a privilege escalation.
+  //  * It widens SCOPE only. The kill switch, suspend, policy and budget are all
+  //    checked later, on a path that does not know this feature exists.
+  //
+  // Both paths run through unionScopes, including the no-grant one, so the claim
+  // has ONE shape regardless of whether an elevation happened to be live. It is
+  // an identity on a well-formed distinct-provider scope and cannot change what
+  // the visa permits (scopeRuleMatch honours any matching row) — but
+  // validateScopes allows `[openai:[a], openai:[b]]`, and a consumer reading one
+  // row per provider (buildAlternatives takes models from the first match) would
+  // otherwise see a narrower list on the common path than under an elevation.
+  //
+  // Array.isArray, not `?? []`: allowed_scopes is jsonb with no CHECK that it is
+  // an array and the service-role client bypasses RLS. `?? []` catches null and
+  // nothing else, so a non-array value used to mint a non-array claim that
+  // verifyVisa then rejected on every call — while the grant path threw inside
+  // unionScopes and 500'd the challenge. Same guard lib/fleet.ts applies at the
+  // grant door.
   const jti = crypto.randomUUID();
-  const scope = (agent.allowed_scopes as ScopeEntry[]) ?? [];
+  const stored = Array.isArray(agent.allowed_scopes) ? (agent.allowed_scopes as ScopeEntry[]) : [];
+  const grant = await readLiveGrant(db, agent.user_id as string, agent.id);
+  const scope = unionScopes(stored, grant?.scopes ?? []);
+  if (grant) {
+    // Every mint under an elevation is recorded. A grant is taken once; the
+    // visas it produces are what actually reach the provider, and an incident
+    // review needs to see how many there were.
+    waitUntil(
+      captureSecurityEvent("challenge.break_glass_minted", {
+        route: "api.auth.challenge",
+        method: "POST",
+        status: 200,
+        code: "break_glass_minted",
+        agentId: agent.id,
+      })
+    );
+  }
   const { token, expSeconds } = await mintVisa({
+    // The key that actually authenticated, not the agent's current one. During
+    // a grace window that may be the retired key, and the audit trail should
+    // record which key was used — a retired key still in heavy use is exactly
+    // what an operator needs to see to know the rotation has not landed.
     passportId: payload.passport_id,
     agentId: agent.id,
-    userId: agent.user_id,
+    userId: agent.user_id as string,
     jti,
     scope,
     budgetTokens: agent.budget_tokens == null ? null : Number(agent.budget_tokens),

@@ -8,7 +8,9 @@ import { resolve } from "node:path";
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), "utf8");
 const dashboard = read("app/dashboard/page.tsx");
 const settings = read("app/dashboard/settings/page.tsx");
+const shell = read("components/dashboard/DashboardShell.tsx");
 const middleware = read("middleware.ts");
+const firstCall = read("components/dashboard/FirstCallActivation.tsx");
 
 describe("settings is behind the same gates as the Control Tower", () => {
   it("is not a public path", () => {
@@ -49,23 +51,24 @@ describe("setup panels left the Control Tower", () => {
   });
 
   it("leaves a way to reach what moved", () => {
-    expect(dashboard).toMatch(/href="\/dashboard\/settings"/);
+    expect(dashboard).toMatch(/<DashboardShell/);
+    expect(shell).toMatch(/href: "\/dashboard\/settings"/);
   });
 });
 
-describe("the key-import on-ramp is a first-run affordance", () => {
-  it("renders only until the tenant holds a provider key", () => {
-    // It never self-hid: 320 lines, the only accent-bordered section on the
-    // page, permanently above the fleet table.
-    expect(dashboard).toMatch(/\{needsFirstKey \? \(/);
+describe("the first-call guide reuses the first-run provider read", () => {
+  it("threads provider readiness into the activation state without a new query", () => {
+    expect(dashboard).toContain("<FirstCallActivation");
+    expect(dashboard).toMatch(/providerConfigured=\{!needsFirstKey\}/);
     expect(dashboard).toMatch(/const needsFirstKey = \(providerKeys\.count \?\? 1\) === 0/);
   });
 
-  it("counts with head:true and treats a failed count as set up", () => {
-    // The card needs to know whether first run is over, not what the keys are —
-    // and showing a getting-started card because a COUNT errored is the more
-    // annoying way to be wrong.
-    expect(dashboard).toMatch(/from\("provider_credentials"\)[\s\S]{0,120}head: true/);
+  it("reads only bounded provider labels and treats a failed count as set up", () => {
+    // The first agent form needs the provider family but never a Vault id or
+    // secret. Showing setup because a COUNT errored is still the more annoying
+    // way to be wrong.
+    expect(dashboard).toMatch(/from\("provider_credentials"\)[\s\S]{0,160}select\("provider"[\s\S]{0,80}limit\(6\)/);
+    expect(dashboard).not.toMatch(/from\("provider_credentials"\)[\s\S]{0,120}vault_secret_id/);
     expect(dashboard).toMatch(/\?\? 1/);
   });
 
@@ -73,15 +76,23 @@ describe("the key-import on-ramp is a first-run affordance", () => {
     const all = dashboard.slice(dashboard.indexOf("await Promise.all(["));
     expect(all.slice(0, all.indexOf("]);"))).toMatch(/provider_credentials/);
   });
+
+  it("does not flash a dismissed completion card before localStorage resolves", () => {
+    expect(firstCall).toContain('state.stage === "complete" && dismissed !== false');
+  });
 });
 
 describe("what the Control Tower is left showing", () => {
-  it("puts the fleet above the audit tables and below the live surfaces", () => {
+  it("puts state before live activity, then fleet before forensic history", () => {
     const at = (needle: string) => dashboard.indexOf(needle);
-    expect(at("<GlobalKillSwitchBar")).toBeLessThan(at("<DeparturesBoard"));
-    expect(at("<DeparturesBoard")).toBeLessThan(at("<FleetOverviewCards"));
-    expect(at("<AgentFleetTable")).toBeLessThan(at("<AuditLogTable"));
-    expect(at("<AuditLogTable")).toBeLessThan(at("<AdminAuditTable"));
+    expect(at("<GlobalKillSwitchBar")).toBeLessThan(at("<FirstCallActivation"));
+    expect(at("<FirstCallActivation")).toBeLessThan(at("<FleetOverviewCards"));
+    expect(at("<FleetOverviewCards")).toBeLessThan(at("<DeparturesBoard"));
+    expect(at("<DeparturesBoard")).toBeLessThan(at("<SpendChart"));
+    expect(at("<SpendChart")).toBeLessThan(at("<AgentFleetTable"));
+    expect(at("<AgentFleetTable")).toBeLessThan(at("<ActivityWorkspace"));
+    expect(at("<ActivityWorkspace")).toBeLessThan(at("<CloudBetaOperations"));
+    expect(read("components/FleetOverviewCards.tsx")).toContain("pc-overview-status-rail");
   });
 
   it("keeps exactly one agent_logs query — the board and the audit log share it", () => {

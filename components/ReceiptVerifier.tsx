@@ -27,8 +27,10 @@ import { createPassportSigil } from "@/lib/passport-art";
 import {
   applyStep,
   describeCall,
+  describeReceiptAuthentication,
   describeFailure,
   describeOwner,
+  describeFailover,
   describeVerdict,
   formatCost,
   formatSignedAt,
@@ -82,14 +84,14 @@ type Outcome =
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function Sigil({ passportId }: { passportId: string }) {
+function Sigil({ passportId, label }: { passportId: string; label?: string }) {
   const sigil = createPassportSigil(passportId);
   return (
     <svg
       className="pcv-sigil h-20 w-20 shrink-0 rounded-xl"
       viewBox="0 0 112 112"
       role="img"
-      aria-label="Mark derived from this passport's public key"
+      aria-label={label ?? "Mark derived from this passport's public key"}
       xmlns="http://www.w3.org/2000/svg"
     >
       <rect width="112" height="112" rx="12" fill={sigil.background} />
@@ -448,8 +450,10 @@ function Inspection({
 
 function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
   const verdict = describeVerdict(claims.res.status, claims.res.http);
+  const authentication = describeReceiptAuthentication(claims);
   const owner = describeOwner(claims.own ?? null);
   const cost = formatCost(claims.cost);
+  const failover = describeFailover(claims.why);
   const tone =
     verdict.tone === "clear"
       ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600"
@@ -466,7 +470,14 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
       <div className="h-1.5 w-full bg-primary" aria-hidden="true" />
       <div className="grid gap-6 p-6 sm:p-8">
         <div className="flex flex-wrap items-start gap-5">
-          <Sigil passportId={claims.sub} />
+          <Sigil
+            passportId={authentication.keyId ?? authentication.subject}
+            label={
+              authentication.keyId
+                ? "Mark derived from this Direct Agent Key identity"
+                : undefined
+            }
+          />
           <div className="min-w-0 flex-1">
             <span className="pcv-bars inline-flex items-end gap-0.5" aria-hidden="true">
               {Array.from({ length: 14 }, (_, i) => (
@@ -484,6 +495,10 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
               <strong className="break-all font-semibold text-foreground">{claims.iss}</strong>{" "}
               using a key they publish, and nothing in it has been altered since. Whether you
               trust that issuer is your own judgement — this page does not vouch for them.
+            </p>
+            <p className="mt-3 mb-0 text-sm leading-6 text-muted-foreground">
+              <strong className="font-semibold text-foreground">{authentication.label}.</strong>{" "}
+              {authentication.detail}
             </p>
           </div>
         </div>
@@ -518,10 +533,15 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
           </Fact>
           <div className="sm:col-span-2">
             <dt className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-              Agent passport
+              {authentication.subjectLabel}
             </dt>
             <dd className="mt-1 mb-0 break-all font-mono text-[0.8rem] leading-5 text-foreground">
-              {claims.sub}
+              {authentication.subject}
+              {authentication.keyId ? (
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Direct key {authentication.keyId}
+                </span>
+              ) : null}
             </dd>
           </div>
           <Fact label="Signed">{formatSignedAt(claims.iat)}</Fact>
@@ -560,6 +580,39 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
             </div>
           ) : null}
         </dl>
+
+        {/* Only on a receipt that followed a failed attempt. It is placed
+            outside the fact list because it is not a fact about THIS call — it
+            is a pointer at another one, and on two of the four reasons it is a
+            prompt to go and check a second invoice. */}
+        {failover ? (
+          <div
+            className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4"
+            data-state={failover.mayHaveBeenCharged ? "chain-billable" : "chain"}
+          >
+            <p className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-amber-600">
+              This was a second attempt
+            </p>
+            <p className="mt-2 mb-0 text-sm font-semibold leading-6 text-foreground">
+              {failover.label}
+            </p>
+            <p className="mt-1 mb-0 text-sm leading-6 text-muted-foreground">{failover.detail}</p>
+            {typeof claims.prev === "string" && claims.prev ? (
+              <>
+                <p className="mt-3 mb-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                  Receipt for the attempt this replaced
+                </p>
+                {/* Plain text, never a link: `prev` comes out of a payload
+                    signed by whoever the reader chose to trust, and building an
+                    href from it would hand an untrusted string to the browser.
+                    Paste it above to check it on its own. */}
+                <p className="mt-1 mb-0 break-all font-mono text-[0.8rem] leading-5 text-foreground">
+                  {claims.prev}
+                </p>
+              </>
+            ) : null}
+          </div>
+        ) : null}
 
         <p className="m-0 rounded-lg border border-border bg-secondary px-4 py-3 text-xs leading-5 text-muted-foreground">
           A receipt records the request and the gateway&rsquo;s decision about it. It does not

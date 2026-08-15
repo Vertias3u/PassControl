@@ -99,13 +99,115 @@ DBC=$(docker ps --filter "label=com.supabase.cli.project=$PROJECT_ID" --filter n
 [[ -n "$DBC" ]] || { echo "✗ Could not find the Supabase DB container." >&2; exit 1; }
 PSQL=(docker exec -i "$DBC" psql -U postgres -d postgres -v ON_ERROR_STOP=1)
 echo "→ Applying migrations (in $DBC)…"
-"${PSQL[@]}" -q -c "create table if not exists public.schema_migrations (version text primary key, applied_at timestamptz default now());"
+REBASELINE="${PASSCONTROL_LEDGER_REBASELINE:-}"
+checksum() { openssl dgst -sha256 "$1" | awk '{ print $NF }'; }
+
+# Locked as it is created, not by 0019 alone: Supabase's default privileges on
+# schema `public` grant every table postgres creates there to `anon` and
+# `authenticated`, so the ledger is reachable through PostgREST from the instant
+# it exists. One transaction, not four `-c` calls, so the table is never visible
+# unlocked. Every statement is idempotent and `postgres` owns the table, so the
+# loop below keeps working. See 0019_lock_migration_ledger.sql, and
+# scripts/migrate.sh — this is the same ledger, reached the other way, and the
+# two must not drift.
+#
+# `vetted` (does the ledger carry the owner-only `checksum` column?) and
+# `recorded` are observed inside that transaction, before it locks anything.
+state="$("${PSQL[@]}" -tA -q <<'SQL'
+begin;
+create table if not exists public.schema_migrations (
+  version text primary key,
+  applied_at timestamptz not null default now()
+);
+-- Before counting. The revoke below takes this lock anyway, but not until after
+-- the count, and a row that commits in between would be counted as absent — an
+-- un-vetted ledger would then be marked vetted with that row inside it.
+lock table public.schema_migrations in access exclusive mode;
+create temporary table _pc_ledger_state on commit drop as
+  select
+    exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'schema_migrations'
+        and column_name = 'checksum'
+    ) as vetted,
+    (select count(*) from public.schema_migrations) as recorded;
+revoke all on public.schema_migrations from anon;
+revoke all on public.schema_migrations from authenticated;
+alter table public.schema_migrations enable row level security;
+select vetted, recorded from _pc_ledger_state;
+commit;
+SQL
+)"
+state="$(tr -d '[:space:]' <<<"$state")"
+[[ -n "$state" ]] || { echo "✗ Could not read the migration ledger's state." >&2; exit 1; }
+vetted="${state%%|*}"
+recorded="${state##*|}"
+
+# A row in an un-vetted ledger may name a migration that never ran — the table
+# was writable through PostgREST until the lockdown. Believing it makes this
+# script SKIP that migration and still report success, which is how a security
+# migration gets suppressed silently. Refuse once, out loud.
+if [[ "$vetted" != "t" ]]; then
+  if [[ "$recorded" != "0" && "$REBASELINE" != "keep" ]]; then
+    versions="$("${PSQL[@]}" -At -c "select version from public.schema_migrations order by version;")"
+    {
+      echo "✗ Refusing to migrate: this stack's ledger has never been vetted."
+      echo
+      echo "  Recorded as applied ($recorded):"
+      sed 's/^/    /' <<<"$versions"
+      first_missing=""
+      for f in db/migrations/*.sql; do
+        v="$(basename "$f")"
+        grep -qxF "$v" <<<"$versions" || { first_missing="$v"; break; }
+      done
+      if [[ -n "$first_missing" ]]; then
+        ahead="$(awk -v cut="$first_missing" '$0 > cut' <<<"$versions")"
+        if [[ -n "$ahead" ]]; then
+          echo
+          echo "  Recorded even though $first_missing is NOT — this is what a forged"
+          echo "  row looks like:"
+          sed 's/^/    /' <<<"$ahead"
+        fi
+      fi
+      echo
+      echo "  Check the schema against that list, delete any row that is wrong, and"
+      echo "  then re-run:"
+      echo
+      echo "      PASSCONTROL_LEDGER_REBASELINE=keep npm run dev:stack"
+      echo
+      echo "  Or, for a local stack, throw it away and start clean:"
+      echo "      supabase stop --no-backup && npm run dev:stack"
+    } >&2
+    exit 1
+  fi
+  "${PSQL[@]}" -q -c "alter table public.schema_migrations add column if not exists checksum text;"
+  [[ "$recorded" == "0" ]] || echo "  → rebaseline: accepting the $recorded version(s) already recorded."
+fi
+
+applied="$("${PSQL[@]}" -At -c "select version || '|' || coalesce(checksum, '') from public.schema_migrations;")"
 for f in db/migrations/*.sql; do
   v="$(basename "$f")"
-  applied="$("${PSQL[@]}" -tAc "select 1 from public.schema_migrations where version='$v'" || true)"
-  if [[ "$applied" == "1" ]]; then echo "  = $v (already applied)"; continue; fi
+  sum="$(checksum "$f")"
+  # Exact match on the version field, not a substring of some other row.
+  row="$(awk -F'|' -v v="$v" '$1 == v { print; exit }' <<<"$applied")"
+  if [[ -n "$row" ]]; then
+    have="${row#*|}"
+    if [[ -z "$have" || ( "$have" != "$sum" && "$REBASELINE" == "keep" ) ]]; then
+      "${PSQL[@]}" -q -c "update public.schema_migrations set checksum = '$sum' where version = '$v';"
+      echo "  = $v (already applied, checksum recorded)"
+    elif [[ "$have" != "$sum" ]]; then
+      echo "✗ $v has changed since it was applied to this stack (recorded $have, on disk $sum)." >&2
+      echo "  Applied migrations are immutable. Restore the file, or re-stamp with" >&2
+      echo "  PASSCONTROL_LEDGER_REBASELINE=keep if the schema already reflects it." >&2
+      exit 1
+    else
+      echo "  = $v (already applied)"
+    fi
+    continue
+  fi
   echo "  + $v"
-  { cat "$f"; printf "\ninsert into public.schema_migrations (version) values ('%s');\n" "$v"; } | "${PSQL[@]}" -1 -q
+  { cat "$f"; printf "\ninsert into public.schema_migrations (version, checksum) values ('%s', '%s');\n" "$v" "$sum"; } | "${PSQL[@]}" -1 -q
 done
 
 # ── 6. Seed a confirmed dev user ──────────────────────────────────────────────

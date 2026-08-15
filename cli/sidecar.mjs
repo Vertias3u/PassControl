@@ -1,6 +1,6 @@
 import http from "node:http";
 import { Readable } from "node:stream";
-import { fail, ok, step } from "./config.mjs";
+import { bareGatewayOrigin, fail, ok, step } from "./config.mjs";
 import { createVisaClient } from "./visa-client.mjs";
 
 const STRIP_REQ = new Set(["authorization", "x-api-key", "host", "content-length", "accept-encoding", "connection"]);
@@ -22,8 +22,12 @@ function isStripped(name) {
 const STRIP_RES = new Set(["content-encoding", "content-length", "transfer-encoding", "connection"]);
 
 export function createSidecar({ gateway, passportId, passportSecret, port = 8788, host = "127.0.0.1", refreshSkewSeconds = 30 }) {
+  // The upstream URL below is built from this, not from the argument: the
+  // sidecar forwards a bearer visa on every proxied request, so its destination
+  // is part of the credential's security rather than a formatting detail.
+  const origin = bareGatewayOrigin(gateway);
   const visas = createVisaClient({
-    gateway,
+    gateway: origin,
     passportId,
     passportSecret,
     refreshSkewSeconds,
@@ -46,7 +50,7 @@ export function createSidecar({ gateway, passportId, passportSecret, port = 8788
     }
     headers["authorization"] = `Bearer ${visa}`;
     headers["accept-encoding"] = "identity";
-    return fetch(`${gateway}${req.url}`, { method: req.method, headers, body: body ?? undefined });
+    return fetch(`${origin}${req.url}`, { method: req.method, headers, body: body ?? undefined });
   }
 
   function writeResponse(res, upstream) {

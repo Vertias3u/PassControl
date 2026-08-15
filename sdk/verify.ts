@@ -13,7 +13,7 @@ export const RECEIPT_TYP = "passcontrol-receipt+jwt";
 export const AGENT_TOKEN_TYP = "passcontrol-agent+jwt";
 
 /** The newest artifact version this verifier understands. */
-export const SUPPORTED_VER = 1;
+export const SUPPORTED_VER = 2;
 
 export type VerifyFailure =
   | "malformed"
@@ -59,7 +59,8 @@ export interface ReceiptClaims {
   jti: string;
   iat: number;
   agid: string;
-  vjti: string;
+  vjti?: string;
+  auth?: { kind: "direct_key"; kid: string; use: string };
   prov: string;
   mdl: string | null;
   mth: string;
@@ -71,6 +72,33 @@ export interface ReceiptClaims {
   t0: number;
   lat: number;
   own?: { kind: string; sub: string; tier: string; vat: string | null };
+  /**
+   * Present only on an attempt that followed a failed one: the `jti` of the
+   * receipt for the attempt this one replaced. Walk it backwards to read the
+   * whole chain — a receipt binds ONE call to ONE provider decision, so a
+   * failover is two receipts linked, never one compound artifact.
+   *
+   * Both attempts carry the same `req` digest, because that digest covers the
+   * bytes the CLIENT sent and those do not change between attempts. Matching
+   * two receipts by a shared digest is therefore a guess; this claim is the
+   * link.
+   *
+   * Optional, and `ver` stays 1: a verifier that predates these claims ignores
+   * what it does not recognise, and must not be invalidated for a feature it
+   * does not need to understand.
+   */
+  prev?: string;
+  /**
+   * Why the gateway moved on. An allowlisted enum at the issuing end, but treat
+   * it as an arbitrary string here — a receipt you verify may come from a
+   * different deployment or a newer version. Do not switch on it exhaustively.
+   *
+   * `upstream_5xx` and `unreachable` are the values where the attempt this
+   * receipt replaced MAY ALREADY HAVE BEEN BILLED by the other provider: it may
+   * have run the call before failing, and no one can tell. The other values mean
+   * the earlier provider refused before doing any work.
+   */
+  why?: string;
   ver: number;
   [claim: string]: unknown;
 }
@@ -302,8 +330,10 @@ async function verifySigned<T extends { iss?: unknown; ver?: unknown }>(
 /**
  * Verify a signed call receipt.
  *
- * What a valid receipt proves: this issuer attests that this passport made this
- * call, with this verdict and this cost, at this time. What it does NOT prove:
+ * What a valid receipt proves: this issuer attests that the named passport or
+ * Direct Agent Key authenticated this call, with this verdict and this cost.
+ * A direct receipt proves bearer possession, not a passport signature. It does
+ * NOT prove:
  * anything about the response, and nothing at all by its absence — see
  * lib/receipt.ts for the limits, which are deliberate and documented.
  */

@@ -34,11 +34,11 @@ const dmMono = DM_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL("https://passcontrol.vertias.eu"),
   title: {
-    default: "PassControl — Keep real API keys out of AI agents",
+    default: "PassControl — API key control for AI agents",
     template: "%s · PassControl",
   },
   description:
-    "Source-available identity and credential gateway for AI agents, with scoped work-visas, budgets, revocation, audit, and vaulted provider keys.",
+    "Give every AI agent its own identity, scope and budget. PassControl checks each model call while keeping provider keys out of agent environments.",
   applicationName: "PassControl",
   authors: [{ name: "Vertias", url: "https://vertias.eu" }],
   creator: "Vertias",
@@ -64,18 +64,18 @@ export const metadata: Metadata = {
     googleBot: { index: true, follow: true, "max-image-preview": "large" },
   },
   openGraph: {
-    title: "PassControl — Your AI agents should never hold your real API keys",
+    title: "PassControl — Agents get access. You keep control.",
     description:
-      "Source-available identity and credential infrastructure for governed AI agent calls.",
+      "Identity, scope and budgets for every model call, without putting provider keys in agent environments.",
     type: "website",
     url: "https://passcontrol.vertias.eu",
     siteName: "PassControl",
   },
   twitter: {
     card: "summary_large_image",
-    title: "PassControl — Your AI agents should never hold your real API keys",
+    title: "PassControl — Agents get access. You keep control.",
     description:
-      "Live keyless demo of governed AI calls — run a call, hit the kill switch, watch the same call get blocked.",
+      "Check identity, scope and budget before each model call while provider keys stay server-side.",
   },
 };
 

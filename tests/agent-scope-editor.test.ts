@@ -172,7 +172,15 @@ describe("the editor UI", () => {
     // uneditable for so long.
     const fleet = read("components/AgentFleetTable.tsx");
     expect(fleet).toMatch(/<ScopeEditor/);
-    expect(fleet).toMatch(/toScopeRows\(a\.allowed_scopes\)/);
+    // The editor must be fed the stored scopes of the agent it names. The row
+    // being edited is looked up BY ID, never by position: an index into a list
+    // this component sorts and filters would open the same off-by-one that once
+    // showed a forged receipt's verdict against the row above it. Assert the
+    // lookup, not the variable name — renaming the variable must not be able to
+    // turn this back into an index.
+    expect(fleet).toMatch(/agents\.find\(\(agent\) => agent\.id === editing\.id\)/);
+    expect(fleet).toMatch(/scopes=\{toScopeRows\(editedAgent\.allowed_scopes\)\}/);
+    expect(fleet).toMatch(/agentId=\{editedAgent\.id\}/);
   });
 
   it("passes the real TTL from the server at both call sites", () => {

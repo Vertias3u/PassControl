@@ -3,6 +3,7 @@
 // public.admin_audit (RLS-scoped to the owner). Read-only; mirrors AuditLogTable.
 import { useState } from "react";
 import { UserPlus, Power, PlayCircle, KeyRound, RefreshCw, ShieldAlert, ShieldCheck, Activity } from "lucide-react";
+import { DashboardTimestamp, useDashboardTime } from "@/components/dashboard/DashboardTime";
 
 export interface AdminAuditRow {
   id: string;
@@ -62,9 +63,10 @@ export function AdminAuditTable({ rows }: { rows: AdminAuditRow[] }) {
   const shown = rows.filter((r) =>
     !q ? true : [describe(r).label, r.action, details(r)].some((f) => f.toLowerCase().includes(q))
   );
+  const { zoneLabel } = useDashboardTime();
 
   if (rows.length === 0) {
-    return <p className="muted">No admin actions recorded yet.</p>;
+    return <p className="muted" data-state="empty">No admin actions recorded yet.</p>;
   }
 
   return (
@@ -74,10 +76,15 @@ export function AdminAuditTable({ rows }: { rows: AdminAuditRow[] }) {
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
       />
-      <table>
+      {shown.length === 0 ? (
+        <div className="pc-table-empty">
+          <span>No operator actions match this filter.</span>
+          <button type="button" className="ghost" onClick={() => setFilter("")}>Clear filter</button>
+        </div>
+      ) : <table>
         <thead>
           <tr>
-            <th>Time</th>
+            <th>Time · {zoneLabel}</th>
             <th>Action</th>
             <th>Details</th>
           </tr>
@@ -88,8 +95,8 @@ export function AdminAuditTable({ rows }: { rows: AdminAuditRow[] }) {
             const color = TONE_HEX[tone];
             return (
               <tr key={r.id}>
-                <td className="muted" title={new Date(r.created_at).toLocaleString()}>
-                  {new Date(r.created_at).toLocaleString()}
+                <td className="muted">
+                  <DashboardTimestamp value={r.created_at} />
                 </td>
                 <td>
                   <span
@@ -105,7 +112,7 @@ export function AdminAuditTable({ rows }: { rows: AdminAuditRow[] }) {
             );
           })}
         </tbody>
-      </table>
+      </table>}
     </div>
   );
 }

@@ -17,6 +17,11 @@ const MESSAGES: Record<string, string> = {
   invalid_idempotency_key: "The Idempotency-Key header is missing or malformed.",
   request_in_progress: "A request with this Idempotency-Key is still being processed.",
   agent_exists: "That passport is already registered.",
+  agent_not_active: "Only an active passport can be rotated.",
+  same_key: "That is already this agent's passport. Generate a new keypair.",
+  rotation_in_progress:
+    "A previous key is still inside its grace window. Wait for it to close, or end it first.",
+  rotation_conflict: "This passport changed while the rotation was in flight. Read it and retry.",
   unsupported_media_type: "Request body must be application/json.",
   payload_too_large: "Request body is too large.",
   not_found: "Resource not found.",

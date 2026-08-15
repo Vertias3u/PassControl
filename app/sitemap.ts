@@ -30,5 +30,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
       changeFrequency: "monthly",
       priority: 0.5,
     },
+    // Legal pages deliberately stay out of the sitemap until the public service
+    // address is resolved and the draft banner can be removed.
   ];
 }

@@ -40,7 +40,7 @@ import type { LogEntry } from "./log";
  * control and cannot upgrade — adding a claim must not invalidate every
  * verifier in the field.
  */
-export const RECEIPT_VER = 1;
+export const RECEIPT_VER = 2;
 
 export interface OwnerClaim {
   kind: string;
@@ -49,11 +49,9 @@ export interface OwnerClaim {
   vat: string | null;
 }
 
-export interface ReceiptInput {
+interface ReceiptInputBase {
   receiptId: string;
-  passportId: string;
   agentId: string;
-  visaJti: string;
   provider: string;
   model?: string;
   method: string;
@@ -77,7 +75,40 @@ export interface ReceiptInput {
   // latency"; that reads as overhead we added. tests/public-receipt-page pins it.
   latencyMs: number;
   owner?: OwnerClaim | null;
+  /**
+   * Set only on an attempt that followed a failed one. Two receipts, never one
+   * compound object: a receipt binds ONE call to ONE provider decision, and an
+   * attempt list would make it a compound artifact every verifier — SDK, CLI,
+   * public page — has to learn to render.
+   *
+   * The link is explicit rather than inferred. Both attempts share a `req`
+   * digest, because that digest covers the client's bytes and those do not
+   * change between attempts — but matching two receipts by a shared digest is a
+   * guess, not a link.
+   */
+  previousReceiptId?: string | null;
+  /** Why the gateway moved on. Allowlisted; see FailoverReason. */
+  failoverReason?: string | null;
 }
+
+type PassportReceiptIdentity = {
+  authMethod?: "passport";
+  passportId: string;
+  visaJti: string;
+  agentAccessKeyId?: never;
+  credentialUseId?: never;
+};
+
+type DirectKeyReceiptIdentity = {
+  authMethod: "direct_key";
+  passportId?: never;
+  visaJti?: never;
+  agentAccessKeyId: string;
+  credentialUseId: string;
+};
+
+export type ReceiptInput = ReceiptInputBase &
+  (PassportReceiptIdentity | DirectKeyReceiptIdentity);
 
 export interface RequestDigest {
   alg: "sha-256";
@@ -94,11 +125,10 @@ export function requestDigest(rawBody: string): RequestDigest {
 export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown> {
   const claims: Record<string, unknown> = {
     iss: instanceIssuer(),
-    sub: input.passportId,
+    sub: input.authMethod === "direct_key" ? input.agentId : input.passportId,
     jti: input.receiptId,
     iat: Math.floor(Date.now() / 1000),
     agid: input.agentId,
-    vjti: input.visaJti,
     prov: input.provider,
     mdl: input.model ?? null,
     mth: input.method,
@@ -108,8 +138,20 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
     res: { status: input.status, http: input.httpStatus },
     t0: input.startedAt,
     lat: input.latencyMs,
-    ver: RECEIPT_VER,
+    // Passport receipts remain version 1 and retain their exact identity
+    // claims. Version 2 exists specifically to say that a bearer Direct Agent
+    // Key — not a passport signature — authenticated this call.
+    ver: input.authMethod === "direct_key" ? RECEIPT_VER : 1,
   };
+  if (input.authMethod === "direct_key") {
+    claims.auth = {
+      kind: "direct_key",
+      kid: input.agentAccessKeyId,
+      use: input.credentialUseId,
+    };
+  } else {
+    claims.vjti = input.visaJti;
+  }
   // Omitted when the gateway refused before reading the body. Absent means
   // "never read"; a digest of "" would mean "the client sent nothing".
   if (input.rawBody !== null && input.rawBody !== undefined) {
@@ -119,6 +161,13 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
   // than null so a receipt from a deployment with no owner binding is not
   // mistaken for one that deliberately withheld it.
   if (input.owner) claims.own = input.owner;
+  // Additive and optional, so `ver` stays 1: a verifier already in the field
+  // ignores claims it does not recognise (sdk/verify.ts), and bumping the version
+  // would invalidate every one of them for a feature they do not need to
+  // understand. Omitted rather than null on a call that never failed over, so
+  // their presence alone means "this attempt followed another".
+  if (input.previousReceiptId) claims.prev = input.previousReceiptId;
+  if (input.failoverReason) claims.why = input.failoverReason;
   return claims;
 }
 

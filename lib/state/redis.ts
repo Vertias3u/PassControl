@@ -21,9 +21,15 @@ const k = {
   reserveMarker: (agid: string, reserveId: string) => `reserve:${agid}:${reserveId}`,
   reserveCostMarker: (agid: string, reserveId: string) => `reserve_cost:${agid}:${reserveId}`,
   key: (agid: string, provider: string) => `key:${agid}:${provider}`,
-  policy: (uid: string, agid: string) => `policy:${uid}:${agid}`,
+  // `policy2` deliberately, not `policy` — see the cache-shape note below.
+  policy: (uid: string, agid: string) => `policy2:${uid}:${agid}`,
+  fallbacks: (uid: string, agid: string) => `fallbacks:${uid}:${agid}`,
   suspended: (agid: string) => `suspended:${agid}`,
   owner: (uid: string) => `owner:${uid}`,
+  // Which providers a tenant holds a credential for. Names no secret and no
+  // credential id — only the provider list, used to say what an agent could fail
+  // over to. Never a decrypt path.
+  providerKeys: (uid: string) => `provkeys:${uid}`,
   lastSeen: (agid: string) => `lastseen:${agid}`,
   keyImport: (uid: string, id: string) => `keyimport:${uid}:${id}`,
 };
@@ -215,6 +221,16 @@ export async function setCachedKey(
 // Policy is not secret material, so cache its serialized JSON directly. Include
 // both tenant and agent identifiers even though agent UUIDs are globally unique:
 // tenant isolation must be visible in every hot-path key, not merely assumed.
+//
+// The key is `policy2:` because the cached SHAPE changed when shadow mode landed:
+// it used to be the policy value itself, and is now { p, s } carrying the live
+// policy and the shadow candidate from one row read. Reusing `policy:` would
+// have made every entry written by the previous deploy parse as a policy object
+// with two unknown keys — which parsePolicy rejects, so the gateway would have
+// read `policy:malformed` and DENIED live traffic for the length of one cache
+// window. There is no invalidation path to keep in sync (the cache is purely
+// TTL-driven, which is what "takes effect after at most 60 seconds" means), so
+// the whole cost of the rename is 60 seconds of misses on deploy.
 export async function getCachedAgentPolicy(
   userId: string,
   agentId: string
@@ -229,6 +245,40 @@ export async function setCachedAgentPolicy(
   ttlSeconds = 60
 ): Promise<void> {
   await redis().set(k.policy(userId, agentId), serializedPolicy, { ex: ttlSeconds });
+}
+
+/**
+ * Drop the cached policy for one agent.
+ *
+ * One key holds both the live policy and the shadow candidate, so this clears
+ * both — which is what promotion needs. Promotion changes ENFORCEMENT, and
+ * leaving the old pair cached would mean the operator watches up to 60 seconds
+ * of traffic decided by the policy they just replaced. Best-effort at every
+ * call site: a failed purge costs one cache window, and must never be the
+ * reason a save is reported as failed when the row was in fact written.
+ */
+export async function purgeAgentPolicy(userId: string, agentId: string): Promise<void> {
+  await redis().del(k.policy(userId, agentId));
+}
+
+export async function getCachedAgentFallbacks(
+  userId: string,
+  agentId: string
+): Promise<string | null> {
+  return redis().get<string>(k.fallbacks(userId, agentId));
+}
+
+export async function setCachedAgentFallbacks(
+  userId: string,
+  agentId: string,
+  serializedFallbacks: string,
+  ttlSeconds = 60
+): Promise<void> {
+  await redis().set(k.fallbacks(userId, agentId), serializedFallbacks, { ex: ttlSeconds });
+}
+
+export async function purgeAgentFallbacks(userId: string, agentId: string): Promise<void> {
+  await redis().del(k.fallbacks(userId, agentId));
 }
 
 // ── Owner-binding cache ──────────────────────────────────────────────────────
@@ -249,6 +299,22 @@ export async function setCachedOwner(
 
 export async function purgeOwnerCache(userId: string): Promise<void> {
   await redis().del(k.owner(userId));
+}
+
+export async function getCachedProviderKeys(userId: string): Promise<string | null> {
+  return redis().get<string>(k.providerKeys(userId));
+}
+
+export async function setCachedProviderKeys(
+  userId: string,
+  serializedProviders: string,
+  ttlSeconds = 300
+): Promise<void> {
+  await redis().set(k.providerKeys(userId), serializedProviders, { ex: ttlSeconds });
+}
+
+export async function purgeProviderKeysCache(userId: string): Promise<void> {
+  await redis().del(k.providerKeys(userId));
 }
 
 export async function purgeAgentCaches(agentId: string, providers: string[]): Promise<void> {

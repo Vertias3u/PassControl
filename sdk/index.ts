@@ -10,17 +10,17 @@
 //                                     people OUTSIDE your deployment: it needs
 //                                     no key, no account, and no callback here.
 //
-//   import { PassControl, ControlClient } from "./sdk";        // relative
-//   import { PassControl, ControlClient } from "@/sdk";        // path alias (in-app)
+// npm consumers load this entry point through the `passcontrol/sdk` export;
+// the dashboard consumes the same source through its local path alias.
 //
 // Self-hosting and want a flat copy? This folder is self-contained — vendor the
 // whole `sdk/` directory; it only needs @noble/curves + the platform fetch/crypto.
 
-export { PassControl } from "./passcontrol";
-export type { PassControlOptions, ProviderId } from "./passcontrol";
+export { PassControl } from "./passcontrol.js";
+export type { PassControlOptions, ProviderId } from "./passcontrol.js";
 
-export { ControlClient, ControlApiError } from "./control";
-export type { ControlClientOptions, WriteOpts } from "./control";
+export { ControlClient, ControlApiError } from "./control.js";
+export type { ControlClientOptions, WriteOpts } from "./control.js";
 
 export {
   verifyReceipt,
@@ -29,7 +29,7 @@ export {
   RECEIPT_TYP,
   AGENT_TOKEN_TYP,
   SUPPORTED_VER,
-} from "./verify";
+} from "./verify.js";
 export type {
   ReceiptClaims,
   AgentTokenClaims,
@@ -38,4 +38,4 @@ export type {
   VerifyResult,
   VerifyFailure,
   PublicJwk,
-} from "./verify";
+} from "./verify.js";

@@ -213,3 +213,55 @@ describe("forward compatibility", () => {
     if (!result.ok) expect(result.reason).toBe("unsupported_version");
   });
 });
+
+describe("a receipt from a failover chain", () => {
+  const CHAINED = {
+    ...INPUT,
+    receiptId: "99999999-2222-4333-8444-555555555555",
+    previousReceiptId: INPUT.receiptId,
+    failoverReason: "upstream_5xx",
+  };
+
+  it("verifies, and hands the chain claims through", async () => {
+    const result = await verifyReceipt(signReceipt(CHAINED)!, opts());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.claims.prev).toBe(INPUT.receiptId);
+      expect(result.claims.why).toBe("upstream_5xx");
+    }
+  });
+
+  // The reason `ver` stays 1. A verifier already deployed in the field refuses
+  // anything newer than it knows (SUPPORTED_VER), so bumping the version to add
+  // two optional claims would invalidate every existing verifier for a feature
+  // none of them need to understand.
+  it("does not bump the version, so older verifiers still accept it", async () => {
+    const result = await verifyReceipt(signReceipt(CHAINED)!, opts());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.claims.ver).toBe(1);
+  });
+
+  it("carries the same request digest as the attempt it replaced", async () => {
+    // Both attempts digest the bytes the CLIENT sent, which do not change. That
+    // is exactly why the link has to be explicit: matching two receipts by a
+    // shared digest would be a guess, `prev` is a statement.
+    const first = await verifyReceipt(signReceipt(INPUT)!, opts());
+    const second = await verifyReceipt(signReceipt(CHAINED)!, opts());
+    expect(first.ok && second.ok).toBe(true);
+    if (first.ok && second.ok) {
+      expect(second.claims.req).toEqual(first.claims.req);
+      expect(second.claims.jti).not.toBe(first.claims.jti);
+    }
+  });
+
+  it("omits both claims on a call that never failed over", async () => {
+    const result = await verifyReceipt(signReceipt(INPUT)!, opts());
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // Absent, not null: presence alone must mean "this attempt followed
+      // another", with no second reading needed to tell them apart.
+      expect("prev" in result.claims).toBe(false);
+      expect("why" in result.claims).toBe(false);
+    }
+  });
+});

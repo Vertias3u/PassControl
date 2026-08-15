@@ -20,10 +20,12 @@ import {
   modelListingUrl,
   type ProviderId,
 } from "@/lib/providers";
+import { purgeAgentFallbacks, purgeProviderKeysCache } from "@/lib/state/redis";
 import { rateLimit } from "@/lib/ratelimit";
 import { open, seal } from "@/lib/crypto/aesgcm";
 import { stashKeyImport, takeKeyImport } from "@/lib/state/redis";
 import * as fleet from "@/lib/fleet";
+import { mfaAuthorizedUser } from "@/lib/mfa";
 
 async function requireUser() {
   const db = await userClient();
@@ -33,6 +35,16 @@ async function requireUser() {
   if (!user) throw new Error("not_authenticated");
   return { db, user };
 }
+
+type RequiredUser = Awaited<ReturnType<typeof requireUser>>;
+type CreateAgentInput = {
+  name: string;
+  passportPubkey: string;
+  scopes: { provider: string; models: string[] }[];
+  budget_tokens?: number | null;
+  budget_cents?: number | null;
+};
+type ProviderKeyInput = { provider: string; label: string; key: string };
 
 /** Log only the DB machine code; surface a generic message to the caller so no
  *  database internals or reflected credential material can leave this action. */
@@ -80,15 +92,16 @@ export async function setAgentSuspended(agentId: string, suspended: boolean) {
   revalidatePath("/");
 }
 
-/** Register a new agent passport (public key generated in the browser). */
-export async function createAgent(input: {
-  name: string;
-  passportPubkey: string;
-  scopes: { provider: string; models: string[] }[];
-  budget_tokens?: number | null;
-  budget_cents?: number | null;
-}) {
-  const { db, user } = await requireUser();
+// The gate lives here rather than on the exported wrapper so that every caller —
+// standalone issuance today, the key-import on-ramp, whatever reuses this next —
+// inherits it. Registering a passport is credential minting: the gateway will mint
+// visas for that public key against this tenant's provider key and budget, which is
+// the same blast radius a Direct Agent Key has and must clear the same gate.
+async function createAgentForUser(
+  { db, user }: RequiredUser,
+  input: CreateAgentInput
+): Promise<{ id: string; name: string; createdAt: string }> {
+  await requireCredentialMfa(db, user);
   // Ensure profile row exists (FK target).
   await db.from("users").upsert({ id: user.id, email: user.email }).select("id");
   const r = await fleet.createAgent(db, user.id, input);
@@ -103,7 +116,197 @@ export async function createAgent(input: {
     targetId: r.value.id,
     metadata: { name: r.value.name },
   });
-  revalidatePath("/");
+  return r.value;
+}
+
+/** Register a new agent passport (public key generated in the browser). */
+export async function createAgent(
+  input: CreateAgentInput
+): Promise<{ agentId: string; createdAt: string }> {
+  const created = await createAgentForUser(await requireUser(), input);
+  return { agentId: created.id, createdAt: created.createdAt };
+}
+
+/**
+ * The credential gate. Be precise about what it does and does not enforce:
+ *
+ *  - It is the STRICT helper (`mfaAuthorizedUser`), whose factor list comes from
+ *    the auth server and whose unknown/error paths fail closed. It never reads the
+ *    unsigned `session.user` cookie wrapper and never trusts a caller-threaded user.
+ *  - An account WITH a verified factor must be at aal2. An aal1 session is refused.
+ *  - An account with NO verified factor passes. That is not a hole being tolerated:
+ *    there is no second factor to step up to, so the only alternatives are letting
+ *    it through or locking every un-enrolled operator out of their own credentials.
+ *    `lib/mfa.ts` decides this from the SERVER's factor list, so a forged cookie
+ *    cannot invent a factor to deny service with either.
+ *
+ * So this is "second factor enforced wherever a second factor exists", not
+ * "second factor enforced universally". Any wording that claims the latter is wrong.
+ */
+async function requireCredentialMfa(
+  db: Awaited<ReturnType<typeof userClient>>,
+  user: Awaited<ReturnType<typeof db.auth.getUser>>["data"]["user"]
+): Promise<void> {
+  // The strict helper performs its own network validation; it never trusts a
+  // caller-threaded user or the unsigned session.user cookie wrapper.
+  const gate = await mfaAuthorizedUser(db);
+  if (!gate.ok || gate.user.id !== user?.id) {
+    throw new Error(
+      !gate.ok && gate.reason === "step_up_required"
+        // Neutral about the verb on purpose: this gate also guards revocation, and
+        // telling an operator who just pressed Revoke that they must verify "before
+        // creating credentials" reads like they hit the wrong button.
+        ? "Complete two-factor verification before changing credentials."
+        : "Your authentication assurance could not be verified. Try again."
+    );
+  }
+}
+
+/** Create the browser-first on-ramp: one agent plus one reveal-once bearer key.
+ * The key is returned from this action once and is never logged or persisted. */
+export async function issueDirectAgent(input: {
+  name: string;
+  scopes: { provider: string; models: string[] }[];
+  budget_tokens?: number | null;
+  budget_cents?: number | null;
+  keyName: string;
+  expiresAt?: string | null;
+}): Promise<{
+  agentId: string;
+  keyId: string;
+  key: string;
+  name: string;
+  keyName: string;
+  expiresAt: string | null;
+}> {
+  const { db, user } = await requireUser();
+  await requireCredentialMfa(db, user);
+  const { error: profileError } = await db
+    .from("users")
+    .upsert({ id: user.id, email: user.email })
+    .select("id");
+  if (profileError) failGeneric("issueDirectAgent.profile", profileError);
+
+  const result = await fleet.createDirectAgent(serviceClient(), user.id, input);
+  if (!result.ok) throw new Error(result.message ?? "The Direct Agent Key could not be created.");
+
+  await recordAdminAction({
+    userId: user.id,
+    action: "agent.create",
+    targetType: "agent",
+    targetId: result.value.agentId,
+    metadata: {
+      name: result.value.name,
+      auth_method: "direct_key",
+      key_name: result.value.keyName,
+      suffix: result.value.key.slice(-8),
+      expires_at: result.value.expiresAt,
+    },
+  });
+  // The raw key exists only in this return value. Revalidating here can
+  // remount DirectAgentConnect before it commits the credential to reveal-once
+  // state; the component refreshes after the operator acknowledges storage.
+  return result.value;
+}
+
+/** Add a named installation credential to an existing owned agent. */
+export async function issueDirectAgentKey(
+  agentId: string,
+  input: { name: string; expiresAt?: string | null }
+): Promise<{ keyId: string; key: string; name: string; expiresAt: string | null }> {
+  const { db, user } = await requireUser();
+  await requireCredentialMfa(db, user);
+  if (!UUID_RE.test(String(agentId))) throw new Error("This agent is unavailable.");
+  const result = await fleet.createAgentAccessKey(serviceClient(), user.id, agentId, input);
+  if (!result.ok) throw new Error(result.message ?? "The Direct Agent Key could not be created.");
+  await recordAdminAction({
+    userId: user.id,
+    action: "agent.direct_key.create",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: {
+      name: result.value.name,
+      suffix: result.value.key.slice(-8),
+      expires_at: result.value.expiresAt,
+    },
+  });
+  // The raw key exists only in this return value. DirectAgentKeyPanel refreshes
+  // the agent page after the reveal-once acknowledgement, never before it.
+  return result.value;
+}
+
+/** Revoke one bearer credential. This never deletes its immutable log links.
+ *
+ * This is the one REVOCATION behind the credential gate, while `revokeApiKey`,
+ * `setAgentSuspended` and `setMasterKill` deliberately stay on `requireUser()`.
+ * That asymmetry is intentional, and the rule behind it is:
+ *
+ *   **Every credential keeps at least one stop reachable without a step-up.**
+ *
+ * A Direct Agent Key is a data-plane credential bound to one agent, and the
+ * gateway checks tenant kill and per-agent suspend on every call before it
+ * resolves anything (`app/api/v1/[provider]/[...path]/route.ts`, step 2). So an
+ * operator who cannot complete a step-up can still stop a leaking key instantly
+ * with Suspend or the kill switch — both ungated — and what the gate defers is
+ * only the permanent, irreversible lifecycle write.
+ *
+ * A `pc_` control-plane key has no such backstop: `lib/control/handler.ts` and
+ * `lib/control/auth.ts` consult neither the kill switch nor agent suspension, so
+ * `api_keys.revoked_at` IS the only stop that exists. Gating `revokeApiKey` would
+ * make stopping that leak harder than creating it, which is the trade this file
+ * refuses. `tests/credential-action-mfa.test.ts` pins both halves, including the
+ * fact that the control plane reads no kill state — if that ever changes, this
+ * rationale has to be revisited rather than inherited.
+ */
+export async function revokeDirectAgentKey(agentId: string, keyId: string): Promise<void> {
+  const { db, user } = await requireUser();
+  await requireCredentialMfa(db, user);
+  if (!UUID_RE.test(String(agentId)) || !UUID_RE.test(String(keyId))) {
+    throw new Error("This credential is unavailable.");
+  }
+  const result = await fleet.revokeAgentAccessKey(serviceClient(), user.id, agentId, keyId);
+  if (!result.ok) throw new Error(result.message ?? "This credential could not be revoked.");
+  await recordAdminAction({
+    userId: user.id,
+    action: "agent.direct_key.revoke",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: { name: result.value.name, suffix: result.value.suffix },
+  });
+  revalidatePath(`/dashboard/agents/${agentId}`);
+  revalidatePath("/dashboard");
+}
+
+/** Upgrade a direct-first agent to passport signing in place. The private half
+ * is generated and retained by the browser; this action accepts only public key material. */
+export async function attachAgentPassport(agentId: string, passportPubkey: string): Promise<void> {
+  const { db, user } = await requireUser();
+  await requireCredentialMfa(db, user);
+  if (!UUID_RE.test(String(agentId))) throw new Error("This agent is unavailable.");
+  const result = await fleet.attachAgentPassport(
+    serviceClient(),
+    user.id,
+    agentId,
+    passportPubkey
+  );
+  if (!result.ok) throw new Error(result.message ?? "The signing passport could not be attached.");
+  await recordAdminAction({
+    userId: user.id,
+    action: "agent.update",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: {
+      fields: "passport_pubkey",
+      via: "dashboard",
+      from: JSON.stringify(null),
+      to: JSON.stringify(result.value.passportPubkey),
+      upgraded_from: "direct_key",
+    },
+  });
+  // Do not revalidate here. The browser still holds the newly generated private
+  // half only in component state; refreshing this route would unmount the
+  // reveal-once dialog and destroy the key before the operator acknowledges it.
+  // DirectAgentPassportUpgrade refreshes after the acknowledgement instead.
 }
 
 export async function updateAgentBudgets(
@@ -164,6 +367,7 @@ export async function updateAgentScopes(
     targetId: agentId,
     metadata: {
       fields: "allowed_scopes",
+      via: "dashboard",
       from: JSON.stringify(before?.allowed_scopes ?? null),
       to: JSON.stringify(scopes),
     },
@@ -174,9 +378,72 @@ export async function updateAgentScopes(
   revalidatePath("/");
 }
 
-/** Add a provider key via the SECURITY DEFINER RPC (plaintext never stored in app tables). */
-export async function addProviderKey(input: { provider: string; label: string; key: string }) {
+/**
+ * Change which other providers the gateway may retry a failed call on.
+ *
+ * `userId` is taken from the session and is deliberately NOT a parameter, the
+ * same tenant boundary updateAgentScopes rests on.
+ *
+ * ── Why this one purges and updateAgentScopes does not ───────────────────────
+ *
+ * Scope is a visa snapshot: there is nothing to purge, the change simply lands
+ * on the next visa. Fallbacks are read live through a 60-second Redis cache
+ * (lib/state/fallbacks.ts), and the direction that matters is REMOVAL — an
+ * operator taking a provider off this list is usually doing it because calls
+ * must stop being billed there. Waiting out a cache window for that is not
+ * acceptable, so the purge is explicit.
+ *
+ * Best-effort, exactly as in addProviderKey: a Redis failure costs at most 60
+ * seconds of a stale list, which must never be a reason to fail the operator's
+ * save and leave the database and the screen disagreeing.
+ */
+export async function updateAgentFallbacks(
+  agentId: string,
+  fallbacks: { provider: string; model: string }[]
+) {
   const { db, user } = await requireUser();
+  // Read first, so the audit row can answer "which provider was this pointed at
+  // BEFORE" — the question that matters when an unexpected provider bill turns
+  // up. `fields: "fallbacks"` alone cannot answer it.
+  const { data: before } = await db
+    .from("agents")
+    .select("fallbacks")
+    .eq("user_id", user.id)
+    .eq("id", agentId)
+    .maybeSingle();
+
+  const r = await fleet.updateAgent(db, user.id, agentId, { fallbacks });
+  if (!r.ok) {
+    console.error("[dashboard:updateAgentFallbacks]", r.code, r.message ?? "");
+    throw new Error(r.message ?? "Something went wrong. Please try again.");
+  }
+  await purgeAgentFallbacks(user.id, agentId).catch(() => {});
+  await recordAdminAction({
+    userId: user.id,
+    action: "agent.update",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: {
+      fields: "fallbacks",
+      via: "dashboard",
+      from: JSON.stringify(before?.fallbacks ?? null),
+      to: JSON.stringify(fallbacks),
+    },
+  });
+  revalidatePath(`/dashboard/agents/${agentId}`);
+  revalidatePath("/");
+}
+
+async function addProviderKeyForUser(
+  { db, user }: RequiredUser,
+  input: ProviderKeyInput,
+  revalidate: boolean
+): Promise<void> {
+  // Gated on the helper, same reasoning as createAgentForUser. completeKeyImport
+  // calls both and therefore checks twice; two auth round-trips on one onboarding
+  // click is the right price for not having an "already checked" parameter, which
+  // is exactly the bypass-shaped API lib/mfa.ts refuses to offer.
+  await requireCredentialMfa(db, user);
   const clean = validateProviderKeyInput(input);
   const { error } = await db.rpc("store_provider_key", {
     p_provider: clean.provider,
@@ -184,13 +451,25 @@ export async function addProviderKey(input: { provider: string; label: string; k
     p_plaintext: clean.key,
   });
   if (error) failGeneric("addProviderKey", error);
+  // The exhaustion branch caches this tenant's provider list for 5 minutes to
+  // decide what an agent could fail over to. Adding a key is the only mutation
+  // that changes the answer (rotate replaces a secret behind a row that already
+  // existed), so one purge here is the whole invalidation story. Best-effort:
+  // a failed purge costs at most 5 minutes of a not-yet-advertised alternative,
+  // which must never be a reason to fail the operator's key import.
+  await purgeProviderKeysCache(user.id).catch(() => {});
   await recordAdminAction({
     userId: user.id,
     action: "provider_key.add",
     targetType: "provider_key",
     metadata: { provider: clean.provider, label: clean.label },
   });
-  revalidatePath("/");
+  if (revalidate) revalidatePath("/");
+}
+
+/** Add a provider key via the SECURITY DEFINER RPC (plaintext never stored in app tables). */
+export async function addProviderKey(input: ProviderKeyInput) {
+  await addProviderKeyForUser(await requireUser(), input, true);
 }
 
 const KEY_IMPORT_TENANT_LIMIT = 5;
@@ -355,8 +634,14 @@ export async function completeKeyImport(input: {
   name: string;
   passportPubkey: string;
   models: string[];
-}): Promise<{ provider: ProviderId; scope: { provider: ProviderId; models: string[] }[] }> {
-  const { user } = await requireUser();
+}): Promise<{
+  agentId: string;
+  createdAt: string;
+  provider: ProviderId;
+  scope: { provider: ProviderId; models: string[] }[];
+}> {
+  const auth = await requireUser();
+  const { user } = auth;
   // Redeem by id. takeKeyImport deletes unconditionally, so a replayed id after
   // this point finds nothing — the handoff is single-use, not merely expiring.
   const token = String(input?.handoff ?? "");
@@ -391,16 +676,22 @@ export async function completeKeyImport(input: {
     models: entry.models,
   }));
 
-  // These are the existing sanctioned paths: store_provider_key via
-  // addProviderKey, then the canonical fleet mutation via createAgent.
-  await addProviderKey(keyInput);
-  await createAgent(agentInput);
-  return { provider, scope };
+  // Use the same sanctioned Vault and fleet mutations as the standalone
+  // actions, but deliberately defer their route revalidation. The browser has
+  // generated the private passport and cannot commit it to reveal-once React
+  // state until this action returns. Revalidating here remounts the on-ramp and
+  // destroys that secret. KeyImportOnramp refreshes only after acknowledgement.
+  await addProviderKeyForUser(auth, keyInput, false);
+  const created = await createAgentForUser(auth, agentInput);
+  return { agentId: created.id, createdAt: created.createdAt, provider, scope };
 }
 
 /** Rotate a provider key behind an owned credential row. */
 export async function rotateProviderKey(input: { credentialId: string; key: string }) {
   const { db, user } = await requireUser();
+  // Replacing the secret behind a credential row is the same authority as storing
+  // one: the new key is what the proxy will inject from here on.
+  await requireCredentialMfa(db, user);
   const clean = validateRotateInput(input);
   const { error } = await db.rpc("rotate_provider_key", {
     p_credential_id: clean.credentialId,
@@ -425,6 +716,10 @@ export async function createApiKey(input: { name: string; scope: "read" | "write
   prefix: string;
 }> {
   const { db, user } = await requireUser();
+  // A `pc_` key is control-plane authority — fleet reads, budget and scope writes,
+  // the kill switch — and it is returned in full exactly once. It is the most
+  // consequential credential minted anywhere in this file.
+  await requireCredentialMfa(db, user);
   const name = String(input?.name ?? "").trim();
   if (name.length < 1 || name.length > 80) throw new Error("Name must be 1–80 characters.");
   if (input?.scope !== "read" && input?.scope !== "write") throw new Error("Scope must be read or write.");

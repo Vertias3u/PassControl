@@ -1,23 +1,29 @@
 import { LoginForm } from "@/components/auth/LoginForm";
-import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
+import { AuthShell } from "@/components/auth/AuthShell";
+import { signupMode } from "@/lib/invite-code";
 
-export const metadata = { title: "Sign in — PassControl by Vertias" };
+export const metadata = { title: "Sign in" };
 
-export default function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ reset?: string; error?: string; deleted?: string }>;
+}) {
+  const query = await searchParams;
+  const notice = query.deleted === "1"
+    ? "Your PassControl account and tenant data were deleted."
+    : query.reset === "success"
+      ? "Password updated. Sign in with your new password."
+      : undefined;
+  const initialError = query.error === "auth" ? "This sign-in link is invalid or expired." : undefined;
   return (
-    <main className="mx-auto mt-[12vh] grid max-w-sm gap-4 px-4">
-      <div className="grid justify-items-center gap-2">
-        <VertiasLogo size={48} />
-        <VertiasWordmark size={22} />
-        <div className="text-center">
-          <h1 className="m-0 text-lg font-bold">PassControl</h1>
-          <p className="mt-0.5 text-sm text-muted-foreground">Agent Control Tower</p>
-        </div>
-      </div>
-      <div className="rounded-lg border border-border bg-card p-6">
-        <LoginForm />
-      </div>
-    </main>
+    <AuthShell
+      eyebrow="Operator access"
+      title="Welcome back"
+      description="Sign in to inspect and operate your governed agent fleet."
+    >
+      <LoginForm notice={notice} initialError={initialError} signupMode={signupMode()} />
+    </AuthShell>
   );
 }
 

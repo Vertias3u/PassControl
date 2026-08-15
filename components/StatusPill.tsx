@@ -25,6 +25,10 @@ const CONFIG: Record<StatusType, { label: string; Icon: typeof CheckCircle2; ton
   // Distinct from a scope violation: the visa's scope allowed this call and a
   // policy rule on the agent refused it anyway.
   blocked_policy: { label: "Policy rule", Icon: AlertCircle, tone: "warning" },
+  // "Budget exceeded" above is ours; this one is the provider's own balance.
+  provider_exhausted: { label: "Provider out of credit", Icon: AlertCircle, tone: "warning" },
+  // A setup gap here, not a fault out there — the call never left.
+  no_provider_key: { label: "No provider key stored", Icon: AlertCircle, tone: "warning" },
   upstream_error: { label: "Provider error", Icon: HelpCircle, tone: "warning" },
   blocked_endpoint: { label: "Endpoint blocked", Icon: AlertCircle, tone: "warning" },
   revoked: { label: "Revoked", Icon: XCircle, tone: "danger" },

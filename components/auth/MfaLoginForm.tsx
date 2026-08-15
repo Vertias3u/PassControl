@@ -1,18 +1,20 @@
 "use client";
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
+import { ShieldCheck } from "lucide-react";
 import { submitLoginMfa } from "@/app/dashboard/mfa-actions";
 
 function SubmitButton() {
   const { pending } = useFormStatus();
-  return <button type="submit" disabled={pending}>{pending ? "Verifying…" : "Verify"}</button>;
+  return <button type="submit" disabled={pending}><ShieldCheck aria-hidden="true" /> {pending ? "Verifying…" : "Verify session"}</button>;
 }
 
 export function MfaLoginForm() {
-  const [state, action] = useFormState(submitLoginMfa, undefined);
+  const [state, action] = useActionState(submitLoginMfa, undefined);
   return (
-    <form action={action} className="grid" style={{ gap: 12 }}>
-      <label className="grid" style={{ gap: 4 }}>
-        <span className="muted">Authenticator code</span>
+    <form action={action} className="pc-auth-form">
+      <label className="pc-field">
+        <span>Authenticator or recovery code</span>
         <input
           name="code"
           inputMode="text"
@@ -20,12 +22,13 @@ export function MfaLoginForm() {
           placeholder="123456"
           autoFocus
           required
-          style={{ letterSpacing: "0.15em" }}
+          className="pc-code-input"
+          aria-describedby="mfa-code-note"
         />
       </label>
       <SubmitButton />
-      {state?.error && <p style={{ color: "var(--danger)", margin: 0 }}>{state.error}</p>}
-      <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+      {state?.error ? <p role="alert" className="pc-form-error">{state.error}</p> : null}
+      <p id="mfa-code-note" className="pc-field-note">
         Lost your device? Enter a <strong>recovery code</strong> instead — it resets 2FA so you can
         re-enroll from Settings.
       </p>

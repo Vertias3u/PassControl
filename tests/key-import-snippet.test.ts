@@ -9,9 +9,9 @@ const presets: string[] = SIDECAR_PRESETS;
 
 const input = {
   passportId: "passport-public-id",
-  passportSecret: "passport-private-secret",
+  passportSecret: "passport-private'secret",
   provider: "anthropic",
-  model: "claude-sonnet-4'preview",
+  model: "claude-sonnet-4-preview",
 };
 
 describe("key-import configure handoff", () => {
@@ -24,8 +24,8 @@ describe("key-import configure handoff", () => {
 
     expect(snippet).toContain(`passcontrol configure ${integration}`);
     expect(snippet).toContain("--provider anthropic");
-    expect(snippet).toContain("--model 'claude-sonnet-4'\\''preview'");
-    expect(snippet.match(/passport-private-secret/g)).toHaveLength(1);
+    expect(snippet).toContain("--model 'claude-sonnet-4-preview'");
+    expect(snippet).toContain("PASSPORT_SECRET='passport-private'\\''secret'");
   });
 
   it("refuses an integration outside the CLI-provided preset list", () => {
@@ -36,5 +36,14 @@ describe("key-import configure handoff", () => {
         allowedIntegrations: presets,
       })
     ).toThrow("Unknown integration preset.");
+  });
+
+  it("refuses an authorization wildcard as a sidecar runtime model", () => {
+    expect(() => buildConfigureSnippet({
+      ...input,
+      model: "claude-*",
+      integration: "generic",
+      allowedIntegrations: presets,
+    })).toThrow("concrete model id");
   });
 });

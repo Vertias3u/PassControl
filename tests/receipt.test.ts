@@ -67,7 +67,7 @@ describe("receipt claims", () => {
     expect(claims.use).toEqual({ in: 11, out: 22 });
     expect(claims.cost).toBe(3300);
     expect(claims.res).toEqual({ status: "ok", http: 200 });
-    expect(claims.ver).toBe(RECEIPT_VER);
+    expect(claims.ver).toBe(1);
   });
 
   // A receipt is a historical record of something that happened. An `exp` would
@@ -103,6 +103,33 @@ describe("receipt claims", () => {
 
   it("omits the owner until one is bound", () => {
     expect((buildReceiptClaims(INPUT) as Record<string, unknown>).own ?? null).toBeNull();
+  });
+
+  it("keeps passport receipts on version 1 and identifies the passport exactly as before", () => {
+    const claims = buildReceiptClaims(INPUT) as Record<string, unknown>;
+    expect(claims.ver).toBe(1);
+    expect(claims.sub).toBe(INPUT.passportId);
+    expect(claims.vjti).toBe(INPUT.visaJti);
+    expect(claims.auth).toBeUndefined();
+  });
+
+  it("uses version 2 for a direct call without claiming a passport or visa", () => {
+    const claims = buildReceiptClaims({
+      ...INPUT,
+      authMethod: "direct_key",
+      agentAccessKeyId: "key-1",
+      credentialUseId: "use-1",
+      passportId: undefined,
+      visaJti: undefined,
+    }) as Record<string, any>;
+
+    expect(claims.ver).toBe(RECEIPT_VER);
+    expect(claims.ver).toBe(2);
+    expect(claims.sub).toBe(INPUT.agentId);
+    expect(claims.vjti).toBeUndefined();
+    expect(claims.auth).toEqual({ kind: "direct_key", kid: "key-1", use: "use-1" });
+    expect(JSON.stringify(claims)).not.toContain(INPUT.passportId);
+    expect(JSON.stringify(claims)).not.toContain(INPUT.visaJti);
   });
 });
 
@@ -174,6 +201,7 @@ describe("receipt versioning", () => {
   // break every deployed verifier. Additive-only, forward-compatible.
   it("declares a numeric version a verifier can range-check", () => {
     expect(typeof RECEIPT_VER).toBe("number");
-    expect((buildReceiptClaims(INPUT) as Record<string, unknown>).ver).toBe(RECEIPT_VER);
+    expect(RECEIPT_VER).toBe(2);
+    expect((buildReceiptClaims(INPUT) as Record<string, unknown>).ver).toBe(1);
   });
 });

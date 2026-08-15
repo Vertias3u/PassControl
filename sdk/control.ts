@@ -3,15 +3,20 @@
 // resources 1:1. Distinct from the data-plane client in ./passcontrol (visa
 // minting for agents); this manages the fleet.
 //
-//   import { ControlClient } from "passcontrol/control";
-//   const pc = new ControlClient({ gateway, apiKey: process.env.PC_API_KEY! });
+//   Load ControlClient from the package SDK export, then construct it with the
+//   gateway and a server-side developer API key.
 //   const agents = await pc.agents.list({ status: "active" });
 //
 // Responses are unwrapped (the API's `{ data }` envelope → the value); non-2xx
 // throws ControlApiError carrying the API error code + request id.
+import { requireGatewayOrigin } from "./gateway.js";
 
 export interface ControlClientOptions {
-  /** Gateway origin, e.g. https://gateway.example.com (no trailing slash). */
+  /**
+   * Gateway origin, e.g. https://gateway.example.com — scheme, host and optional
+   * port only. Validated at construction against the same bare-origin rule as
+   * `PassControl`; plain HTTP is accepted only on loopback. See ./gateway.
+   */
   gateway: string;
   /** Developer API key (`pc_…`). Keep server-side. */
   apiKey: string;
@@ -40,13 +45,30 @@ type Query = Record<string, string | number | undefined>;
 
 export class ControlClient {
   private readonly base: string;
-  private readonly apiKey: string;
+  /**
+   * A real `#private` field, not a TypeScript `private` one.
+   *
+   * `private` is erased at compile time: the key would be an ordinary own
+   * property, so `console.log(client)` and `JSON.stringify(client)` — the two
+   * things every debugging session and error reporter does to an object —
+   * would print a long-lived, tenant-wide control-plane credential. A `#` field
+   * is invisible to both.
+   */
+  readonly #apiKey: string;
   private readonly transport: typeof fetch;
 
   constructor(opts: ControlClientOptions) {
     if (!opts.gateway || !opts.apiKey) throw new Error("ControlClient: gateway and apiKey are required.");
-    this.base = opts.gateway.replace(/\/+$/, "") + "/api/control/v1";
-    this.apiKey = opts.apiKey;
+    // First, and before anything else in this constructor: the `pc_` key is
+    // long-lived, tenant-wide, and the only credential the control plane
+    // accepts, so `gateway` is not configuration — it decides who receives it.
+    // Validating here means an invalid value never reaches a stored base, never
+    // has the key held beside it, and never touches the default *or* a
+    // caller-supplied transport. The base is then built from the parsed origin,
+    // so no path material from the option survives into the request URL.
+    const origin = requireGatewayOrigin("ControlClient", opts.gateway);
+    this.base = `${origin}/api/control/v1`;
+    this.#apiKey = opts.apiKey;
     const f = opts.fetch ?? globalThis.fetch;
     if (!f) throw new Error("ControlClient: no fetch available; pass options.fetch.");
     this.transport = (...a: Parameters<typeof fetch>) => f(...a);
@@ -61,7 +83,7 @@ export class ControlClient {
     for (const [k, v] of Object.entries(opts.query ?? {})) {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
     }
-    const headers: Record<string, string> = { authorization: `Bearer ${this.apiKey}` };
+    const headers: Record<string, string> = { authorization: `Bearer ${this.#apiKey}` };
     if (opts.body !== undefined) headers["content-type"] = "application/json";
     if (opts.idempotencyKey) headers["idempotency-key"] = opts.idempotencyKey;
 

@@ -29,7 +29,7 @@
 --     as a verified one, because the page keys its wording off tier, not kind.
 --
 -- The difference is between a tenant identity LEAKING and an owner ASSERTING.
--- 0015's rule governs the first and is intact. See DECISIONS.md.
+-- 0015's rule governs the first and remains intact.
 -- ============================================================================
 
 -- Apply via scripts/migrate.sh, which ledgers each file in

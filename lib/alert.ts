@@ -24,6 +24,13 @@ const SEVERITY: Record<string, Severity> = {
   "auth.mfa.failed": "warning", // a wrong TOTP / recovery code at login step-up
   "killswitch.master": "critical", // platform-wide kill toggled (see fields.on)
   "agent.suspend": "warning", // an agent was suspended
+  // Which key can speak for an agent changed. An operator who did NOT do this
+  // needs to hear about it now — a rotation an attacker performs hands them the
+  // agent and locks the owner out at the end of the grace window.
+  "agent.passport_rotate": "critical",
+  // A deliberate hole in the capability model was opened. The whole
+  // justification for having break-glass is that nobody can take one quietly.
+  "agent.break_glass": "critical",
 };
 
 export function alertSeverity(event: string): Severity {

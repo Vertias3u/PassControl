@@ -149,6 +149,29 @@ describe("gateway accounting writes", () => {
     expect(insert.mock.calls[0]![0]).not.toHaveProperty("receipt");
   });
 
+  it("writes a direct identity without fabricating passport or visa fields", async () => {
+    insert.mockResolvedValue({ error: null });
+
+    await writeLog({
+      authMethod: "direct_key",
+      agentId: "agent-1",
+      userId: "user-1",
+      agentAccessKeyId: "key-1",
+      credentialUseId: "use-1",
+      status: "ok",
+    });
+
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        auth_method: "direct_key",
+        agent_access_key_id: "key-1",
+        credential_use_id: "use-1",
+        passport_id: null,
+        jti: null,
+      })
+    );
+  });
+
   it("reports a failed spend mirror RPC instead of dropping it", async () => {
     rpc.mockResolvedValue({ error: { message: "database unavailable" } });
 

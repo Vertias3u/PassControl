@@ -211,6 +211,189 @@ describe("verifying a domain claim", () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The claim that was CHECKED must be the claim that gets STAMPED.
+//
+// verifyOwnerDomain reads the row, then awaits an HTTPS fetch of a host the
+// owner chose — which the owner of that host controls the timing of, and can
+// hold open indefinitely. Anything the tenant does in that window changes the
+// row underneath the in-flight check. A write filtered only on `user_id` lands
+// on whatever row is there when it returns, not the one that was proven.
+//
+// The naive db() above cannot see this: its maybeSingle() ignores filters
+// entirely, so a conditional update and an unconditional one look identical to
+// it. These tests use a fake that actually honours .eq(), and assert on the
+// STORED ROW — the patch is still *sent* after the fix, it just must not match.
+// ─────────────────────────────────────────────────────────────────────────────
+function ledger(initial: Record<string, unknown> | null) {
+  const store: { row: Record<string, unknown> | null; writeError: unknown } = {
+    row: initial ? { ...initial } : null,
+    writeError: null,
+  };
+
+  const from = () => {
+    // Per-query, not per-table: readOwner's user_id filter must not be
+    // attributed to the update that follows it.
+    const filters: [string, unknown][] = [];
+    let op: { kind: "select" } | { kind: "update"; patch: Record<string, unknown> } | { kind: "upsert"; row: Record<string, unknown> } =
+      { kind: "select" };
+
+    const matches = () =>
+      store.row !== null && filters.every(([col, val]) => store.row![col] === val);
+
+    const b: Record<string, unknown> = {
+      select: () => b,
+      eq: (col: string, val: unknown) => {
+        filters.push([col, val]);
+        return b;
+      },
+      update: (patch: Record<string, unknown>) => {
+        op = { kind: "update", patch };
+        return b;
+      },
+      upsert: (row: Record<string, unknown>) => {
+        op = { kind: "upsert", row };
+        return b;
+      },
+      maybeSingle: async () => {
+        if (op.kind === "upsert") {
+          store.row = { ...op.row };
+          return { data: { ...store.row }, error: null };
+        }
+        if (op.kind === "update") {
+          if (store.writeError) return { data: null, error: store.writeError };
+          if (!matches()) return { data: null, error: null }; // row moved
+          store.row = { ...store.row, ...op.patch };
+          return { data: { ...store.row }, error: null };
+        }
+        return { data: matches() ? { ...store.row } : null, error: null };
+      },
+    };
+    return b;
+  };
+
+  return { db: { from } as never, store };
+}
+
+const BOUND_ROW = { user_id: "u1", ...OWNER_ROW, verification_token: "passcontrol-verify-A" };
+
+/** Start a check and pause it at the outbound fetch, the way a slow host would. */
+function heldCheck() {
+  let release!: (value: { ok: boolean; reason?: string }) => void;
+  let reached!: () => void;
+  const atTheFetch = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  h.verifyDomainMock.mockImplementation(() => {
+    reached();
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  });
+  return { atTheFetch, release: (r: { ok: boolean; reason?: string }) => release(r) };
+}
+
+describe("a check in flight cannot stamp a claim it never checked", () => {
+  // The exploit: hold acme.com's valid response open, re-point the binding at a
+  // domain nobody has proved anything about, then let the response land.
+  it("refuses to promote a claim that was replaced mid-check", async () => {
+    const { db, store } = ledger(BOUND_ROW);
+    const held = heldCheck();
+
+    const inFlight = verifyOwnerDomain(db, "u1");
+    await held.atTheFetch;
+
+    // The window. A Server Action is addressable by id, so a disabled button in
+    // the UI is not what stops this.
+    expect((await setOwner(db, "u1", { kind: "domain", subject: "evil.example" })).ok).toBe(true);
+
+    held.release({ ok: true });
+    const result = await inFlight;
+
+    expect(store.row).toMatchObject({ subject: "evil.example", tier: "unverified" });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.status).toBe(409);
+    expect(result.ok === false && result.code).toBe("owner_changed");
+  });
+
+  // The subtler half: the subject never changes, so a kind+subject filter would
+  // still match. Re-declaring resets the proof and issues a new token, and that
+  // reset is exactly what a stale success would undo.
+  it("refuses to promote the same domain re-declared mid-check", async () => {
+    const { db, store } = ledger({ ...BOUND_ROW, tier: "unverified" });
+    const held = heldCheck();
+
+    const inFlight = verifyOwnerDomain(db, "u1");
+    await held.atTheFetch;
+
+    await setOwner(db, "u1", { kind: "domain", subject: "acme.com" });
+    const reissued = store.row!.verification_token;
+    expect(reissued).not.toBe(BOUND_ROW.verification_token);
+
+    held.release({ ok: true });
+    const result = await inFlight;
+
+    expect(store.row).toMatchObject({ tier: "unverified", verification_token: reissued });
+    expect(result.ok === false && result.code).toBe("owner_changed");
+  });
+
+  // Failure is conditioned too: a stale failure must not spend one of the three
+  // strikes belonging to a binding that was never checked.
+  it("refuses to charge a failure to a claim that was replaced mid-check", async () => {
+    const { db, store } = ledger({ ...BOUND_ROW, tier: "domain", failure_count: 2 });
+    const held = heldCheck();
+
+    const inFlight = verifyOwnerDomain(db, "u1");
+    await held.atTheFetch;
+    await setOwner(db, "u1", { kind: "domain", subject: "evil.example" });
+
+    held.release({ ok: false, reason: "not_published" });
+    const result = await inFlight;
+
+    expect(store.row).toMatchObject({ failure_count: 0, tier: "unverified" });
+    expect(result.ok === false && result.code).toBe("owner_changed");
+  });
+
+  it("still promotes the claim it actually checked", async () => {
+    const { db, store } = ledger(BOUND_ROW);
+    h.verifyDomainMock.mockResolvedValue({ ok: true });
+
+    const result = await verifyOwnerDomain(db, "u1");
+
+    expect(result.ok).toBe(true);
+    expect(store.row).toMatchObject({
+      subject: "acme.com",
+      tier: "domain",
+      verification_token: BOUND_ROW.verification_token,
+    });
+  });
+
+  it("still counts a failure against the claim it actually checked", async () => {
+    const { db, store } = ledger({ ...BOUND_ROW, tier: "domain", failure_count: 1 });
+    h.verifyDomainMock.mockResolvedValue({ ok: false, reason: "unreachable" });
+
+    const result = await verifyOwnerDomain(db, "u1");
+
+    expect(result.ok).toBe(true);
+    expect(store.row).toMatchObject({ tier: "domain", failure_count: 2 });
+  });
+
+  // A database that is down is not a row that moved. Reporting one as the other
+  // would tell an operator their binding changed when nothing of the sort
+  // happened, and would hide a real outage.
+  it("reports a genuine write failure as a failure, not a conflict", async () => {
+    h.verifyDomainMock.mockResolvedValue({ ok: true });
+    const { db, store } = ledger(BOUND_ROW);
+    store.writeError = { code: "57P01" };
+
+    const result = await verifyOwnerDomain(db, "u1");
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.status).toBe(500);
+    expect(result.ok === false && result.code).toBe("write_failed");
+  });
+});
+
 describe("a cache blip never fails a write that landed", () => {
   // The database write is durable; the cache purge is not. Throwing here would
   // return 500 for a mutation that actually succeeded, so the caller retries a

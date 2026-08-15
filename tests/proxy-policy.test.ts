@@ -72,6 +72,7 @@ vi.mock("@/lib/observability", () => ({
 }));
 
 import { POST } from "@/app/api/v1/[provider]/[...path]/route";
+import { shadowRevision, stampShadowVerdict } from "@/lib/policy-shadow";
 
 const baseClaims = {
   sub: "passport-id",
@@ -94,14 +95,19 @@ function request(provider = "openai", model = "gpt-4.1") {
   });
 }
 
+// `shadow` is the candidate policy an operator is trialling. The cache entry
+// carries both values because they come from one row read — putting a second
+// round-trip on the credential path for a decision that decides nothing would
+// be the wrong trade, and the shape is what makes that avoidable.
 async function callProxy(
   policy: unknown,
   claims: typeof baseClaims = baseClaims,
   provider = "openai",
-  model = "gpt-4.1"
+  model = "gpt-4.1",
+  shadow: unknown = null
 ) {
   verifyVisaMock.mockResolvedValueOnce(claims);
-  getCachedAgentPolicyMock.mockResolvedValueOnce(JSON.stringify(policy));
+  getCachedAgentPolicyMock.mockResolvedValueOnce(JSON.stringify({ p: policy, s: shadow ?? null }));
   return POST(request(provider, model), {
     params: Promise.resolve({ provider, path: ["chat", "completions"] }),
   });
@@ -139,7 +145,7 @@ beforeEach(() => {
   reconcileBudgetMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue("provider-key");
   setCachedKeyMock.mockResolvedValue(undefined);
-  getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({}));
+  getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   setCachedAgentPolicyMock.mockResolvedValue(undefined);
   readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
@@ -348,12 +354,151 @@ describe("proxy agent policy", () => {
     expect(res.status).toBe(200);
     expect(filters).toContainEqual(["user_id", "tenant-a"]);
     expect(filters).toContainEqual(["id", "agent-a"]);
+
+    // ONE row read carries both the live policy and the shadow candidate. This
+    // is the whole reason shadow mode costs nothing on the credential path — a
+    // separate read for the shadow value would be a second round-trip on the
+    // way to a provider key, for a decision that decides nothing.
+    expect(builder.select).toHaveBeenCalledWith("policy, policy_shadow");
+
+    // Cached together for the same reason, so a cache HIT is also one round
+    // trip. `s: null` is a real value meaning "shadow mode is off".
     expect(setCachedAgentPolicyMock).toHaveBeenCalledWith(
       "tenant-a",
       "agent-a",
-      "null",
+      JSON.stringify({ p: null, s: null }),
       60
     );
+  });
+
+  // A deployment that has not applied 0020 has no `policy_shadow` column.
+  //
+  // PostgREST does NOT answer such a request with a row that simply lacks the
+  // property — it rejects the ENTIRE query. Verified against the running local
+  // stack on 2026-08-08 with the anon key:
+  //
+  //   GET /rest/v1/agents?select=policy,does_not_exist_col  →  HTTP 400
+  //   {"code":"42703","details":null,"hint":null,
+  //    "message":"column agents.does_not_exist_col does not exist"}
+  //
+  // So the live policy has to survive the shadow column being absent. It is the
+  // deny rules of the whole fleet that are at stake: an unreadable row is
+  // POLICY_UNREADABLE, and POLICY_UNREADABLE on the default (fail-open) posture
+  // permits exactly the calls the operator wrote a policy to refuse. The
+  // previous fixture here modelled an omitted property, which PostgREST cannot
+  // produce, and that is why this passed.
+  // One PostgREST that has `policy` but not `policy_shadow`, i.e. a database at
+  // 0019 or earlier. Unrelated reads on this client (the owner lookup) answer
+  // empty and are not recorded, so `policySelects` is the policy read alone.
+  function pre0020Client(policy: unknown) {
+    const policySelects: string[] = [];
+    let columns = "";
+    const builder = {
+      select: vi.fn((requested: string) => {
+        columns = requested;
+        if (requested.includes("policy")) policySelects.push(requested);
+        return builder;
+      }),
+      eq: vi.fn(() => builder),
+      maybeSingle: vi.fn(async () => {
+        if (columns.includes("policy_shadow")) {
+          return {
+            data: null,
+            error: {
+              code: "42703",
+              details: null,
+              hint: null,
+              message: "column agents.policy_shadow does not exist",
+            },
+          };
+        }
+        if (columns === "policy") return { data: { policy }, error: null };
+        return { data: null, error: null };
+      }),
+    };
+    serviceClientMock.mockReturnValue({
+      from: vi.fn(() => builder),
+      rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
+    });
+    return policySelects;
+  }
+
+  it("still enforces the live deny policy when policy_shadow does not exist", async () => {
+    const denyAll = { deny: [{ provider: "openai", models: ["*"] }] };
+    const policySelects = pre0020Client(denyAll);
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(null);
+
+    const res = await POST(request(), {
+      params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "blocked_policy" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // The two-column read is still what runs FIRST, so a current schema keeps
+    // paying for exactly one round trip. The narrowed retry is the fallback.
+    expect(policySelects).toEqual(["policy, policy_shadow", "policy"]);
+
+    // Shadow mode is off, not broken: there is no such thing as an unreadable
+    // shadow policy, because an unreadable one simply does not run.
+    expect(setCachedAgentPolicyMock).toHaveBeenCalledWith(
+      "tenant-a",
+      "agent-a",
+      JSON.stringify({ p: denyAll, s: null }),
+      60
+    );
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ policyShadowWould: expect.anything() })
+    );
+  });
+
+  // The same absence with no policy stored: the call goes through, and nothing
+  // about shadow mode is recorded.
+  it("treats a pre-0020 schema as shadow mode off, not as an error", async () => {
+    pre0020Client(null);
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(null);
+
+    const res = await POST(request(), {
+      params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ policyShadowWould: expect.anything() })
+    );
+  });
+
+  // A read that fails for a reason OTHER than the missing column must not be
+  // retried into a narrower query — it is an infrastructure fault, and the
+  // deliberate fail-open posture (with POLICY_FAIL_CLOSED to opt out) is what
+  // handles it. Retrying would double the load on a database already in trouble.
+  it("does not retry a genuine read failure as a narrower query", async () => {
+    const policySelects: string[] = [];
+    const builder = {
+      select: vi.fn((columns: string) => {
+        if (columns.includes("policy")) policySelects.push(columns);
+        return builder;
+      }),
+      eq: vi.fn(() => builder),
+      maybeSingle: vi.fn(async () => ({ data: null, error: { message: "timeout" } })),
+    };
+    serviceClientMock.mockReturnValue({
+      from: vi.fn(() => builder),
+      rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
+    });
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(null);
+
+    const res = await POST(request(), {
+      params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
+    });
+
+    expect(res.status).toBe(200); // fail-open, as documented
+    expect(policySelects).toEqual(["policy, policy_shadow"]);
+    expect(setCachedAgentPolicyMock).not.toHaveBeenCalled();
   });
 
   it("enforces policy on the demo path as part of its real governance pipeline", async () => {
@@ -374,5 +519,246 @@ describe("proxy agent policy", () => {
     expect(await res.json()).toEqual({ error: "blocked_policy" });
     expect(reserveBudgetMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Shadow mode ──────────────────────────────────────────────────────────────
+//
+// A candidate policy evaluated on every real call that decides nothing. The
+// feature is only worth having if that second half is airtight, so these tests
+// are the second half.
+describe("policy shadow mode", () => {
+  const DENY_ALL_OPENAI = { deny: [{ provider: "openai", models: ["*"] }] };
+
+  // The headline property. A shadow policy that would refuse this call must
+  // change nothing an agent or a caller can observe.
+  it("never changes the response, even when it would have denied", async () => {
+    const withoutShadow = await callProxy({});
+    const forwardedWithout = fetchMock.mock.calls.length;
+
+    const withShadow = await callProxy({}, baseClaims, "openai", "gpt-4.1", DENY_ALL_OPENAI);
+
+    expect(withoutShadow.status).toBe(200);
+    expect(withShadow.status).toBe(200);
+    expect(await withShadow.json()).toEqual(await withoutShadow.json());
+    // The call still went upstream. A shadow deny that quietly skipped the
+    // provider would be enforcement wearing a diagnostic's name.
+    expect(fetchMock.mock.calls.length).toBe(forwardedWithout + 1);
+    expect(reserveBudgetMock).toHaveBeenCalled();
+  });
+
+  /**
+   * The recorded value names the DRAFT as well as the verdict. Without that,
+   * the dashboard has to attribute a verdict to a draft by when the row landed
+   * — and a long streaming request that read the previous draft lands after the
+   * next one's save. The revision is derived from the draft, so it is asserted
+   * by deriving it here rather than by pasting a hash.
+   */
+  it("records what the shadow policy would have done, stamped with which draft said so", async () => {
+    await callProxy({}, baseClaims, "openai", "gpt-4.1", DENY_ALL_OPENAI);
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        policyShadowWould: stampShadowVerdict("deny:policy", shadowRevision(DENY_ALL_OPENAI)),
+        status: "ok",
+      })
+    );
+
+    writeLogMock.mockClear();
+    await callProxy({}, baseClaims, "openai", "gpt-4.1", {});
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        policyShadowWould: stampShadowVerdict("allow", shadowRevision({})),
+      })
+    );
+  });
+
+  // Two drafts that differ must not be recorded under the same name.
+  it("stamps a different draft with a different revision", async () => {
+    await callProxy({}, baseClaims, "openai", "gpt-4.1", DENY_ALL_OPENAI);
+    const first = writeLogMock.mock.calls.at(-1)?.[0].policyShadowWould;
+
+    writeLogMock.mockClear();
+    await callProxy({}, baseClaims, "openai", "gpt-4.1", {
+      deny: [{ provider: "openai", models: ["gpt-3*"] }],
+    });
+    const second = writeLogMock.mock.calls.at(-1)?.[0].policyShadowWould;
+
+    expect(first).not.toBe(second);
+  });
+
+  // The reverse divergence: the live policy denies, the shadow one would not.
+  // Recorded on the blocked row, or an operator loosening a rule has no way to
+  // see that it works.
+  it("records a would-allow on a call the live policy blocked", async () => {
+    const res = await callProxy(DENY_ALL_OPENAI, baseClaims, "openai", "gpt-4.1", {});
+
+    expect(res.status).toBe(403);
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "blocked_policy",
+        policyShadowWould: stampShadowVerdict("allow", shadowRevision({})),
+      })
+    );
+  });
+
+  // THE COUNTER GUARD. rateLimit() mutates. A shadow evaluation that took its
+  // own reading would consume the operator's hourly cap twice as fast for
+  // having switched shadow mode on — observing the system would change it.
+  it("charges the hourly counter exactly once with shadow mode on", async () => {
+    const policyKeys: string[] = [];
+    rateLimitMock.mockImplementation(async (key: string) => {
+      if (key.startsWith("policy-hour:")) policyKeys.push(key);
+      return { success: true, remaining: 5 };
+    });
+
+    await callProxy({ max_requests_per_hour: 10 }, baseClaims, "openai", "gpt-4.1", {
+      max_requests_per_hour: 1,
+    });
+
+    expect(policyKeys).toEqual(["policy-hour:tenant-a:agent-a"]);
+  });
+
+  // ── The cap the reading was taken FOR ─────────────────────────────────────
+  //
+  // The counter guard above says the reading is taken once. It does not say the
+  // reading answers the draft's question. `rateLimit(key, limit, window)` decides
+  // success against the LIVE limit, so a `{success:true}` read for a cap of 10
+  // says nothing at all about a draft that caps at 1 — and a draft that caps
+  // anything when the live policy caps nothing has no reading in existence.
+  //
+  // Recording "allow" in either case is a confident false statement about the
+  // one thing the operator is trialling. No verdict is the honest answer, and
+  // taking a second reading is not an option: it would charge the counter twice.
+  const noVerdict = () =>
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ policyShadowWould: expect.anything() })
+    );
+
+  it("records no verdict for a draft cap the live policy never counted", async () => {
+    const policyKeys: string[] = [];
+    rateLimitMock.mockImplementation(async (key: string) => {
+      if (String(key).startsWith("policy-hour:")) policyKeys.push(String(key));
+      return { success: true, remaining: 5 };
+    });
+
+    await callProxy({}, baseClaims, "openai", "gpt-4.1", { max_requests_per_hour: 1 });
+
+    // No live cap means no counter was read at all — and observing the draft
+    // must not create one.
+    expect(policyKeys).toEqual([]);
+    noVerdict();
+  });
+
+  it("records no verdict when the draft's cap differs from the live one", async () => {
+    rateLimitMock.mockResolvedValue({ success: true, remaining: 5 });
+
+    await callProxy({ max_requests_per_hour: 10 }, baseClaims, "openai", "gpt-4.1", {
+      max_requests_per_hour: 1,
+    });
+
+    noVerdict();
+  });
+
+  // The other half: when the caps DO match, the reading the live gate took is
+  // exactly the evidence the draft needs, and suppressing the verdict there
+  // would throw away the measurement the feature exists to make.
+  it("judges a matching draft cap against the reading already taken", async () => {
+    const policyKeys: string[] = [];
+    rateLimitMock.mockImplementation(async (key: string) => {
+      if (String(key).startsWith("policy-hour:")) policyKeys.push(String(key));
+      return { success: true, remaining: 5 };
+    });
+
+    await callProxy({ max_requests_per_hour: 10 }, baseClaims, "openai", "gpt-4.1", {
+      max_requests_per_hour: 10,
+    });
+
+    expect(policyKeys).toEqual(["policy-hour:tenant-a:agent-a"]);
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({ policyShadowWould: expect.stringMatching(/^allow(@|$)/) })
+    );
+  });
+
+  it("records the draft's deny when a matching cap is exhausted", async () => {
+    // Only the POLICY counter is exhausted. Failing the proxy's own request-rate
+    // limiter as well would return 429 before any row is written, and this test
+    // would pass for the wrong reason.
+    rateLimitMock.mockImplementation(async (key: string) =>
+      String(key).startsWith("policy-hour:")
+        ? { success: false, remaining: 0 }
+        : { success: true, remaining: 1 }
+    );
+
+    const res = await callProxy({ max_requests_per_hour: 10 }, baseClaims, "openai", "gpt-4.1", {
+      max_requests_per_hour: 10,
+    });
+
+    expect(res.status).toBe(429);
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "blocked_policy",
+        policyShadowWould: expect.stringMatching(/^deny:policy(@|$)/),
+      })
+    );
+  });
+
+  // A deny rule is decided before the cap is ever consulted, so a draft that
+  // denies on a rule still gets a verdict even though its cap has no reading.
+  it("still records a rule deny from a draft whose cap has no reading", async () => {
+    await callProxy({}, baseClaims, "openai", "gpt-4.1", {
+      deny: [{ provider: "openai", models: ["*"] }],
+      max_requests_per_hour: 1,
+    });
+
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({ policyShadowWould: expect.stringMatching(/^deny:policy(@|$)/) })
+    );
+  });
+
+  // Diagnostics must not be able to fail a credential-path call. A shadow value
+  // that no reader can make sense of is inert, which is the opposite posture
+  // from the LIVE policy — that one fails closed, and deliberately so.
+  it.each([
+    ["a bare string", "deny everything"],
+    ["an array", [1, 2, 3]],
+    ["an unknown key", { sudo: true }],
+    ["a number", 42],
+  ])("is inert when the shadow policy is %s", async (_label, shadow) => {
+    const res = await callProxy({}, baseClaims, "openai", "gpt-4.1", shadow);
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalled();
+    // Malformed reaches the policy step and denies THERE, so it is honestly
+    // recorded as such — the operator should see that their draft is broken.
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        policyShadowWould: stampShadowVerdict("deny:policy", shadowRevision(shadow)),
+      })
+    );
+  });
+
+  // An earlier gate denying means the shadow policy was never reached. Its
+  // "deny" would be someone else's refusal attributed to the rule being
+  // trialled — which is exactly the number an operator would promote on.
+  it("records nothing when an earlier gate decided the call", async () => {
+    readKillStateMock.mockResolvedValue({
+      platformKill: true,
+      tenantKill: false,
+      denylist: [],
+    });
+
+    const res = await callProxy({}, baseClaims, "openai", "gpt-4.1", DENY_ALL_OPENAI);
+
+    expect(res.status).toBe(403);
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ policyShadowWould: expect.anything() })
+    );
+  });
+
+  it("records nothing when shadow mode is off", async () => {
+    await callProxy({});
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ policyShadowWould: expect.anything() })
+    );
   });
 });

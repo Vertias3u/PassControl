@@ -150,6 +150,25 @@ describe("integration presets", () => {
     expect(SIDECAR_PRESETS.filter((p) => MCP_PRESETS.includes(p))).toEqual([]);
     expect(new Set(INTEGRATIONS).size).toBe(INTEGRATIONS.length);
   });
+
+  it("prints Hermes's current custom-provider YAML without a provider key", async () => {
+    const { out } = await runCli(["env", "hermes", "--provider", "openai", "--model", "gpt-5-mini"]);
+    expect(out).toContain("Hermes Agent custom provider");
+    expect(out).toContain("provider: custom");
+    expect(out).toContain('base_url: "http://127.0.0.1:8788/api/v1/openai/v1"');
+    expect(out).toContain('api_key: "passcontrol"');
+    expect(out).not.toContain("OPENAI_BASE_URL");
+  });
+
+  it("rejects a non-numeric port before printing a copyable sidecar command", async () => {
+    const { out } = await runCli(
+      ["env", "hermes", "--provider", "openai", "--model", "gpt-5-mini", "--port", "8788; id"],
+      { expectFailure: true }
+    );
+    expect(out).toContain("--port must be an integer from 1 to 65535");
+    expect(out).not.toContain("Start the bridge first");
+    expect(out).not.toContain("sidecar --port 8788; id");
+  });
 });
 
 describe("configure --write", () => {

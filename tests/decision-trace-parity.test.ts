@@ -57,8 +57,18 @@ vi.mock("@/lib/state/redis", () => ({
   seedSpent: (...a: unknown[]) => h.seedSpentMock(...a),
   claimNonce: (...a: unknown[]) => h.claimNonceMock(...a),
 }));
+// Both readers, driven by ONE mock. The trace takes the live policy alone; the
+// proxy takes the pair. Letting them diverge here would let this file report
+// parity between a proxy and a trace that had been told different things —
+// which is the single thing it exists to rule out. `shadow: null` throughout:
+// shadow mode must not be able to move a verdict, so parity is asserted with it
+// off, and tests/proxy-policy.test.ts is where it is asserted with it on.
 vi.mock("@/lib/state/policy", () => ({
   readCurrentAgentPolicy: (...a: unknown[]) => h.readCurrentAgentPolicyMock(...a),
+  readCurrentAgentPolicyAndShadow: async (...a: unknown[]) => ({
+    policy: await h.readCurrentAgentPolicyMock(...a),
+    shadow: null,
+  }),
 }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => h.serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({

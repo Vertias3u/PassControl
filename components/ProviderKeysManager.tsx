@@ -5,11 +5,13 @@
 import { useState, useTransition } from "react";
 import { addProviderKey } from "@/app/dashboard/actions";
 import { PROVIDERS } from "@/lib/providers";
+import { CheckCircle2, Eye, EyeOff, LockKeyhole } from "lucide-react";
 
 export function ProviderKeysManager() {
   const [provider, setProvider] = useState("anthropic");
   const [label, setLabel] = useState("");
   const [key, setKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [pending, start] = useTransition();
 
@@ -27,41 +29,55 @@ export function ProviderKeysManager() {
     });
 
   return (
-    <div className="grid" style={{ gap: 8 }}>
-      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-        <select
-          value={provider}
-          onChange={(e) => setProvider(e.target.value)}
-          style={{ width: "auto" }}
-        >
-          {PROVIDERS.map((p) => (
-            <option key={p} value={p}>
-              {p}
-            </option>
-          ))}
-        </select>
-        <input
-          placeholder="label (optional)"
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          style={{ flex: 1, minWidth: 120 }}
-        />
-      </div>
-      <input
-        type="password"
-        placeholder="Provider API key (e.g. sk-ant-…)"
-        value={key}
-        onChange={(e) => setKey(e.target.value)}
-        autoComplete="off"
-      />
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <span className="muted">Encrypted in Supabase Vault — never shown again.</span>
-        <button disabled={!key || pending} onClick={submit}>
-          {pending ? "Storing…" : "Add key"}
-        </button>
+    <div className="pc-settings-manager">
+      <div className="pc-settings-form">
+        <div className="pc-settings-form__row">
+          <label className="pc-field">
+            <span>Provider</span>
+            <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+              {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </label>
+          <label className="pc-field">
+            <span>Vault label</span>
+            <input placeholder="production" value={label} onChange={(e) => setLabel(e.target.value)} autoComplete="off" />
+            <small>Use a name that identifies the account or environment.</small>
+          </label>
+        </div>
+        <label className="pc-field">
+          <span>Provider API key</span>
+          <span className="pc-password-field">
+            <input
+              type={showKey ? "text" : "password"}
+              placeholder="Paste the provider credential"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              autoComplete="new-password"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              className="pc-password-field__toggle"
+              aria-label={showKey ? "Hide provider key" : "Show provider key"}
+              aria-pressed={showKey}
+              onClick={() => setShowKey((value) => !value)}
+            >
+              {showKey ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+            </button>
+          </span>
+          <small>The key is encrypted in Supabase Vault and is never shown again.</small>
+        </label>
+        <div className="pc-settings-form__actions">
+          <span><LockKeyhole aria-hidden="true" /> Plaintext exists only for this write.</span>
+          <button disabled={!key || pending} onClick={submit}>
+            {pending ? "Storing securely…" : "Store in Vault"}
+          </button>
+        </div>
       </div>
       {msg && (
-        <p style={{ color: msg.ok ? "var(--green)" : "var(--red)", margin: 0 }}>{msg.text}</p>
+        <p className={msg.ok ? "pc-inline-notice is-success" : "pc-inline-notice is-danger"} role={msg.ok ? "status" : "alert"}>
+          {msg.ok ? <CheckCircle2 aria-hidden="true" /> : null}{msg.text}
+        </p>
       )}
     </div>
   );
