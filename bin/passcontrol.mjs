@@ -25,6 +25,7 @@ import {
   redact,
   requireControlApiKey,
   requireControlGateway,
+  operatorEnv,
   requirePassportGateway,
   requirePassport,
   step,
@@ -145,7 +146,8 @@ ${heading("Operate")}
                                  show active config and instance state
   ${cmd} doctor [--deep] [--fix]  diagnose setup and repair a stopped dashboard
   ${cmd} call "hi"                mint a visa and make a governed model call
-  ${cmd} sidecar [--port 8788]    start the local agent bridge
+  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]]
+                                 start the local agent bridge
 
 ${heading("Manage")}
   ${cmd} agent list [--json]      list agents
@@ -1562,6 +1564,21 @@ async function sidecarCommand(rest, opts) {
     passportSecret,
     port: sidecarPort(opts),
     host: String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1"),
+    // Named on the command line, never inferred. A sidecar reachable off-host
+    // mints visas for whoever connects, so widening the bind is a decision the
+    // operator states rather than one a config value makes quietly.
+    allowNonLoopback: Boolean(opts.allowNonLoopback),
+    // Hosts the agent may CONNECT-tunnel to, beyond the gateway itself. Provider
+    // hosts are never eligible — see cli/proxy-policy.mjs.
+    //
+    // `operatorEnv`, not `process.env`, for the same reason `allowNonLoopback`
+    // above takes no environment fallback at all: this is an egress control. A
+    // `.passcontrol` that travels with a cloned repository was able to add tunnel
+    // destinations to a sidecar started with no flags, and say nothing about it.
+    allowConnectHosts: String(opts.allowConnect ?? operatorEnv("SIDECAR_ALLOW_CONNECT") ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
     refreshSkewSeconds: Number(opts.refreshSkewSeconds ?? process.env.REFRESH_SKEW_SECONDS ?? 30),
   });
 

@@ -196,6 +196,15 @@ export ANTHROPIC_BASE_URL="http://127.0.0.1:8788/api/v1/anthropic"   # or /api/v
 export ANTHROPIC_API_KEY="passcontrol"   # ignored — the sidecar injects a live visa
 ```
 
+**Why not `HTTPS_PROXY`?** Because governing a `CONNECT` tunnel means terminating its TLS,
+which means installing a certificate authority on your machine that can impersonate any
+site to any program trusting it. PassControl exists to get a one-provider secret *off* your
+machine; installing a broader one to save an environment variable is the wrong trade. So
+the sidecar answers `HTTPS_PROXY` honestly instead of silently: a `CONNECT` to a provider
+is **refused** with the base URL to use, never quietly tunnelled into a call that looks
+governed and is not. It also refuses every other host — it is not an open proxy — and
+`--allow-connect <host>` names exceptions, which can never be a provider.
+
 The agent never holds a real key or a long-lived token. Presets ship for coding agents
 (**openhands, aider, cline, continue, litellm**), for the desktop chat apps you would otherwise
 paste a raw provider key into (**chatbox, jan, msty, cherry-studio, open-webui, librechat**), and

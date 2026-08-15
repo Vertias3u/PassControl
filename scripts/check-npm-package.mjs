@@ -45,6 +45,10 @@ const allowed = new Set([
   "cli/mcp/README.md",
   "cli/mcp/server.mjs",
   "cli/presets.mjs",
+  // The sidecar's destination policy. Ships because the sidecar refuses to load
+  // without it, and because it is the file that decides which hosts a proxied
+  // agent may reach — the reviewable half of "PassControl is not an open proxy".
+  "cli/proxy-policy.mjs",
   "cli/sidecar.mjs",
   "cli/visa-client.mjs",
   "sdk/README.md",

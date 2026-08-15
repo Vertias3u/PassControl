@@ -134,14 +134,42 @@ export function loadConfigSources({ cwd = process.cwd(), env = process.env } = {
   return sources;
 }
 
+/**
+ * Keys that arrived from a `.passcontrol` FILE rather than the operator's shell.
+ *
+ * A config file is checked in and travels with a repository, so for anything
+ * security-relevant "the environment says so" and "the operator said so" are not
+ * the same statement. Recorded at injection time rather than derived afterwards:
+ * a key present in BOTH the shell and a file keeps its shell value below, and
+ * that value is the operator's — so asking the file later would wrongly disown it.
+ */
+export const configInjectedKeys = new Set();
+
 export function applyConfigSourcesToEnv({ cwd = process.cwd(), env = process.env } = {}) {
   const sources = loadConfigSources({ cwd, env });
   const merged = {};
   for (const source of sources) Object.assign(merged, source.values);
   for (const [key, value] of Object.entries(merged)) {
-    if (env[key] === undefined) env[key] = value;
+    if (env[key] === undefined) {
+      env[key] = value;
+      configInjectedKeys.add(key);
+    }
   }
   return sources;
+}
+
+/**
+ * Read an environment variable ONLY if the operator set it.
+ *
+ * For an egress or credential control, a value a cloned repository's
+ * `.passcontrol` dropped into the environment must not stand in for a decision
+ * the operator made. Everything else — `MODEL`, `SIDECAR_PORT`, `PROMPT` — is
+ * still perfectly good to configure from a file and goes on reading `process.env`
+ * directly; this is deliberately opt-in per key rather than a blanket filter,
+ * because narrowing what a config file may set would break ordinary use.
+ */
+export function operatorEnv(key, { env = process.env, injected = configInjectedKeys } = {}) {
+  return injected.has(key) ? undefined : env[key];
 }
 
 export let configLoadError = null;
