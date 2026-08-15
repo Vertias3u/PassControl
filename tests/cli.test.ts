@@ -193,7 +193,11 @@ describe("passcontrol CLI", () => {
     const start = source.indexOf("function checkDockerDaemon");
     const body = source.slice(start, source.indexOf("function checkSupabaseInstalled", start));
     expect(body).toContain('execFileSync("docker", ["info"]');
-    expect(body).toMatch(/timeout:\s*2_000/);
+    // A bound must exist — that is this test's whole point. The VALUE is pinned
+    // separately (see "waits long enough for a cold daemon"), because asserting
+    // an exact 2_000 here turned a tuning decision into a contract, and that
+    // number was too small: it reported "not running" about a cold daemon.
+    expect(body).toMatch(/timeout:\s*[0-9_]+/);
   });
 
   it("refuses to clone the app into a non-empty directory", async () => {
@@ -570,4 +574,36 @@ describe("passcontrol CLI", () => {
       stderr: expect.stringContaining("No control-plane API key configured."),
     });
   }, 10000);
+});
+
+// `passcontrol setup` is the first command a new user runs, and its Docker probe
+// decides whether onboarding proceeds. The probe is bounded on purpose — Docker
+// Desktop can leave its socket present while the engine is wedged, and a
+// diagnostic must not hang forever. But the bound was 2s, which a COLD daemon
+// exceeds routinely: it turned the public repo's `local-smoke` CI job red on an
+// ubuntu runner that had Docker available the whole time, reporting "not
+// running" about a daemon that was merely starting.
+//
+// So the probe must stay bounded AND stay generous, and it must not describe a
+// timeout as if it were a stopped daemon — those need different fixes from the
+// person reading the line.
+describe("the Docker daemon probe in setup/doctor", () => {
+  const source = readFileSync(CLI, "utf8");
+
+  it("waits long enough for a cold daemon, while still being bounded", () => {
+    const probe = source.slice(source.indexOf("function checkDockerDaemon"));
+    const timeout = probe.match(/timeout:\s*([0-9_]+)/)?.[1]?.replace(/_/g, "");
+    expect(timeout, "the docker info probe must declare a timeout").toBeDefined();
+    expect(Number(timeout)).toBeGreaterThanOrEqual(10_000);
+    expect(Number(timeout)).toBeLessThanOrEqual(60_000);
+  });
+
+  it("tells a timeout apart from a daemon that is actually down", () => {
+    const probe = source.slice(
+      source.indexOf("function checkDockerDaemon"),
+      source.indexOf("function checkSupabaseInstalled")
+    );
+    expect(probe).toMatch(/ETIMEDOUT|error\?\.code|\.code ===/);
+    expect(probe).toMatch(/did not respond/i);
+  });
 });

@@ -430,13 +430,26 @@ function checkDockerDaemon() {
   try {
     // Docker Desktop can leave its CLI socket present while the engine is
     // wedged. A diagnostic command must report that state, not hang every
-    // onboarding/release check indefinitely.
-    execFileSync("docker", ["info"], { stdio: "ignore", timeout: 2_000 });
+    // onboarding/release check indefinitely — hence a bound.
+    //
+    // The bound is generous because the failure it must not cause is worse than
+    // the one it prevents. At 2s this reported "not running" about a daemon that
+    // was merely COLD: it failed the public repo's local-smoke CI job on a runner
+    // where Docker was available throughout, and it would tell a first-time user
+    // on a slow laptop to go start something already running. A wedged engine
+    // still gets caught; it just takes fifteen seconds to say so.
+    execFileSync("docker", ["info"], { stdio: "ignore", timeout: 15_000 });
     return { ok: true, message: "Docker daemon: running." };
-  } catch {
+  } catch (error) {
+    // A timeout and a stopped daemon need different things from the reader, so
+    // they must not share a sentence. `execFileSync` surfaces the timeout kill as
+    // ETIMEDOUT, or as the signal it used when the platform reports no code.
+    const timedOut = error?.code === "ETIMEDOUT" || error?.signal === "SIGTERM";
     return {
       ok: false,
-      message: "Docker daemon: not running. Fix: start Docker Desktop and wait for the engine to become ready.",
+      message: timedOut
+        ? "Docker daemon: did not respond within 15s. The engine may still be starting — wait and re-run. If it persists, Docker is wedged: restart Docker Desktop."
+        : "Docker daemon: not running. Fix: start Docker Desktop and wait for the engine to become ready.",
     };
   }
 }
