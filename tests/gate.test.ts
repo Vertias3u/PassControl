@@ -158,3 +158,57 @@ describe("shared ordered gate evaluator", () => {
     });
   });
 });
+
+// ── Skipping scope may never let a model-bound call through ──────────────────
+//
+// `isModelListing` decides whether the per-model scope check is skipped, and it
+// now also covers `GET /v1/models/{id}`. That breadth is safe ONLY because the
+// endpoint step runs after scope in the same evaluation and always consults the
+// real allowlist — so a skipped scope can co-occur with an allowed endpoint just
+// for the GET forms, which carry no model. If that ordering, or the allowlist's
+// GET-only rule, ever changed, this would become a scope bypass: a POST carrying
+// an out-of-scope model under a `models/…` path.
+describe("the model-listing scope exemption cannot become a bypass", () => {
+  const outOfScope = (method: string, path: string[]): GateInput =>
+    allowedInput({
+      method,
+      path,
+      // Deliberately outside the visa's "gpt-4*" scope.
+      model: "claude-haiku-4-5-20251001",
+    });
+
+  it("skips scope for the GET retrieve, and still admits it", () => {
+    const gate = evaluateGate(outOfScope("GET", ["v1", "models", "claude-haiku-4-5-20251001"]));
+    expect(gate.steps.find((s) => s.name === "scope")?.status).toBe("skipped");
+    expect(gate.deniedBy).toBeUndefined();
+  });
+
+  it("denies a POST to the same path at the endpoint step", () => {
+    // Scope is skipped here too — the endpoint allowlist is what refuses it, and
+    // that is the whole load-bearing assumption.
+    const gate = evaluateGate(outOfScope("POST", ["v1", "models", "claude-haiku-4-5-20251001"]));
+    expect(gate.deniedBy).toBe("endpoint");
+  });
+
+  it("denies every non-GET method under a models path", () => {
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      const gate = evaluateGate(outOfScope(method, ["v1", "models", "anything"]));
+      expect(gate.deniedBy, `${method} must not pass`).toBe("endpoint");
+    }
+  });
+
+  it("still enforces scope on a real chat call", () => {
+    // The exemption must not have leaked to the model-bound path.
+    const gate = evaluateGate(outOfScope("POST", ["v1", "chat", "completions"]));
+    expect(gate.deniedBy).toBe("scope");
+  });
+
+  it("does not exempt a deeper path under models", () => {
+    // Exactly one extra segment is a retrieve; anything deeper is not, so the
+    // scope check still applies and refuses first. Denied earlier, not later —
+    // what matters is that the exemption did not extend to it.
+    const gate = evaluateGate(outOfScope("GET", ["v1", "models", "a", "b"]));
+    expect(gate.steps.find((s) => s.name === "scope")?.status).not.toBe("skipped");
+    expect(gate.deniedBy).toBe("scope");
+  });
+});

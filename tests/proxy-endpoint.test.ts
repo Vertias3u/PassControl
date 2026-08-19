@@ -279,4 +279,152 @@ describe("proxy endpoint allowlist", () => {
     expect(await res.json()).toEqual({ error: "blocked_endpoint" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  // ── Retrieving one model's metadata ────────────────────────────────────────
+  //
+  // `GET /v1/models/{id}` is what an agent's "detect context length" probe calls.
+  // It used to miss the exact-length listing rule and come back blocked_endpoint
+  // around every prompt. Proven here through the real handler, not just the
+  // matcher, because the scope step is the part that could still refuse it: the
+  // visa's scope below is deliberately "nothing-*".
+  it("allows GET /v1/models/{id} without a per-model scope match", async () => {
+    const res = await getProxy("openai", ["v1", "models", "gpt-4.1"]);
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.openai.com/v1/models/gpt-4.1",
+      expect.objectContaining({ method: "GET" })
+    );
+  });
+
+  it("forwards the retrieve for anthropic, the shape that surfaced this", async () => {
+    const res = await getProxy("anthropic", ["v1", "models", "claude-haiku-4-5-20251001"]);
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.anthropic.com/v1/models/claude-haiku-4-5-20251001",
+      expect.objectContaining({ method: "GET" })
+    );
+  });
+
+  it("refuses to let the model segment escape into another endpoint", async () => {
+    // The one real risk in admitting a parameterised path: the segment is joined
+    // into the upstream URL, so it must never be able to reach /v1/fine_tuning.
+    // Two independent guards refuse it and the OUTER one wins — the route's
+    // traversal check runs before the allowlist, so this is 400 invalid_path,
+    // not 403. The matcher refuses it too (tests/scope-glob.test.ts), which is
+    // what keeps this safe if the order ever changes.
+    const res = await getProxy("openai", ["v1", "models", ".."]);
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_path" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a deeper path under models", async () => {
+    const res = await getProxy("openai", ["v1", "models", "a", "b"]);
+
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks POST to /v1/models/{id} — retrieve stays read-only", async () => {
+    const res = await callProxy("openai", ["v1", "models", "gpt-4.1"], "gpt-4o-mini");
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "blocked_endpoint" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Discovery is bounded by the visa ─────────────────────────────────────────
+describe("model listing is narrowed to the visa's scope", () => {
+  const upstreamList = () =>
+    new Response(
+      JSON.stringify({
+        object: "list",
+        data: [{ id: "gpt-4.1" }, { id: "gpt-3.5-turbo" }, { id: "dall-e-3" }],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  async function listWithScope(models: string[]) {
+    fetchMock.mockResolvedValue(upstreamList());
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models }] });
+    const res = await GET(getReq(), {
+      params: Promise.resolve({ provider: "openai", path: ["v1", "models"] }),
+    });
+    return { res, body: (await res.json()) as any };
+  }
+
+  it("returns only the models this visa may actually call", async () => {
+    // The provider key reaches the tenant's whole account; the visa is one
+    // agent's capability. Before this, the picker offered all three.
+    const { res, body } = await listWithScope(["gpt-4*"]);
+
+    expect(res.status).toBe(200);
+    expect(body.data.map((m: any) => m.id)).toEqual(["gpt-4.1"]);
+    // Still the provider's own row, untouched.
+    expect(body.data[0]).toEqual({ id: "gpt-4.1" });
+    expect(body.object).toBe("list");
+  });
+
+  it("still forwards upstream — this narrows a real answer, it does not invent one", async () => {
+    await listWithScope(["gpt-4*"]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.openai.com/v1/models",
+      expect.objectContaining({ method: "GET" })
+    );
+  });
+
+  it("returns an empty list when the visa permits none of them", async () => {
+    const { res, body } = await listWithScope(["nothing-*"]);
+
+    expect(res.status).toBe(200);
+    expect(body.data).toEqual([]);
+  });
+
+  it("leaves the single-model retrieve unnarrowed", async () => {
+    // Discovery is scoped; an explicit lookup is not. The caller already knows
+    // the name, so hiding it would only replace an answer with a confusion —
+    // and the gate still refuses to CALL it.
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ id: "dall-e-3", object: "model" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      scope: [{ provider: "openai", models: ["nothing-*"] }],
+    });
+    const res = await GET(getReq(), {
+      params: Promise.resolve({ provider: "openai", path: ["v1", "models", "dall-e-3"] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: "dall-e-3", object: "model" });
+  });
+
+  it("does not narrow a chat completion response", async () => {
+    // The filter keys on `data`, and a chat response has none — but this pins it
+    // rather than trusting that, because silently reshaping an inference
+    // response would be the worst possible bug in this file.
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl-1",
+          choices: [{ message: { content: "hi" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+    const body = (await res.json()) as any;
+
+    expect(res.status).toBe(200);
+    expect(body.choices[0].message.content).toBe("hi");
+  });
 });

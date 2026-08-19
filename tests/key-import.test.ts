@@ -15,13 +15,16 @@ const mocks = vi.hoisted(() => {
     if (table !== "users") throw new Error(`unexpected table ${table}`);
     return { upsert: usersUpsert };
   });
+  // `rpc` deliberately lives on the SERVICE client only. 0030 drops the
+  // auth.uid()-derived provider-key RPCs, so the user-scoped client has no
+  // business calling one — and leaving `rpc` off this object means a regression
+  // back to `db.rpc(...)` fails loudly here rather than passing silently.
   const db = {
     auth: {
       getUser: vi.fn(async () => ({
         data: { user: { id: currentUserId, email: `${currentUserId}@example.test` } },
       })),
     },
-    rpc,
     from,
   };
 
@@ -53,6 +56,10 @@ const mocks = vi.hoisted(() => {
       ok: true,
       value: { id: "agent-1", name: "Imported agent" },
     })),
+    // A distinguishable stand-in for the service-role client, so the assertions
+    // below can prove the passport insert and the provider-key RPC do NOT run as
+    // the dashboard user.
+    serviceDb: { __client: "service-role", rpc },
     rateLimit: vi.fn(async () => ({ success: true, remaining: 4 })),
     recordAdminAction: vi.fn(async () => undefined),
     revalidatePath: vi.fn(),
@@ -81,7 +88,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
 vi.mock("next/headers", () => ({ headers: mocks.headers }));
 vi.mock("@/lib/supabase/server", () => ({ userClient: async () => mocks.db }));
-vi.mock("@/lib/supabase", () => ({ serviceClient: vi.fn() }));
+vi.mock("@/lib/supabase", () => ({ serviceClient: vi.fn(() => mocks.serviceDb) }));
 vi.mock("@/lib/fleet", () => ({
   createAgent: mocks.createAgent,
   setTenantKill: vi.fn(),
@@ -308,7 +315,11 @@ describe("server-side provider model probe", () => {
       provider: "anthropic",
       scope: [{ provider: "anthropic", models: ["claude-sonnet-*"] }],
     });
-    expect(mocks.rpc).toHaveBeenCalledWith("store_provider_key", {
+    // Service-role RPC, with the tenant passed explicitly. `p_user_id` is the
+    // tenant boundary now that RLS is bypassed, so it must be the verified
+    // server-side user id and never anything the caller supplied.
+    expect(mocks.rpc).toHaveBeenCalledWith("store_provider_key_for_user", {
+      p_user_id: "tenant-a",
       p_provider: "anthropic",
       p_label: "imported",
       p_plaintext: RAW_KEY,
@@ -317,8 +328,13 @@ describe("server-side provider model probe", () => {
     // this agent fail over to". An import that does not drop it advertises the
     // wrong set for the next five minutes.
     expect(mocks.purgeProviderKeysCache).toHaveBeenCalledWith("tenant-a");
+    // The service-role client, NOT `mocks.db`. 0028 revokes INSERT on `agents`
+    // from `authenticated`, because a user-scoped insert here is a request an
+    // aal1 session can replay over PostgREST with its own passport_pubkey,
+    // straight past the MFA gate. The tenant id stays an explicit argument
+    // derived from the verified server-side user.
     expect(mocks.createAgent).toHaveBeenCalledWith(
-      mocks.db,
+      mocks.serviceDb,
       "tenant-a",
       expect.objectContaining({
         name: "Imported agent",
@@ -349,7 +365,7 @@ describe("server-side provider model probe", () => {
 });
 
 describe("key import secret and tenant boundaries", () => {
-  it("stores through store_provider_key, creates through fleet, and returns the chosen probed scope", async () => {
+  it("stores through store_provider_key_for_user, creates through fleet, and returns the chosen probed scope", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>

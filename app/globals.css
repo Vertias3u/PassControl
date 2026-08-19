@@ -975,12 +975,18 @@ a.pc-metric-card:hover {
 .pc-live-calls__signals svg { width: 11px; height: 11px; }
 .pc-live-calls__signals .is-clear { color: var(--success); }
 .pc-live-calls__signals .is-refused { color: #ef7676; }
+/* Deliberately quiet, and deliberately not one of the verdict colours. SDK
+   housekeeping is neither a pass nor a refusal — colouring it like either is
+   what made a startup handshake read as agent activity in the first place. */
+.pc-live-calls__signals .is-housekeeping { color: var(--pc-quiet); }
 .pc-live-calls__signals .is-live { color: var(--pc-signal); }
 .pc-live-calls__signals .is-connecting { color: var(--warning); }
 
 .pc-live-calls__controls {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto auto;
+  /* Four controls since the SDK-probe toggle joined: search, outcome segmented,
+     probe toggle, pause. Only the search field flexes. */
+  grid-template-columns: minmax(220px, 1fr) auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 11px 18px;
@@ -1053,6 +1059,39 @@ a.pc-metric-card:hover {
 
 .pc-live-calls__pause svg { width: 13px; height: 13px; }
 
+/* The ×N on a collapsed burst. Reads as a count, not as a second verdict — it
+   sits beside the word rather than competing with it, and never takes a tone
+   colour of its own. */
+.pc-live-calls__repeat {
+  margin-left: 6px;
+  background: none;
+  cursor: pointer;
+  padding: 1px 5px;
+  border: 1px solid var(--pc-line-subtle);
+  border-radius: 3px;
+  color: var(--pc-quiet);
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.pc-live-calls__housekeeping {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-pc-sans), system-ui, sans-serif;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+/* Shown-on-request rows stay legible but read as background: they are records,
+   not activity. The row is never hidden from the drawer or the receipt. */
+.pc-live-calls__table tbody tr[data-call-class="housekeeping"],
+.pc-live-calls__cards li[data-call-class="housekeeping"] {
+  opacity: 0.62;
+}
+
 .pc-live-calls__table { overflow-x: auto; }
 .pc-live-calls__table table {
   min-width: 760px;
@@ -1082,9 +1121,19 @@ a.pc-metric-card:hover {
 .pc-live-calls__empty { padding: 42px 18px !important; color: var(--pc-quiet); text-align: center; }
 .pc-live-calls__cards { display: none; }
 
+/* The controls row went from three items to four when the SDK-probe toggle
+   arrived. Below 760px it already collapses to one column; this covers the band
+   in between, where four columns plus a 220px search field overflow. Search
+   takes its own row, the three controls sit under it. */
+@media (min-width: 761px) and (max-width: 1024px) {
+  .pc-live-calls__controls { grid-template-columns: repeat(3, auto); justify-content: start; }
+  .pc-live-calls__controls .pc-search-field { grid-column: 1 / -1; }
+}
+
 @media (max-width: 760px) {
   .pc-live-calls__bar { align-items: flex-start; flex-direction: column; gap: 8px; }
-  .pc-live-calls__signals { width: 100%; justify-content: space-between; }
+  /* Four signals now, and they must wrap rather than squeeze off the edge. */
+  .pc-live-calls__signals { width: 100%; justify-content: space-between; flex-wrap: wrap; gap: 8px 14px; }
   .pc-live-calls__controls { grid-template-columns: 1fr; }
   .pc-segmented { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; }
   .pc-live-calls__table { display: none; }

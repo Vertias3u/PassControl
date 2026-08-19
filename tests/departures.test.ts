@@ -3,14 +3,20 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEPARTURE_VERDICT,
+  departureCounts,
+  departureDestination,
+  groupDepartures,
+  groupSpan,
   departureTime,
   fare,
   flightCode,
   mergeDeparture,
   totalTokens,
   verdictFor,
+  visibleDepartures,
   type DepartureRow,
 } from "@/lib/departures";
+import { isHousekeeping } from "@/lib/call-class";
 
 function row(overrides: Partial<DepartureRow> = {}): DepartureRow {
   return {
@@ -136,5 +142,181 @@ describe("the board reads the data the Control Tower already fetched", () => {
     const page = readFileSync(join(process.cwd(), "app/dashboard/page.tsx"), "utf8");
     expect(page).toMatch(/<DeparturesBoard[^>]*initialRows=\{displayLogs\}/);
     expect(page.match(/from\("agent_logs"\)/g) ?? []).toHaveLength(1);
+  });
+
+  it("still hands the board every row, including housekeeping", () => {
+    // The classification is a VIEW. If the page ever starts passing a filtered
+    // list, the board's "show probes" toggle becomes a lie — the rows would not
+    // be there to show. Preserve everything; filter at the point of display.
+    const page = readFileSync(join(process.cwd(), "app/dashboard/page.tsx"), "utf8");
+    expect(page).not.toMatch(/initialRows=\{(inferenceLogs|housekeepingLogs)\}/);
+  });
+});
+
+describe("housekeeping rows on the board", () => {
+  const probe = () => row({ id: "probe-1", model: "", status: "ok", input_tokens: 0, output_tokens: 0, cost_microcents: 0 });
+
+  it("names a capability probe instead of showing a blank destination", () => {
+    // Before this, a model-listing row rendered as provider + nothing, read as
+    // a normal CLEARED call with a missing model — the exact confusion between
+    // protocol chatter and agent activity this is meant to end.
+    expect(departureDestination(probe())).toBe("Capability probe");
+    expect(departureDestination(row())).toBe("gpt-4.1");
+  });
+
+  it("leaves a refused probe described by its refusal", () => {
+    // A kill switch stopping a startup probe is agent activity of the most
+    // important kind. It keeps its normal destination and stays visible.
+    const refused = row({ id: "probe-2", model: "", status: "blocked_killed" });
+    expect(isHousekeeping(refused)).toBe(false);
+    expect(departureDestination(refused)).toBe("—");
+  });
+
+  it("counts cleared against agent calls, not handshakes", () => {
+    const counts = departureCounts([row(), probe(), row({ id: "r2", status: "blocked_scope" })]);
+    expect(counts).toEqual({ cleared: 1, refused: 1, housekeeping: 1 });
+  });
+
+  it("hides housekeeping by default and restores it on request", () => {
+    const rows = [row(), probe()];
+    expect(visibleDepartures(rows, { filter: "all", query: "", showHousekeeping: false }).map((r) => r.id))
+      .toEqual(["row-1"]);
+    expect(visibleDepartures(rows, { filter: "all", query: "", showHousekeeping: true }).map((r) => r.id))
+      .toEqual(["row-1", "probe-1"]);
+  });
+
+  it("does not let the outcome filter resurrect a hidden probe", () => {
+    // "Cleared" is an outcome, not a class. A probe is cleared, so an unguarded
+    // filter would put it straight back on a board the operator just cleaned.
+    expect(visibleDepartures([probe()], { filter: "cleared", query: "", showHousekeeping: false }))
+      .toHaveLength(0);
+  });
+
+  it("still matches a shown probe against the search box", () => {
+    expect(visibleDepartures([probe()], { filter: "all", query: "openai", showHousekeeping: true }))
+      .toHaveLength(1);
+    expect(visibleDepartures([probe()], { filter: "all", query: "gpt-4.1", showHousekeeping: true }))
+      .toHaveLength(0);
+  });
+});
+
+// ── Collapsing repeat bursts ─────────────────────────────────────────────────
+//
+// A client that pings the same unrouted path before, during and after every
+// prompt writes one refused row per ping. They are all true, and twenty of them
+// say exactly what one of them says. The board groups consecutive identical
+// refusals; the record keeps every row, and the counters above the table still
+// count rows, not groups.
+describe("repeat-burst grouping", () => {
+  const at = (s: number, over: Partial<DepartureRow> = {}) =>
+    row({
+      id: `r${s}`,
+      created_at: new Date(Date.UTC(2026, 7, 16, 12, 0, s)).toISOString(),
+      status: "blocked_endpoint",
+      model: "",
+      ...over,
+    });
+
+  it("collapses consecutive identical refusals into one row with a count", () => {
+    const groups = groupDepartures([at(30), at(29), at(28)]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.count).toBe(3);
+    // The newest row represents the burst, so the timestamp is the latest one.
+    expect(groups[0]!.row.id).toBe("r30");
+  });
+
+  it("never collapses a successful call", () => {
+    // Two cleared calls are two pieces of real work and two real charges. Only a
+    // refusal can be a repeat of nothing.
+    const groups = groupDepartures([at(30, { status: "ok", model: "gpt-4.1" }), at(29, { status: "ok", model: "gpt-4.1" })]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("keeps refusals of different kinds apart", () => {
+    // A scope refusal next to an endpoint refusal are two different problems.
+    const groups = groupDepartures([at(30), at(29, { status: "blocked_scope" })]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("keeps different agents apart", () => {
+    const groups = groupDepartures([at(30, { agent_id: "a" }), at(29, { agent_id: "b" })]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("keeps different models apart", () => {
+    const groups = groupDepartures([
+      at(30, { status: "blocked_scope", model: "claude-haiku-4.5" }),
+      at(29, { status: "blocked_scope", model: "gpt-4.1" }),
+    ]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("does not reach across a gap in time", () => {
+    // Two bursts an hour apart are two events. Collapsing them would tell the
+    // operator a story about frequency that the rows do not support.
+    const groups = groupDepartures([at(30), at(29), at(29 - 3600)]);
+    expect(groups.map((g) => g.count)).toEqual([2, 1]);
+  });
+
+  it("does not group rows whose time is unknown", () => {
+    // A null timestamp cannot be shown to be part of a burst, so it stands alone
+    // rather than being folded in on an assumption.
+    const groups = groupDepartures([at(30, { created_at: null }), at(29, { created_at: null })]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("is interrupted by an unrelated row between two identical ones", () => {
+    // Only CONSECUTIVE rows group: a cleared call in between means the client
+    // recovered and failed again, which is a different shape from a burst.
+    const groups = groupDepartures([at(30), at(29, { status: "ok", model: "gpt-4.1" }), at(28)]);
+    expect(groups.map((g) => g.count)).toEqual([1, 1, 1]);
+  });
+
+  it("carries every original row on the group for the board to expand", () => {
+    // The board draws one line and the ×N badge expands it back into these —
+    // see "wires the count badge to expand the burst" below, which checks the
+    // UI actually reaches them. The CSV export is a separate, ungrouped surface.
+    const groups = groupDepartures([at(30), at(29)]);
+    expect(groups[0]!.members.map((m) => m.id)).toEqual(["r30", "r29"]);
+  });
+
+  it("leaves the counters counting rows, not groups", () => {
+    // "3 refused" must stay 3 when the board draws one line for them.
+    expect(departureCounts([at(30), at(29), at(28)]).refused).toBe(3);
+  });
+});
+
+describe("a collapsed burst is honest about time and reachable", () => {
+  const at = (s: number) =>
+    row({
+      id: `s${s}`,
+      created_at: new Date(Date.UTC(2026, 7, 16, 12, 0, s)).toISOString(),
+      status: "blocked_endpoint",
+      model: "",
+    });
+
+  it("reports the span a burst covers, not a single instant", () => {
+    // The window chains member-to-member, so a steady pinger can fold a long
+    // stretch onto one line. Drawing that at the newest timestamp alone would
+    // imply twenty things happened at once.
+    const [group] = groupDepartures([at(100), at(60), at(20)]);
+    expect(groupSpan(group!)).toEqual({
+      from: "2026-08-16T12:00:20.000Z",
+      to: "2026-08-16T12:01:40.000Z",
+    });
+  });
+
+  it("offers no span for a single row", () => {
+    expect(groupSpan(groupDepartures([at(10)])[0]!)).toBeNull();
+  });
+
+  it("wires the count badge to expand the burst back into its rows", () => {
+    // The grouping only stays honest if the ×N is a way IN to the rows. A test
+    // asserting `members` exists while nothing in the UI can reach them would
+    // guard a feature that does not exist.
+    const board = readFileSync(join(process.cwd(), "components/DeparturesBoard.tsx"), "utf8");
+    expect(board).toMatch(/toggleGroup\(row\.id\)/);
+    expect(board).toMatch(/expanded\.has\(group\.row\.id\)/);
+    expect(board).toMatch(/group\.members\.map/);
   });
 });

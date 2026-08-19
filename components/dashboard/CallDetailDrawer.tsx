@@ -3,9 +3,11 @@
 import { useState } from "react";
 import { Check, Copy, FileClock, ShieldCheck } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
-import type { DepartureRow } from "@/lib/departures";
+import { departureDestination, type DepartureRow } from "@/lib/departures";
+import { isHousekeeping } from "@/lib/call-class";
 import type { LogEntry } from "@/lib/log";
 import { parseShadowVerdict } from "@/lib/policy-shadow";
+import { readRecordedEndpoint } from "@/lib/verify/receipt-view";
 import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
 
 export interface CallContext {
@@ -67,6 +69,7 @@ export function CallDetailDrawer({
   const status = row ? statusDetail(row.status) : null;
   const shadow = row ? describeStoredShadow(row.policy_shadow_would, currentShadowRevision) : null;
   const tokens = row ? (row.input_tokens ?? 0) + (row.output_tokens ?? 0) : 0;
+  const endpoint = readRecordedEndpoint(row?.receipt);
   const copyReceipt = async () => {
     if (!row?.receipt) return;
     await navigator.clipboard.writeText(row.receipt);
@@ -109,7 +112,19 @@ export function CallDetailDrawer({
           <div><dt>Passport public-key suffix</dt><dd><code>{row.passport_id ? `…${row.passport_id.slice(-16)}` : "Not recorded"}</code></dd></div>
           <div><dt>Direct key ID</dt><dd><code>{row.agent_access_key_id ?? "Not recorded"}</code></dd></div>
           <div><dt>Credential use ID</dt><dd><code>{row.credential_use_id ?? "Not recorded"}</code></dd></div>
-          <div><dt>Destination</dt><dd>{row.provider ?? "Not recorded"}{row.model ? ` / ${row.model}` : ""}</dd></div>
+          {/* Named, not blank. The drawer is where an operator inspects a row
+              the board hid, so it has to say what the row was — a model-listing
+              probe carries no model, and rendering the provider alone made it
+              read as a call whose model failed to record. */}
+          <div><dt>Destination</dt><dd>{row.provider ?? "Not recorded"} / {departureDestination(row)}</dd></div>
+          <div><dt>Call class</dt><dd>{isHousekeeping(row) ? "SDK housekeeping — preserved in the record, not counted as agent activity" : "Agent call"}</dd></div>
+          {/* The one thing a blocked_endpoint row could never tell you: which
+              endpoint. It has always been in the receipt; nothing showed it.
+              Worded as RECORDED, not proven — these claims are decoded without
+              checking the signature, and the verifier below is the proof path. */}
+          {endpoint ? (
+            <div><dt>Endpoint (recorded on the receipt, not verified here)</dt><dd><code>{endpoint}</code></dd></div>
+          ) : null}
           <div><dt>Input tokens</dt><dd>{row.input_tokens?.toLocaleString() ?? "Not recorded"}</dd></div>
           <div><dt>Output tokens</dt><dd>{row.output_tokens?.toLocaleString() ?? "Not recorded"}</dd></div>
           <div><dt>Total tokens</dt><dd>{tokens.toLocaleString()}</dd></div>

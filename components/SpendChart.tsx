@@ -4,19 +4,24 @@
 import { useEffect, useMemo, useState } from "react";
 import { browserClient } from "@/lib/supabase/client";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
+import { isInference } from "@/lib/call-class";
 
 interface Log {
   id: string;
   created_at: string;
   provider?: string | null;
   model?: string | null;
+  // Needed to tell an agent call from SDK housekeeping. Absent on neither the
+  // dashboard's select nor the realtime payload; optional here only so the
+  // interface stays a description of what is read, not what is required.
+  status?: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cost_microcents: number | null;
 }
 
 export function SpendChart({ userId, initialLogs }: { userId: string; initialLogs: Log[] }) {
-  const [logs, setLogs] = useState<Log[]>(initialLogs);
+  const [allLogs, setLogs] = useState<Log[]>(initialLogs);
   const [live, setLive] = useState(false);
   const { format, zoneLabel } = useDashboardTime();
 
@@ -35,7 +40,13 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
     };
   }, [userId]);
 
-  const { totalTokens, totalCost, bars, providers } = useMemo(() => {
+  const { totalTokens, totalCost, bars, providers, callCount } = useMemo(() => {
+    // A spend view has nothing to say about SDK housekeeping: a model-listing
+    // probe carries no tokens and no cost, so it contributed only a zero-height
+    // bar and inflated the per-provider call count. Filtered here rather than in
+    // the page, because this component subscribes to realtime itself and would
+    // otherwise take probes straight back in off the WAL.
+    const logs = allLogs.filter(isInference);
     const recent = [...logs].slice(0, 40).reverse();
     const max = Math.max(1, ...recent.map((l) => (l.input_tokens ?? 0) + (l.output_tokens ?? 0)));
     const byProvider = new Map<string, { calls: number; cost: number; tokens: number }>();
@@ -55,8 +66,9 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
         height: ((log.input_tokens ?? 0) + (log.output_tokens ?? 0)) / max,
       })),
       providers: [...byProvider.entries()].sort((a, b) => b[1].cost - a[1].cost),
+      callCount: logs.length,
     };
-  }, [logs]);
+  }, [allLogs]);
 
   const first = bars[0]?.log.created_at;
   const last = bars.at(-1)?.log.created_at;
@@ -68,7 +80,7 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
         <div className="pc-spend-stat">
           <div>Tokens in loaded window</div>
           <strong>{totalTokens.toLocaleString()}</strong>
-          <span>{logs.length} call record{logs.length === 1 ? "" : "s"}</span>
+          <span>{callCount} agent call{callCount === 1 ? "" : "s"}</span>
         </div>
         <div className="pc-spend-stat">
           <div>Cost in loaded window</div>
@@ -85,7 +97,7 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
       <div className="pc-spend-chart" aria-label="Token volume for the most recent 40 loaded calls">
         {bars.length === 0 ? (
           <div className="pc-spend-chart__empty">
-            <span>No governed calls in this loaded window.</span>
+            <span>No agent calls in this loaded window.</span>
             <small>Once an agent routes a call through the gateway, token volume appears here.</small>
           </div>
         ) : (

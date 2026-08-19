@@ -221,6 +221,45 @@ export function peekArtifact(input: string): PeekResult {
 }
 
 /**
+ * The endpoint a stored row's receipt records, as `METHOD /path`, or null.
+ *
+ * Every row carries `mth` + `path` in its receipt — `logBlocked` builds one too,
+ * so refused rows have it as well. Nothing surfaced it, which is why a board
+ * full of `NO ROUTE` could not tell an operator *which* route was refused, and
+ * why diagnosing a client that pings an unrouted path meant decoding a JWS by
+ * hand.
+ *
+ * ── This is a DISPLAY read of an UNVERIFIED payload ─────────────────────────
+ *
+ * No signature is checked here, and the caller must label it as recorded rather
+ * than proven. Rendering a decoded claim as an asserted fact is exactly the
+ * defect that once showed "Signature matches the contents ✓" against a forged
+ * receipt. The claims are attacker-influenceable until the verifier says
+ * otherwise, so this treats them as untrusted text: non-strings are refused
+ * outright, control characters are stripped, and the result is bounded.
+ */
+const RECORDED_ENDPOINT_MAX = 128;
+
+export function readRecordedEndpoint(receipt: string | null | undefined): string | null {
+  if (!receipt) return null;
+  const parts = receipt.trim().split(".");
+  if (parts.length !== 3) return null;
+  const claims = decodeSegment(parts[1] ?? "");
+  if (!claims) return null;
+
+  const { mth, path } = claims;
+  // Both required: a method with no path (or the reverse) is a half-answer, and
+  // a half-answer on a diagnostic surface is worse than an honest blank.
+  if (typeof mth !== "string" || typeof path !== "string") return null;
+  if (!mth || !path) return null;
+
+  const clean = (value: string) => value.replace(/[\r\n\t\x00-\x1f\x7f]/g, " ");
+  const method = clean(mth);
+  const route = clean(path.startsWith("/") ? path : `/${path}`);
+  return `${method} ${route}`.slice(0, RECORDED_ENDPOINT_MAX);
+}
+
+/**
  * The checks that can be settled locally, before touching the network.
  *
  * Returns the step that fails and the reason, or null when the artifact gets as

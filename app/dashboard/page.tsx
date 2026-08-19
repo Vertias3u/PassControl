@@ -17,6 +17,7 @@ import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { ActivityWorkspace } from "@/components/dashboard/ActivityWorkspace";
 import { FleetAttentionQueue } from "@/components/dashboard/FleetAttentionQueue";
 import { buildFleetAttention } from "@/lib/dashboard-attention";
+import { partitionByClass } from "@/lib/call-class";
 import { shadowRevision } from "@/lib/policy-shadow";
 import { CloudBetaOperations } from "@/components/dashboard/CloudBetaOperations";
 import { FirstCallActivation } from "@/components/dashboard/FirstCallActivation";
@@ -98,6 +99,11 @@ export default async function ControlTowerPage() {
   const displayLogs = attentionLogRows.slice(0, 100);
   const attentionQueue = buildFleetAttention(agentList, attentionLogRows);
   const blockedCalls = displayLogs.filter((l) => l.status.startsWith("blocked")).length;
+  // Split for presentation only. The query above is unchanged and still fetches
+  // every row — nothing is filtered out of the fetch, so the window does not
+  // silently shrink, and the departures board below still receives all of it.
+  // What changes is only what the headline counts call "agent activity".
+  const { housekeeping: housekeepingLogs, inference: inferenceLogs } = partitionByClass(displayLogs);
   const callContext = {
     shadowRevisions: Object.fromEntries(
       agentList.map((agent) => [agent.id, shadowRevision(agent.policy_shadow ?? null)])
@@ -173,7 +179,8 @@ export default async function ControlTowerPage() {
           totalAgents={agentList.length}
           spentMicrocents={agentList.reduce((s, a) => s + (a.spent_microcents ?? 0), 0)}
           blockedCalls={blockedCalls}
-          recentCalls={displayLogs.length}
+          recentCalls={inferenceLogs.length}
+          housekeepingCalls={housekeepingLogs.length}
           attentionAgents={attentionQueue.length}
         />
 

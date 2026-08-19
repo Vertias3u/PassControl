@@ -1,3 +1,5 @@
+import { partitionByClass } from "./call-class";
+
 export type FirstCallStatus =
   | "ok"
   | "blocked_budget"
@@ -61,7 +63,14 @@ export function authenticationProofLabel(authMethod: FirstCallRow["auth_method"]
 export type FirstCallActivation =
   | { stage: "provider" }
   | { stage: "agent" }
-  | { stage: "call"; agentId: string; agentName: string }
+  /**
+   * `connected` means the gateway has admitted SDK housekeeping from this fleet
+   * — a capability probe — without an inference call following it. That is a
+   * genuinely different position from silence: the base URL and the credential
+   * are already proven right, and only the model call itself is outstanding. It
+   * is deliberately NOT a completion (see `admitted` below).
+   */
+  | { stage: "call"; agentId: string; agentName: string; connected: boolean }
   | { stage: "diagnose"; agentId: string; agentName: string; row: FirstCallRow }
   | {
       stage: "complete";
@@ -86,7 +95,17 @@ export function deriveFirstCallActivation(input: {
 
   const byId = new Map(activeAgents.map((agent) => [agent.id, agent]));
   const relevantRows = input.logs.filter((row) => row.agent_id && byId.has(row.agent_id));
-  const admitted = relevantRows.find((row) => row.status === "ok");
+
+  // Housekeeping is preserved in the log and excluded from the milestone.
+  //
+  // An SDK lists models on startup, which the gateway admits and records as a
+  // perfectly ordinary `ok` row. Completing onboarding on that row tells the
+  // operator their agent is working when it has not yet run one inference — the
+  // handshake proves the wiring, not the work. `classifyCall` fails toward
+  // "inference", so a refused probe stays a diagnosable attempt below.
+  const { inference, housekeeping } = partitionByClass(relevantRows);
+
+  const admitted = inference.find((row) => row.status === "ok");
   if (admitted?.agent_id) {
     const agent = byId.get(admitted.agent_id)!;
     return {
@@ -98,7 +117,10 @@ export function deriveFirstCallActivation(input: {
     };
   }
 
-  const attempted = relevantRows[0];
+  // The newest row the operator can actually act on. A succeeded probe sitting
+  // on top of a refusal must not become the diagnosis — there is nothing to fix
+  // about a handshake that worked, and the refusal underneath is the real state.
+  const attempted = inference[0];
   if (attempted?.agent_id) {
     const agent = byId.get(attempted.agent_id)!;
     return {
@@ -109,8 +131,16 @@ export function deriveFirstCallActivation(input: {
     };
   }
 
-  const agent = activeAgents[0]!;
-  return { stage: "call", agentId: agent.id, agentName: agent.name };
+  // Prefer the agent the SDK actually reached, so the instructions name the
+  // identity whose credential is already known to work.
+  const probed = housekeeping[0]?.agent_id;
+  const agent = (probed ? byId.get(probed) : undefined) ?? activeAgents[0]!;
+  return {
+    stage: "call",
+    agentId: agent.id,
+    agentName: agent.name,
+    connected: housekeeping.length > 0,
+  };
 }
 
 export interface ActivationDiagnosis {

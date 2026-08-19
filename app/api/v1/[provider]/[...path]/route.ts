@@ -27,7 +27,8 @@ import {
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
-import { canonicalEndpointPath } from "@/lib/scope";
+import { canonicalEndpointPath, isModelListingIndex } from "@/lib/scope";
+import { filterModelListingToScope } from "@/lib/providers/model-listing";
 import {
   POLICY_UNREADABLE,
   evaluateGate,
@@ -1181,8 +1182,20 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // Non-streaming JSON: read, tally, forward.
     const json = await upstream.json().catch(() => ({}));
     const usage = usageFromJson(attemptProvider, json);
+    // Discovery is bounded by the visa. `GET /v1/models` otherwise answers with
+    // every model the PROVIDER KEY can reach — the tenant's whole account —
+    // rather than the models THIS agent may call, so an SDK's model picker
+    // offered choices guaranteed to 403 on first use. A narrowing of the
+    // provider's own rows only: nothing is added and nothing is synthesised, and
+    // an unrecognised body passes through untouched (see lib/providers/
+    // model-listing.ts). Not applied to the single-model retrieve, which names a
+    // model the caller already knows.
+    const forwarded =
+      req.method === "GET" && isModelListingIndex(path)
+        ? filterModelListingToScope(json, attemptProvider, scopes)
+        : json;
     return terminal(
-      new Response(JSON.stringify(json), {
+      new Response(JSON.stringify(forwarded), {
         status: 200,
         headers: {
           "content-type": "application/json",

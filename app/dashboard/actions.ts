@@ -20,7 +20,7 @@ import {
   modelListingUrl,
   type ProviderId,
 } from "@/lib/providers";
-import { purgeAgentFallbacks, purgeProviderKeysCache } from "@/lib/state/redis";
+import { purgeAgentCaches, purgeAgentFallbacks, purgeProviderKeysCache } from "@/lib/state/redis";
 import { rateLimit } from "@/lib/ratelimit";
 import { open, seal } from "@/lib/crypto/aesgcm";
 import { stashKeyImport, takeKeyImport } from "@/lib/state/redis";
@@ -104,7 +104,14 @@ async function createAgentForUser(
   await requireCredentialMfa(db, user);
   // Ensure profile row exists (FK target).
   await db.from("users").upsert({ id: user.id, email: user.email }).select("id");
-  const r = await fleet.createAgent(db, user.id, input);
+  // Service role, not `db`. 0028 revokes INSERT on `agents` from `authenticated`,
+  // because the user-scoped write went over PostgREST under the caller's own JWT
+  // and RLS can only ask who owns the row — never whether this session cleared a
+  // second factor. An aal1 attacker could therefore replay this exact insert with
+  // their own passport_pubkey and mint visas against the tenant's provider key.
+  // The gate above is now the only way in, and `user.id` comes from the verified
+  // server-side user (requireUser -> getUser), never from client input.
+  const r = await fleet.createAgent(serviceClient(), user.id, input);
   if (!r.ok) {
     console.error("[dashboard:createAgent]", r.code, r.message ?? "");
     throw new Error(r.message ?? "Something went wrong. Please try again.");
@@ -445,7 +452,13 @@ async function addProviderKeyForUser(
   // is exactly the bypass-shaped API lib/mfa.ts refuses to offer.
   await requireCredentialMfa(db, user);
   const clean = validateProviderKeyInput(input);
-  const { error } = await db.rpc("store_provider_key", {
+  // Service role, and the tenant is now an explicit argument. 0030 drops the
+  // auth.uid()-derived RPCs: they were execute-able by `authenticated`, so an
+  // aal1 session could reach them straight over /rest/v1/rpc and skip the gate
+  // above. `user.id` comes from requireUser()/getUser() in this same request —
+  // RLS is bypassed here, so this argument IS the tenant boundary.
+  const { error } = await serviceClient().rpc("store_provider_key_for_user", {
+    p_user_id: user.id,
     p_provider: clean.provider,
     p_label: clean.label,
     p_plaintext: clean.key,
@@ -686,23 +699,158 @@ export async function completeKeyImport(input: {
   return { agentId: created.id, createdAt: created.createdAt, provider, scope };
 }
 
+/**
+ * Drop the gateway's sealed copy of a provider key for every agent of a tenant.
+ *
+ * The proxy caches the SEALED key at `key:<agentId>:<provider>` for
+ * KEY_CACHE_TTL_S = 60. Nothing invalidated it, so rotating, switching or
+ * deleting a credential left the previous secret being injected for up to a
+ * minute — which during the 2026-08-17 incident was indistinguishable from the
+ * fix not having worked, and sent the operator looking for a second bug.
+ *
+ * Per AGENT, because that is how the key is scoped, while a credential is per
+ * TENANT — so one credential mutation has to fan out across the tenant's agents.
+ * Bounded deliberately: past the cap the 60-second TTL is left to do the work
+ * rather than turning one key save into an unbounded pipeline. Best-effort in
+ * both directions, exactly as the fallbacks purge above: a Redis failure must
+ * never fail the operator's save and leave the database and the screen
+ * disagreeing. The cost of a miss is one cache window.
+ */
+const KEY_PURGE_AGENT_CAP = 200;
+
+async function purgeProviderKeyForTenant(
+  { db, user }: RequiredUser,
+  provider: string
+): Promise<void> {
+  try {
+    const { data } = await db
+      .from("agents")
+      .select("id")
+      .eq("user_id", user.id)
+      .limit(KEY_PURGE_AGENT_CAP);
+    await Promise.all(
+      (data ?? []).map((agent: { id: string }) =>
+        purgeAgentCaches(agent.id, [provider]).catch(() => {})
+      )
+    );
+  } catch {
+    // Deliberately empty — see above.
+  }
+}
+
+/** The provider a credential row belongs to, or null when it is not this tenant's. */
+async function ownedCredentialProvider(
+  { db, user }: RequiredUser,
+  credentialId: string
+): Promise<string | null> {
+  const { data } = await db
+    .from("provider_credentials")
+    .select("provider")
+    .eq("user_id", user.id)
+    .eq("id", credentialId)
+    .maybeSingle();
+  return typeof data?.provider === "string" ? data.provider : null;
+}
+
 /** Rotate a provider key behind an owned credential row. */
 export async function rotateProviderKey(input: { credentialId: string; key: string }) {
-  const { db, user } = await requireUser();
+  const auth = await requireUser();
+  const { db, user } = auth;
   // Replacing the secret behind a credential row is the same authority as storing
   // one: the new key is what the proxy will inject from here on.
   await requireCredentialMfa(db, user);
   const clean = validateRotateInput(input);
-  const { error } = await db.rpc("rotate_provider_key", {
+  // Read the provider BEFORE the write: it is what the cache purge is keyed on,
+  // and after a rotate the row still exists but we would be re-reading it for no
+  // reason. After a delete it would be gone entirely — same shape, so both paths
+  // read first and stay consistent.
+  const provider = await ownedCredentialProvider(auth, clean.credentialId);
+  const { error } = await serviceClient().rpc("rotate_provider_key_for_user", {
+    p_user_id: user.id,
     p_credential_id: clean.credentialId,
     p_plaintext: clean.key,
   });
   if (error) failGeneric("rotateProviderKey", error);
+  if (provider) await purgeProviderKeyForTenant(auth, provider);
   await recordAdminAction({
     userId: user.id,
     action: "provider_key.rotate",
     targetType: "provider_key",
     targetId: clean.credentialId,
+  });
+  revalidatePath("/");
+}
+
+/**
+ * Choose which stored credential the gateway injects for a provider.
+ *
+ * Gated like a mint. It creates no secret, but it redirects every subsequent
+ * call — and the spend behind it — onto a different upstream account, which is
+ * the same authority as having stored the key.
+ */
+export async function setActiveProviderKey(input: { credentialId: string }) {
+  const auth = await requireUser();
+  const { db, user } = auth;
+  await requireCredentialMfa(db, user);
+  const credentialId = String(input?.credentialId ?? "").trim();
+  if (!UUID_RE.test(credentialId)) throw new Error("Invalid credential id.");
+  const provider = await ownedCredentialProvider(auth, credentialId);
+  // Refuse here rather than letting the RPC's own 'credential not found' answer
+  // it: this keeps a cross-tenant id indistinguishable from a missing one at the
+  // action boundary, before any write is attempted.
+  if (!provider) throw new Error("That credential could not be found.");
+  const { error } = await serviceClient().rpc("set_active_provider_key_for_user", {
+    p_user_id: user.id,
+    p_credential_id: credentialId,
+  });
+  if (error) failGeneric("setActiveProviderKey", error);
+  await purgeProviderKeyForTenant(auth, provider);
+  await recordAdminAction({
+    userId: user.id,
+    action: "provider_key.activate",
+    targetType: "provider_key",
+    targetId: credentialId,
+    metadata: { provider },
+  });
+  revalidatePath("/");
+}
+
+/**
+ * Delete a stored credential and its Vault secret.
+ *
+ * The database refuses the ACTIVE credential (0027) rather than promoting a
+ * replacement, so a delete can never quietly change which upstream account is
+ * billed. That refusal is surfaced as its own sentence — a generic failure here
+ * would read as a bug rather than as the deliberate "switch first" rule.
+ */
+export async function deleteProviderKey(input: { credentialId: string }) {
+  const auth = await requireUser();
+  const { db, user } = auth;
+  await requireCredentialMfa(db, user);
+  const credentialId = String(input?.credentialId ?? "").trim();
+  if (!UUID_RE.test(credentialId)) throw new Error("Invalid credential id.");
+  const provider = await ownedCredentialProvider(auth, credentialId);
+  if (!provider) throw new Error("That credential could not be found.");
+  const { error } = await serviceClient().rpc("delete_provider_key_for_user", {
+    p_user_id: user.id,
+    p_credential_id: credentialId,
+  });
+  if (error) {
+    if (String(error.message ?? "").includes("active_credential")) {
+      throw new Error(
+        "That is the credential the gateway is using. Switch to another one first, then delete it."
+      );
+    }
+    failGeneric("deleteProviderKey", error);
+  }
+  await purgeProviderKeyForTenant(auth, provider);
+  await purgeProviderKeysCache(user.id).catch(() => {});
+  await recordAdminAction({
+    userId: user.id,
+    action: "provider_key.delete",
+    targetType: "provider_key",
+    targetId: credentialId,
+    metadata: { provider },
   });
   revalidatePath("/");
 }
@@ -725,7 +873,12 @@ export async function createApiKey(input: { name: string; scope: "read" | "write
   if (input?.scope !== "read" && input?.scope !== "write") throw new Error("Scope must be read or write.");
 
   const { token, prefix, hash } = await generateApiKey();
-  const { error } = await db.from("api_keys").insert({
+  // Service role, not `db` — same reason as createAgentForUser above, and this is
+  // the sink the bypass was found on: an aal1 session could POST /rest/v1/api_keys
+  // with a self-chosen key_hash and scope='write', and lib/control/auth.ts
+  // authenticates by hash lookup alone, so the row was a working control-plane
+  // credential that outlived the stolen session. 0028 revokes INSERT.
+  const { error } = await serviceClient().from("api_keys").insert({
     user_id: user.id,
     name,
     key_prefix: prefix,

@@ -15,14 +15,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Pause, Play, Search, Radio, WifiOff } from "lucide-react";
 import { browserClient } from "@/lib/supabase/client";
 import {
+  departureCounts,
+  departureDestination,
+  departureTime,
+  groupDepartures,
+  groupSpan,
   fare,
   flightCode,
   mergeDeparture,
   totalTokens,
   verdictFor,
+  visibleDepartures,
   type DepartureRow,
   type DepartureTone,
 } from "@/lib/departures";
+import { isHousekeeping } from "@/lib/call-class";
 import { CallDetailDrawer, type CallContext } from "@/components/dashboard/CallDetailDrawer";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 
@@ -45,13 +52,28 @@ export function DeparturesBoard({
   initialRows: DepartureRow[];
   callContext: CallContext;
 }) {
+  // Never "×20 at 12:00:30" — the rows only support a span, so the tooltip says
+  // the span. Times are UTC to match the board's own column.
+  const repeatTitle = (count: number, span: { from: string; to: string } | null) =>
+    span
+      ? `${count} identical consecutive refusals between ${departureTime(span.from)} and ${departureTime(span.to)} UTC — every one is stored. Click to show them.`
+      : `${count} identical consecutive refusals, all stored. Click to show them.`;
+
   const [rows, setRows] = useState<DepartureRow[]>(() => initialRows.slice(0, MAX_ROWS));
   const [live, setLive] = useState(false);
   const [paused, setPaused] = useState(false);
   const [queued, setQueued] = useState(0);
   const [filter, setFilter] = useState<"all" | "cleared" | "refused">("all");
+  // Off by default: the board answers "what are my agents doing", and an SDK
+  // listing models on startup is not that. The rows are still here, still
+  // counted in the signal bar, and one click away — hidden, never discarded.
+  const [showHousekeeping, setShowHousekeeping] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<DepartureRow | null>(null);
+  // Representative ids of bursts the operator has opened. Expanding puts every
+  // member back on the board as its own row, so the ×N badge is a way IN to the
+  // rows rather than a wall in front of them.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const { format, zoneLabel } = useDashboardTime();
   const pausedRef = useRef(false);
   const queuedRows = useRef<DepartureRow[]>([]);
@@ -89,26 +111,37 @@ export function DeparturesBoard({
     };
   }, [userId]);
 
-  const { cleared, refused } = useMemo(
-    () => ({
-      cleared: rows.filter((r) => r.status === "ok").length,
-      refused: rows.filter((r) => (r.status ?? "").startsWith("blocked")).length,
-    }),
-    [rows]
-  );
+  const { cleared, refused, housekeeping } = useMemo(() => departureCounts(rows), [rows]);
 
-  const visibleRows = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return rows.filter((row) => {
-      const verdict = verdictFor(row.status);
-      if (filter === "cleared" && verdict.tone !== "clear") return false;
-      if (filter === "refused" && !(row.status ?? "").startsWith("blocked_")) return false;
-      if (!needle) return true;
-      return [row.provider, row.model, row.passport_id, row.jti, row.agent_access_key_id, row.credential_use_id, row.status]
-        .filter((value): value is string => typeof value === "string")
-        .some((value) => value.toLowerCase().includes(needle));
+  const visibleRows = useMemo(
+    () => visibleDepartures(rows, { filter, query, showHousekeeping }),
+    [filter, query, rows, showHousekeeping]
+  );
+  // Group AFTER filtering: a hidden probe between two refusals must not split a
+  // burst that the operator sees as continuous.
+  const visibleGroups = useMemo(() => {
+    const grouped = groupDepartures(visibleRows);
+    // An expanded burst becomes its members again, in place.
+    return grouped.flatMap((group) =>
+      group.count > 1 && expanded.has(group.row.id)
+        ? group.members.map((member) => ({ row: member, count: 1, members: [member] }))
+        : [group]
+    );
+  }, [visibleRows, expanded]);
+
+  const toggleGroup = (id: string) =>
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
     });
-  }, [filter, query, rows]);
+
+  // "Nothing matches" would be misleading when the only rows loaded are hidden
+  // handshakes: the operator would go looking for calls that are right there.
+  const emptyReason =
+    housekeeping === rows.length && !showHousekeeping
+      ? `Only SDK housekeeping has arrived — ${housekeeping} capability probe${housekeeping === 1 ? "" : "s"}, recorded but not counted as agent activity. Show them above.`
+      : "No loaded calls match these filters.";
 
   const resume = () => {
     setRows((current) =>
@@ -136,6 +169,11 @@ export function DeparturesBoard({
         <div className="pc-live-calls__signals">
           <span className="is-clear">{cleared} cleared</span>
           <span className="is-refused">{refused} refused</span>
+          {housekeeping ? (
+            <span className="is-housekeeping" data-board-signal="housekeeping">
+              {housekeeping} SDK probe{housekeeping === 1 ? "" : "s"}
+            </span>
+          ) : null}
           <span className={live ? "is-live" : "is-connecting"} role="status">
             {live ? <Radio aria-hidden="true" /> : <WifiOff aria-hidden="true" />}
             {live ? (paused ? `paused${queued ? ` · ${queued} new` : ""}` : "live") : "connecting"}
@@ -165,6 +203,17 @@ export function DeparturesBoard({
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          className="ghost pc-live-calls__housekeeping"
+          aria-pressed={showHousekeeping}
+          data-showing={showHousekeeping ? "shown" : "hidden"}
+          onClick={() => setShowHousekeeping((shown) => !shown)}
+          title="Model-listing calls an SDK makes on startup. Recorded in full either way."
+        >
+          {showHousekeeping ? "Hide" : "Show"} SDK probes
+          {housekeeping ? ` · ${housekeeping}` : ""}
+        </button>
         <button
           type="button"
           className="ghost pc-live-calls__pause"
@@ -197,16 +246,18 @@ export function DeparturesBoard({
             </tr>
           </thead>
           <tbody>
-            {visibleRows.length === 0 ? (
+            {visibleGroups.length === 0 ? (
               <tr>
                 <td colSpan={7} className="pc-live-calls__empty">
                   {rows.length === 0
                     ? "No governed calls yet. Route a call through the gateway and it will appear here."
-                    : "No loaded calls match these filters."}
+                    : emptyReason}
                 </td>
               </tr>
             ) : (
-              visibleRows.map((row) => {
+              visibleGroups.map((group) => {
+                const { row, count } = group;
+                const span = groupSpan(group);
                 const verdict = verdictFor(row.status);
                 const refusedRow = verdict.tone === "denied";
                 return (
@@ -216,6 +267,7 @@ export function DeparturesBoard({
                       refusedRow ? "is-refused" : ""
                     } ${arrived.current.has(row.id) ? "pc-departure-new" : ""}`}
                     data-call-state={selected?.id === row.id ? "selected" : "idle"}
+                    data-call-class={isHousekeeping(row) ? "housekeeping" : "inference"}
                     role="button"
                     tabIndex={0}
                     aria-label={`Open recorded call ${flightCode(row)}`}
@@ -235,7 +287,7 @@ export function DeparturesBoard({
                     </td>
                     <td className="pc-live-calls__destination">
                       {row.provider ?? "—"}
-                      {row.model ? <span> / {row.model}</span> : null}
+                      <span> / {departureDestination(row)}</span>
                     </td>
                     <td className="pc-live-calls__passport" title={row.passport_id ?? ""}>
                       {row.passport_id
@@ -252,6 +304,20 @@ export function DeparturesBoard({
                     </td>
                     <td className={`pc-live-calls__verdict ${TONE_CLASS[verdict.tone]}`}>
                       {verdict.word}
+                      {count > 1 ? (
+                        <button
+                          type="button"
+                          className="pc-live-calls__repeat"
+                          title={repeatTitle(count, span)}
+                          aria-label={`Show the ${count} calls in this burst`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleGroup(row.id);
+                          }}
+                        >
+                          ×{count}
+                        </button>
+                      ) : null}
                     </td>
                   </tr>
                 );
@@ -262,20 +328,23 @@ export function DeparturesBoard({
       </div>
 
       <ol className="pc-live-calls__cards" aria-label="Calls handled by the gateway">
-        {visibleRows.length === 0 ? (
+        {visibleGroups.length === 0 ? (
           <li className="pc-live-calls__empty">
             {rows.length === 0
               ? "No governed calls yet. Route a call through the gateway and it will appear here."
-              : "No loaded calls match these filters."}
+              : emptyReason}
           </li>
         ) : (
-          visibleRows.map((row) => {
+          visibleGroups.map((group) => {
+            const { row, count } = group;
+            const span = groupSpan(group);
             const verdict = verdictFor(row.status);
             return (
               <li
                 key={row.id}
                 className={`pc-call-row ${verdict.tone === "denied" ? "is-refused" : ""}`}
                 data-call-state={selected?.id === row.id ? "selected" : "idle"}
+                data-call-class={isHousekeeping(row) ? "housekeeping" : "inference"}
                 role="button"
                 tabIndex={0}
                 onClick={() => setSelected(row)}
@@ -288,9 +357,22 @@ export function DeparturesBoard({
               >
                 <div>
                   <strong>{row.provider ?? "Unknown provider"}</strong>
-                  <span>{row.model ?? "Model unavailable"}</span>
+                  <span>{departureDestination(row)}</span>
                 </div>
-                <span className={TONE_CLASS[verdict.tone]}>{verdict.word}</span>
+                <span className={TONE_CLASS[verdict.tone]}>
+                  {verdict.word}
+                  {count > 1 ? (
+                    <button
+                      type="button"
+                      className="pc-live-calls__repeat"
+                      title={repeatTitle(count, span)}
+                      aria-label={`Show the ${count} calls in this burst`}
+                      onClick={(event) => { event.stopPropagation(); toggleGroup(row.id); }}
+                    >
+                      ×{count}
+                    </button>
+                  ) : null}
+                </span>
                 <dl>
                   <div><dt>{zoneLabel}</dt><dd>{format(row.created_at, "time")}</dd></div>
                   <div><dt>Identity</dt><dd>{row.passport_id ? row.passport_id.slice(0, 10) : row.auth_method === "direct_key" ? "Direct key" : "—"}</dd></div>

@@ -123,8 +123,18 @@ export class ControlClient {
   };
 
   readonly logs = {
-    list: (params?: { agent_id?: string; status?: string; limit?: number }) =>
-      this.req<any[]>("GET", "/logs", { query: params }),
+    /**
+     * `class` selects a view, never a different record: omitted returns every
+     * call, `inference` drops SDK housekeeping (startup model-listing probes),
+     * `housekeeping` returns only those. The limit is applied before the
+     * filter, so a filtered page can be shorter than the limit asked for.
+     */
+    list: (params?: {
+      agent_id?: string;
+      status?: string;
+      class?: "inference" | "housekeeping";
+      limit?: number;
+    }) => this.req<any[]>("GET", "/logs", { query: params }),
   };
 
   readonly audit = {

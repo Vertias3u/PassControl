@@ -47,6 +47,73 @@ describe("first-call activation state", () => {
     })).toMatchObject({ stage: "complete", agentId: "agent-1", receiptRecorded: true });
   });
 
+  // ── SDK housekeeping must not fire the milestone ──────────────────────────
+  //
+  // An SDK pointed at PassControl lists models on startup. That row is real,
+  // governed and `ok` — and it is a handshake, not a call anyone asked the agent
+  // to make. Treating it as first-call completion tells an operator their agent
+  // is working before it has ever run a single inference. See lib/call-class.ts.
+  const probeRow = (): FirstCallRow => ({
+    id: "log-probe",
+    agent_id: "agent-1",
+    provider: "openai",
+    model: "", // GET /v1/models carries no model
+    status: "ok",
+    receipt: "signed-receipt",
+    created_at: "2026-08-12T11:59:00.000Z",
+  });
+
+  it("does not complete on a successful capability probe alone", () => {
+    const state = deriveFirstCallActivation({
+      providerConfigured: true,
+      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+      logs: [probeRow()],
+    });
+    expect(state.stage).toBe("call");
+    // Still worth telling the operator: the SDK reached us, so base URL and
+    // credential are right, and only the inference itself is outstanding.
+    expect(state).toMatchObject({ stage: "call", connected: true });
+  });
+
+  it("reports no connection when nothing at all has arrived", () => {
+    expect(deriveFirstCallActivation({
+      providerConfigured: true,
+      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+      logs: [],
+    })).toMatchObject({ stage: "call", connected: false });
+  });
+
+  it("completes on the real call even when a probe arrived first", () => {
+    expect(deriveFirstCallActivation({
+      providerConfigured: true,
+      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+      logs: [row("ok"), probeRow()],
+    })).toMatchObject({ stage: "complete", agentId: "agent-1" });
+  });
+
+  it("diagnoses a real refusal rather than the probe that succeeded beside it", () => {
+    // Newest first, as the dashboard fetches them: the probe is the most recent
+    // row, but the refusal is the one the operator has to act on.
+    const state = deriveFirstCallActivation({
+      providerConfigured: true,
+      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+      logs: [probeRow(), row("blocked_scope")],
+    });
+    expect(state).toMatchObject({ stage: "diagnose", agentId: "agent-1" });
+    expect(state.stage === "diagnose" && state.row.status).toBe("blocked_scope");
+  });
+
+  it("keeps a refused capability probe visible as a diagnosable attempt", () => {
+    // A kill switch refusing a startup probe is not chatter — it is the control
+    // working, and the operator needs to see why nothing is getting through.
+    const refusedProbe: FirstCallRow = { ...probeRow(), id: "log-killed", status: "blocked_killed", receipt: null };
+    expect(deriveFirstCallActivation({
+      providerConfigured: true,
+      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+      logs: [refusedProbe],
+    })).toMatchObject({ stage: "diagnose", agentId: "agent-1" });
+  });
+
   it("keeps a suspended identity in the flow so its refusal can be diagnosed", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,

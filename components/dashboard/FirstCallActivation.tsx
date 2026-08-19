@@ -243,15 +243,35 @@ export function FirstCallActivation({
         ) : null}
 
         {state.stage === "call" ? (
-          <div className="pc-first-call__action" data-activation-state="call">
+          <div
+            className="pc-first-call__action"
+            data-activation-state="call"
+            data-connected={state.connected ? "probe" : "none"}
+          >
             <div>
               <strong>Run one request from {state.agentName || "the agent"}.</strong>
-              <p>
-                {state.stage === "call" && agents.find((agent) => agent.id === state.agentId)?.identityKind === "passport"
-                  ? "Use the Passport SDK configuration saved during issuance. The private key signs locally and the provider call goes through PassControl Cloud."
-                  : "Use the Direct Agent Key configuration saved when the credential was revealed. The provider call goes through PassControl Cloud."}
-              </p>
-              <small>If nothing appears, check the PassControl base URL and agent credential. Authentication failures happen before a tenant call row can be written.</small>
+              {/* A probe already cleared the gate, so the wiring is not in doubt
+                  — saying "check the base URL" here would send the operator to
+                  debug the one thing already proven. The probe is named, not
+                  hidden: it is a real recorded call, just not an inference. */}
+              {state.connected ? (
+                <p>
+                  This agent&rsquo;s SDK has already reached PassControl — a capability probe
+                  (model listing) cleared the gate, so the base URL and credential are correct.
+                  What is outstanding is one actual model call.
+                </p>
+              ) : (
+                <p>
+                  {agents.find((agent) => agent.id === state.agentId)?.identityKind === "passport"
+                    ? "Use the Passport SDK configuration saved during issuance. The private key signs locally and the provider call goes through PassControl Cloud."
+                    : "Use the Direct Agent Key configuration saved when the credential was revealed. The provider call goes through PassControl Cloud."}
+                </p>
+              )}
+              <small>
+                {state.connected
+                  ? "Capability probes are recorded in full on the departures board, but they do not count as agent activity."
+                  : "If nothing appears, check the PassControl base URL and agent credential. Authentication failures happen before a tenant call row can be written."}
+              </small>
             </div>
             <Link href={`/dashboard/agents/${state.agentId}#agent-identity`} className="ghost">
               Open agent identity <ArrowRight aria-hidden="true" />

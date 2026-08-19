@@ -179,6 +179,13 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "killswitch.master",
         "provider_key.add",
         "provider_key.rotate",
+        // Migration 0027. Switching decides which stored credential the gateway
+        // injects, and therefore which upstream account is billed from then on;
+        // deleting destroys a credential row and its Vault secret. Neither mints
+        // anything, and both are exactly the kind of change an operator needs to
+        // find in the trail when an unexpected provider bill turns up.
+        "provider_key.activate",
+        "provider_key.delete",
         "apikey.create",
         "apikey.revoke",
         "mfa.enroll",

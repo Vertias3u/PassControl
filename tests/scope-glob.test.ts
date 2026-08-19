@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scopeAllows } from "@/lib/scope";
+import { scopeAllows, endpointAllows, isModelListing, canonicalEndpointPath } from "@/lib/scope";
 
 /**
  * The glob matcher is shared by the SHADOW simulator and the LIVE gate, so
@@ -117,5 +117,77 @@ describe("glob matching, pinned against the regex implementation it replaced", (
         `pattern ${JSON.stringify(pattern)} model ${JSON.stringify(model)}`
       ).toBe(expected);
     }
+  });
+});
+
+// ── Retrieving ONE model's metadata ──────────────────────────────────────────
+//
+// `pathEquals` is exact-length, so `GET /v1/models/{id}` — the standard
+// single-model retrieve — could never match the length-2 listing rule and was
+// refused as `blocked_endpoint`. That is what an agent's "detect context length"
+// probe uses, so a supported integration pinged an unrouted path before, during
+// and after every prompt and filled the board with refusals.
+//
+// Admitting it is the narrow fix: it is a read-only GET that returns strictly
+// LESS than `GET /v1/models`, which is already allowed and already exempt from
+// the per-model scope check. Gating the narrower call more tightly than the
+// broader one would be incoherent — "I may list every model but not read one".
+describe("single-model retrieve", () => {
+  it("is admitted as a GET, for every provider that admits the listing", () => {
+    expect(endpointAllows("anthropic", "GET", ["v1", "models", "claude-haiku-4-5-20251001"])).toBe(true);
+    expect(endpointAllows("openai", "GET", ["v1", "models", "gpt-4.1"])).toBe(true);
+    expect(endpointAllows("openai", "GET", ["models", "gpt-4.1"])).toBe(true);
+    expect(endpointAllows("groq", "GET", ["v1", "models", "llama-3.3-70b"])).toBe(true);
+  });
+
+  it("stays GET-only — it must not become a write path", () => {
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      expect(endpointAllows("openai", "GET".replace("GET", method), ["v1", "models", "gpt-4.1"]))
+        .toBe(false);
+    }
+  });
+
+  it("admits exactly one extra segment, never a deeper path", () => {
+    // Deep paths are how a "models" prefix would become a way into anything the
+    // provider happens to nest under it.
+    expect(endpointAllows("openai", "GET", ["v1", "models", "a", "b"])).toBe(false);
+    expect(endpointAllows("openai", "GET", ["v1", "models", ""])).toBe(false);
+  });
+
+  it("refuses a segment that could restructure the upstream URL", () => {
+    // The route guard already rejects these, but the matcher must not depend on
+    // a caller having run it — this list is joined straight into the upstream URL.
+    for (const bad of ["..", "../fine_tuning", "a/b", "%2e%2e", "a%2fb"]) {
+      expect(endpointAllows("openai", "GET", ["v1", "models", bad])).toBe(false);
+    }
+  });
+
+  it("is treated as model listing, so no per-model scope match is required", () => {
+    // Consistency with GET /v1/models, which is exempt for the same reason: the
+    // call carries no model to run inference on. It is gated by this allowlist.
+    expect(isModelListing(["v1", "models", "gpt-4.1"])).toBe(true);
+    expect(isModelListing(["models", "gpt-4.1"])).toBe(true);
+  });
+
+  it("carries the requested model through to the upstream path, encoded", () => {
+    // Encoded so the segment can only ever BE one segment: it cannot introduce
+    // a slash, a query or a fragment into a URL built by joining these parts.
+    expect(canonicalEndpointPath("openai", "GET", ["models", "gpt-4.1"]))
+      .toEqual(["v1", "models", "gpt-4.1"]);
+    expect(canonicalEndpointPath("openai", "GET", ["v1", "models", "a b"]))
+      .toEqual(["v1", "models", "a%20b"]);
+    expect(canonicalEndpointPath("openai", "GET", ["v1", "models", "a?b#c"]))
+      .toEqual(["v1", "models", "a%3Fb%23c"]);
+  });
+
+  it("leaves the plain listing exactly as it was", () => {
+    expect(endpointAllows("openai", "GET", ["v1", "models"])).toBe(true);
+    expect(endpointAllows("openai", "POST", ["v1", "models"])).toBe(false);
+    expect(canonicalEndpointPath("openai", "GET", ["v1", "models"])).toEqual(["v1", "models"]);
+  });
+
+  it("does not admit a retrieve where deepseek never admitted a listing", () => {
+    // deepseek has no models rule today; this change must not invent one.
+    expect(endpointAllows("deepseek", "GET", ["models", "deepseek-chat"])).toBe(false);
   });
 });

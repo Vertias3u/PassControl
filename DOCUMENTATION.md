@@ -92,12 +92,29 @@ path shape real SDKs send, then forwards to the provider's canonical upstream pa
 
 | Provider | Accepted client paths | Canonical upstream path |
 |---|---|---|
-| `openai` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models` | `/v1/chat/completions`; `/v1/models` |
-| `groq` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models` | `/v1/chat/completions`; `/v1/models` |
-| `mistral` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models` | `/v1/chat/completions`; `/v1/models` |
-| `together` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models` | `/v1/chat/completions`; `/v1/models` |
-| `anthropic` | `POST /v1/messages`; `GET /v1/models` | `/v1/messages`; `/v1/models` |
+| `openai` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
+| `groq` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
+| `mistral` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
+| `together` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
+| `anthropic` | `POST /v1/messages`; `GET /v1/models`; `GET /v1/models/{id}` | `/v1/messages`; `/v1/models`; `/v1/models/{id}` |
 | `deepseek` | `POST /chat/completions` | `/chat/completions` |
+
+`GET .../models` is **narrowed to the visa's scope**: PassControl forwards to the provider,
+then removes the entries this agent may not call. The rows that survive are the provider's own,
+byte for byte — nothing is added and no field is synthesised — and an unrecognised response shape
+passes through untouched. Without it the listing answers with everything the *provider key* can
+reach, which is the tenant's whole account rather than the agent's capability, so an SDK's model
+picker offers choices guaranteed to be refused on first use. This is presentation of a boundary
+the gate already enforces, not the enforcement itself.
+
+`GET .../models/{id}` retrieves one model's metadata. It is read-only, returns strictly less
+than the listing beside it, and — like the listing — carries no model to run inference on, so
+it is exempt from the per-model scope check and gated by this allowlist alone. It is **not**
+narrowed: discovery is scoped, an explicit lookup is not — the caller already knows the name, and
+it still cannot *call* an out-of-scope model. Exactly one
+extra segment is accepted, and it is URL-encoded into the upstream path, so it can only ever
+be a model id and never a route into anything else. Agent SDKs call it to detect a model's
+context length; without it that probe is refused around every prompt.
 
 Endpoints outside that allowlist are denied by default. The gateway does **not** proxy
 embeddings, files, fine-tuning, batches, responses, or token-counting endpoints. PassControl

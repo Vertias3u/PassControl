@@ -43,6 +43,13 @@ const MUST_GATE = [
   "createApiKey",
   // Revoking a Direct Agent Key is a write against a credential row.
   "revokeDirectAgentKey",
+  // Choosing WHICH stored provider credential the gateway injects. It mints
+  // nothing, but it redirects every subsequent call — and the spend for them —
+  // onto a different upstream account, which is the same authority as storing
+  // the key in the first place.
+  "setActiveProviderKey",
+  // Destroys a credential row AND its Vault secret. Irreversible.
+  "deleteProviderKey",
 ];
 
 describe("credential-minting Server Actions clear the strict MFA gate", () => {

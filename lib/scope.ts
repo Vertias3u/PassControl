@@ -457,6 +457,35 @@ interface EndpointRule {
   readonly method: string;
   readonly path: readonly string[];
   readonly upstreamPath: readonly string[];
+  /**
+   * When set, the rule matches `path` followed by EXACTLY ONE more segment,
+   * which is appended (URL-encoded) to `upstreamPath`.
+   *
+   * This exists for one shape only: retrieving a single model,
+   * `GET /v1/models/{id}`. `pathEquals` is exact-length, so that call could
+   * never match the length-2 listing rule and came back `blocked_endpoint` —
+   * which is what an agent's "detect context length" probe does, so a supported
+   * integration pinged an unrouted path around every prompt.
+   *
+   * Deliberately *one* segment, never a prefix match. A prefix match under
+   * `models` would be a way into anything a provider nests below it, and the
+   * comment above this allowlist promises exact-segment matching.
+   */
+  readonly param?: true;
+}
+
+/**
+ * A free segment may only ever BE a segment.
+ *
+ * The route handler already rejects traversal on every path, but this matcher
+ * must not depend on its caller having done that — the result is joined
+ * straight into the upstream URL. Checked here, and encoded on the way out.
+ */
+function isSafeParamSegment(segment: string | undefined): segment is string {
+  if (!segment) return false;
+  if (segment === "." || segment === "..") return false;
+  if (segment.includes("/")) return false;
+  return !/%2e|%2f/i.test(segment);
 }
 
 const OPENAI_CHAT_PATH = ["v1", "chat", "completions"] as const;
@@ -470,28 +499,37 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH, param: true },
   ],
   anthropic: [
     { method: "POST", path: ANTHROPIC_MESSAGES_PATH, upstreamPath: ANTHROPIC_MESSAGES_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH, param: true },
   ],
   groq: [
     { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH, param: true },
   ],
   mistral: [
     { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH, param: true },
   ],
   together: [
     { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH, param: true },
   ],
   deepseek: [
     { method: "POST", path: DEEPSEEK_CHAT_PATH, upstreamPath: DEEPSEEK_CHAT_PATH },
@@ -508,13 +546,40 @@ function pathEquals(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((seg, i) => seg === b[i]);
 }
 
+/** The matched rule plus, for a parameterised rule, the segment it captured. */
+interface EndpointMatch {
+  rule: EndpointRule;
+  param: string | null;
+}
+
+function endpointMatchFor(
+  provider: ProviderId,
+  method: string,
+  path: readonly string[]
+): EndpointMatch | null {
+  const m = method.toUpperCase();
+  for (const rule of ENDPOINT_ALLOWLIST[provider]) {
+    if (rule.method !== m) continue;
+    if (!rule.param) {
+      if (pathEquals(rule.path, path)) return { rule, param: null };
+      continue;
+    }
+    // Exactly one more segment than the rule, and it must be a safe one.
+    if (path.length !== rule.path.length + 1) continue;
+    if (!pathEquals(rule.path, path.slice(0, rule.path.length))) continue;
+    const segment = path[path.length - 1];
+    if (!isSafeParamSegment(segment)) continue;
+    return { rule, param: segment };
+  }
+  return null;
+}
+
 function endpointRuleFor(
   provider: ProviderId,
   method: string,
   path: readonly string[]
 ): EndpointRule | null {
-  const m = method.toUpperCase();
-  return ENDPOINT_ALLOWLIST[provider].find((rule) => rule.method === m && pathEquals(rule.path, path)) ?? null;
+  return endpointMatchFor(provider, method, path)?.rule ?? null;
 }
 
 /** True if this (method, path) is one of the fixed, known-good endpoints. */
@@ -532,14 +597,41 @@ export function canonicalEndpointPath(
   method: string,
   path: readonly string[]
 ): readonly string[] | null {
-  return endpointRuleFor(provider, method, path)?.upstreamPath ?? null;
+  const match = endpointMatchFor(provider, method, path);
+  if (!match) return null;
+  if (match.param == null) return match.rule.upstreamPath;
+  // Encoded, so a captured segment cannot introduce a slash, a query or a
+  // fragment into the URL the proxy builds by joining these parts.
+  return [...match.rule.upstreamPath, encodeURIComponent(match.param)];
 }
 
 /** The model-listing endpoints (GET /models or /v1/models) carry no model, so the
  *  per-model scope check does not apply to it — it is gated by the endpoint
  *  allowlist (GET-only) instead. */
-export function isModelListing(path: readonly string[]): boolean {
+/**
+ * The listing INDEX only — `GET /models` or `GET /v1/models`, never the
+ * single-model retrieve.
+ *
+ * Separate from `isModelListing` because the two answer different questions.
+ * That one asks "is this exempt from the per-model scope check" (both forms
+ * are). This one asks "is this the agent discovering what it may use", which is
+ * the index alone — and it is the only response the gateway narrows to scope.
+ */
+export function isModelListingIndex(path: readonly string[]): boolean {
   return (path.length === 1 && path[0] === "models") || pathEquals(path, OPENAI_MODELS_PATH);
+}
+
+export function isModelListing(path: readonly string[]): boolean {
+  const listing = isModelListingIndex;
+  if (listing(path)) return true;
+  // Retrieving ONE model is exempt for the same reason, and it must be exempt
+  // for consistency: `GET /v1/models` returns every model and is already exempt,
+  // so gating the strictly narrower call more tightly would mean an agent may
+  // list every model but not read one of them. Neither call runs inference, so
+  // neither has a model to match a scope pattern against.
+  return path.length > 1 && isSafeParamSegment(path[path.length - 1])
+    ? listing(path.slice(0, -1))
+    : false;
 }
 
 /**
@@ -558,7 +650,9 @@ export function advertisedClientPath(
 ): readonly string[] | null {
   const wantModels = operation === "models";
   const candidates = ENDPOINT_ALLOWLIST[provider].filter(
-    (rule) => isModelListing(rule.path) === wantModels
+    // Parameterised rules are excluded: what is advertised is a BASE path an SDK
+    // is pointed at, and `/v1/models/{id}` is not one.
+    (rule) => !rule.param && isModelListing(rule.path) === wantModels
   );
   if (candidates.length === 0) return null;
   return candidates.reduce((shortest, rule) =>

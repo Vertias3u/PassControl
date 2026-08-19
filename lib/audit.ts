@@ -21,6 +21,10 @@ export const AUDIT_ACTIONS = [
   "agent.revoke",
   "provider_key.add",
   "provider_key.rotate",
+  // Which stored credential the gateway injects, and the destruction of one.
+  // Both change what gets billed upstream, so both belong in the audit trail.
+  "provider_key.activate",
+  "provider_key.delete",
   "killswitch.master",
   "agent.break_glass",
   "owner.set",

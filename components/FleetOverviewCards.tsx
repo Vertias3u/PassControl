@@ -6,9 +6,17 @@ export function FleetOverviewCards(props: {
   totalAgents: number;
   spentMicrocents: number;
   blockedCalls: number;
+  /** Agent calls only. SDK capability probes are counted separately below so
+   *  the refusal figure reads against work the agent actually asked for. */
   recentCalls: number;
+  /** Preserved and disclosed, never folded into the denominator. */
+  housekeepingCalls?: number;
   attentionAgents: number;
 }) {
+  const probes = props.housekeepingCalls ?? 0;
+  const scanNote =
+    `Latest ${props.recentCalls} agent call${props.recentCalls === 1 ? "" : "s"}` +
+    (probes ? ` · ${probes} SDK probe${probes === 1 ? "" : "s"}` : "");
   return (
     <div className="pc-metric-grid pc-overview-status-rail" aria-label="Fleet operational summary">
       <MetricCard
@@ -31,7 +39,7 @@ export function FleetOverviewCards(props: {
         label="Refused calls"
         value={props.blockedCalls}
         icon={<ShieldAlert className="h-5 w-5" />}
-        note={`Latest ${props.recentCalls} call record${props.recentCalls === 1 ? "" : "s"}`}
+        note={scanNote}
         href="#activity"
         tone={props.blockedCalls ? "warning" : "neutral"}
       />

@@ -168,6 +168,7 @@ paths:
       parameters:
         - { $ref: "#/components/parameters/AgentIdQuery" }
         - { $ref: "#/components/parameters/Status" }
+        - { $ref: "#/components/parameters/CallClass" }
         - { $ref: "#/components/parameters/Limit" }
       responses:
         "200":
@@ -265,9 +266,23 @@ components:
       name: status
       in: query
       schema: { type: string }
+    CallClass:
+      name: class
+      in: query
+      description: >-
+        Narrow to operationally meaningful calls (`inference`) or to SDK
+        housekeeping such as startup model-listing probes (`housekeeping`).
+        Omitted returns every recorded call, which stays the default: the log is
+        the complete record, and this parameter only chooses a view of it.
+        Classification is derived from the stored row, not a stored field, and a
+        refused call is never housekeeping.
+      schema: { type: string, enum: [inference, housekeeping] }
     Limit:
       name: limit
       in: query
+      description: >-
+        Applied to the query before any `class` filter, so a filtered page can
+        return fewer rows than the limit.
       schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
     IdempotencyKey:
       name: Idempotency-Key

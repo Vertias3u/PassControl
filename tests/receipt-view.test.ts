@@ -13,6 +13,7 @@ import {
   isFetchableIssuer,
   peekArtifact,
   preflight,
+  readRecordedEndpoint,
 } from "@/lib/verify/receipt-view";
 
 describe("receipt authentication wording", () => {
@@ -456,5 +457,56 @@ describe("the failover chain", () => {
   it("never lets a zero cost read as a guarantee that nothing was charged", () => {
     expect(formatCost(0).primary).not.toMatch(/free|no charge for|nothing/i);
     expect(formatCost(0).primary.toLowerCase()).toContain("recorded");
+  });
+});
+
+// ── Reading the endpoint back off a stored row ───────────────────────────────
+//
+// Every row carries `mth` + `path` inside its signed receipt — including refused
+// ones, because logBlocked builds a receipt too. Nothing surfaced it, so a board
+// full of NO ROUTE told an operator nothing about which route. This reads it for
+// display only: the claims are UNVERIFIED here, and the wording must never let a
+// decoded claim pass as an asserted fact (the forged-receipt lesson).
+describe("recorded endpoint, read from an unverified receipt", () => {
+  const jws = (claims: Record<string, unknown>) => {
+    const seg = (o: unknown) =>
+      Buffer.from(JSON.stringify(o)).toString("base64url");
+    return `${seg({ alg: "EdDSA", typ: "application/passcontrol-receipt+jwt" })}.${seg(claims)}.c2ln`;
+  };
+
+  it("reads the method and path a receipt records", () => {
+    expect(readRecordedEndpoint(jws({ mth: "POST", path: "v1/messages" })))
+      .toBe("POST /v1/messages");
+  });
+
+  it("keeps a path that already has a leading slash from doubling it", () => {
+    expect(readRecordedEndpoint(jws({ mth: "GET", path: "/v1/models" })))
+      .toBe("GET /v1/models");
+  });
+
+  it("returns null when there is no receipt to read", () => {
+    expect(readRecordedEndpoint(null)).toBeNull();
+    expect(readRecordedEndpoint("")).toBeNull();
+  });
+
+  it("returns null rather than a half-answer on a malformed receipt", () => {
+    expect(readRecordedEndpoint("not.a.jws")).toBeNull();
+    expect(readRecordedEndpoint(jws({ mth: "POST" }))).toBeNull();
+    expect(readRecordedEndpoint(jws({ path: "v1/messages" }))).toBeNull();
+  });
+
+  it("refuses claim values that are not strings", () => {
+    // A receipt is attacker-influenceable input until a signature says otherwise.
+    expect(readRecordedEndpoint(jws({ mth: { $: 1 }, path: "v1/messages" }))).toBeNull();
+    expect(readRecordedEndpoint(jws({ mth: "POST", path: ["v1", "messages"] }))).toBeNull();
+  });
+
+  it("bounds and sanitises what it will render", () => {
+    // Rendered into the dashboard, so it may not carry control characters or an
+    // unbounded string out of a payload nobody has verified.
+    expect(readRecordedEndpoint(jws({ mth: "POST", path: "v1/mes\nsages" })))
+      .toBe("POST /v1/mes sages");
+    const long = readRecordedEndpoint(jws({ mth: "POST", path: "a".repeat(500) }));
+    expect(long!.length).toBeLessThanOrEqual(128);
   });
 });

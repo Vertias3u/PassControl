@@ -34,6 +34,43 @@ const k = {
   keyImport: (uid: string, id: string) => `keyimport:${uid}:${id}`,
 };
 
+/**
+ * Undo the Upstash client's automatic deserialization for a cache that stores a
+ * string.
+ *
+ * `@upstash/redis` serialises a string by passing it through unchanged, then
+ * deserialises EVERY response with `JSON.parse`. So a value written as JSON text
+ * — which is every structured cache below — comes back as a parsed object, and
+ * `redis().get<string>(…)` quietly asserts otherwise: it is a type argument, not
+ * a runtime coercion. Every caller then does `JSON.parse(cached)`, which throws
+ * on an object, and every caller's catch branch reads that as "the cached value
+ * is malformed".
+ *
+ * For the policy cache that meant `policy:malformed`, which the proxy fails
+ * CLOSED on — an agent with no policy at all was refused for the length of every
+ * cache window, clearing only on the miss that re-read Postgres. Found in
+ * production on 2026-08-16.
+ *
+ * The fix belongs here rather than in each caller: the callers are written
+ * against the declared `string` contract and are correct as written, so this
+ * restores the contract instead of teaching four modules about a client
+ * behaviour they should never have to know.
+ *
+ * Not `automaticDeserialization: false` on the client, which would be the same
+ * repair with a far wider blast radius: one client serves the atomic budget Lua
+ * script, the nonce `set nx`, and the spend counters, and all of their return
+ * types would move at once.
+ *
+ * A non-string round-trips through `JSON.stringify`, which reproduces the exact
+ * text that was stored — including the digit-only case, where `parseRecursive`
+ * hands back a real number.
+ */
+function asCachedString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value;
+  return JSON.stringify(value) ?? null;
+}
+
 // ── Replay nonces (Flow B) ────────────────────────────────────────────────────
 /** Returns true if the nonce was fresh (claimed), false if already seen (replay). */
 export async function claimNonce(nonce: string, ttlSeconds = 180): Promise<boolean> {
@@ -205,7 +242,7 @@ export async function seedSpent(
 
 // ── Provider-key cache (stores ciphertext only; see aesgcm.ts) ────────────────
 export async function getCachedKey(agentId: string, provider: string): Promise<string | null> {
-  return redis().get<string>(k.key(agentId, provider));
+  return asCachedString(await redis().get<unknown>(k.key(agentId, provider)));
 }
 
 export async function setCachedKey(
@@ -235,7 +272,7 @@ export async function getCachedAgentPolicy(
   userId: string,
   agentId: string
 ): Promise<string | null> {
-  return redis().get<string>(k.policy(userId, agentId));
+  return asCachedString(await redis().get<unknown>(k.policy(userId, agentId)));
 }
 
 export async function setCachedAgentPolicy(
@@ -265,7 +302,7 @@ export async function getCachedAgentFallbacks(
   userId: string,
   agentId: string
 ): Promise<string | null> {
-  return redis().get<string>(k.fallbacks(userId, agentId));
+  return asCachedString(await redis().get<unknown>(k.fallbacks(userId, agentId)));
 }
 
 export async function setCachedAgentFallbacks(
@@ -286,7 +323,7 @@ export async function purgeAgentFallbacks(userId: string, agentId: string): Prom
 // Owner bindings change far less often than policy, hence the longer TTL. Not
 // secret material — a published owner is public by definition.
 export async function getCachedOwner(userId: string): Promise<string | null> {
-  return redis().get<string>(k.owner(userId));
+  return asCachedString(await redis().get<unknown>(k.owner(userId)));
 }
 
 export async function setCachedOwner(
@@ -302,7 +339,7 @@ export async function purgeOwnerCache(userId: string): Promise<void> {
 }
 
 export async function getCachedProviderKeys(userId: string): Promise<string | null> {
-  return redis().get<string>(k.providerKeys(userId));
+  return asCachedString(await redis().get<unknown>(k.providerKeys(userId)));
 }
 
 export async function setCachedProviderKeys(
@@ -368,7 +405,7 @@ export async function stashKeyImport(
  */
 export async function takeKeyImport(userId: string, id: string): Promise<string | null> {
   const key = k.keyImport(userId, id);
-  const sealed = await redis().get<string>(key);
+  const sealed = asCachedString(await redis().get<unknown>(key));
   await redis().del(key);
   return sealed ?? null;
 }

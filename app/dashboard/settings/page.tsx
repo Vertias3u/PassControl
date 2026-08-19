@@ -39,18 +39,45 @@ export default async function SettingsPage() {
   // agent_owners is SELECT-only for `authenticated` (0017) and readOwner filters
   // on user_id explicitly, so the service-role client here is the same tenant
   // boundary the control route uses — enforced in code, not by RLS.
-  const [{ data: apiKeys }, mfaStatus, owner, providerCredentialCount] = await Promise.all([
+  const [{ data: apiKeys }, mfaStatus, owner, providerCredentials] = await Promise.all([
     db
       .from("api_keys")
       .select("id, name, key_prefix, scope, last_used_at, revoked_at, created_at")
       .order("created_at", { ascending: false }),
     getMfaStatus(),
     readOwner(serviceClient(), user.id),
-    db.from("provider_credentials").select("id", { count: "exact", head: true }),
+    // Metadata only, and that is structural rather than careful: the secret is
+    // in Vault and has no column here to select. `is_active` arrives with
+    // migration 0027, so this is read tolerantly — a settings page that 500s
+    // because a migration has not been applied yet is a worse failure than a
+    // list that is briefly missing, and the add form must keep working either way.
+    db
+      .from("provider_credentials")
+      .select("id, provider, label, created_at, is_active")
+      .order("created_at", { ascending: false }),
   ]);
 
   const activeApiKeys = (apiKeys ?? []).filter((key) => !key.revoked_at).length;
-  const providerCount = providerCredentialCount.count ?? 0;
+  // An error here means 0027 has not been applied (no `is_active` column). The
+  // panel says so and still lets a key be stored, rather than taking the page down.
+  const credentialList = (providerCredentials.data ?? []).map((row) => ({
+    id: String(row.id),
+    provider: String(row.provider),
+    label: typeof row.label === "string" ? row.label : null,
+    created_at: String(row.created_at),
+    is_active: row.is_active === true,
+  }));
+  const credentialListUnavailable = Boolean(providerCredentials.error);
+  // Never infer "no credentials" from a failed read. In the exact window the
+  // tolerant read exists for — deployed before 0027, so `is_active` does not
+  // resolve — an empty list would light the status chip as "Needs a provider
+  // key" for a tenant that has several, which reads as a second fault stacked on
+  // the first. One extra head query, only on the degraded path.
+  const providerCount = credentialListUnavailable
+    ? (
+        await db.from("provider_credentials").select("id", { count: "exact", head: true })
+      ).count ?? 0
+    : credentialList.length;
   const ownerRecord = owner.ok ? owner.data : null;
 
   return (
@@ -102,7 +129,10 @@ export default async function SettingsPage() {
             </>}
           />
           <div className="pc-section__body">
-          <ProviderKeysManager />
+          <ProviderKeysManager
+            credentials={credentialList}
+            listUnavailable={credentialListUnavailable}
+          />
           </div>
         </section>
 
