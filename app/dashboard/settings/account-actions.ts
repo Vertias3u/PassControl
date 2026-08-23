@@ -57,6 +57,23 @@ export async function deleteAccount(confirmation: string): Promise<DeleteAccount
   }
 
   const admin = serviceClient();
+
+  // READ THE AVATAR PATH FIRST. delete_account_data (0024) cascades foreign
+  // keys, and public.users is one of the rows it deletes — so after the RPC
+  // there is nothing left to read the storage key from, and every avatar this
+  // account ever uploaded would be orphaned in the bucket with no row anywhere
+  // that names it. Nothing else can find it afterwards; there is no sweep.
+  //
+  // Reading it early costs one query on a path that is already doing far more,
+  // and the value is null for the overwhelming majority of accounts.
+  const { data: avatarRow } = await admin
+    .from("users")
+    .select("avatar_path")
+    .eq("id", user.id)
+    .maybeSingle();
+  const avatarPath =
+    avatarRow && typeof avatarRow.avatar_path === "string" ? avatarRow.avatar_path : null;
+
   const { data: deletionData, error: databaseError } = await admin.rpc("delete_account_data", {
     p_user_id: user.id,
   });
@@ -70,6 +87,22 @@ export async function deleteAccount(confirmation: string): Promise<DeleteAccount
       route: "dashboard/settings/account-delete",
       event: "account_delete_inventory_invalid",
     });
+  }
+
+  // Storage is outside the RPC's reach — it cascades foreign keys, not buckets.
+  // A failure here leaves an image nothing references, which is a quota
+  // nuisance rather than a disclosure (the avatar_key that addressed it went
+  // with the row), so it is reported and does not abort the deletion.
+  let avatarOrphaned = false;
+  if (avatarPath) {
+    const removal = await admin.storage.from("avatars").remove([avatarPath]);
+    avatarOrphaned = Boolean(removal.error);
+    if (avatarOrphaned) {
+      await captureError(new Error("Account deletion could not remove the stored avatar"), {
+        route: "dashboard/settings/account-delete",
+        event: "account_delete_avatar_orphaned",
+      });
+    }
   }
 
   const { error: authError } = await admin.auth.admin.deleteUser(user.id);
@@ -96,7 +129,9 @@ export async function deleteAccount(confirmation: string): Promise<DeleteAccount
       inventory.controlApiKeyIds
     );
     await armTenantKill(user.id, false);
-    return { ok: true, cleanupPending: false };
+    // An orphaned avatar is still incomplete cleanup, and this file already
+    // refuses to say "Success!" when a cleanup step fails.
+    return { ok: true, cleanupPending: avatarOrphaned };
   } catch (error) {
     await captureError(error, {
       route: "dashboard/settings/account-delete",

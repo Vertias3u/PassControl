@@ -1,17 +1,25 @@
 "use server";
 // MFA (TOTP) management for the Control Tower (see MFA_SCOPING.md). Enrollment +
 // recovery codes only — the login step-up / AAL2 gate is a separate (careful) pass.
-// Actions run as the authenticated user, EXCEPT the recovery-code writes: 0029
-// revokes insert/update/delete on `mfa_recovery_codes` from `authenticated`, so
-// those go through the service role with an explicit `user_id` filter. Redeeming
-// a code unenrolls the TOTP factor by design, which means a client that could
-// write that table could plant a code, redeem it, and walk through the strict
-// credential gate with nothing left to step up to. Codes are still hashed.
+// Actions run as the authenticated user, EXCEPT everything that touches
+// `mfa_recovery_codes`: 0029 revoked insert/update/delete from `authenticated`
+// and 0031 revoked SELECT, so the browser now holds no privilege on that table
+// at all and every access here goes through the service role with an explicit
+// `user_id` filter. Redeeming a code unenrolls the TOTP factor by design, so a
+// client that could write the table could plant a code, redeem it, and walk
+// through the strict credential gate with nothing left to step up to — and a
+// client that could READ it got the SHA-256 verifiers of ~49.5-bit codes to
+// crack offline, which ends in the same place one search later. Codes are
+// hashed, and the hashes never leave the server.
+//
+// service_role bypasses RLS, so the `.eq("user_id", user.id)` on each of these
+// calls IS the tenant boundary. `user.id` always comes from `getUser()` in the
+// same request; none of these functions takes a user id as an argument.
 import { redirect } from "next/navigation";
 import { userClient } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/supabase";
 import { mfaAuthorizedUser } from "@/lib/mfa";
-import { generateRecoveryCodes, consumeRecoveryCode } from "@/lib/recoveryCodes";
+import { generateRecoveryCodes, consumeRecoveryCode, type GeneratedRecoveryCode } from "@/lib/recoveryCodes";
 import { recordAdminAction } from "@/lib/audit";
 import { logSecurityEvent } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
@@ -64,24 +72,60 @@ async function mfaBlockedReason(
 
 export interface MfaStatus {
   enrolled: boolean;
-  recoveryRemaining: number;
+  /** Unused recovery codes, or null when the count could not be read. NOT zero:
+   *  the panel warns "regenerate soon" at <= 2, and regenerating throws away a
+   *  perfectly good set — so a transient read failure must never be able to talk
+   *  a user into destroying working codes. Null renders as "unavailable". */
+  recoveryRemaining: number | null;
 }
 
-/** Current MFA state for the dashboard Security panel. */
+/** Current MFA state for the dashboard Security panel.
+ *
+ *  The count is the ONLY recovery-code fact a browser gets, and it is derived
+ *  server-side rather than granted: before 0031 this read ran on the user client,
+ *  which meant `authenticated` needed table SELECT, which meant any aal1 session
+ *  for the tenant could ask PostgREST for `select=code_hash` instead of the
+ *  `count` this function asks for. The projection the app sends was never the
+ *  capability the grant conferred. */
 export async function getMfaStatus(): Promise<MfaStatus> {
   const supabase = await userClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) return { enrolled: false, recoveryRemaining: 0 };
+  if (!user) return { enrolled: false, recoveryRemaining: null };
   const { data: factors } = await supabase.auth.mfa.listFactors();
   const enrolled = (factors?.totp ?? []).length > 0;
-  const { count } = await supabase
+  // Service role — the browser has no read path to this table. `user.id` is the
+  // tenant boundary here, and it comes from getUser() above, not from a caller.
+  const { count, error } = await serviceClient()
     .from("mfa_recovery_codes")
     .select("id", { count: "exact", head: true })
     .eq("user_id", user.id)
     .is("used_at", null);
+  if (error) {
+    logSecurityEvent("auth.mfa.status_unavailable", { user: user.id });
+    return { enrolled, recoveryRemaining: null };
+  }
   return { enrolled, recoveryRemaining: count ?? 0 };
+}
+
+/** Replace a tenant's recovery-code set in ONE transaction.
+ *
+ *  The old shape was DELETE then INSERT as two round trips, which cannot be
+ *  all-or-nothing in either direction: a failed INSERT after a committed DELETE
+ *  leaves the user with no backup codes at all, and a failed DELETE after a
+ *  committed INSERT leaves the OLD codes redeemable while the screen says they
+ *  were replaced (fresh hashes are random, so they never collide the old set
+ *  away). The RPC body is a single transaction, so a failure rolls the delete
+ *  back and the previous set survives intact.
+ *
+ *  Service-role only (0031), and `userId` is the caller's verified id. */
+async function replaceRecoveryCodes(userId: string, codes: GeneratedRecoveryCode[]): Promise<boolean> {
+  const { error } = await serviceClient().rpc("replace_mfa_recovery_codes_for_user", {
+    p_user_id: userId,
+    p_hashes: codes.map((c) => c.hash),
+  });
+  return !error;
 }
 
 /** Begin TOTP enrollment → returns the QR + secret to show the user. Clears any
@@ -125,9 +169,10 @@ export async function verifyMfaEnrollment(
   // factor this call is verifying, which the caller may have just enrolled. The
   // gate is mfaBlockedReason above.
   const codes = await generateRecoveryCodes();
-  const admin = serviceClient();
-  await admin.from("mfa_recovery_codes").delete().eq("user_id", user.id);
-  await admin.from("mfa_recovery_codes").insert(codes.map((c) => ({ user_id: user.id, code_hash: c.hash })));
+  // Store first, hand them over second. Returning the plaintext before the
+  // replacement commits would show the user ten codes the database never took.
+  const stored = await replaceRecoveryCodes(user.id, codes);
+  if (!stored) return { error: "Could not store your recovery codes. Please try again." };
 
   logSecurityEvent("auth.mfa.enrolled", { user: user.id });
   await recordAdminAction({ userId: user.id, action: "mfa.enroll", metadata: {} });
@@ -143,12 +188,10 @@ export async function regenerateRecoveryCodes(): Promise<{ recoveryCodes: string
   const blocked = await mfaBlockedReason(supabase);
   if (blocked) return { error: blocked };
   const codes = await generateRecoveryCodes();
-  const admin = serviceClient();
-  await admin.from("mfa_recovery_codes").delete().eq("user_id", user.id);
-  const { error } = await admin
-    .from("mfa_recovery_codes")
-    .insert(codes.map((c) => ({ user_id: user.id, code_hash: c.hash })));
-  if (error) return { error: "Could not regenerate recovery codes." };
+  // Atomic: on failure the previous set is still valid and still the user's, so
+  // the honest thing to report is that nothing changed.
+  const stored = await replaceRecoveryCodes(user.id, codes);
+  if (!stored) return { error: "Could not regenerate recovery codes. Your existing codes still work." };
   return { recoveryCodes: codes.map((c) => c.code) };
 }
 

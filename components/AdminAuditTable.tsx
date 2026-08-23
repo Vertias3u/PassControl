@@ -37,6 +37,12 @@ function describe(row: AdminAuditRow): { label: string; Icon: typeof UserPlus; t
       return { label: "Provider key added", Icon: KeyRound, tone: "info" };
     case "provider_key.rotate":
       return { label: "Provider key rotated", Icon: RefreshCw, tone: "info" };
+    // Named for the consequence, not the mechanic: this is the row an operator
+    // looks for when an unexpected upstream account starts getting billed.
+    case "provider_key.activate":
+      return { label: "Provider key switched", Icon: RefreshCw, tone: "warning" };
+    case "provider_key.delete":
+      return { label: "Provider key deleted", Icon: KeyRound, tone: "warning" };
     case "killswitch.master":
       return m.on === true
         ? { label: "Master kill ARMED", Icon: ShieldAlert, tone: "danger" }

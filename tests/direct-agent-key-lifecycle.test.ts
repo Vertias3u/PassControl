@@ -153,4 +153,16 @@ describe("Direct Agent Key lifecycle", () => {
       p_passport_pubkey: passportPubkey,
     });
   });
+
+  it("maps a 0035 current-or-retired namespace collision to a safe attach conflict", async () => {
+    const rpc = vi.fn(async () => ({
+      data: null,
+      error: { code: "P0001", message: "passport_key_in_use" },
+    }));
+    const passportPubkey = randomBytes(32).toString("base64url");
+
+    await expect(
+      attachAgentPassport({ rpc } as never, "user-1", "agent-1", passportPubkey)
+    ).resolves.toMatchObject({ ok: false, status: 409, code: "passport_key_in_use" });
+  });
 });

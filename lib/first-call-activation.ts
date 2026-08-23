@@ -72,6 +72,20 @@ export type FirstCallActivation =
    */
   | { stage: "call"; agentId: string; agentName: string; connected: boolean }
   | { stage: "diagnose"; agentId: string; agentName: string; row: FirstCallRow }
+  /**
+   * Traffic has passed and the operator has not yet exercised a stop control.
+   *
+   * Carries exactly the same fields as `complete` so the proof copy is shared
+   * rather than restated — the two stages differ in what is still outstanding,
+   * not in what the stored row proved.
+   */
+  | {
+      stage: "verify";
+      agentId: string;
+      agentName: string;
+      row: FirstCallRow;
+      receiptRecorded: boolean;
+    }
   | {
       stage: "complete";
       agentId: string;
@@ -80,10 +94,83 @@ export type FirstCallActivation =
       receiptRecorded: boolean;
     };
 
+/**
+ * Admin-audit actions that count as "the operator exercised a stop control".
+ *
+ * Both are single-emitter and neither can be reached by ordinary setup:
+ *   killswitch.master  app/dashboard/actions.ts — armed OR disarmed the tenant kill
+ *   agent.suspend      app/dashboard/actions.ts — suspended OR resumed an agent
+ *
+ * ── Why `agent.update` is NOT here, so nobody "fixes" the omission ──────────
+ *
+ * It reads like the obvious third entry ("they set a budget"), and it is a trap.
+ * `agent.update` has six emitters: updateAgentBudgets, attachAgentPassport, the
+ * scope editor, the fallback editor, passport rotation/expiry
+ * (agents/[id]/passport-actions.ts) and shadow policy (agents/[id]/shadow-actions.ts).
+ * Two of those are ordinary onboarding moves — a Direct Agent Key user upgrading
+ * to a passport, and a scope fix, which is exactly where the `diagnose` stage
+ * below SENDS people via `destinationFor` -> "#agent-policy".
+ *
+ * So accepting it would close this loop: refused first call -> follow our own
+ * advice and widen the scope -> step 4 marks itself verified, with no stop
+ * control ever touched. That is the same failure mode `agent.create` and
+ * `provider_key.add` are excluded for, just harder to see. Narrowing on
+ * `metadata.fields` would work today and break the moment a seventh emitter
+ * reuses the shape.
+ *
+ * Setting a budget is still offered as a link on the step — it just does not
+ * stand as evidence.
+ */
+export const CONTROL_EXERCISE_ACTIONS = ["killswitch.master", "agent.suspend"] as const;
+
+/**
+ * Name of the cookie recording that an operator dismissed the activation guide.
+ * Written by the client component, read by the dashboard server component.
+ *
+ * It lives HERE, in a plain module, and must not move into the component. That
+ * component is `"use client"`, and a value imported from a client module into a
+ * server component does not arrive as the value — the server got a client
+ * reference, so `cookies().get(NAME)` returned null while `getAll()` plainly
+ * listed the cookie, and the guide simply refused to stay dismissed. Nothing
+ * type-checks differently and no test that greps the source can see it.
+ *
+ * Declared in `app/legal/cookies/page.tsx`; a new client-visible cookie has to
+ * appear in that notice.
+ */
+export const FIRST_CALL_DISMISSED_COOKIE = "pc-first-call-dismissed";
+
+/** Only the column this decision needs. Not a full admin_audit row type. */
+export interface ControlAuditRow {
+  action: string;
+}
+
+/**
+ * Has this tenant ever demonstrably stopped something?
+ *
+ * The caller passes the dashboard's existing newest-100 `admin_audit` window, so
+ * this is bounded evidence, not an exhaustive history: a tenant busy enough to
+ * push the proof out of 100 rows has certainly touched one of these actions, and
+ * the guide is dismissible regardless. Stated rather than glossed, because a
+ * bounded read that reports itself as a lifetime fact is how a surface starts
+ * lying quietly.
+ */
+export function hasExercisedControls(rows: readonly ControlAuditRow[]): boolean {
+  return rows.some((entry) =>
+    (CONTROL_EXERCISE_ACTIONS as readonly string[]).includes(entry.action)
+  );
+}
+
 export function deriveFirstCallActivation(input: {
   providerConfigured: boolean;
   agents: readonly FirstCallAgent[];
   logs: readonly FirstCallRow[];
+  /**
+   * Required on purpose — no default. Defaulting to `true` would make absent
+   * evidence read as "verified", which is precisely the kind of manufactured
+   * proof `authenticationProofLabel` above refuses to produce. Every call site
+   * has to answer the question.
+   */
+  controlsExercised: boolean;
 }): FirstCallActivation {
   if (!input.providerConfigured) return { stage: "provider" };
 
@@ -108,8 +195,11 @@ export function deriveFirstCallActivation(input: {
   const admitted = inference.find((row) => row.status === "ok");
   if (admitted?.agent_id) {
     const agent = byId.get(admitted.agent_id)!;
+    // One admitted call proves the path is OPEN. It says nothing about whether
+    // this operator can close it, and closing it is the entire product — so the
+    // guide does not end here unless a stop control has actually been used.
     return {
-      stage: "complete",
+      stage: input.controlsExercised ? "complete" : "verify",
       agentId: agent.id,
       agentName: agent.name,
       row: admitted,

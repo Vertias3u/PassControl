@@ -20,6 +20,10 @@ export function DashboardSkeleton({ variant = "overview" }: { variant?: "overvie
             <div className="pc-skeleton pc-skeleton--alert" />
             {variant === "overview" ? <section className="pc-skeleton-panel pc-skeleton--operations" data-skeleton="operations"><div className="pc-skeleton pc-skeleton--kicker" /><div className="pc-skeleton pc-skeleton--heading" /><div className="pc-skeleton pc-skeleton--operations-grid" /></section> : null}
             {variant === "overview" ? <div className="pc-skeleton-grid">{Array.from({ length: 4 }, (_, index) => <div className="pc-skeleton pc-skeleton--metric" key={index} />)}</div> : null}
+            {/* The profile section is first on the settings page, so its
+                placeholder is first here — a skeleton whose blocks land in a
+                different order than the page is a layout shift, not a hint. */}
+            {variant === "settings" ? <section className="pc-skeleton-panel" data-skeleton="profile"><div className="pc-skeleton pc-skeleton--kicker" /><div className="pc-skeleton pc-skeleton--heading" /><div className="pc-skeleton pc-skeleton--table short" /></section> : null}
             <section className="pc-skeleton-panel"><div className="pc-skeleton pc-skeleton--kicker" /><div className="pc-skeleton pc-skeleton--heading" /><div className="pc-skeleton pc-skeleton--table" /></section>
             <section className="pc-skeleton-panel"><div className="pc-skeleton pc-skeleton--kicker" /><div className="pc-skeleton pc-skeleton--heading" /><div className="pc-skeleton pc-skeleton--table short" /></section>
           </main>

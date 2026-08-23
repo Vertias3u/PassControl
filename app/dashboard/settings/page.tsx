@@ -14,12 +14,15 @@ import { MfaManager } from "@/components/MfaManager";
 import { ProviderKeysManager } from "@/components/ProviderKeysManager";
 import { ApiKeysManager } from "@/components/ApiKeysManager";
 import { OwnerBinding } from "@/components/OwnerBinding";
+import { ProfileSettings } from "@/components/ProfileSettings";
 import { AccountLifecycle } from "@/components/AccountLifecycle";
+import { RecoveryPanel } from "@/components/RecoveryPanel";
 import { readOwner } from "@/lib/owner/manage";
+import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
-import { Fingerprint, KeyRound, ShieldCheck, Vault } from "lucide-react";
+import { Fingerprint, KeyRound, ShieldCheck, UserRound, Vault } from "lucide-react";
 import { betaOperatorEmails } from "@/lib/beta-launch";
 
 export const dynamic = "force-dynamic";
@@ -39,13 +42,21 @@ export default async function SettingsPage() {
   // agent_owners is SELECT-only for `authenticated` (0017) and readOwner filters
   // on user_id explicitly, so the service-role client here is the same tenant
   // boundary the control route uses — enforced in code, not by RLS.
-  const [{ data: apiKeys }, mfaStatus, owner, providerCredentials] = await Promise.all([
+  const [{ data: apiKeys }, mfaStatus, owner, profile, publishedAgents, providerCredentials, { data: lastExport }] = await Promise.all([
     db
       .from("api_keys")
       .select("id, name, key_prefix, scope, last_used_at, revoked_at, created_at")
       .order("created_at", { ascending: false }),
     getMfaStatus(),
     readOwner(serviceClient(), user.id),
+    // Tolerates a missing row: nothing creates one at signup, so a freshly
+    // signed-up operator legitimately has none and the panel renders empty
+    // rather than erroring. See ensureProfileRow's note.
+    readProfile(serviceClient(), user.id),
+    // How many agents this operator has published, for the panel that has to
+    // say — accurately — that publishing the profile publishes no agent.
+    // `published` is not in the client's column grant, so this is a plain read.
+    db.from("agents").select("id", { count: "exact", head: true }).eq("published", true),
     // Metadata only, and that is structural rather than careful: the secret is
     // in Vault and has no column here to select. `is_active` arrives with
     // migration 0027, so this is read tolerantly — a settings page that 500s
@@ -55,6 +66,17 @@ export default async function SettingsPage() {
       .from("provider_credentials")
       .select("id, provider, label, created_at, is_active")
       .order("created_at", { ascending: false }),
+    // When this workspace last had a configuration export taken, from either
+    // surface. The plain user client is enough: admin_audit's select policy is
+    // `user_id = (select auth.uid())` (0003), so RLS scopes this for us and
+    // there is nothing here the operator may not read about themselves.
+    db
+      .from("admin_audit")
+      .select("created_at")
+      .eq("action", "workspace.export")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ]);
 
   const activeApiKeys = (apiKeys ?? []).filter((key) => !key.revoked_at).length;
@@ -79,6 +101,8 @@ export default async function SettingsPage() {
       ).count ?? 0
     : credentialList.length;
   const ownerRecord = owner.ok ? owner.data : null;
+  const profileRecord = profile.ok ? profile.data : null;
+  const publishedAgentCount = publishedAgents.count ?? 0;
 
   return (
     <DashboardShell
@@ -90,6 +114,10 @@ export default async function SettingsPage() {
       description="Credentials, operator access, account security, and public ownership."
     >
       <div className="pc-settings-status" aria-label="Settings status">
+        <a href="#profile" data-state={profileRecord?.profile_public ? "ready" : profileRecord?.username ? "neutral" : "attention"}>
+          <UserRound aria-hidden="true" />
+          <span><strong>Operator profile</strong><small>{profileRecord?.profile_public ? `Public at /@${profileRecord.username}` : profileRecord?.username ? `@${profileRecord.username} · private` : "No handle yet"}</small></span>
+        </a>
         <a href="#provider-credentials" data-state={providerCount ? "ready" : "attention"}>
           <Vault aria-hidden="true" />
           <span><strong>Provider credentials</strong><small>{providerCount ? `${providerCount} stored in Vault` : "Needs a provider key"}</small></span>
@@ -100,7 +128,7 @@ export default async function SettingsPage() {
         </a>
         <a href="#account-security" data-state={mfaStatus.enrolled ? "ready" : "attention"}>
           <ShieldCheck aria-hidden="true" />
-          <span><strong>Account security</strong><small>{mfaStatus.enrolled ? `MFA on · ${mfaStatus.recoveryRemaining} recovery codes` : "MFA is not enabled"}</small></span>
+          <span><strong>Account security</strong><small>{mfaStatus.enrolled ? (mfaStatus.recoveryRemaining === null ? "MFA on" : `MFA on · ${mfaStatus.recoveryRemaining} recovery codes`) : "MFA is not enabled"}</small></span>
         </a>
         <a href="#ownership" data-state={ownerRecord?.published ? "ready" : "neutral"}>
           <Fingerprint aria-hidden="true" />
@@ -110,14 +138,31 @@ export default async function SettingsPage() {
 
       <div className="pc-settings-layout">
         <nav aria-label="Settings sections" className="pc-settings-nav">
+          <a href="#profile">Your profile</a>
           <a href="#provider-credentials">Provider credentials</a>
           <a href="#control-api-keys">Control API keys</a>
           <a href="#account-security">Security and MFA</a>
           <a href="#ownership">Ownership</a>
           <a href="#account-data">Account data</a>
+          <a href="#recovery">Recovery</a>
         </nav>
 
         <div className="pc-settings-sections">
+        <section id="profile" className="pc-section scroll-mt-28">
+          <SectionHeader
+            eyebrow="Operator identity"
+            title="Your profile"
+            description={<>
+            Who you are inside the product, and — only if you choose — on a page at
+            <code> /@handle</code> that anyone can read. Publishing the profile publishes
+            <strong> no agent</strong>; each one is a separate opt-in on its own page.
+            </>}
+          />
+          <div className="pc-section__body">
+            <ProfileSettings profile={profileRecord} publishedAgentCount={publishedAgentCount} />
+          </div>
+        </section>
+
         <section id="provider-credentials" className="pc-section scroll-mt-28">
           <SectionHeader
             eyebrow="Credential vault"
@@ -188,6 +233,17 @@ export default async function SettingsPage() {
           />
           <div className="pc-section__body">
             <AccountLifecycle />
+          </div>
+        </section>
+
+        <section id="recovery" className="pc-section scroll-mt-28">
+          <SectionHeader
+            eyebrow="Backup and recovery"
+            title="Recovery"
+            description="What PassControl can restore, what it cannot, and what you would have to re-enter by hand. Worth reading before you need it."
+          />
+          <div className="pc-section__body">
+            <RecoveryPanel lastExportAt={lastExport?.created_at ?? null} />
           </div>
         </section>
         </div>

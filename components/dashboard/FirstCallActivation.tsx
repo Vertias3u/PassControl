@@ -10,6 +10,7 @@ import {
   Radio,
   ReceiptText,
   ShieldAlert,
+  ShieldOff,
   X,
 } from "lucide-react";
 
@@ -19,6 +20,7 @@ import { PassportIssuanceModal } from "@/components/PassportIssuanceModal";
 import { browserClient } from "@/lib/supabase/client";
 import type { ProviderId } from "@/lib/providers";
 import {
+  FIRST_CALL_DISMISSED_COOKIE,
   activationDiagnosis,
   authenticationProofLabel,
   deriveFirstCallActivation,
@@ -28,6 +30,7 @@ import {
 } from "@/lib/first-call-activation";
 
 const MAX_ACTIVATION_ROWS = 40;
+
 
 function destinationFor(action: ReturnType<typeof activationDiagnosis>["action"], agentId: string) {
   switch (action) {
@@ -42,10 +45,17 @@ function destinationFor(action: ReturnType<typeof activationDiagnosis>["action"]
   }
 }
 
-function stepState(current: string, step: "provider" | "agent" | "call") {
-  const order = ["provider", "agent", "call", "diagnose", "complete"];
-  const currentIndex = order.indexOf(current);
-  const stepIndex = order.indexOf(step);
+type StepName = "provider" | "agent" | "call" | "verify";
+
+// `diagnose` stays in this list even though no step is named after it. It is a
+// position, not a label: drop it and indexOf returns -1 at that stage, so every
+// earlier step fails both the `<` and `===` branches below and silently regresses
+// from complete to grey. The special case underneath only rescues `call`.
+const STEP_ORDER = ["provider", "agent", "call", "diagnose", "verify", "complete"];
+
+function stepState(current: string, step: StepName) {
+  const currentIndex = STEP_ORDER.indexOf(current);
+  const stepIndex = STEP_ORDER.indexOf(step);
   if (current === "diagnose" && step === "call") return "attention";
   if (current === "complete" || stepIndex < currentIndex) return "complete";
   return stepIndex === currentIndex ? "current" : "upcoming";
@@ -54,6 +64,8 @@ function stepState(current: string, step: "provider" | "agent" | "call") {
 export function FirstCallActivation({
   userId,
   providerConfigured,
+  controlsExercised,
+  dismissed: dismissedOnServer,
   agents,
   initialLogs,
   integrations,
@@ -61,6 +73,12 @@ export function FirstCallActivation({
 }: {
   userId: string;
   providerConfigured: boolean;
+  controlsExercised: boolean;
+  /**
+   * Resolved on the server from the dismissal cookie. It is a prop and not a
+   * local lookup for a reason — see the guard at the bottom of this component.
+   */
+  dismissed: boolean;
   agents: FirstCallAgent[];
   initialLogs: FirstCallRow[];
   integrations: string[];
@@ -68,7 +86,7 @@ export function FirstCallActivation({
 }) {
   const [logs, setLogs] = useState(initialLogs);
   const [live, setLive] = useState(false);
-  const [dismissed, setDismissed] = useState<boolean | null>(null);
+  const [dismissed, setDismissed] = useState(dismissedOnServer);
   // Which on-ramp, if any, currently has an unrecoverable secret on screen. Each
   // on-ramp is rendered inside a stage branch, so advancing the stage unmounts it
   // and destroys a private key the user cannot be shown again. The on-ramps' own
@@ -77,8 +95,8 @@ export function FirstCallActivation({
   // which flips providerConfigured or refreshes `agents` underneath us.
   const [revealing, setRevealing] = useState<"provider" | "agent" | null>(null);
   const derived = useMemo(
-    () => deriveFirstCallActivation({ providerConfigured, agents, logs }),
-    [providerConfigured, agents, logs]
+    () => deriveFirstCallActivation({ providerConfigured, controlsExercised, agents, logs }),
+    [providerConfigured, controlsExercised, agents, logs]
   );
   // Safe to pin by stage name alone: both held variants are field-free, so there
   // is no captured row or agent id that could go stale while the hold is active.
@@ -88,14 +106,9 @@ export function FirstCallActivation({
     setLogs(initialLogs);
   }, [initialLogs]);
 
-  useEffect(() => {
-    if (state.stage !== "complete") return;
-    try {
-      setDismissed(localStorage.getItem(`passcontrol:first-call:${userId}:dismissed`) === "true");
-    } catch {
-      setDismissed(false);
-    }
-  }, [state.stage, userId]);
+  // Both terminal-ish stages are dismissible. `verify` has to be: a tenant that
+  // never touches a stop control would otherwise carry this rail forever.
+  const dismissible = state.stage === "complete" || state.stage === "verify";
 
   useEffect(() => {
     const supabase = browserClient();
@@ -119,18 +132,33 @@ export function FirstCallActivation({
 
   const dismiss = () => {
     try {
-      localStorage.setItem(`passcontrol:first-call:${userId}:dismissed`, "true");
+      // Value is the operator id, not a bare flag: one browser can hold two
+      // sessions over time, and a shared machine must not start a second
+      // operator halfway through the guide.
+      const secure = location.protocol === "https:" ? "; secure" : "";
+      document.cookie = `${FIRST_CALL_DISMISSED_COOKIE}=${encodeURIComponent(userId)}; path=/; max-age=31536000; samesite=lax${secure}`;
     } catch {
-      // A blocked local preference must not make the completion control fail.
+      // A blocked preference must not make the dismiss control fail.
     }
     setDismissed(true);
   };
 
-  // A completed guide may have been dismissed in localStorage. Do not render it
-  // once on the server and then make it disappear after hydration; wait until
-  // the local-only preference has been resolved. Incomplete setup remains
-  // server-visible immediately because it has no dismissal state.
-  if (state.stage === "complete" && dismissed !== false) return null;
+  // Dismissal is resolved before the first paint, and it has to be.
+  //
+  // This used to start as `null` and get filled in by a localStorage read in an
+  // effect, with the guard treating "not yet known" as "hide it". That
+  // deadlocked: the server rendered null, so the client component never
+  // mounted, so the effect never ran, so nothing ever un-hid it. The completion
+  // card had therefore never appeared on a fresh dashboard load — only after a
+  // client-side navigation, which is how it survived review. A cookie is
+  // readable by the server, so the answer is known when the first HTML is
+  // produced and there is no window to hide.
+  //
+  // Cost of the change, stated because operators will notice: anyone who
+  // dismissed the old localStorage key sees the guide once more. In practice
+  // that is close to nobody, since the card they would have dismissed it from
+  // was not rendering on a cold load in the first place.
+  if (dismissible && dismissed) return null;
 
   if (state.stage === "complete") {
     return (
@@ -193,8 +221,9 @@ export function FirstCallActivation({
           ["provider", "1", "Provider key", "Stored server-side"],
           ["agent", "2", "Agent identity", "Scope and budget attached"],
           ["call", "3", "Governed call", "Stored result proves the path"],
+          ["verify", "4", "Verify controls", "Prove you can stop it"],
         ].map(([step, number, label, detail]) => {
-          const status = stepState(state.stage, step as "provider" | "agent" | "call");
+          const status = stepState(state.stage, step as StepName);
           return (
             <li key={step} data-state={status}>
               <span className="pc-first-call__step-mark">
@@ -276,6 +305,49 @@ export function FirstCallActivation({
             <Link href={`/dashboard/agents/${state.agentId}#agent-identity`} className="ghost">
               Open agent identity <ArrowRight aria-hidden="true" />
             </Link>
+          </div>
+        ) : null}
+
+        {state.stage === "verify" ? (
+          <div className="pc-first-call__action" data-activation-state="verify">
+            <div>
+              <strong>
+                {state.agentName || "The agent"} reached {state.row.provider ?? "the provider"}
+                {state.row.model ? ` / ${state.row.model}` : ""}. Now close the path.
+              </strong>
+              {/* The honest framing of the last step. One admitted call proves the
+                  gateway will let traffic THROUGH; nothing so far proves this
+                  operator can stop it, and that is the half of the product worth
+                  trusting. So the guide points at the controls and lets the
+                  operator choose — it does not arm anything on their behalf. */}
+              <p>
+                An admitted call proves the path is open. It does not prove you can close it.
+                Exercise one stop control and this guide is done.
+              </p>
+              <small>
+                The fleet kill switch is at the top of this page. Arming it refuses new calls for
+                every agent in this workspace until you disarm it, and disarming restores them —
+                it does not change any agent you suspended separately.
+              </small>
+            </div>
+            <nav className="pc-first-call__controls" aria-label="Controls to verify">
+              <Link href="/dashboard#overview" data-control="kill">
+                <ShieldOff aria-hidden="true" /> Fleet kill switch
+              </Link>
+              <Link href="/dashboard#fleet" data-control="suspend">Suspend this agent</Link>
+              <Link href="/dashboard#fleet" data-control="budget">Set a budget</Link>
+              <Link href="/dashboard#activity" data-control="receipt">
+                {state.receiptRecorded ? "Inspect the signed receipt" : "Inspect the stored call"}
+              </Link>
+            </nav>
+            <button
+              type="button"
+              className="pc-first-call__dismiss"
+              onClick={dismiss}
+              aria-label="Dismiss the first-call guide"
+            >
+              <X aria-hidden="true" /> Dismiss
+            </button>
           </div>
         ) : null}
 

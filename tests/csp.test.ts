@@ -131,12 +131,28 @@ describe("middleware matcher", () => {
     expect(matches("/.well-known/jwks.json")).toBe(false);
   });
 
+  // Avatars are bytes, served from our own origin so that img-src 'self' never
+  // has to name a third-party bucket. Excluded for the same two reasons as the
+  // JWKS: a PUBLIC_PATHS entry would still run supabase.auth.getUser() on every
+  // image fetch, and a gated route would 302 the <img> to /login — which on the
+  // public profile page renders as a broken avatar with no clue why.
+  it("never gates /avatars/<key>", () => {
+    expect(matches("/avatars/aVatArKey0123456789")).toBe(false);
+  });
+
   it.each(["/dashboard", "/dashboard/agents/abc", "/login", "/"])(
     "still covers %s so it receives a nonce",
     (pathname) => {
       expect(matches(pathname)).toBe(true);
     }
   );
+
+  // The exclusion above must not be so broad that it swallows a real page. A
+  // handle can never be "avatars" (it is reserved), but a path that merely
+  // STARTS with those letters is a different route and must stay gated.
+  it.each(["/avatarsomething", "/dashboard/avatars"])("still covers %s", (pathname) => {
+    expect(matches(pathname)).toBe(true);
+  });
 });
 
 // The public receipt page verifies in the BROWSER: it fetches the issuer's

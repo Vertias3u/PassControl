@@ -9,6 +9,7 @@ import {
   LogOut,
   Network,
   Settings,
+  Stethoscope,
   UsersRound,
 } from "lucide-react";
 import { signOut } from "@/app/actions/auth";
@@ -19,8 +20,12 @@ import { userClient } from "@/lib/supabase/server";
 import { DashboardTimeProvider, TimeZoneToggle } from "@/components/dashboard/DashboardTime";
 import { GlobalElevationBar, type ActiveElevation } from "@/components/dashboard/GlobalElevationBar";
 import { DashboardStickyOffsets } from "@/components/dashboard/DashboardStickyOffsets";
+import { instanceLabel } from "@/lib/instance-label";
+import { readProfile } from "@/lib/profile/manage";
+import { serviceClient } from "@/lib/supabase";
+import { systemOperatorEmails } from "@/lib/system-health/operator";
 
-export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "settings" | "beta";
+export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "settings" | "beta" | "system";
 
 const NAV: Array<{
   id: DashboardArea;
@@ -36,10 +41,12 @@ const NAV: Array<{
   { id: "settings", label: "Settings", href: "/dashboard/settings", Icon: Settings },
 ];
 
-function Navigation({ active, mobile = false, showBetaOperator = false }: { active: DashboardArea; mobile?: boolean; showBetaOperator?: boolean }) {
-  const entries = showBetaOperator
-    ? [...NAV, { id: "beta" as const, label: "Beta ops", href: "/dashboard/beta", Icon: UsersRound }]
-    : NAV;
+function Navigation({ active, mobile = false, showBetaOperator = false, showSystemHealth = false }: { active: DashboardArea; mobile?: boolean; showBetaOperator?: boolean; showSystemHealth?: boolean }) {
+  const entries = [
+    ...NAV,
+    ...(showSystemHealth ? [{ id: "system" as const, label: "System health", href: "/dashboard/system", Icon: Stethoscope }] : []),
+    ...(showBetaOperator ? [{ id: "beta" as const, label: "Beta ops", href: "/dashboard/beta", Icon: UsersRound }] : []),
+  ];
   return (
     <nav aria-label="Control Tower" className={mobile ? "pc-mobile-nav__links" : "pc-sidebar__nav"}>
       {entries.map(({ id, label, href, Icon }) => (
@@ -55,6 +62,18 @@ function Navigation({ active, mobile = false, showBetaOperator = false }: { acti
       ))}
     </nav>
   );
+}
+
+/**
+ * Two letters for an operator with no avatar. Falls back to the handle, then to
+ * nothing at all — an empty circle is better than a wrong initial.
+ */
+function operatorInitials(displayName: string | null, handle: string | null): string {
+  const source = (displayName ?? handle ?? "").trim();
+  if (!source) return "";
+  const words = source.split(/\s+/).filter(Boolean);
+  const letters = words.length > 1 ? `${words[0]![0]}${words[1]![0]}` : source.slice(0, 2);
+  return letters.toUpperCase();
 }
 
 export async function DashboardShell({
@@ -80,7 +99,7 @@ export async function DashboardShell({
 }) {
   const db = await userClient();
   const now = new Date().toISOString();
-  const [{ data: commandAgents, error: agentError }, { data: grants, error: grantError }] =
+  const [{ data: commandAgents, error: agentError }, { data: grants, error: grantError }, profile, { data: auth }] =
     await Promise.all([
       db
         .from("agents")
@@ -94,7 +113,17 @@ export async function DashboardShell({
         .is("revoked_at", null)
         .gt("expires_at", now)
         .order("expires_at", { ascending: true }),
+      // Joins the existing Promise.all rather than adding a serial round trip.
+      // Tolerates a missing row on purpose: nothing creates one at signup, so a
+      // freshly signed-up operator legitimately has none and the chip falls
+      // back to the deployment label it has always shown.
+      readProfile(serviceClient(), userId),
+      // Navigation only: resolve the email from Auth rather than from an
+      // unverified caller prop. The page itself still uses the strict operator
+      // gate, including verified TOTP, before it reads a health snapshot.
+      db.auth.getUser(),
     ]);
+  const profileRecord = profile.ok ? profile.data : null;
   const agentNames = new Map((commandAgents ?? []).map((agent) => [agent.id, agent.name]));
   const elevations: ActiveElevation[] = (grants ?? []).map((grant) => ({
     id: grant.id,
@@ -102,6 +131,8 @@ export async function DashboardShell({
     agentName: agentNames.get(grant.agent_id) ?? `Agent …${String(grant.agent_id).slice(-8)}`,
     expiresAt: grant.expires_at,
   }));
+  const showSystemHealth = systemOperatorEmails().has(auth.user?.email?.trim().toLowerCase() ?? "")
+    && (auth.user?.factors ?? []).some((factor) => factor.factor_type === "totp" && factor.status === "verified");
 
   return (
     <DashboardTimeProvider>
@@ -119,7 +150,7 @@ export async function DashboardShell({
         <details className="pc-mobile-nav">
           <summary aria-label="Open navigation">Menu</summary>
           <div className="pc-mobile-nav__panel">
-            <Navigation active={active} mobile showBetaOperator={showBetaOperator} />
+            <Navigation active={active} mobile showBetaOperator={showBetaOperator} showSystemHealth={showSystemHealth} />
             <form action={signOut}>
               <button type="submit" className="pc-nav-link w-full">
                 <LogOut aria-hidden="true" />
@@ -140,15 +171,38 @@ export async function DashboardShell({
             </span>
           </Link>
 
+          {/* Who is signed in, then WHICH deployment. The order is the change:
+              this block used to show the deployment label alone, so the one
+              thing it never answered was "whose session is this" — the question
+              that matters most on a screen with a kill switch on it. The
+              deployment label keeps its place on the second line, because an
+              operator with a local stack and a production tab open needs both. */}
+          <Link href="/dashboard/settings#profile" className="pc-sidebar__operator">
+            <span className="pc-sidebar__operator-avatar" aria-hidden="true">
+              {profileRecord?.avatar_key && profileRecord.avatar_path ? (
+                // eslint-disable-next-line @next/next/no-img-element -- served
+                // from our own origin by app/avatars/[key], keyed on a
+                // capability token rather than the tenant id.
+                <img src={`/avatars/${profileRecord.avatar_key}`} alt="" width={28} height={28} />
+              ) : (
+                operatorInitials(profileRecord?.display_name ?? null, profileRecord?.username ?? null)
+              )}
+            </span>
+            <span>
+              {profileRecord?.display_name ?? (profileRecord?.username ? `@${profileRecord.username}` : "Your profile")}
+              <small>{profileRecord?.username ? `@${profileRecord.username}` : "Set a handle"}</small>
+            </span>
+          </Link>
+
           <div className="pc-sidebar__instance">
             <span className="pc-live-dot" aria-hidden="true" />
             <span>
-              Local control plane
+              {instanceLabel()}
               <small>Operator session</small>
             </span>
           </div>
 
-          <Navigation active={active} showBetaOperator={showBetaOperator} />
+          <Navigation active={active} showBetaOperator={showBetaOperator} showSystemHealth={showSystemHealth} />
 
           <div className="pc-sidebar__footer">
             <Link href="/verify" className="pc-nav-link">
@@ -175,7 +229,7 @@ export async function DashboardShell({
             </div>
             <div className="pc-page-actions">
               <TimeZoneToggle />
-              <DashboardCommandPalette agents={commandAgents ?? []} />
+              <DashboardCommandPalette agents={commandAgents ?? []} showSystemHealth={showSystemHealth} />
               {actions}
             </div>
           </header>

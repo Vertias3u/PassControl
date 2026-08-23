@@ -18,8 +18,25 @@ import {
 // passport id and no account can ask whether we issued it. It is public but NOT
 // prerendered — it is dynamically rendered per request, so it carries a nonce
 // like every other dynamic page and must stay out of PRERENDERED_PUBLIC_PATHS.
-const PUBLIC_PATHS = ["/", "/beta", "/login", "/signup", "/auth/callback", "/verify", "/legal"];
+//
+// "/u" is the public operator profile. /@handle rewrites onto it below, but the
+// canonical path has to be public in its own right as well: a crawler following
+// the canonical link, or anyone who copies the address out of a rewritten URL
+// bar, arrives at /u/<handle> directly and would otherwise be sent to /login.
+const PUBLIC_PATHS = ["/", "/beta", "/login", "/signup", "/auth/callback", "/verify", "/legal", "/u"];
 const CSP_HEADER = "Content-Security-Policy";
+
+/**
+ * Handles that /@… may be rewritten with.
+ *
+ * Deliberately narrower than lib/profile/handle.ts and duplicated rather than
+ * imported: this runs before the auth gate, on a path an anonymous caller
+ * controls completely, so it must be a plain character-class test that cannot
+ * be widened by an edit somewhere else. Everything it rejects — /@../../dashboard,
+ * /@..%2f..%2fdashboard, a 400-character segment — falls through to the normal
+ * gate instead, which is the safe direction.
+ */
+const REWRITABLE_HANDLE = /^[a-z0-9_]{3,30}$/;
 
 function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
@@ -53,6 +70,32 @@ export async function middleware(request: NextRequest) {
     response.headers.set(CSP_HEADER, csp);
     return response;
   };
+
+  // ── /@handle, before the auth gate ────────────────────────────────────────
+  //
+  // `app/@x` is Next's parallel-route syntax and cannot be a literal `@`
+  // segment, so the page lives at /u/[handle] and this rewrites onto it.
+  //
+  // It returns BEFORE createServerClient/getUser, which is the entire point: a
+  // logged-out stranger is the whole audience for this page, and running the
+  // gate would both cost a network round trip on every visit and 302 them to
+  // /login. Same reasoning that keeps .well-known out of the matcher.
+  //
+  // withCsp and forwardedHeaders are still applied. Returning early past them
+  // is the easy mistake here, and it fails in a way that looks like a styling
+  // problem: with no nonce under 'strict-dynamic', every framework script is
+  // refused and the page simply never hydrates.
+  if (request.nextUrl.pathname.startsWith("/@")) {
+    const handle = request.nextUrl.pathname.slice(2).toLowerCase();
+    if (REWRITABLE_HANDLE.test(handle)) {
+      const url = request.nextUrl.clone();
+      url.pathname = `/u/${encodeURIComponent(handle)}`;
+      return withCsp(
+        NextResponse.rewrite(url, { request: { headers: forwardedHeaders() } })
+      );
+    }
+    // Not handle-shaped: fall through and let the ordinary gate answer.
+  }
 
   let supabaseResponse = NextResponse.next({ request: { headers: forwardedHeaders() } });
 
@@ -102,7 +145,12 @@ export const config = {
   // receipts and agent tokens to /login. Excluded here rather than added to
   // PUBLIC_PATHS because a PUBLIC_PATHS entry still runs supabase.auth.getUser()
   // — a network round trip on a document meant to be fetched and cached.
+  //
+  // `avatars/` joins them, and the trailing slash is load-bearing: it excludes
+  // /avatars/<key> without also excluding some future /avatarsomething page. An
+  // avatar is an <img src> on a page strangers read, so gating it would 302 the
+  // image to /login and render as a broken picture with no clue why.
   matcher: [
-    "/((?!api|\\.well-known|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|llms.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api|\\.well-known|avatars/|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|llms.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

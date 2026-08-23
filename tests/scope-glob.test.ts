@@ -191,3 +191,69 @@ describe("single-model retrieve", () => {
     expect(endpointAllows("deepseek", "GET", ["models", "deepseek-chat"])).toBe(false);
   });
 });
+
+// ── The bare `models` spelling, on anthropic ─────────────────────────────────
+//
+// openai, groq, mistral and together each carry BOTH `["models"]` and
+// `["v1","models"]`, because a client pointed at a base URL that already ends
+// in `/v1` sends the short one and a client pointed at the host sends the long
+// one. anthropic carried only the long one, so `GET /api/v1/anthropic/models`
+// was refused as `blocked_endpoint`.
+//
+// Observed in production on 2026-08-17: one agent, one direct key, chat
+// succeeding at `POST /v1/messages` while its discovery step tried `GET /models`
+// — 8 of the 20 refusals on the board. Same class as the deepseek note in
+// ENDPOINT_ALLOWLIST: a client cannot know which spelling we happen to accept.
+//
+// This widens the proxy's route gate, so the boundary it must NOT move is
+// spelled out below: nothing about chat changes, and no other provider gains a
+// rule it did not already have.
+describe("bare models spelling on anthropic", () => {
+  it("admits the listing and the single-model retrieve", () => {
+    expect(endpointAllows("anthropic", "GET", ["models"])).toBe(true);
+    expect(endpointAllows("anthropic", "GET", ["models", "claude-haiku-4-5-20251001"])).toBe(true);
+  });
+
+  it("sends both to anthropic's real upstream path, which keeps the v1 prefix", () => {
+    // The client path is length 1; the upstream path is length 2. The rule's
+    // `upstreamPath` supplies the prefix, so a captured segment is appended to
+    // the UPSTREAM path and never to the client's spelling of it.
+    expect(canonicalEndpointPath("anthropic", "GET", ["models"])).toEqual(["v1", "models"]);
+    expect(canonicalEndpointPath("anthropic", "GET", ["models", "claude-opus-4-5"]))
+      .toEqual(["v1", "models", "claude-opus-4-5"]);
+  });
+
+  it("carries the same guards as the v1 spelling", () => {
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      expect(endpointAllows("anthropic", method, ["models"])).toBe(false);
+      expect(endpointAllows("anthropic", method, ["models", "claude-opus-4-5"])).toBe(false);
+    }
+    expect(endpointAllows("anthropic", "GET", ["models", "a", "b"])).toBe(false);
+    for (const bad of ["..", "../fine_tuning", "a/b", "%2e%2e", "a%2fb", ""]) {
+      expect(endpointAllows("anthropic", "GET", ["models", bad])).toBe(false);
+    }
+  });
+
+  it("is model listing, so it is exempt from the per-model scope check", () => {
+    // Already true before this change — `isModelListingIndex` has always
+    // accepted the short spelling. Pinned because the exemption and the
+    // allowlist have to agree: an admitted path the scope step does not
+    // recognise would be refused for having no model to match.
+    expect(isModelListing(["models"])).toBe(true);
+    expect(isModelListing(["models", "claude-opus-4-5"])).toBe(true);
+  });
+
+  it("does not widen chat, which is the whole point of keeping this narrow", () => {
+    // anthropic's chat rule stays `["v1","messages"]` alone. Admitting a
+    // discovery spelling is not a licence to admit an inference spelling: this
+    // one runs no model and spends nothing, and that asymmetry is the argument.
+    expect(endpointAllows("anthropic", "POST", ["messages"])).toBe(false);
+    expect(endpointAllows("anthropic", "POST", ["v1", "messages"])).toBe(true);
+  });
+
+  it("leaves every other provider exactly as it was", () => {
+    expect(endpointAllows("deepseek", "GET", ["models"])).toBe(false);
+    expect(endpointAllows("openai", "GET", ["models"])).toBe(true);
+    expect(endpointAllows("anthropic", "GET", ["v1", "models"])).toBe(true);
+  });
+});

@@ -79,10 +79,10 @@ events. The five-minute trigger calls the authenticated `/api/cron/reconcile` ro
 trigger calls `/api/cron/beta-retention`, both internally with `CRON_SECRET`. Neither duplicates
 application logic or creates a second write path.
 
-Before an external invite, run the stricter configuration and human-gate check documented in
-[`cloud-direct-agent-beta.md`](./cloud-direct-agent-beta.md). It requires the production environment
-plus explicit acknowledgements for restore-tested backup, Supabase Auth, SMTP, advisors, and
-rollback; it inspects shapes and variable names and never prints secret values.
+Before letting anyone else onto the deployment, run `npm run check:cloud-beta`. It requires the
+production environment plus explicit acknowledgements for restore-tested backup, Supabase Auth,
+SMTP, advisors, and rollback; it inspects shapes and variable names and never prints secret values.
+`npm run canary:cloud-beta` then exercises one real governed call end to end.
 
 ## The outbound step (owner only)
 

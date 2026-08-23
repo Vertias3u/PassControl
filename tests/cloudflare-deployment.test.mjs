@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   BETA_RETENTION_CRON,
@@ -22,6 +24,26 @@ describe("Cloudflare deployment contract", () => {
 
     const sourceRoute = fs.readFileSync("app/api/auth/challenge/route.ts", "utf8");
     expect(sourceRoute).toContain('export const runtime = "edge"');
+
+    const buildSource = fs.readFileSync("scripts/build-cloudflare.mjs", "utf8");
+    expect(buildSource).toContain('"db/migrations"');
+    expect(buildSource).not.toContain('copy("db")');
+  });
+
+  it("injects an Edge-safe manifest that includes the checked-out migration head", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    const manifest = JSON.parse(config.env.PASSCONTROL_INTERNAL_MIGRATION_MANIFEST);
+    const migrationsDir = path.join(process.cwd(), "db", "migrations");
+    const entries = fs.readdirSync(migrationsDir)
+      .filter((name) => name.endsWith(".sql"))
+      .sort()
+      .map((version) => ({
+        version,
+        checksum: createHash("sha256").update(fs.readFileSync(path.join(migrationsDir, version))).digest("hex"),
+      }));
+    expect(manifest.entries).toEqual(entries);
+    expect(manifest.head).toBe(entries.at(-1).version);
+    expect(manifest.fingerprint).toBe(createHash("sha256").update(JSON.stringify(entries)).digest("hex"));
   });
 
   it("calls the authenticated beta-retention route only from its daily trigger", async () => {

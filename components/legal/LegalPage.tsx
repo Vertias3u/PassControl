@@ -12,6 +12,7 @@ const PAGES = [
   ["Acceptable use", "/legal/acceptable-use"],
   ["Cookies", "/legal/cookies"],
   ["Service providers", "/legal/subprocessors"],
+  ["Recovery", "/legal/recovery"],
 ] as const;
 
 export function LegalPage({

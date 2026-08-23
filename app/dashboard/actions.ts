@@ -13,6 +13,7 @@ import {
 import { logSecurityEvent } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
 import { recordAdminAction } from "@/lib/audit";
+import { ensureProfileRow } from "@/lib/profile/manage";
 import { generateApiKey } from "@/lib/apikeys";
 import {
   authHeaders,
@@ -62,7 +63,15 @@ function failGeneric(
   throw new Error("Something went wrong. Please try again.");
 }
 
-/** Per-tenant master kill: flip Redis killswitch:tenant:<uid>; suspend+purge every owned agent. */
+/** Per-tenant master kill: flip Redis `killswitch:tenant:<uid>`, and nothing else.
+ *
+ * It does NOT suspend agent rows and does NOT purge the provider-key cache. Both claims
+ * used to sit here and both were false: `purgeAgentCaches` is reached only from the
+ * per-agent suspend and revoke paths (lib/fleet.ts), and `setTenantKill` is deliberately
+ * independent of per-agent suspension so that disarming a tenant can never reactivate an
+ * agent that was separately suspended or revoked (lib/fleet.ts:729-731).
+ *
+ * The Redis flag is the whole enforcement: the proxy reads it per call at check 2. */
 export async function setMasterKill(on: boolean) {
   const { db, user } = await requireUser();
   await fleet.setTenantKill(db, user.id, on);
@@ -102,8 +111,12 @@ async function createAgentForUser(
   input: CreateAgentInput
 ): Promise<{ id: string; name: string; createdAt: string }> {
   await requireCredentialMfa(db, user);
-  // Ensure profile row exists (FK target).
-  await db.from("users").upsert({ id: user.id, email: user.email }).select("id");
+  // Ensure profile row exists (FK target). Service role, not `db`: 0032 revokes
+  // INSERT on public.users from `authenticated` for the same reason 0028 revoked
+  // it on `agents`. This call used to run under the caller's JWT AND discard its
+  // error, so after that revoke it would have failed silently and surfaced as an
+  // unrelated foreign-key error from createAgent below.
+  await ensureProfileRow(serviceClient(), user);
   // Service role, not `db`. 0028 revokes INSERT on `agents` from `authenticated`,
   // because the user-scoped write went over PostgREST under the caller's own JWT
   // and RLS can only ask who owns the row — never whether this session cleared a
@@ -188,11 +201,14 @@ export async function issueDirectAgent(input: {
 }> {
   const { db, user } = await requireUser();
   await requireCredentialMfa(db, user);
-  const { error: profileError } = await db
-    .from("users")
-    .upsert({ id: user.id, email: user.email })
-    .select("id");
-  if (profileError) failGeneric("issueDirectAgent.profile", profileError);
+  // Service role, not `db` — see createAgentForUser above and 0032.
+  try {
+    await ensureProfileRow(serviceClient(), user);
+  } catch {
+    // A bounded machine code, which is all failGeneric wants to log — the
+    // underlying Postgres message is not a safe log input.
+    failGeneric("issueDirectAgent.profile", { code: "profile_row_unavailable" });
+  }
 
   const result = await fleet.createDirectAgent(serviceClient(), user.id, input);
   if (!result.ok) throw new Error(result.message ?? "The Direct Agent Key could not be created.");

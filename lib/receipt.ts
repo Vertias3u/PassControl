@@ -25,6 +25,7 @@
 //    database outage loses the row and the receipt with it.
 import { sha256 } from "@noble/hashes/sha256";
 
+import { RECEIPT_PROTOCOL } from "@/cli/protocols.mjs";
 import { bytesToBase64url, utf8ToBytes } from "./encoding";
 import { instanceIssuer, loadInstanceSigner } from "./crypto/instanceKey";
 import { RECEIPT_TYP, signCompactJws } from "./crypto/jws";
@@ -40,7 +41,7 @@ import type { LogEntry } from "./log";
  * control and cannot upgrade — adding a claim must not invalidate every
  * verifier in the field.
  */
-export const RECEIPT_VER = 2;
+export const RECEIPT_VER = RECEIPT_PROTOCOL.maximum;
 
 export interface OwnerClaim {
   kind: string;
@@ -62,6 +63,23 @@ interface ReceiptInputBase {
   rawBody: string | null;
   inputTokens: number;
   outputTokens: number;
+  /**
+   * Prompt-cache traffic, when the provider reported any.
+   *
+   * `inputTokens` above stays exactly the provider's OWN `input_tokens` — the
+   * uncached remainder — so a reader reconciling this receipt against an
+   * Anthropic invoice finds the same number in both. These two name the rest of
+   * the prompt, which is billed at different rates, so the whole input is
+   * `inputTokens + cacheReadTokens + cacheWriteTokens` and `cost` already
+   * accounts for all three.
+   *
+   * Note this convention differs on purpose from `agent_logs.input_tokens`,
+   * which folds all three into one figure because the spend checkpoint sums that
+   * column. Neither should be changed to match the other — see the fold comment
+   * in the proxy's reconcile().
+   */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   costMicrocents: number;
   status: LogEntry["status"];
   httpStatus: number;
@@ -133,7 +151,19 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
     mdl: input.model ?? null,
     mth: input.method,
     path: input.path,
-    use: { in: input.inputTokens, out: input.outputTokens },
+    // `cr` / `cw` are added only when the provider reported cache traffic, so a
+    // receipt for an uncached call is byte-identical to one issued before these
+    // existed. `ver` deliberately does NOT move for them: the SDK verifier
+    // refuses an artifact NEWER than it understands but ignores unknown claims
+    // within a supported version, which is exactly the mechanism that lets a
+    // field be added without invalidating verifiers already in the field.
+    // Bumping the version would reject every new receipt on an older verifier.
+    use: {
+      in: input.inputTokens,
+      out: input.outputTokens,
+      ...(input.cacheReadTokens ? { cr: input.cacheReadTokens } : {}),
+      ...(input.cacheWriteTokens ? { cw: input.cacheWriteTokens } : {}),
+    },
     cost: Math.round(input.costMicrocents),
     res: { status: input.status, http: input.httpStatus },
     t0: input.startedAt,

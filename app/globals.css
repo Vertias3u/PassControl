@@ -253,11 +253,64 @@
   text-transform: uppercase;
 }
 
+/* Who is signed in. Sits directly above the deployment label, which answers a
+   different question — this one is "whose session is this", on a screen that
+   carries a kill switch. A link, because the only thing an operator wants next
+   after reading it is to change it. */
+.pc-sidebar__operator {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 26px 3px 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--pc-line-subtle);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.018);
+  color: var(--pc-copy);
+  font-size: 0.68rem;
+  line-height: 1.35;
+  text-decoration: none;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.pc-sidebar__operator:hover,
+.pc-sidebar__operator:focus-visible {
+  border-color: var(--pc-line-strong);
+  background: rgba(255, 255, 255, 0.04);
+}
+.pc-sidebar__operator > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-sidebar__operator small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--pc-quiet);
+  font-family: var(--font-pc-mono), ui-monospace, monospace;
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pc-sidebar__operator-avatar {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border: 1px solid var(--pc-line-subtle);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--pc-quiet);
+  font-size: 0.6rem;
+  font-weight: 600;
+}
+.pc-sidebar__operator-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+/* Now the second line of the pair, so its top margin closes up. */
 .pc-sidebar__instance {
   display: flex;
   align-items: flex-start;
   gap: 9px;
-  margin: 26px 3px 22px;
+  margin: 0 3px 22px;
   padding: 12px;
   border: 1px solid var(--pc-line-subtle);
   border-radius: 9px;
@@ -452,6 +505,77 @@
 }
 
 .pc-app .pc-section-header__action { flex: 0 0 auto; }
+
+/* Restricted instance diagnostics. These panels deliberately render only the
+   safe, pre-classified snapshot; the visual state always has a text label too. */
+.pc-system-health-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px;
+  border: 1px solid var(--pc-line-strong);
+  border-radius: 12px;
+  background: rgba(17, 20, 17, 0.94);
+}
+.pc-system-health-banner[data-state="attention"] { border-color: rgba(233, 120, 64, 0.45); }
+.pc-system-health-banner[data-state="degraded"],
+.pc-system-health-banner[data-state="incompatible"] { border-color: rgba(239, 68, 68, 0.48); }
+.pc-system-health-banner strong { display: block; color: var(--pc-paper); font-size: 1.05rem; }
+.pc-system-health-banner span,
+.pc-system-health-banner > p { margin: 5px 0 0; color: var(--pc-quiet); font-size: 0.71rem; line-height: 1.5; }
+.pc-system-health-banner > p { max-width: 360px; }
+
+.pc-system-health-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.pc-system-health-card {
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  padding: 19px;
+  border: 1px solid var(--pc-line-subtle);
+  border-radius: 12px;
+  background: rgba(17, 20, 17, 0.94);
+}
+.pc-system-health-card[data-state="attention"] { border-color: rgba(233, 120, 64, 0.38); }
+.pc-system-health-card[data-state="degraded"] { border-color: rgba(239, 68, 68, 0.45); }
+.pc-system-health-card__heading { display: flex; align-items: flex-start; gap: 12px; }
+.pc-system-health-card__icon,
+.pc-system-health-card__status { display: inline-flex; align-items: center; gap: 7px; }
+.pc-system-health-card__icon { width: 30px; height: 30px; flex: 0 0 auto; justify-content: center; border: 1px solid var(--pc-line-strong); border-radius: 8px; color: var(--pc-signal); }
+.pc-system-health-card__icon svg { width: 16px; height: 16px; }
+.pc-system-health-card h2 { margin: 0; color: var(--pc-paper); font-size: .9rem; }
+.pc-system-health-card p { margin: 5px 0 0; color: var(--pc-quiet); font-size: .69rem; line-height: 1.5; }
+.pc-system-health-card__status { color: var(--pc-copy); font-size: .7rem; }
+.pc-system-health-card__status svg,
+.pc-system-health-card__details li > svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.pc-system-health-card[data-state="ready"] .pc-system-health-card__status { color: var(--pc-signal); }
+.pc-system-health-card[data-state="attention"] .pc-system-health-card__status { color: #ed9d70; }
+.pc-system-health-card[data-state="degraded"] .pc-system-health-card__status { color: #fb8a8a; }
+.pc-system-health-card__details { border-top: 1px solid var(--pc-line-subtle); padding-top: 13px; }
+.pc-system-health-card__details summary { color: var(--pc-copy); cursor: pointer; font-size: .7rem; font-weight: 650; }
+.pc-system-health-card__details ul { display: grid; gap: 12px; margin: 13px 0 0; padding: 0; list-style: none; }
+.pc-system-health-card__details li { display: flex; align-items: flex-start; gap: 9px; color: var(--pc-copy); }
+.pc-system-health-card__details li[data-state="ready"] > svg { color: var(--pc-signal); }
+.pc-system-health-card__details li[data-state="attention"] > svg { color: #ed9d70; }
+.pc-system-health-card__details li[data-state="degraded"] > svg { color: #fb8a8a; }
+.pc-system-health-card__details strong { display: block; font-size: .72rem; }
+.pc-system-health-card__details .pc-system-health-card__action { color: var(--pc-paper); }
+.pc-system-health-card__facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: -3px 0 0; }
+.pc-system-health-card__facts div,
+.pc-system-health-card__migration { padding: 10px; border: 1px solid var(--pc-line-subtle); border-radius: 8px; background: rgba(5, 7, 6, .26); }
+.pc-system-health-card__facts dt { color: var(--pc-quiet); font-size: .61rem; }
+.pc-system-health-card__facts dd { margin: 4px 0 0; color: var(--pc-paper); font: 600 .68rem var(--font-pc-mono), monospace; text-transform: capitalize; }
+.pc-system-health-card__migration { margin: -3px 0 0; }
+.pc-system-health-card__migration[data-state="behind"] { border-color: rgba(233, 120, 64, .33); }
+.pc-system-health-card__migration[data-state="incompatible"] { border-color: rgba(239, 68, 68, .4); }
+.pc-system-health-card__migration > strong { color: var(--pc-paper); font-size: .72rem; }
+.pc-system-health-card__migration-heads { display: grid; gap: 5px; margin: 10px 0 0; }
+.pc-system-health-card__migration-heads div { display: flex; justify-content: space-between; gap: 12px; color: var(--pc-quiet); font-size: .62rem; }
+.pc-system-health-card__migration-heads dd { margin: 0; color: var(--pc-copy); font-family: var(--font-pc-mono), monospace; overflow-wrap: anywhere; text-align: right; }
+.pc-system-health-refresh { display: inline-flex; min-height: 38px; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid var(--pc-line-strong); border-radius: 8px; background: var(--pc-surface-2); color: var(--pc-paper); font-size: .7rem; font-weight: 650; }
+.pc-system-health-refresh:hover:not(:disabled) { border-color: rgba(183, 243, 74, .45); }
+.pc-system-health-refresh:disabled { cursor: wait; opacity: .7; }
+.pc-system-health-refresh svg { width: 14px; height: 14px; }
 
 .pc-metric-grid {
   display: grid;
@@ -702,7 +826,7 @@ a.pc-metric-card:hover {
 
 .pc-first-call__steps {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin: 0;
   padding: 0;
   border-bottom: 1px solid var(--pc-line-subtle);
@@ -745,6 +869,32 @@ a.pc-metric-card:hover {
 .pc-first-call__steps li[data-state="complete"] .pc-first-call__step-mark { border-color: rgba(183, 243, 74, 0.35); background: rgba(183, 243, 74, 0.07); }
 .pc-first-call__steps li[data-state="attention"] { color: #f0a373; }
 .pc-first-call__steps li[data-state="attention"] .pc-first-call__step-mark { border-color: rgba(233, 120, 64, 0.45); background: rgba(233, 120, 64, 0.08); }
+
+.pc-first-call[data-stage="verify"] { border-color: rgba(183, 243, 74, 0.32); }
+/* Four control links will not sit beside a paragraph at space-between, so this
+   branch stacks instead of inheriting the row layout of the other actions. */
+.pc-first-call__body > [data-activation-state="verify"] {
+  position: relative;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+/* The gutter belongs to the text block, not the whole branch: the dismiss button
+   is ~73px of absolutely-positioned content in the top-right corner, and the
+   headline carries an operator-supplied agent name that will run straight under
+   it otherwise. Measured at 18px of overlap with a 17-character name. The link
+   row below sits clear of the button and keeps the full width. */
+.pc-first-call__body > [data-activation-state="verify"] > div:first-child {
+  padding-right: 96px;
+}
+.pc-first-call__body > [data-activation-state="verify"] .pc-first-call__controls {
+  justify-content: flex-start;
+  margin-top: 13px;
+}
+.pc-first-call__body > [data-activation-state="verify"] a[data-control="kill"] {
+  border-color: rgba(239, 68, 68, 0.32);
+  color: #f0a373;
+}
 
 .pc-first-call__body { padding: 20px; }
 .pc-first-call__body > [data-activation-state="provider"] { display: grid; gap: 20px; }
@@ -831,7 +981,25 @@ a.pc-metric-card:hover {
 .pc-first-call--proof .pc-first-call__complete-copy > strong { font-size: .82rem; }
 .pc-first-call__dismiss svg { width: 13px; height: 13px; }
 
+/* Four steps across need roughly 836px of rail before the detail lines start
+   clipping, which the dashboard content column only reaches around a 1140px
+   viewport. Below that the stepper goes 2x2 rather than shaving every detail to
+   an ellipsis — measured at 938px, where four across leaves each `small` 85px
+   against the 133px "Stored result proves the path" needs. */
+@media (min-width: 761px) and (max-width: 1180px) {
+  .pc-first-call__steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pc-first-call__steps li:nth-child(2n) { border-right: 0; }
+  .pc-first-call__steps li:nth-child(-n + 2) { border-bottom: 1px solid var(--pc-line-subtle); }
+}
+
 @media (max-width: 760px) {
+  /* The dismiss button is ~73px wide and absolutely positioned in the corner, so
+     the headline still needs to clear it here — but 96px is a lot to give up on a
+     ~358px rail. Trim it rather than dropping it; the link row is a sibling and
+     keeps the full width either way. */
+  .pc-first-call__body > [data-activation-state="verify"] > div:first-child {
+    padding-right: 76px;
+  }
   .pc-first-call__header,
   .pc-first-call__action { align-items: stretch; flex-direction: column; }
   .pc-first-call__header > span { align-self: flex-start; }
@@ -1073,6 +1241,21 @@ a.pc-metric-card:hover {
   font-size: 0.58rem;
   letter-spacing: 0.04em;
   vertical-align: middle;
+}
+
+/* The provider's HTTP status beside the verdict word. Same restraint as the ×N:
+   it qualifies the verdict, it is not a second one, so it borrows no tone
+   colour. Rendered only when every row behind the line agrees on the code. */
+.pc-live-calls__upstream {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--pc-line-subtle);
+  border-radius: 3px;
+  color: var(--pc-quiet);
+  font-size: 0.58rem;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+  cursor: help;
 }
 
 .pc-live-calls__housekeeping {
@@ -2028,10 +2211,13 @@ a.pc-metric-card:hover {
   .pc-page-header { display: grid; gap: 16px; }
   .pc-page-actions { justify-content: flex-start; }
   .pc-page-actions > * { max-width: 100%; }
+  .pc-system-health-banner { align-items: stretch; flex-direction: column; }
   .pc-app .pc-section-header { display: grid; gap: 15px; padding: 18px; }
   .pc-app .pc-section-header__action { width: 100%; }
   .pc-app .pc-section__body { padding: 18px; }
   .pc-metric-grid { grid-template-columns: 1fr; }
+  .pc-system-health-grid { grid-template-columns: 1fr; }
+  .pc-system-health-card__facts { grid-template-columns: 1fr; }
   .pc-metric-card { min-height: 124px; }
   .pc-kill-switch { align-items: stretch; flex-direction: column; }
   .pc-kill-switch button { justify-content: center; width: 100%; }
@@ -2729,6 +2915,159 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .pc-inline-notice svg { width: 0.9rem; }
 .pc-inline-notice.is-success { color: #75d6a3; border-color: rgba(74, 222, 128, 0.24); background: rgba(74, 222, 128, 0.06); }
 .pc-inline-notice.is-danger { color: #ff9a8b; border-color: rgba(247,108,92,0.25); background: rgba(247,108,92,0.06); }
+/* Not danger: the duplicate-key warning describes a real consequence but nothing
+   has gone wrong yet, and colouring it red would train the operator to dismiss it. */
+.pc-inline-notice.is-warning { color: #e7b96d; border-color: rgba(245,158,11,0.28); background: rgba(245,158,11,0.05); align-items: flex-start; line-height: 1.5; }
+.pc-inline-notice.is-warning svg { margin-top: 0.15rem; flex: 0 0 auto; }
+
+/* ── Operator profile ────────────────────────────────────────────────────────
+   Three blocks, one per consequence. They look different from each other on
+   purpose: the handle form and the publish switch do things that cannot simply
+   be undone, and a panel where everything is the same shade of "a field" is a
+   panel where an operator flips a disclosure switch thinking it saved a
+   preference. */
+.pc-profile-avatar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: color-mix(in srgb, var(--secondary) 46%, transparent);
+}
+.pc-profile-avatar__frame {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  width: 72px;
+  height: 72px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--secondary) 70%, transparent);
+}
+.pc-profile-avatar__frame img { width: 100%; height: 100%; object-fit: cover; }
+.pc-profile-avatar__frame span {
+  color: var(--muted-foreground);
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.pc-profile-avatar__frame svg { width: 1.4rem; height: 1.4rem; }
+.pc-profile-avatar__body { display: grid; gap: 0.5rem; min-width: 0; }
+.pc-profile-avatar__body strong { color: var(--foreground); font-size: 0.82rem; }
+.pc-profile-avatar__body p { margin: 0; color: var(--muted-foreground); font-size: 0.72rem; line-height: 1.55; }
+.pc-profile-avatar__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.15rem; }
+.pc-profile-avatar__actions svg { width: 0.85rem; height: 0.85rem; }
+
+/* The @ sits inside the field rather than beside it, so what the operator types
+   is visibly the handle and not the URL. */
+.pc-profile-handle-input {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding-left: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--input, transparent);
+}
+.pc-profile-handle-input > span { color: var(--muted-foreground); font-size: 0.8rem; }
+.pc-profile-handle-input input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+}
+/* A permanent handle still LOOKS like the field it used to be, so an operator
+   recognises it, but it is visibly no longer one. The padlock and the muted
+   text are the whole difference; the explanation lives in the note below it. */
+.pc-profile-handle-input[data-state="locked"] { border-style: dashed; background: transparent; }
+.pc-profile-handle-input[data-state="locked"] input { color: var(--muted-foreground); cursor: default; }
+.pc-profile-handle-input[data-state="locked"] svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: 0 0 auto;
+  margin-right: 0.6rem;
+  color: var(--muted-foreground);
+}
+
+/* The disclosure switch. Bordered in the signal colour when live, because "is
+   my profile public right now" must be answerable from across the room. */
+.pc-profile-publish {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.9rem;
+  align-items: center;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  background: color-mix(in srgb, var(--secondary) 46%, transparent);
+}
+.pc-profile-publish[data-state="public"] {
+  border-color: rgba(183, 243, 74, 0.28);
+  background: rgba(183, 243, 74, 0.045);
+}
+.pc-profile-publish > svg { width: 1.05rem; height: 1.05rem; color: var(--muted-foreground); }
+.pc-profile-publish[data-state="public"] > svg { color: var(--pc-signal, var(--primary)); }
+.pc-profile-publish strong { display: block; color: var(--foreground); font-size: 0.82rem; }
+.pc-profile-publish p { margin: 0.35rem 0 0; color: var(--muted-foreground); font-size: 0.72rem; line-height: 1.55; }
+.pc-profile-publish code { font-size: 0.95em; }
+
+@media (max-width: 640px) {
+  .pc-profile-avatar { grid-template-columns: 1fr; }
+  .pc-profile-publish { grid-template-columns: 1fr; }
+}
+
+/* ── Stored provider credentials ─────────────────────────────────────────────
+   Nickname and date only. There is deliberately no element here that could hold
+   a secret: the key lives in Vault and has no column to render. The active row
+   is marked because "which one is the gateway actually using" is the question
+   this list exists to answer — not having it is what made an expired key
+   unreplaceable through the dashboard on 2026-08-17. */
+.pc-credential-list { display: grid; gap: 0.6rem; margin: 0; padding: 0; list-style: none; }
+.pc-credential-list__empty {
+  padding: 0.85rem;
+  border: 1px dashed var(--pc-line-subtle);
+  border-radius: 0.55rem;
+  color: var(--pc-quiet);
+  font-size: 0.74rem;
+}
+.pc-credential {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, var(--secondary) 40%, transparent);
+}
+.pc-credential[data-state="active"] { border-color: rgba(183,243,74,.28); }
+.pc-credential__identity { display: flex; align-items: center; gap: 0.55rem; min-width: 0; }
+.pc-credential__identity svg { width: 0.95rem; flex: 0 0 auto; color: var(--pc-quiet); }
+.pc-credential__identity > span { display: grid; min-width: 0; }
+.pc-credential__identity strong { overflow-wrap: anywhere; font-size: 0.8rem; }
+.pc-credential__identity small { color: var(--pc-quiet); font-size: 0.64rem; }
+.pc-credential__badge {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(183,243,74,.32);
+  border-radius: 3px;
+  color: var(--pc-accent, #b7f34a);
+  font-family: var(--font-pc-mono), monospace;
+  font-size: 0.56rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.pc-credential__actions { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+.pc-credential__actions button { font-size: 0.7rem; }
+.pc-credential__actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+.pc-credential__rotate {
+  display: grid;
+  gap: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--pc-line-subtle);
+}
 
 .pc-empty-state {
   display: grid;
@@ -3216,6 +3555,10 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .pc-call-detail__grid > div { min-width: 0; padding: 0.7rem; border: 1px solid var(--pc-line-subtle); border-radius: 0.5rem; }
 .pc-call-detail dt { color: var(--pc-quiet); font-family: var(--font-pc-mono), monospace; font-size: 0.52rem; letter-spacing: 0.07em; text-transform: uppercase; }
 .pc-call-detail dd { margin: 0.3rem 0 0; overflow-wrap: anywhere; color: var(--pc-copy); font-size: 0.69rem; }
+/* The reading beside a provider status code. Quiet, and on its own line: it is
+   an interpretation of a decoded claim, so it must not compete with the code
+   itself for the eye. */
+.pc-call-detail__hint { display: block; margin-top: 0.28rem; color: var(--pc-quiet); font-size: 0.62rem; line-height: 1.45; }
 .pc-call-detail__shadow, .pc-call-detail__receipt { padding: 0.85rem; border: 1px solid var(--pc-line-subtle); border-radius: 0.55rem; }
 .pc-call-detail__shadow[data-state="stale"] { border-color: rgba(245,158,11,.28); background: rgba(245,158,11,.04); }
 .pc-call-detail__shadow[data-state="allow"] { border-color: rgba(183,243,74,.2); }
@@ -3434,6 +3777,35 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .pc-control-graph__canvas { position: relative; min-width: 0; min-height: 42rem; overflow: hidden; border-right: 1px solid var(--pc-line-subtle); -webkit-user-select: none; user-select: none; }
 .pc-control-graph__canvas svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
 .pc-control-graph__canvas svg:active { cursor: grabbing; }
+/* The row must be BOUNDED, not merely tall enough.
+ *
+ * `min-height` alone leaves the grid row auto-sized, so the rail's event list —
+ * which grows with the loaded call window — set the row height, and the canvas
+ * stretched to match it. With `.pc-control-graph__canvas svg { height: 100% }`
+ * and a 960x620 viewBox, the default `xMidYMid meet` then fits the diagram to
+ * the WIDTH and centres it in a column several viewports tall: at 33 recorded
+ * events the row measured 2233px and the graph sat ~470px below the fold, so
+ * the page painted an empty grid until you scrolled. Bounding the row is also
+ * what makes the rail's existing `overflow-y: auto` engage at all — an
+ * auto-sized row can never overflow. Desktop only; under 900px the layout is a
+ * single stacked column whose height is meant to grow.
+ *
+ * MUST STAY BELOW the two rules it overrides. A media query adds no specificity,
+ * so `.pc-control-graph__canvas { min-height: 0 }` here and
+ * `.pc-control-graph__canvas { min-height: 42rem }` above are a tie broken by
+ * source order alone. Placed above them this block shipped half-applied: the row
+ * bounded to 505px while the canvas held its 42rem floor and overflowed a
+ * clipped parent, so the graph was still off-screen on load. Presentation mode
+ * is unaffected either way — its selectors carry an attribute and genuinely win.
+ *
+ * Verifying this by injecting a <style> into <head> cannot catch that: an
+ * injected sheet is always last. Check the built stylesheet's ORDER instead. */
+@media (min-width: 900px) {
+  .pc-control-graph__layout { height: calc(100dvh - 3.35rem - var(--pc-sticky-header-offset, 92px)); }
+  /* Both are grid items, so both default to `min-height: auto` and would push
+   * the bounded row back open — the canvas via its 42rem floor above. */
+  .pc-control-graph__canvas, .pc-control-graph__rail { min-height: 0; }
+}
 .pc-control-graph__stages text { fill: var(--pc-quiet); font-family: var(--font-pc-mono), monospace; font-size: .62rem; letter-spacing: .1em; }
 .pc-control-graph__edge { fill: none; stroke: rgba(151,164,153,.2); stroke-width: 1.25; vector-effect: non-scaling-stroke; transition: opacity 160ms ease, stroke 160ms ease; }
 .pc-control-graph__edge.is-approval, .pc-control-graph__edge.is-dispatch { stroke: rgba(151,164,153,.38); }

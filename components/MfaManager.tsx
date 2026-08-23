@@ -7,7 +7,7 @@ import { enrollMfa, verifyMfaEnrollment, unenrollMfa, regenerateRecoveryCodes } 
 import { AlertTriangle, Check, Copy, ShieldCheck, ShieldOff } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 
-type Status = { enrolled: boolean; recoveryRemaining: number };
+type Status = { enrolled: boolean; recoveryRemaining: number | null };
 
 export function MfaManager({ status }: { status: Status }) {
   const router = useRouter();
@@ -70,13 +70,19 @@ export function MfaManager({ status }: { status: Status }) {
     <div className="pc-settings-manager">
       {err && <p className="pc-inline-notice is-danger" role="alert">{err}</p>}
 
-      {/* Enrolled state */}
+      {/* Enrolled state. A null count means the read failed, NOT that the codes are
+          gone — it must not render as 0, because 0 trips the "regenerate soon" nudge
+          and regenerating destroys a set that is very likely still fine. */}
       {status.enrolled && !enroll && (
-        <div className="pc-security-state" data-state={status.recoveryRemaining <= 2 ? "warning" : "ready"}>
+        <div className="pc-security-state" data-state={status.recoveryRemaining === null ? "ready" : status.recoveryRemaining <= 2 ? "warning" : "ready"}>
           <ShieldCheck aria-hidden="true" />
           <div>
             <strong>Two-factor authentication is on</strong>
-            <p>{status.recoveryRemaining} recovery code{status.recoveryRemaining === 1 ? "" : "s"} remaining{status.recoveryRemaining <= 2 ? " · regenerate soon" : ""}.</p>
+            {status.recoveryRemaining === null ? (
+              <p>Recovery code count is temporarily unavailable.</p>
+            ) : (
+              <p>{status.recoveryRemaining} recovery code{status.recoveryRemaining === 1 ? "" : "s"} remaining{status.recoveryRemaining <= 2 ? " · regenerate soon" : ""}.</p>
+            )}
           </div>
           <div className="pc-security-state__actions">
             <button onClick={regen} disabled={pending} className="rounded-md border border-border bg-secondary px-3 py-1.5 text-sm font-semibold hover:bg-secondary/80">

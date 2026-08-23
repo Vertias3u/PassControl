@@ -3,9 +3,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  CONTROL_EXERCISE_ACTIONS,
   activationDiagnosis,
   authenticationProofLabel,
   deriveFirstCallActivation,
+  hasExercisedControls,
   type FirstCallRow,
 } from "@/lib/first-call-activation";
 
@@ -23,12 +25,13 @@ const row = (status: FirstCallRow["status"], model = "gpt-5-mini"): FirstCallRow
 
 describe("first-call activation state", () => {
   it("keeps provider setup, agent creation and call proof as separate states", () => {
-    expect(deriveFirstCallActivation({ providerConfigured: false, agents: [], logs: [] }).stage)
+    expect(deriveFirstCallActivation({ providerConfigured: false, controlsExercised: false, agents: [], logs: [] }).stage)
       .toBe("provider");
-    expect(deriveFirstCallActivation({ providerConfigured: true, agents: [], logs: [] }).stage)
+    expect(deriveFirstCallActivation({ providerConfigured: true, controlsExercised: false, agents: [], logs: [] }).stage)
       .toBe("agent");
     expect(deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [],
     }).stage).toBe("call");
@@ -37,11 +40,13 @@ describe("first-call activation state", () => {
   it("treats only a stored ok row as first-call completion", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("blocked_scope")],
     }).stage).toBe("diagnose");
     expect(deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("ok")],
     })).toMatchObject({ stage: "complete", agentId: "agent-1", receiptRecorded: true });
@@ -66,6 +71,7 @@ describe("first-call activation state", () => {
   it("does not complete on a successful capability probe alone", () => {
     const state = deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [probeRow()],
     });
@@ -78,6 +84,7 @@ describe("first-call activation state", () => {
   it("reports no connection when nothing at all has arrived", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [],
     })).toMatchObject({ stage: "call", connected: false });
@@ -86,6 +93,7 @@ describe("first-call activation state", () => {
   it("completes on the real call even when a probe arrived first", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("ok"), probeRow()],
     })).toMatchObject({ stage: "complete", agentId: "agent-1" });
@@ -96,6 +104,7 @@ describe("first-call activation state", () => {
     // row, but the refusal is the one the operator has to act on.
     const state = deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [probeRow(), row("blocked_scope")],
     });
@@ -109,6 +118,7 @@ describe("first-call activation state", () => {
     const refusedProbe: FirstCallRow = { ...probeRow(), id: "log-killed", status: "blocked_killed", receipt: null };
     expect(deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [refusedProbe],
     })).toMatchObject({ stage: "diagnose", agentId: "agent-1" });
@@ -117,6 +127,7 @@ describe("first-call activation state", () => {
   it("keeps a suspended identity in the flow so its refusal can be diagnosed", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "suspended" }],
       logs: [row("blocked_suspended")],
     })).toMatchObject({ stage: "diagnose", agentId: "agent-1" });
@@ -136,12 +147,14 @@ describe("first-call activation state", () => {
     ] as const) {
       expect(deriveFirstCallActivation({
         providerConfigured: true,
+      controlsExercised: true,
         agents: [{ id: "agent-1", name: "Scout", status: "active" }],
         logs: [row(status)],
       }).stage).toBe("diagnose");
     }
     expect(deriveFirstCallActivation({
       providerConfigured: true,
+      controlsExercised: true,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [{ ...row("ok"), receipt: null }],
     })).toMatchObject({ stage: "complete", receiptRecorded: false });
@@ -294,5 +307,84 @@ describe("first-call dashboard integration", () => {
     expect(direct).toMatch(/preventClose=\{Boolean\(result && !stored\)\}/);
     expect(setup).toContain("smokeCommand");
     expect(setup).not.toContain("model: gpt-*");
+  });
+});
+
+// ── Step 4: the guide does not end at "it worked" ────────────────────────────
+//
+// A stored `ok` inference row proves the path is open. It proves nothing about
+// whether the operator can CLOSE it, and closing it is the product. So the
+// milestone splits: `verify` once traffic has passed, `complete` once a stop
+// control has actually been exercised.
+describe("first-call control verification", () => {
+  const okRow = (): FirstCallRow => row("ok");
+
+  it("stops at verify until a stop control has been exercised", () => {
+    expect(deriveFirstCallActivation({
+      providerConfigured: true,
+      controlsExercised: false,
+      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+      logs: [okRow()],
+    })).toMatchObject({ stage: "verify", agentId: "agent-1", receiptRecorded: true });
+  });
+
+  it("completes once a stop control has been exercised", () => {
+    expect(deriveFirstCallActivation({
+      providerConfigured: true,
+      controlsExercised: true,
+      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+      logs: [okRow()],
+    })).toMatchObject({ stage: "complete", agentId: "agent-1", receiptRecorded: true });
+  });
+
+  it("does not let the flag skip an earlier stage", () => {
+    // The flag only ever splits the milestone. An operator who armed the kill
+    // switch before wiring anything up has proven nothing about their own agent.
+    for (const stage of ["provider", "agent", "call"] as const) {
+      const input = {
+        provider: { providerConfigured: false, agents: [], logs: [] },
+        agent: { providerConfigured: true, agents: [], logs: [] },
+        call: {
+          providerConfigured: true,
+          agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+          logs: [],
+        },
+      }[stage];
+      expect(deriveFirstCallActivation({ ...input, controlsExercised: true }).stage).toBe(stage);
+    }
+  });
+
+  it("counts both stop controls and nothing that setup also writes", () => {
+    for (const action of CONTROL_EXERCISE_ACTIONS) {
+      expect(hasExercisedControls([{ action }]), action).toBe(true);
+    }
+    expect(hasExercisedControls([])).toBe(false);
+    // `agent.update` is the one that matters here. It is emitted by the scope
+    // editor, and `activationDiagnosis` sends a refused first call straight to
+    // the scope editor — so accepting it would let the guide close the loop on
+    // its own advice with no stop control ever touched. The rest are plain setup.
+    for (const action of ["agent.update", "agent.create", "provider_key.add", "apikey.create"]) {
+      expect(hasExercisedControls([{ action }]), action).toBe(false);
+    }
+  });
+
+  it("pins the audit action strings to the writers that emit them", () => {
+    // These are string literals matched across a module boundary: renaming one
+    // in actions.ts would silently stall every tenant's onboarding at step 4
+    // with nothing red anywhere. Fail here instead.
+    expect([...CONTROL_EXERCISE_ACTIONS]).toEqual(["killswitch.master", "agent.suspend"]);
+    const actions = read("app/dashboard/actions.ts");
+    for (const action of CONTROL_EXERCISE_ACTIONS) {
+      expect(actions, action).toContain(`action: "${action}"`);
+    }
+  });
+
+  it("keeps diagnose in the step order so earlier steps cannot regress", () => {
+    // indexOf(-1) at stage `diagnose` makes steps 1 and 2 fail both branches of
+    // stepState and render as grey `upcoming` — a refused call would visibly
+    // un-complete the provider key the operator just stored.
+    const guide = read("components/dashboard/FirstCallActivation.tsx");
+    const order = guide.slice(guide.indexOf("const STEP_ORDER"));
+    expect(order.slice(0, order.indexOf("]"))).toContain('"diagnose"');
   });
 });

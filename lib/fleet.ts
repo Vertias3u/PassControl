@@ -33,6 +33,14 @@ import {
 
 const cachePurgeProviders = () => [...PROVIDERS];
 
+/** The 0035 namespace trigger raises this stable internal token for a
+ * current-versus-retired collision; old databases surface 23505 instead. */
+function passportKeyInUse(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const row = error as { code?: unknown; message?: unknown };
+  return row.code === "23505" || (typeof row.message === "string" && row.message.includes("passport_key_in_use"));
+}
+
 export type FleetResult<T> =
   | { ok: true; value: T }
   | { ok: false; status: number; code: string; message?: string };
@@ -66,7 +74,7 @@ export async function createAgent(
     .single();
   if (error) {
     // 23505 = unique_violation (passport already registered).
-    if ((error as { code?: string }).code === "23505") {
+    if (passportKeyInUse(error)) {
       return { ok: false, status: 409, code: "agent_exists", message: "That passport is already registered." };
     }
     return { ok: false, status: 500, code: "query_failed" };
@@ -501,7 +509,7 @@ export async function rotatePassport(
   if (error) {
     // 23505 = unique_violation: the new key is already registered somewhere,
     // as a current key or as somebody's retired one.
-    if ((error as { code?: string }).code === "23505") {
+    if (passportKeyInUse(error)) {
       return {
         ok: false,
         status: 409,

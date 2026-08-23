@@ -23,6 +23,7 @@ import {
   getCachedKey,
   setCachedKey,
   seedSpent,
+  touchLastSeen,
 } from "@/lib/state/redis";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { seal, open } from "@/lib/crypto/aesgcm";
@@ -36,8 +37,13 @@ import {
   type GatePolicyInput,
   type GateRateLimitInput,
 } from "@/lib/gate";
-import { costMicrocents, estimateTokenUsage, MICROCENTS_PER_CENT } from "@/lib/pricing";
-import { createUsageTransform, usageFromJson, type Usage } from "@/lib/usage/parseStream";
+import {
+  costMicrocents,
+  costMicrocentsForUsage,
+  estimateTokenUsage,
+  MICROCENTS_PER_CENT,
+} from "@/lib/pricing";
+import { createUsageTransform, usageFromJson, NO_USAGE, type Usage } from "@/lib/usage/parseStream";
 import { writeLog, mirrorSpend } from "@/lib/log";
 import { shadowRevision, stampShadowVerdict } from "@/lib/policy-shadow";
 import { signReceipt, type OwnerClaim } from "@/lib/receipt";
@@ -159,6 +165,31 @@ function clientIp(req: Request): string {
   );
 }
 
+/**
+ * Coalesced last-seen, the direct-key half of it.
+ *
+ * The passport path stamps this at the challenge and again at the visa mint; a
+ * direct key reaches neither, so `lastseen:<agid>` was never written for a
+ * direct-key agent, the reconcile cron had nothing to flush, and
+ * `agents.last_seen_at` stayed NULL however many calls the agent made — the
+ * fleet table read "never" for an agent whose last call was minutes old.
+ *
+ * Swallows everything, in both directions. This is a presentation stamp sitting
+ * on the money path: it must not add latency to the gate, and it must never be
+ * able to refuse, delay or 500 a call. A rejected write is swallowed, and so is
+ * a SYNCHRONOUS throw — `redis()` constructs its client on first use and can
+ * throw outright on a misconfigured instance, which without the guard would
+ * surface to the caller as `authentication_unavailable` on a call whose
+ * credential was in fact perfectly good. A missed stamp costs one stale cell.
+ */
+function stampLastSeen(agentId: string): void {
+  try {
+    waitUntil(Promise.resolve(touchLastSeen(agentId)).catch(() => undefined));
+  } catch {
+    // Deliberately empty — see above.
+  }
+}
+
 /** Authenticate either door without letting one format fall through to the other. */
 async function authenticateGatewayRequest(
   req: Request,
@@ -222,6 +253,11 @@ async function authenticateGatewayRequest(
         );
         return { ok: false, response: err(401, "invalid_credential") };
       }
+      // Stamped the moment the credential is accepted, which keeps the meaning
+      // the passport path already gives it: last *seen*, not last *cleared*. A
+      // suspended or over-budget agent presenting a valid key was still seen,
+      // and that is precisely when an operator wants to know it is still live.
+      stampLastSeen(principal.agentId);
       return { ok: true, principal, db };
     } catch {
       waitUntil(
@@ -891,12 +927,17 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       status: Parameters<typeof writeLog>[0]["status"],
       httpStatus = 200
     ): Settlement => {
-      const cost = costMicrocents(
-        attemptModel,
-        usage.inputTokens,
-        usage.outputTokens,
-        attemptProvider
-      );
+      const cost = costMicrocentsForUsage(usage, attemptModel, attemptProvider);
+
+      // Every token the provider processed for this call, which is what a token
+      // budget is a limit on. Anthropic reports a cached prompt across three
+      // fields and `input_tokens` is only the UNCACHED remainder, so summing just
+      // input+output charged a steady-state cached agent for ~12 tokens of an
+      // ~18,000-token prompt — a cap set in the dashboard that the agent could
+      // run straight through. Cache reads are cheap, not free, and they are not
+      // absent.
+      const billedTokens =
+        usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
 
       // Release the reservation FIRST and hold its promise. Everything after this
       // line — receipt signing included — is then structurally unable to prevent
@@ -909,7 +950,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         reserveId,
         estimate,
         estimateMicrocents,
-        actualTokens: usage.inputTokens + usage.outputTokens,
+        actualTokens: billedTokens,
         actualMicrocents: cost,
       });
 
@@ -928,8 +969,26 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           // The CLIENT's bytes, identical across attempts. That is exactly why a
           // shared req.dig is not a link between two receipts and `prev` is.
           rawBody: capturedBody,
+          // THE RECEIPT SPLITS, THE LOG ROW FOLDS. Deliberate, and the two must
+          // not be "made consistent" with each other:
+          //
+          //   here          — `in` is the provider's own `input_tokens`, with the
+          //                   cache traffic named separately as `cr`/`cw`. A
+          //                   stranger checking this receipt against the
+          //                   provider's invoice finds matching numbers, and the
+          //                   discounted portions are visible rather than buried.
+          //   writeLog below — one folded total, because `reconcile_agent_spend`
+          //                   sums `input_tokens + output_tokens` and there is no
+          //                   cache column for it to read. Splitting there would
+          //                   drop the cache tokens out of authoritative spend at
+          //                   the next cron, re-opening the bug this closes.
+          //
+          // Both describe the same call; `cost` is identical and already includes
+          // all three dimensions either way.
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
+          ...(usage.cacheReadTokens ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+          ...(usage.cacheWriteTokens ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
           costMicrocents: cost,
           status,
           httpStatus,
@@ -950,7 +1009,13 @@ async function handle(req: Request, params: { provider: string; path: string[] }
             ...logIdentity,
             provider: attemptProvider,
             model: attemptModel,
-            inputTokens: usage.inputTokens,
+            // The FOLDED total — see the receipt comment above for why this is
+            // not the provider's `input_tokens`. No migration is involved, which
+            // is the point: naming a cache column that a deployment has not
+            // migrated yet would make PostgREST reject the whole insert and this
+            // call would write no audit row at all.
+            inputTokens:
+              usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens,
             outputTokens: usage.outputTokens,
             costMicrocents: cost,
             status,
@@ -960,7 +1025,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           }),
         ];
         if (status === "ok") {
-          tasks.push(mirrorSpend(agentId, usage.inputTokens + usage.outputTokens, cost));
+          // Same folded figure as the row, so the dashboard mirror and the
+          // authoritative checkpoint cannot disagree about one call.
+          tasks.push(mirrorSpend(agentId, billedTokens, cost));
         }
         return Promise.all(tasks);
       })();
@@ -993,7 +1060,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     if (!providerKey) {
       // No usage; release the reservation by reconciling with the estimate as spend
       // would over-count, so release exactly the reserve and log zero usage.
-      const settle = reconcile({ inputTokens: 0, outputTokens: 0 }, "no_provider_key", 409);
+      const settle = reconcile(NO_USAGE, "no_provider_key", 409);
       // A fallback with no stored key is a fallback that cannot run. Release what
       // it took and move on rather than answering the client with its problem.
       if (!primary) {
@@ -1039,7 +1106,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           code: "upstream_unreachable",
         })
       );
-      const settle = reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error", 502);
+      const settle = reconcile(NO_USAGE, "upstream_error", 502);
       return {
         kind: "retryable",
         // Cannot distinguish "never sent" from "sent, no answer came back", so
@@ -1107,12 +1174,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       if (!why) {
         return terminal(
           passthrough(),
-          reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error", upstream.status)
+          reconcile(NO_USAGE, "upstream_error", upstream.status)
         );
       }
 
       if (why === "credit_exhausted") {
-        const settle = reconcile({ inputTokens: 0, outputTokens: 0 }, "provider_exhausted", 402);
+        const settle = reconcile(NO_USAGE, "provider_exhausted", 402);
         // Redis-cached and only reached on a call that has already failed, so it
         // costs an approved call nothing. Degrades to an empty list rather than
         // failing the response — see lib/providers/available.ts.
@@ -1149,7 +1216,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         why,
         receiptId: attemptReceiptId,
         response: passthrough(),
-        settle: reconcile({ inputTokens: 0, outputTokens: 0 }, "upstream_error", upstream.status),
+        settle: reconcile(NO_USAGE, "upstream_error", upstream.status),
       };
     }
 
@@ -1159,9 +1226,38 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // left to fail over from — the failover trigger is a response, before the
     // first byte of a body reaches the client.
     if (isStream && upstream.body) {
-      const { stream, usage } = createUsageTransform(attemptProvider);
-      // The monitored transform resolves usage exactly once on normal close or client cancel.
-      waitUntil(usage.then((u) => reconcile(u, "ok").done));
+      const { stream, settled } = createUsageTransform(attemptProvider);
+      // The monitored transform settles exactly once on every ending — normal
+      // close, client cancel, and a break in the provider's own stream.
+      //
+      // The ending decides the status, and it has to: a stream that broke
+      // mid-answer delivered a truncated answer, and logging that as `ok` would
+      // put a row in the audit trail asserting a call succeeded when the client
+      // got half of one. A client cancel stays `ok` — the gateway and the
+      // provider both did their job, and the partial usage is real spend.
+      //
+      // The tokens are recorded either way. The provider billed for what it
+      // produced before the break, so reconciling with the partial tally is what
+      // keeps the reservation and the agent's live spend honest. (Note the
+      // authoritative spend checkpoint counts only `ok` rows, so a broken
+      // stream's tokens drop out of the cap at the next reconcile cron — see
+      // TEAMSHARE for why that is left as its own decision rather than widened
+      // here.)
+      //
+      // `req.signal.aborted` is what separates the two, and without it the status
+      // would be a RACE. One client disconnect — a stop button, a closed tab —
+      // fires two endings from the same event: the platform cancels the response
+      // body we returned (→ `cancel`), and req.signal aborts the upstream fetch,
+      // whose body then errors under the transform's reader (→ `error`). First
+      // one to settle wins, so the same disconnect would log `ok` or
+      // `upstream_error` depending on timing. An aborted request means the client
+      // left; the provider did not fail. Checked here rather than in the
+      // transform, which has no business knowing about requests.
+      waitUntil(
+        settled.then(({ usage, end }) =>
+          reconcile(usage, end === "error" && !req.signal.aborted ? "upstream_error" : "ok").done
+        )
+      );
       return {
         kind: "response",
         response: new Response(upstream.body.pipeThrough(stream), {

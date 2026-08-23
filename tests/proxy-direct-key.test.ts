@@ -19,6 +19,7 @@ const {
   consumeCloudBetaQuotaMock,
   captureSecurityEventMock,
   signReceiptMock,
+  touchLastSeenMock,
   fetchMock,
 } = vi.hoisted(() => ({
   verifyVisaMock: vi.fn(),
@@ -39,6 +40,7 @@ const {
   consumeCloudBetaQuotaMock: vi.fn(),
   captureSecurityEventMock: vi.fn(),
   signReceiptMock: vi.fn(),
+  touchLastSeenMock: vi.fn(),
   fetchMock: vi.fn(),
 }));
 
@@ -63,6 +65,7 @@ vi.mock("@/lib/state/redis", () => ({
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
+  touchLastSeen: (...args: unknown[]) => touchLastSeenMock(...args),
   seedSpent: vi.fn(),
 }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
@@ -323,5 +326,46 @@ describe("Direct Agent Key gateway authentication", () => {
     expect(verifyVisaMock).toHaveBeenCalledWith("passport.visa.value");
     expect(rateLimitFailClosedMock).not.toHaveBeenCalled();
     expect(authenticateDirectAgentKeyMock).not.toHaveBeenCalled();
+  });
+
+  // ── last-seen ──────────────────────────────────────────────────────────────
+  //
+  // `touchLastSeen` had exactly two callers — the challenge and the visa mint —
+  // both of which a direct key skips entirely. So `lastseen:<agid>` was never
+  // written for a direct-key agent, the reconcile cron had nothing to flush,
+  // and `agents.last_seen_at` stayed NULL however many calls the agent made.
+  // Observed on production 2026-08-17: the fleet table read "never" for an
+  // agent whose most recent call was twelve minutes old.
+  describe("last-seen", () => {
+    it("stamps it once the key is accepted", async () => {
+      const res = await call();
+      expect(res.status).toBe(200);
+      expect(touchLastSeenMock).toHaveBeenCalledWith(directPrincipal.agentId);
+    });
+
+    it("stamps on authentication, not on a cleared call", async () => {
+      // Same meaning the passport path already gives it: the challenge stamps
+      // before any gate runs. A suspended agent that presents a valid key WAS
+      // seen — that is exactly when an operator most wants to know it is live.
+      isSuspendedMock.mockResolvedValue(true);
+      const res = await call();
+      expect(res.status).toBe(403);
+      expect(touchLastSeenMock).toHaveBeenCalledWith(directPrincipal.agentId);
+    });
+
+    it("never stamps for a credential that was not authenticated", async () => {
+      authenticateDirectAgentKeyMock.mockResolvedValue(null);
+      const res = await call();
+      expect(res.status).toBe(401);
+      expect(touchLastSeenMock).not.toHaveBeenCalled();
+    });
+
+    it("cannot fail the call when Redis is unwritable", async () => {
+      // It is a presentation stamp on the money path. It must never be able to
+      // refuse, delay, or 500 a call that the gate already cleared.
+      touchLastSeenMock.mockRejectedValue(new Error("redis down"));
+      const res = await call();
+      expect(res.status).toBe(200);
+    });
   });
 });

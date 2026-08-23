@@ -99,6 +99,11 @@ describe("createAgent", () => {
     const { db } = makeDb({ data: null, error: { code: "23505" } });
     expect(await createAgent(db, "u1", validInput)).toMatchObject({ ok: false, status: 409, code: "agent_exists" });
   });
+
+  it("maps a 0035 current-or-retired namespace collision to the same safe conflict", async () => {
+    const { db } = makeDb({ data: null, error: { code: "P0001", message: "passport_key_in_use" } });
+    expect(await createAgent(db, "u1", validInput)).toMatchObject({ ok: false, status: 409, code: "agent_exists" });
+  });
 });
 
 describe("validateAgentUpdate", () => {
@@ -316,6 +321,15 @@ describe("rotatePassport", () => {
     const { db } = makeDb({ data: null, error: null }, { data: activeAgent(), error: null });
     const r = await rotatePassport(db, "u1", "a1", NEW_KEY, 60);
     expect(r).toMatchObject({ ok: false, code: "rotation_conflict" });
+  });
+
+  it("maps a global current-or-retired namespace conflict without exposing its owner", async () => {
+    const { db } = makeDb(
+      { data: null, error: { code: "P0001", message: "passport_key_in_use" } },
+      { data: activeAgent(), error: null }
+    );
+    const r = await rotatePassport(db, "u1", "a1", NEW_KEY, 60);
+    expect(r).toMatchObject({ ok: false, status: 409, code: "agent_exists" });
   });
 
   /**

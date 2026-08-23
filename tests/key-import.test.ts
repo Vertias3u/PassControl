@@ -19,13 +19,18 @@ const mocks = vi.hoisted(() => {
   // auth.uid()-derived provider-key RPCs, so the user-scoped client has no
   // business calling one — and leaving `rpc` off this object means a regression
   // back to `db.rpc(...)` fails loudly here rather than passing silently.
+  // `from` deliberately lives on the SERVICE client only, for the same reason
+  // `rpc` does. 0032 revokes INSERT/UPDATE/DELETE on public.users from
+  // `authenticated`, so the profile-row upsert cannot run under the dashboard
+  // user's JWT any more. Leaving `from` off this object means a regression back
+  // to `db.from("users")` fails loudly here instead of passing silently and then
+  // failing in production as an unrelated foreign-key error.
   const db = {
     auth: {
       getUser: vi.fn(async () => ({
         data: { user: { id: currentUserId, email: `${currentUserId}@example.test` } },
       })),
     },
-    from,
   };
 
   // A real in-memory store, not a stub: the point of the Redis-backed handoff
@@ -59,7 +64,7 @@ const mocks = vi.hoisted(() => {
     // A distinguishable stand-in for the service-role client, so the assertions
     // below can prove the passport insert and the provider-key RPC do NOT run as
     // the dashboard user.
-    serviceDb: { __client: "service-role", rpc },
+    serviceDb: { __client: "service-role", rpc, from },
     rateLimit: vi.fn(async () => ({ success: true, remaining: 4 })),
     recordAdminAction: vi.fn(async () => undefined),
     revalidatePath: vi.fn(),

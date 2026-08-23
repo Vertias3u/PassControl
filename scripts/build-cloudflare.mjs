@@ -17,6 +17,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const tempRoot = fs.mkdtempSync(path.join(repoRoot, ".cloudflare-build-"));
 
 const SOURCE_DIRS = ["app", "cli", "components", "lib", "sdk"];
+const MIGRATION_DIR = "db/migrations";
 const ROOT_FILES = [
   "components.json",
   "middleware.ts",
@@ -58,6 +59,10 @@ function stripEdgeRuntime(directory) {
 
 try {
   for (const directory of SOURCE_DIRS) copy(directory);
+  // next.config.mjs freezes exact migration bytes at build time, so the
+  // isolated source must carry them too. Copy only migrations, never DB dumps
+  // or test fixtures.
+  copy(MIGRATION_DIR);
   for (const file of ROOT_FILES) copy(file);
   const transformedRoutes = stripEdgeRuntime(tempRoot);
   if (transformedRoutes === 0) {

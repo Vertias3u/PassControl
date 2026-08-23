@@ -11,6 +11,7 @@ import {
   CONFIG_FILE,
   OPENAI_SHAPE_PROVIDERS,
   PROVIDERS,
+  WORKSPACE_IMPORT_MAX_VERSION,
   assertConfigLoaded,
   config,
   configPathLabel,
@@ -47,6 +48,7 @@ import {
   isIntegration,
   supportsWrite,
 } from "../cli/presets.mjs";
+import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
 import {
   checkIssuerPublishesKey,
@@ -54,6 +56,7 @@ import {
   instanceKidFromSeed,
 } from "../cli/instance-key.mjs";
 import { FAILURE_REASONS, verifyAgentToken, verifyReceipt } from "../cli/verify.mjs";
+import { compareProtocolSets } from "../cli/protocols.mjs";
 
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -163,6 +166,9 @@ ${heading("Manage")}
   ${cmd} logs [--limit 20] [--json]
                                  show governed call logs
   ${cmd} kill on|off              toggle the tenant kill switch
+  ${cmd} export [--out FILE]      save a workspace configuration snapshot
+  ${cmd} import <file> [--confirm IMPORT]
+                                 restore agents from a snapshot (never overwrites)
 
 ${heading("Integrate")}
   ${cmd} env [integration]        print settings without writing anything
@@ -262,6 +268,10 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
   const dashboard = dashboardStatusLabel(gateway, noNetwork);
   const app = appRootLabel();
   const configFile = configPathLabel(config.sources);
+  // This is deliberately credential-gated. Status remains useful to an agent
+  // install with no Control key, but it must never probe a tenant endpoint
+  // anonymously or make that normal setup state look like a failure.
+  const systemHealth = noNetwork ? { state: "not-checked" } : await fetchSystemHealth();
 
   if (json) {
     console.log(JSON.stringify({
@@ -276,6 +286,7 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
         passport_configured: passportConfigured,
         control_api_key_configured: adminConfigured,
       },
+      system_health: systemHealthForJson(systemHealth),
     }, null, 2));
     return;
   }
@@ -289,6 +300,7 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
   console.log(formatLabel("Model", config.model));
   console.log(formatLabel("Passport", passportConfigured ? redact(config.passportId) : "missing"));
   console.log(formatLabel("Admin key", adminConfigured ? redact(config.apiKey, 6) : "missing"));
+  console.log(formatLabel("System health", systemHealthLabel(systemHealth)));
   console.log(`${formatLabel("Sidecar", `foreground command (\`${cliCommand("sidecar")}\`)`)}\n`);
   const next = [];
   if (config.sources.length === 0) {
@@ -309,6 +321,96 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
   console.log(heading("Next:"));
   for (const [command, description] of next.slice(0, 3)) {
     console.log(`  ${cliCommand(command).padEnd(34)} ${description}`);
+  }
+}
+
+function safeHealthText(value, fallback = "unavailable") {
+  if (typeof value !== "string") return fallback;
+  // Keep a compromised/misconfigured server from writing terminal control
+  // sequences or an unbounded line into an operator's terminal.
+  const clean = value.replace(/[\x00-\x1f\x7f]/g, " ").trim().slice(0, 240);
+  return clean || fallback;
+}
+
+async function fetchSystemHealth() {
+  if (!config.apiKey) return { state: "skipped" };
+  try {
+    const health = await api("GET", "/system");
+    if (!health || typeof health !== "object") return { state: "unavailable", reason: "invalid response" };
+    return { state: "available", health };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "request failed";
+    return { state: message.startsWith("403 ") ? "restricted" : "unavailable", reason: message };
+  }
+}
+
+function healthCompatibility(health) {
+  return compareProtocolSets(health && typeof health === "object" ? health.protocols : undefined);
+}
+
+function shortBuildCommit(value) {
+  return typeof value === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value)
+    ? value.slice(0, 12).toLowerCase()
+    : "unknown";
+}
+
+function systemBuildSummary(health) {
+  const build = health?.build && typeof health.build === "object" ? health.build : {};
+  const migrations = health?.migrations && typeof health.migrations === "object" ? health.migrations : {};
+  return {
+    version: safeHealthText(build.version, "unknown"),
+    channel: safeHealthText(build.channel, "unknown"),
+    commit: shortBuildCommit(build.commit),
+    migrationState: safeHealthText(migrations.state, "unknown"),
+    migrationHead: safeHealthText(migrations.expected_head, "unknown"),
+    appliedMigrationHead: migrations.applied_head == null
+      ? "not recorded"
+      : safeHealthText(migrations.applied_head, "unknown"),
+  };
+}
+
+function systemHealthLabel(result) {
+  if (result.state === "skipped") return "skipped (operator read key required)";
+  if (result.state === "not-checked") return "not checked (--no-network)";
+  if (result.state === "restricted") return "restricted (control key cannot read system health)";
+  if (result.state !== "available") return `unavailable (${safeHealthText(result.reason)})`;
+  const build = systemBuildSummary(result.health);
+  return `${safeHealthText(result.health.overall, "reported")} · v${build.version} ${build.channel} ${build.commit} · migrations ${build.migrationState} (${build.appliedMigrationHead} → ${build.migrationHead}) · protocols ${healthCompatibility(result.health).state}`;
+}
+
+function systemHealthForJson(result) {
+  if (result.state !== "available") return { state: result.state };
+  return {
+    state: "available",
+    overall: safeHealthText(result.health.overall, "reported"),
+    protocol_compatibility: healthCompatibility(result.health).state,
+    build: systemBuildSummary(result.health),
+  };
+}
+
+function printSystemHealthDiagnostic(result) {
+  if (result.state === "skipped") {
+    step("System health skipped: an operator read key is required.");
+    return;
+  }
+  if (result.state === "restricted") {
+    fail("System health diagnostic restricted (403): this key's owner is not an allowlisted MFA-enrolled system operator.");
+    return;
+  }
+  if (result.state !== "available") {
+    fail(`System health diagnostic failed: ${safeHealthText(result.reason)}`);
+    return;
+  }
+  const compatibility = healthCompatibility(result.health);
+  const build = systemBuildSummary(result.health);
+  ok(`System health ${safeHealthText(result.health.overall, "reported")} · v${build.version} ${build.channel} ${build.commit} · migrations ${build.migrationState} (${build.appliedMigrationHead} → ${build.migrationHead}) · protocol compatibility ${compatibility.state}`);
+  for (const check of Array.isArray(result.health.checks) ? result.health.checks : []) {
+    if (!check || typeof check !== "object") continue;
+    const label = safeHealthText(check.label, "System check");
+    const state = safeHealthText(check.state, "unknown");
+    const summary = safeHealthText(check.summary, "No summary provided.");
+    console.log(`  ${label}: ${state} — ${summary}`);
+    if (typeof check.action === "string" && check.action.trim()) step(`Remediation: ${safeHealthText(check.action)}`);
   }
 }
 
@@ -1354,7 +1456,7 @@ async function api(method, pathPart, body) {
     const e = json.error ?? {};
     throw new Error(`${res.status} ${e.code ?? ""} ${e.message ?? ""} (req ${e.request_id ?? "?"})`);
   }
-  return json.data;
+  return Object.prototype.hasOwnProperty.call(json, "data") ? json.data : json;
 }
 
 function controlPath(pathPart, params = {}) {
@@ -1848,6 +1950,9 @@ async function doctorCommand(opts = {}) {
 
   console.log("");
   step("Deep checks");
+  // One authenticated request for this command. Its failure is a failed
+  // diagnostic, not a CLI crash: remaining local checks are still useful.
+  printSystemHealthDiagnostic(await fetchSystemHealth());
   await runLocalPrerequisiteChecks({ report: true });
   if (config.passportId && config.passportSecret) {
     try {
@@ -2000,6 +2105,127 @@ async function openDashboard(opts = {}) {
   ok(`opening ${url}`);
 }
 
+// ── Workspace snapshots ─────────────────────────────────────────────────────
+// A recovery snapshot is CONFIGURATION, not a backup: it carries agents, their
+// scopes, budgets, policies and failover order, and deliberately carries no
+// secret value at all. What it cannot restore is stated in the file itself,
+// under `exclusions`, because this is the artifact someone opens at the worst
+// possible moment.
+
+// lib/control/body.ts caps every control-plane request at 64 KiB, and it is not
+// raised for one route. Checking here means a large fleet is told what to do
+// instead of being handed a bare 413 by the server.
+const IMPORT_BODY_LIMIT = 64 * 1024;
+
+// Wide enough for "Skipped (already exist)", the longest label below. formatLabel
+// pads to the width and does not truncate, so a short width silently glues the
+// value onto the colon.
+const REPORT_LABEL_WIDTH = 26;
+
+// A passport public key is unique across the whole instance, not per workspace,
+// because the gateway identifies an agent BY that key. So importing a file into
+// a second workspace on the SAME instance refuses every agent still held by the
+// first — which is correct, and is not what a restore looks like. A restore
+// goes into a fresh instance, where the passports are free.
+const IMPORT_REASONS = {
+  passport_registered_elsewhere:
+    "its passport is already registered on this instance. Nothing was created for it. " +
+    "Passports are unique per instance, so this file restores into a FRESH deployment, " +
+    "not alongside the workspace it came from.",
+  policy_malformed: "its policy could not be parsed, and creating it without one would leave it unrestricted.",
+  policy_shadow_malformed: "its shadow policy could not be parsed.",
+  unknown_status: "it records a status this version does not recognise.",
+};
+
+async function exportCommand(opts = {}) {
+  const snapshot = await api("GET", "/workspace/export");
+  const body = JSON.stringify(snapshot, null, 2);
+  const target = typeof opts.out === "string" ? opts.out : null;
+  if (!target) {
+    console.log(body);
+    return;
+  }
+  fs.writeFileSync(target, `${body}\n`, { mode: 0o600 });
+  ok(`Wrote ${snapshot.workspace.agents.length} agents to ${target}`);
+  console.log(`\n${heading("Not in this file")}`);
+  for (const line of snapshot.exclusions) console.log(`  • ${line}`);
+}
+
+async function importCommand(rest = [], opts = {}) {
+  const file = rest[0];
+  if (!file) throw new Error(`Usage: ${cliPrefix()} import <file> [--confirm IMPORT]`);
+
+  let snapshot;
+  try {
+    snapshot = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new Error(`Could not read ${file} as JSON: ${error.message}`);
+  }
+  if (snapshot?.format !== "passcontrol-export") {
+    throw new Error(`${file} is not a PassControl workspace export.`);
+  }
+  // A file from a LATER schema may describe fields this CLI would silently drop.
+  // Refusing is the honest move: a partial restore that reports success is the
+  // failure this whole feature exists to prevent.
+  if (Number(snapshot.version) > WORKSPACE_IMPORT_MAX_VERSION) {
+    throw new Error(
+      `${file} uses export format v${snapshot.version}; this CLI understands up to ` +
+        `v${WORKSPACE_IMPORT_MAX_VERSION}. Upgrade PassControl and try again.`
+    );
+  }
+
+  // Only what the import writes goes on the wire. Provider mappings, break-glass
+  // grants, the exclusions prose and the display settings stay on disk — they
+  // are not importable, so sending them would spend the size budget on bytes the
+  // server ignores.
+  const agents = snapshot.workspace?.agents ?? [];
+  const payload = { agents, ownership: snapshot.workspace?.ownership ?? null };
+  const size = Buffer.byteLength(JSON.stringify(payload));
+  if (size > IMPORT_BODY_LIMIT) {
+    throw new Error(
+      `This snapshot holds ${agents.length} agents (${Math.ceil(size / 1024)} KiB) and the import ` +
+        `API accepts ${IMPORT_BODY_LIMIT / 1024} KiB per request. Split the "agents" array across ` +
+        `several files and import them one at a time — importing is additive, so the parts combine.`
+    );
+  }
+
+  const preview = await api("POST", "/workspace/import?dry_run=true", payload);
+  printImportReport(preview, { preview: true });
+
+  if (preview.agents.create === 0) {
+    ok(noAgentCreateMessage(preview.agents));
+    return;
+  }
+  if (opts.confirm !== "IMPORT") {
+    console.log(
+      `\nNothing has been written. Re-run with \`--confirm IMPORT\` to create the ` +
+        `${preview.agents.create} agent(s) above.`
+    );
+    return;
+  }
+
+  const result = await api("POST", "/workspace/import", payload);
+  printImportReport(result, { preview: false });
+  ok(importCompletionMessage(result));
+}
+
+function printImportReport(report, { preview }) {
+  console.log(`\n${heading(preview ? "Dry run — nothing written yet" : "Imported")}`);
+  const created = preview ? report.agents.create : report.agents.created.length;
+  console.log(formatLabel(preview ? "Will create" : "Created", String(created), REPORT_LABEL_WIDTH));
+  if (report.agents.skipped.length > 0) {
+    console.log(formatLabel("Skipped (already exist)", report.agents.skipped.join(", "), REPORT_LABEL_WIDTH));
+  }
+  for (const entry of report.agents.rejected) {
+    console.log(formatLabel("Refused", `${entry.name} — ${IMPORT_REASONS[entry.reason] ?? entry.reason}`, REPORT_LABEL_WIDTH));
+  }
+  console.log(formatLabel("Ownership", report.ownership, REPORT_LABEL_WIDTH));
+  console.log(`\n${heading("Not restored")}`);
+  for (const line of report.not_restored) console.log(`  • ${line}`);
+  // Said once, plainly: an existing agent is never touched, so a re-run is safe.
+  console.log(`\nAn agent already in the workspace is left exactly as it is — import never overwrites.`);
+}
+
 async function main() {
   const { opts, rest } = parseArgv(process.argv.slice(2));
   const [command, ...commandRest] = rest;
@@ -2079,6 +2305,12 @@ async function main() {
       break;
     case "kill":
       await killCommand(commandRest);
+      break;
+    case "export":
+      await exportCommand(opts);
+      break;
+    case "import":
+      await importCommand(commandRest, opts);
       break;
     case "open":
       await openDashboard(opts);

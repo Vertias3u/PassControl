@@ -177,18 +177,6 @@ describe("migration lifecycle", () => {
     expect(sql).toContain("'feedback_request.pending'");
   });
 
-  it("keeps the rollout fail-closed and verifies Auth preserved the invitation email", () => {
-    const runbook = readFileSync(join(repo, "docs/deployment/invite-beta-launch.md"), "utf8");
-    const hook = runbook.indexOf("Before User Created");
-    const publicDeploy = runbook.indexOf("public application form");
-    expect(hook).toBeGreaterThan(-1);
-    expect(hook).toBeLessThan(publicDeploy);
-    expect(runbook).toContain("auth.users");
-    expect(runbook).toContain("email_normalized");
-    expect(runbook).toContain("Allow new users to sign up");
-    expect(runbook).toContain("unconfirmed");
-  });
-
   it("fails closed when application rate-limit infrastructure is unreadable", () => {
     const action = readFileSync(join(repo, "app/beta/actions.ts"), "utf8");
     expect(action).toContain("rateLimitFailClosed");

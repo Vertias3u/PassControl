@@ -283,6 +283,7 @@ The primary interface is `passcontrol <command>`. Highlights:
 | List / create agents | `passcontrol agent list` · `passcontrol agent create billing-bot` |
 | Suspend, resume, or revoke an agent | `passcontrol agent suspend <id>` |
 | Inspect spend, logs, and audit history | `passcontrol spend` · `passcontrol logs` · `passcontrol audit` |
+| Save / restore a workspace configuration snapshot | `passcontrol export --out workspace.json` · `passcontrol import workspace.json` (previews first; never overwrites an existing agent) |
 | Generate this deployment's receipt signing key | `passcontrol keygen instance` |
 | Check a receipt or agent token (no account needed) | `passcontrol verify receipt <jws> --issuer <origin>` |
 | Arm / release the tenant kill switch | `passcontrol kill on` · `passcontrol kill off` |
@@ -337,7 +338,7 @@ await cp.killSwitch.set(true);
 Both credential-bearing clients enforce the same `gateway` boundary — a bare HTTPS origin, plain
 HTTP only on loopback — and refuse anything else at construction, before any request.
 
-The compiled ESM SDK ships in npm version 0.6.0. Keep Passport secrets **and `pc_` control keys**
+The compiled ESM SDK ships with the current CLI release. Keep Passport secrets **and `pc_` control keys**
 in trusted server runtimes, never browser-exposed variables. See the
 [Cloud Passport SDK guide](./docs/integrations/passport-sdk.md).
 Full API reference: [`openapi.yaml`](./openapi.yaml) and [`DOCUMENTATION.md`](./DOCUMENTATION.md). Runnable example

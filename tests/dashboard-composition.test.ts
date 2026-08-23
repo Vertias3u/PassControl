@@ -77,8 +77,73 @@ describe("the first-call guide reuses the first-run provider read", () => {
     expect(all.slice(0, all.indexOf("]);"))).toMatch(/provider_credentials/);
   });
 
-  it("does not flash a dismissed completion card before localStorage resolves", () => {
-    expect(firstCall).toContain('state.stage === "complete" && dismissed !== false');
+  it("resolves the guide's dismissal on the server, not in an effect", () => {
+    // This replaced an assertion that pinned the opposite and was wrong for it.
+    //
+    // Dismissal used to be read from localStorage in an effect, with the guard
+    // treating "not yet known" as "hide". That deadlocks: the server renders
+    // null, so the client component never mounts, so the effect never runs.
+    // Every dismissible stage was invisible on a cold load, in production, and
+    // the old source-grep could not see it because the source looked correct.
+    // The behavioural check lives in tests/first-call-steps-rendering.test.tsx;
+    // this one keeps the two halves of the cookie from drifting apart.
+    expect(firstCall).toContain("if (dismissible && dismissed) return null;");
+    // The prose above the guard explains why localStorage was abandoned, so
+    // match on use, not on the word.
+    expect(firstCall).not.toMatch(/localStorage\s*\.\s*(get|set|remove)Item/);
+    expect(dashboard).toContain("FIRST_CALL_DISMISSED_COOKIE");
+    expect(dashboard).toContain("?.value === user.id");
+
+    // The cookie name is declared in the plain shared module, NOT in the client
+    // component, and importing it from the client component is the bug this
+    // pins. A `"use client"` export reaches a server component as a client
+    // reference rather than the string, so `cookies().get(NAME)` returned null
+    // while `getAll()` listed the cookie and the guide would not stay dismissed.
+    // Type-checks fine; invisible to every source-grep that does not look here.
+    expect(read("lib/first-call-activation.ts")).toContain(
+      'export const FIRST_CALL_DISMISSED_COOKIE = "pc-first-call-dismissed"'
+    );
+    expect(firstCall).not.toMatch(/export const FIRST_CALL_DISMISSED_COOKIE/);
+    const dashboardImports = dashboard.slice(0, dashboard.indexOf("export const dynamic"));
+    expect(dashboardImports).toMatch(
+      /import \{[^}]*FIRST_CALL_DISMISSED_COOKIE[^}]*\} from "@\/lib\/first-call-activation"/
+    );
+
+    const dismissible = firstCall.slice(firstCall.indexOf("const dismissible ="));
+    const line = dismissible.slice(0, dismissible.indexOf(";"));
+    expect(line).toContain('state.stage === "complete"');
+    expect(line).toContain('state.stage === "verify"');
+  });
+
+  it("declares the dismissal cookie in the cookie notice", () => {
+    // An identity product that sets an undeclared client-visible cookie is a
+    // compliance defect, not a styling one. The notice enumerates storage by
+    // name, so a new cookie has to arrive there in the same change.
+    expect(read("app/legal/cookies/page.tsx")).toContain("pc-first-call-dismissed");
+  });
+
+  it("derives the last activation step from audit rows it already fetched", () => {
+    // A rail most tenants have dismissed must not cost a round trip. admin_audit
+    // is loaded once, for ActivityWorkspace, and step 4 reads the same rows.
+    expect(dashboard).toContain("hasExercisedControls(adminAudit ?? [])");
+    expect(dashboard).toContain("controlsExercised={controlsExercised}");
+    expect(dashboard.match(/from\("admin_audit"\)/g) ?? []).toHaveLength(1);
+  });
+
+  it("ends the guide on proving the fleet can be stopped, not on one admitted call", () => {
+    expect(firstCall).toContain('"Verify controls"');
+    expect(firstCall).toContain('data-activation-state="verify"');
+    expect(firstCall).toContain('data-control="kill"');
+    // Trust boundary 3 in copy: tenant kill is reversible and independent of
+    // per-agent suspension, and it purges nothing. The bar next to it said
+    // otherwise until this step was written; neither may say it again.
+    expect(firstCall).not.toMatch(/purge/i);
+    const bar = read("components/GlobalKillSwitchBar.tsx");
+    expect(bar).not.toMatch(/purges cached/i);
+    // The bar and its own confirm dialog described the same action two different
+    // ways: the dialog claimed it suspends every agent, which is the per-agent
+    // control this switch deliberately leaves alone. Neither surface may claim it.
+    expect(bar).not.toMatch(/immediately suspends/i);
   });
 });
 

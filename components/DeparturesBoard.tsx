@@ -17,9 +17,10 @@ import { browserClient } from "@/lib/supabase/client";
 import {
   departureCounts,
   departureDestination,
-  departureTime,
   groupDepartures,
   groupSpan,
+  groupUpstreamStatus,
+  repeatBurstTitle,
   fare,
   flightCode,
   mergeDeparture,
@@ -30,6 +31,7 @@ import {
   type DepartureTone,
 } from "@/lib/departures";
 import { isHousekeeping } from "@/lib/call-class";
+import { describeUpstreamStatus } from "@/lib/verify/receipt-view";
 import { CallDetailDrawer, type CallContext } from "@/components/dashboard/CallDetailDrawer";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 
@@ -52,13 +54,6 @@ export function DeparturesBoard({
   initialRows: DepartureRow[];
   callContext: CallContext;
 }) {
-  // Never "×20 at 12:00:30" — the rows only support a span, so the tooltip says
-  // the span. Times are UTC to match the board's own column.
-  const repeatTitle = (count: number, span: { from: string; to: string } | null) =>
-    span
-      ? `${count} identical consecutive refusals between ${departureTime(span.from)} and ${departureTime(span.to)} UTC — every one is stored. Click to show them.`
-      : `${count} identical consecutive refusals, all stored. Click to show them.`;
-
   const [rows, setRows] = useState<DepartureRow[]>(() => initialRows.slice(0, MAX_ROWS));
   const [live, setLive] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -75,6 +70,11 @@ export function DeparturesBoard({
   // rows rather than a wall in front of them.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const { format, zoneLabel } = useDashboardTime();
+  // Formatted through the same hook as the TIME column, so the tooltip follows
+  // the UTC/LOCAL toggle instead of asserting its own zone. `format(_, "time")`
+  // already names the zone, so nothing appends one.
+  const repeatTitle = (count: number, span: { from: string; to: string } | null) =>
+    repeatBurstTitle(count, span, (value) => format(value, "time"));
   const pausedRef = useRef(false);
   const queuedRows = useRef<DepartureRow[]>([]);
   // Rows that arrived after mount, so only genuinely new ones animate. Without
@@ -259,6 +259,7 @@ export function DeparturesBoard({
                 const { row, count } = group;
                 const span = groupSpan(group);
                 const verdict = verdictFor(row.status);
+                const upstreamStatus = groupUpstreamStatus(group);
                 const refusedRow = verdict.tone === "denied";
                 return (
                   <tr
@@ -304,6 +305,17 @@ export function DeparturesBoard({
                     </td>
                     <td className={`pc-live-calls__verdict ${TONE_CLASS[verdict.tone]}`}>
                       {verdict.word}
+                      {/* The provider's own status, when every row behind this
+                          line agrees on it. DIVERTED alone could not separate an
+                          expired provider key from a wrong model id. */}
+                      {upstreamStatus !== null ? (
+                        <span
+                          className="pc-live-calls__upstream"
+                          title={describeUpstreamStatus(upstreamStatus) ?? `The provider returned HTTP ${upstreamStatus}.`}
+                        >
+                          {upstreamStatus}
+                        </span>
+                      ) : null}
                       {count > 1 ? (
                         <button
                           type="button"
@@ -339,6 +351,7 @@ export function DeparturesBoard({
             const { row, count } = group;
             const span = groupSpan(group);
             const verdict = verdictFor(row.status);
+            const upstreamStatus = groupUpstreamStatus(group);
             return (
               <li
                 key={row.id}
@@ -361,6 +374,14 @@ export function DeparturesBoard({
                 </div>
                 <span className={TONE_CLASS[verdict.tone]}>
                   {verdict.word}
+                  {upstreamStatus !== null ? (
+                    <span
+                      className="pc-live-calls__upstream"
+                      title={describeUpstreamStatus(upstreamStatus) ?? `The provider returned HTTP ${upstreamStatus}.`}
+                    >
+                      {upstreamStatus}
+                    </span>
+                  ) : null}
                   {count > 1 ? (
                     <button
                       type="button"

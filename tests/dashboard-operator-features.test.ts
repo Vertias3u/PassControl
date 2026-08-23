@@ -3,6 +3,7 @@ import {
   BUDGET_ATTENTION_RATIO,
   budgetRiskRatio,
   buildFleetAttention,
+  withLastSeenFromLogs,
   type AttentionAgent,
   type AttentionLog,
 } from "@/lib/dashboard-attention";
@@ -80,5 +81,71 @@ describe("operator-priority dashboard read models", () => {
       "/dashboard/agents/agent-9#agent-policy",
       "/dashboard/agents/agent-9#agent-activity",
     ]);
+  });
+
+  // ── One last-seen, not two ─────────────────────────────────────────────────
+  //
+  // The operator queue derived last-seen from the log scan while the fleet table
+  // read `agents.last_seen_at`, and the two disagreed inside one viewport: on
+  // production 2026-08-17 the queue said "16 Aug, 06:42" for an agent whose
+  // fleet row said "never". The column is written only by the nightly reconcile
+  // flush, and — until the direct-key stamp landed in the proxy — was never
+  // written at all for a Direct Agent Key agent.
+  //
+  // Both readers now go through this one function, so they cannot drift again.
+  describe("withLastSeenFromLogs", () => {
+    it("fills a column the reconcile flush has not written yet", () => {
+      const [merged] = withLastSeenFromLogs(
+        [{ ...agent(), last_seen_at: null }],
+        [log({ created_at: "2026-08-08T11:00:00.000Z" })]
+      );
+      expect(merged?.last_seen_at).toBe("2026-08-08T11:00:00.000Z");
+    });
+
+    it("takes whichever evidence is newer, never a step backwards", () => {
+      // The column can lead: it is stamped when a passport authenticates, which
+      // happens before any call is recorded. Neither source is authoritative on
+      // its own, and "seen" is satisfied by either.
+      const older = withLastSeenFromLogs(
+        [{ ...agent(), last_seen_at: "2026-08-08T09:00:00.000Z" }],
+        [log({ created_at: "2026-08-08T11:00:00.000Z" })]
+      );
+      expect(older[0]?.last_seen_at).toBe("2026-08-08T11:00:00.000Z");
+
+      const newer = withLastSeenFromLogs(
+        [{ ...agent(), last_seen_at: "2026-08-08T11:30:00.000Z" }],
+        [log({ created_at: "2026-08-08T11:00:00.000Z" })]
+      );
+      expect(newer[0]?.last_seen_at).toBe("2026-08-08T11:30:00.000Z");
+    });
+
+    it("keeps 'never' honest when there is no evidence at all", () => {
+      // An agent that has genuinely never called must still read never — the
+      // fallback may only ever ADD evidence, never invent it.
+      const [merged] = withLastSeenFromLogs([{ ...agent(), last_seen_at: null }], []);
+      expect(merged?.last_seen_at).toBe(null);
+    });
+
+    it("ignores rows belonging to another agent, and unusable timestamps", () => {
+      const [merged] = withLastSeenFromLogs(
+        [{ ...agent(), id: "agent-1", last_seen_at: null }],
+        [
+          log({ agent_id: "agent-2", created_at: "2026-08-08T11:00:00.000Z" }),
+          log({ agent_id: "agent-1", created_at: null }),
+          log({ agent_id: null, created_at: "2026-08-08T11:00:00.000Z" }),
+          log({ agent_id: "agent-1", created_at: "not a date" }),
+        ]
+      );
+      expect(merged?.last_seen_at).toBe(null);
+    });
+
+    it("is the same evidence the operator queue reports", () => {
+      // The point of the shared function: one number, two readers.
+      const agents = [{ ...agent(), status: "suspended", last_seen_at: null }];
+      const logs = [log({ created_at: "2026-08-08T11:00:00.000Z" })];
+      expect(withLastSeenFromLogs(agents, logs)[0]?.last_seen_at).toBe(
+        buildFleetAttention(agents, logs, NOW)[0]?.lastSeenAt
+      );
+    });
   });
 });

@@ -14,6 +14,8 @@ import {
   peekArtifact,
   preflight,
   readRecordedEndpoint,
+  readRecordedUpstreamStatus,
+  describeUpstreamStatus,
 } from "@/lib/verify/receipt-view";
 
 describe("receipt authentication wording", () => {
@@ -343,6 +345,30 @@ describe("the verdict a receipt records", () => {
     expect(describeVerdict(status, 403).tone).toBe("denied");
   });
 
+  // A stream that broke mid-answer records upstream_error against the 200 the
+  // provider had already committed to the wire. The generic upstream_error line
+  // says the provider "returned an error", which beside a 200 is a sentence that
+  // argues with its own number — on the one page a stranger uses to check a
+  // receipt they were handed.
+  it("does not tell a reader the provider errored when it answered 200", () => {
+    const verdict = describeVerdict("upstream_error", 200);
+    expect(verdict.detail).not.toMatch(/returned an error/i);
+    expect(verdict.label).toMatch(/cut off|incomplete|mid-answer/i);
+    // Still not a success: the caller got half an answer.
+    expect(verdict.tone).not.toBe("clear");
+    // The partial tokens on the receipt are real, and a reader reconciling a
+    // bill needs to know they were charged for something they did not fully get.
+    expect(verdict.detail).toMatch(/partial|incomplete/i);
+    expect(verdict.detail).toContain("HTTP 200");
+  });
+
+  it("still reads a genuine provider failure as one", () => {
+    const verdict = describeVerdict("upstream_error", 503);
+    expect(verdict.detail).toMatch(/returned an error/i);
+    expect(verdict.detail).toContain("HTTP 503");
+    expect(verdict.label).not.toMatch(/cut off/i);
+  });
+
   it("shows an unrecognised status as itself rather than mislabelling it", () => {
     const verdict = describeVerdict("blocked_something_new", 403);
     expect(verdict.label).toContain("blocked_something_new");
@@ -508,5 +534,88 @@ describe("recorded endpoint, read from an unverified receipt", () => {
       .toBe("POST /v1/mes sages");
     const long = readRecordedEndpoint(jws({ mth: "POST", path: "a".repeat(500) }));
     expect(long!.length).toBeLessThanOrEqual(128);
+  });
+});
+
+// The board said "Provider error" for a 401, a 404 and a 429 alike. On
+// 2026-08-17 that cost a whole debugging session: the owner's Anthropic key had
+// expired, every upstream call returned 401, and the only way to learn that was
+// to decode a receipt by hand in a browser console. `res.http` has been on every
+// receipt since v1 — including refused rows, because logBlocked builds one too —
+// so this is a pure display read with no migration and it works on all history.
+describe("recorded upstream status, read from an unverified receipt", () => {
+  const jws = (claims: Record<string, unknown>) => {
+    const seg = (o: unknown) =>
+      Buffer.from(JSON.stringify(o)).toString("base64url");
+    return `${seg({ alg: "EdDSA", typ: "application/passcontrol-receipt+jwt" })}.${seg(claims)}.c2ln`;
+  };
+
+  it("reads the HTTP status a receipt records", () => {
+    expect(readRecordedUpstreamStatus(jws({ res: { status: "upstream_error", http: 401 } })))
+      .toBe(401);
+    expect(readRecordedUpstreamStatus(jws({ res: { status: "ok", http: 200 } })))
+      .toBe(200);
+  });
+
+  it("returns null when there is no receipt to read", () => {
+    expect(readRecordedUpstreamStatus(null)).toBeNull();
+    expect(readRecordedUpstreamStatus("")).toBeNull();
+    expect(readRecordedUpstreamStatus("not.a.jws")).toBeNull();
+  });
+
+  it("returns null rather than a guess when the claim is absent", () => {
+    expect(readRecordedUpstreamStatus(jws({ mth: "GET", path: "v1/models" }))).toBeNull();
+    expect(readRecordedUpstreamStatus(jws({ res: { status: "ok" } }))).toBeNull();
+  });
+
+  it("refuses anything that is not a real status code", () => {
+    // Unverified, attacker-influenceable input: a non-number, a non-integer, or a
+    // value outside the HTTP range is refused outright rather than coerced. A
+    // coerced 0 would render as a status the provider never returned.
+    expect(readRecordedUpstreamStatus(jws({ res: { http: "401" } }))).toBeNull();
+    expect(readRecordedUpstreamStatus(jws({ res: { http: 401.5 } }))).toBeNull();
+    expect(readRecordedUpstreamStatus(jws({ res: { http: 0 } }))).toBeNull();
+    expect(readRecordedUpstreamStatus(jws({ res: { http: 99 } }))).toBeNull();
+    expect(readRecordedUpstreamStatus(jws({ res: { http: 600 } }))).toBeNull();
+    expect(readRecordedUpstreamStatus(jws({ res: { http: Number.NaN } }))).toBeNull();
+  });
+
+  it("refuses a res claim that is not an object", () => {
+    expect(readRecordedUpstreamStatus(jws({ res: 401 }))).toBeNull();
+    expect(readRecordedUpstreamStatus(jws({ res: [401] }))).toBeNull();
+    expect(readRecordedUpstreamStatus(jws({ res: null }))).toBeNull();
+  });
+});
+
+// A bare "HTTP 401" is still not the answer an operator needs, because the
+// interesting part is WHICH credential the provider rejected — PassControl holds
+// two, and the agent's one already passed. This names the provider key, which is
+// the sentence that would have ended the 2026-08-17 session immediately.
+describe("upstream status, explained", () => {
+  it("names the provider key on an auth rejection, never the agent's credential", () => {
+    const text = describeUpstreamStatus(401)!;
+    expect(text).toMatch(/provider/i);
+    // The agent's own credential was accepted long before this point — saying or
+    // implying otherwise sends the operator to rotate exactly the wrong key.
+    expect(text).not.toMatch(/direct agent key|passport|visa/i);
+    expect(describeUpstreamStatus(403)).toMatch(/provider/i);
+  });
+
+  it("separates the model/endpoint case from the credential case", () => {
+    // The distinction the board could not draw: an expired key vs a wrong model id.
+    expect(describeUpstreamStatus(404)).toMatch(/model|endpoint/i);
+    expect(describeUpstreamStatus(404)).not.toMatch(/credential|key/i);
+  });
+
+  it("names rate limiting and provider-side failure", () => {
+    expect(describeUpstreamStatus(429)).toMatch(/rate/i);
+    expect(describeUpstreamStatus(500)).toMatch(/provider/i);
+    expect(describeUpstreamStatus(503)).toMatch(/provider/i);
+  });
+
+  it("says nothing rather than guessing on a status it has no reading for", () => {
+    expect(describeUpstreamStatus(200)).toBeNull();
+    expect(describeUpstreamStatus(204)).toBeNull();
+    expect(describeUpstreamStatus(418)).toBeNull();
   });
 });

@@ -32,7 +32,7 @@ begin
   -- (0) RLS enabled on every sensitive table.
   select string_agg(relname, ', ') into bad from pg_class
    where relnamespace = 'public'::regnamespace and relkind = 'r'
-     and relname in ('users','agents','agent_logs','provider_credentials','admin_audit','agent_spend_checkpoint','api_keys','mfa_recovery_codes','agent_access_keys')
+     and relname in ('users','agents','agent_logs','provider_credentials','admin_audit','agent_spend_checkpoint','api_keys','mfa_recovery_codes','agent_access_keys','agent_owners','retired_usernames')
      and relrowsecurity = false;
   if bad is not null then raise exception 'RLS disabled on: %', bad; end if;
 
@@ -45,6 +45,113 @@ begin
   end if;
   if not has_column_privilege('authenticated', 'public.agents', 'name', 'UPDATE') then
     raise exception 'authenticated must retain UPDATE on editable agent metadata';
+  end if;
+
+  -- Positive guards, because the failure mode here is a DROPPED grant, not an
+  -- added one. 0011 granted four columns; 0018 appended `fallbacks` to that list.
+  -- Anyone who "tidies" this by re-issuing a table-level revoke plus a fresh
+  -- grant list silently removes whichever column they forget, and the negative
+  -- assertions above would all still pass. 0033 therefore adds its columns
+  -- without touching the agents grants at all.
+  if not has_column_privilege('authenticated', 'public.agents', 'fallbacks', 'UPDATE') then
+    raise exception 'authenticated lost UPDATE on agents.fallbacks (a re-granted column list dropped it)';
+  end if;
+  if not has_column_privilege('authenticated', 'public.agents', 'allowed_scopes', 'UPDATE') then
+    raise exception 'authenticated lost UPDATE on agents.allowed_scopes';
+  end if;
+
+  -- Publishing an agent is a disclosure act: it puts a label and a passport
+  -- fingerprint on a page a stranger reads. It runs server-side behind
+  -- mfaAuthorizedUser, because RLS can prove who owns the row but not that the
+  -- session cleared a second factor -- the same argument 0017 makes for `tier`.
+  if has_column_privilege('authenticated', 'public.agents', 'published', 'UPDATE') then
+    raise exception 'authenticated must not publish an agent directly through PostgREST';
+  end if;
+  if has_column_privilege('authenticated', 'public.agents', 'public_label', 'UPDATE') then
+    raise exception 'authenticated must not set a public agent label directly through PostgREST';
+  end if;
+
+  -- Policy is the agent's leash: deny rules, UTC windows and the hourly cap.
+  -- It is not in 0011's grant list and must never be added to it. The reason is
+  -- sharper than "server-side is tidier": lib/scope.ts parses a NULL policy as
+  -- an EMPTY one -- no denies, no windows, no cap -- so a browser role able to
+  -- write this column could remove every restriction on its own agent by
+  -- sending one null, and the fleet table would still show a configured agent.
+  -- The workspace import writes these columns under service_role with an
+  -- explicit user_id filter for exactly this reason.
+  if has_column_privilege('authenticated', 'public.agents', 'policy', 'UPDATE') then
+    raise exception 'authenticated must not write agents.policy (a null policy is an empty policy)';
+  end if;
+  if has_column_privilege('authenticated', 'public.agents', 'policy_shadow', 'UPDATE') then
+    raise exception 'authenticated must not write agents.policy_shadow';
+  end if;
+
+  -- 0035 turns the two passport columns into one global reservation namespace.
+  -- The table itself is intentionally unreachable, including to service_role:
+  -- trusted code writes `agents`, and the SECURITY DEFINER trigger maintains
+  -- reservations in that SAME transaction. The only server-facing read is a
+  -- boolean availability RPC used by workspace-import previews; browser roles
+  -- cannot call either function or inspect the table as an identity oracle.
+  if to_regclass('public.passport_key_namespace') is null then
+    raise exception 'passport_key_namespace is missing';
+  end if;
+  if not (select relrowsecurity from pg_class where oid = 'public.passport_key_namespace'::regclass) then
+    raise exception 'passport_key_namespace must have RLS enabled';
+  end if;
+  if has_table_privilege('anon', 'public.passport_key_namespace', 'SELECT')
+     or has_table_privilege('authenticated', 'public.passport_key_namespace', 'SELECT')
+     or has_table_privilege('service_role', 'public.passport_key_namespace', 'SELECT')
+     or has_table_privilege('authenticated', 'public.passport_key_namespace', 'INSERT')
+     or has_table_privilege('authenticated', 'public.passport_key_namespace', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.passport_key_namespace', 'DELETE') then
+    raise exception 'passport_key_namespace must be trigger-private';
+  end if;
+  if to_regprocedure('public.sync_passport_key_namespace()') is null
+     or to_regprocedure('public.passport_key_availability(text[])') is null
+     or not exists (
+       select 1 from pg_trigger
+        where tgrelid = 'public.agents'::regclass
+          and tgname = 'agents_passport_key_namespace_sync'
+          and not tgisinternal
+     ) then
+    raise exception 'passport namespace trigger or availability RPC is missing';
+  end if;
+  if has_function_privilege('anon', 'public.sync_passport_key_namespace()', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.sync_passport_key_namespace()', 'EXECUTE')
+     or has_function_privilege('service_role', 'public.sync_passport_key_namespace()', 'EXECUTE')
+     or has_function_privilege('anon', 'public.passport_key_availability(text[])', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.passport_key_availability(text[])', 'EXECUTE')
+     or not has_function_privilege('service_role', 'public.passport_key_availability(text[])', 'EXECUTE') then
+    raise exception 'passport namespace functions have the wrong execution grants';
+  end if;
+
+  -- The public profile RPCs. 0015's central protection is that "public" happens
+  -- in the web tier, not in the database: a server component calls these with
+  -- the service client, and the browser roles cannot reach them at all. A newly
+  -- created function defaults to EXECUTE for PUBLIC, so this is the assertion
+  -- that catches a `create or replace` that forgot to re-issue its revoke --
+  -- exactly the trap 0017's header records.
+  if to_regprocedure('public.public_operator_profile(text)') is null
+     or to_regprocedure('public.public_operator_agents(text,integer)') is null
+     or to_regprocedure('public.avatar_object_path(text)') is null then
+    raise exception 'the public operator-profile RPCs are missing';
+  end if;
+  if has_function_privilege('anon', 'public.public_operator_profile(text)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.public_operator_agents(text,integer)', 'EXECUTE')
+     or has_function_privilege('anon', 'public.avatar_object_path(text)', 'EXECUTE') then
+    raise exception 'anon must not execute the public profile RPCs directly';
+  end if;
+  if has_function_privilege('authenticated', 'public.public_operator_profile(text)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.public_operator_agents(text,integer)', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.avatar_object_path(text)', 'EXECUTE') then
+    raise exception 'authenticated must not execute the public profile RPCs directly';
+  end if;
+
+  -- retired_usernames follows the migration ledger in 0019: RLS on, no policy at
+  -- all, so neither PostgREST role sees a row even holding a stray grant.
+  if has_table_privilege('authenticated', 'public.retired_usernames', 'SELECT')
+     or has_table_privilege('anon', 'public.retired_usernames', 'SELECT') then
+    raise exception 'retired_usernames must not be readable by a browser role';
   end if;
 
   -- api_keys: an owner may revoke their own key (UPDATE revoked_at), but must not
@@ -117,6 +224,37 @@ begin
     raise exception 'authenticated must have no direct provider_credentials write path (vault_secret_id is forgeable)';
   end if;
 
+  -- public.users is the account row, and 0002 tried and failed to keep `plan` off
+  -- the client. It issued `revoke update (plan)` with no accompanying GRANT, which
+  -- cannot narrow a table-level privilege — 0011 and 0012 both say so in their own
+  -- headers and both fix it by replacing the table grant. 0002 never did, and
+  -- 0007_grants.sql then re-issued `grant all on public.users` afterwards anyway.
+  -- The result, confirmed against the live dump before 0032: any logged-in session
+  -- could run `update public.users set plan = … where id = auth.uid()`.
+  --
+  -- 0032 follows agent_owners (0017) rather than the column allowlist of 0011/0012:
+  -- revoke the writes outright and run every mutation through the service role.
+  -- That is why this asserts NO write privilege at all rather than checking a list
+  -- of editable columns — there is no list to keep in sync, so a profile column
+  -- added later cannot arrive writable by accident.
+  if has_table_privilege('authenticated', 'public.users', 'INSERT')
+     or has_table_privilege('authenticated', 'public.users', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.users', 'DELETE') then
+    raise exception 'authenticated must have no direct public.users write path (plan is forgeable)';
+  end if;
+  -- Named explicitly as well as covered by the table check above, because `plan`
+  -- is the column 0002 was actually aiming at and a future column re-grant would
+  -- most plausibly reintroduce it.
+  if has_column_privilege('authenticated', 'public.users', 'plan', 'UPDATE') then
+    raise exception 'authenticated must not be able to choose its own plan';
+  end if;
+  -- ...but the read must survive. users_self already confines a SELECT to the
+  -- caller's own row, and the dashboard depends on it; a blanket revoke here would
+  -- look like a tightening and would actually be a regression.
+  if not has_table_privilege('authenticated', 'public.users', 'SELECT') then
+    raise exception 'authenticated must keep SELECT on public.users (users_self scopes it)';
+  end if;
+
   -- mfa_recovery_codes is credential material, and it defeats everything above if
   -- it is writable. A recovery code is redeemed at /login/verify as an EMERGENCY
   -- RESET: consume one, unenroll the TOTP factor, land in at aal1 — a recovery
@@ -133,9 +271,34 @@ begin
      or has_table_privilege('authenticated', 'public.mfa_recovery_codes', 'DELETE') then
     raise exception 'authenticated must have no direct mfa_recovery_codes write path';
   end if;
-  -- getMfaStatus counts the codes still unused, so the read stays.
-  if not has_table_privilege('authenticated', 'public.mfa_recovery_codes', 'SELECT') then
-    raise exception 'authenticated must retain SELECT on mfa_recovery_codes (status panel)';
+  -- ...and it must not be READABLE either, which 0029 got wrong (0031 fixes it).
+  -- 0029 kept SELECT because `getMfaStatus` renders a count of unused codes, and a
+  -- count of one's own codes really does leak nothing. But the application's
+  -- projection is not the database's capability: PostgREST lets the caller choose
+  -- its own columns, so `?select=code_hash` returns the verifiers themselves to any
+  -- aal1 session for the tenant. A recovery code is ~49.5 bits (10 chars of a
+  -- 31-glyph alphabet) stored as a bare SHA-256, so possession of the hashes is an
+  -- OFFLINE search no online control can rate-limit — and one recovered code
+  -- legitimately resets the factor via the path above. The count now comes from a
+  -- trusted server action instead.
+  if has_table_privilege('authenticated', 'public.mfa_recovery_codes', 'SELECT') then
+    raise exception 'authenticated must not SELECT mfa_recovery_codes; recovery verifier material is server-only';
+  end if;
+  -- Asserted at column granularity too: a future column-level grant would leave the
+  -- table-level check above passing while handing back the one column that matters.
+  if has_column_privilege('authenticated', 'public.mfa_recovery_codes', 'code_hash', 'SELECT') then
+    raise exception 'authenticated must never read MFA recovery-code hashes';
+  end if;
+  if has_table_privilege('anon', 'public.mfa_recovery_codes', 'SELECT')
+     or has_column_privilege('anon', 'public.mfa_recovery_codes', 'code_hash', 'SELECT') then
+    raise exception 'anon must not SELECT mfa_recovery_codes';
+  end if;
+  -- ...while the server must still be able to issue, count and consume them.
+  if not has_table_privilege('service_role', 'public.mfa_recovery_codes', 'SELECT')
+     or not has_table_privilege('service_role', 'public.mfa_recovery_codes', 'INSERT')
+     or not has_table_privilege('service_role', 'public.mfa_recovery_codes', 'UPDATE')
+     or not has_table_privilege('service_role', 'public.mfa_recovery_codes', 'DELETE') then
+    raise exception 'service_role must retain lifecycle access to mfa_recovery_codes';
   end if;
 
   -- Provider-key mutation is service-role-only (0030). The four originals derived
@@ -215,8 +378,19 @@ begin
   if n <> 0 then raise exception 'tenant leak: A saw B''s admin_audit'; end if;
   select count(*) into n from public.api_keys where user_id = v_b;
   if n <> 0 then raise exception 'tenant leak: A saw B''s api_keys'; end if;
-  select count(*) into n from public.mfa_recovery_codes where user_id = v_b;
-  if n <> 0 then raise exception 'tenant leak: A saw B''s mfa_recovery_codes'; end if;
+  -- Recovery codes are no longer tenant-scoped-by-RLS, they are unreachable: the
+  -- grant is gone (0031), so there is no "own rows" read left to leak. Asserted
+  -- behaviourally rather than by privilege introspection alone, because this is
+  -- the exact call the attack made. Dynamic SQL so the failure is raised at
+  -- execution rather than at plan time, and ONLY insufficient_privilege is
+  -- caught — catching `others` would swallow the raise below and make the
+  -- assertion unfailable.
+  begin
+    execute 'select code_hash from public.mfa_recovery_codes limit 1';
+    raise exception 'authenticated could still read mfa_recovery_codes.code_hash';
+  exception
+    when insufficient_privilege then null;
+  end;
   select count(id) into n from public.agent_access_keys where user_id = v_b;
   if n <> 0 then raise exception 'tenant leak: A saw B''s agent_access_keys'; end if;
   select count(id) into n from public.agent_access_keys;
@@ -256,7 +430,105 @@ begin
     from public.authenticate_direct_agent_key(repeat('A', 43));
   if n <> 0 then raise exception 'revoked Direct Agent Key authenticated on the next lookup'; end if;
 
+  -- Namespace mutation tests inspect the trigger-private table directly, so
+  -- return to the migration owner. The service-role negative table-grant is
+  -- asserted above and the service-only availability call is exercised below.
   reset role;
+
+  -- A key held as one tenant's CURRENT key must not be written into another
+  -- tenant's RETIRED column. 0021's separate unique constraints allowed this
+  -- cross-column case; 0035's trigger raises inside the UPDATE transaction.
+  begin
+    update public.agents
+       set previous_passport_pubkey = 'pkA_' || v_a
+     where user_id = v_b;
+    raise exception 'a current passport could be registered as another agent''s retired key';
+  exception
+    when sqlstate 'P0001' then
+      if position('passport_key_in_use' in sqlerrm) = 0 then
+        raise;
+      end if;
+  end;
+
+  -- Rotate A, then prove its old key remains reserved until only A clears it.
+  -- Once that cleanup commits, B can claim it as a current key; the trigger did
+  -- not delete another row's reservation while clearing A's stale state.
+  update public.agents
+     set passport_pubkey = 'pkA_rotated_' || v_a,
+         previous_passport_pubkey = 'pkA_' || v_a,
+         previous_valid_until = now() - interval '1 second'
+   where user_id = v_a;
+  begin
+    update public.agents
+       set passport_pubkey = 'pkA_' || v_a
+     where user_id = v_b;
+    raise exception 'a still-reserved passport could be claimed by another agent';
+  exception
+    when sqlstate 'P0001' then
+      if position('passport_key_in_use' in sqlerrm) = 0 then
+        raise;
+      end if;
+  end;
+  update public.agents
+     set previous_passport_pubkey = null,
+         previous_valid_until = null
+   where user_id = v_a;
+  update public.agents
+     set passport_pubkey = 'pkA_' || v_a
+   where user_id = v_b;
+  if not exists (
+    select 1 from public.passport_key_namespace
+     where passport_pubkey = 'pkA_' || v_a
+  ) then
+    raise exception 'the surviving agent lost its passport reservation during stale-key cleanup';
+  end if;
+
+  -- Service-role callers can ask only whether a public key is free. The table
+  -- remains unreadable even to that role; the SECURITY DEFINER function is the
+  -- narrow availability mechanism the import dry run uses.
+  reset role;
+  set local role service_role;
+  select count(*) into n
+    from public.passport_key_availability(array['pkA_' || v_a, 'free_' || v_a]) as availability
+   where (availability.passport_pubkey = 'pkA_' || v_a and availability.available = false)
+      or (availability.passport_pubkey = 'free_' || v_a and availability.available = true);
+  if n <> 2 then
+    raise exception 'passport key availability did not report only the reserved/free state';
+  end if;
+
+  reset role;
+
+  -- Migration-rollout proof: only the database owner in this disposable test
+  -- may suppress the trigger long enough to construct the legacy shape 0035
+  -- faces on an already-running deployment. The exact preflight grouping in
+  -- 0035 finds the current-vs-retired collision instead of a UNION silently
+  -- choosing one claimant. Browser and service roles cannot disable a trigger
+  -- or write the private namespace (asserted above).
+  alter table public.agents disable trigger agents_passport_key_namespace_sync;
+  update public.agents
+     set previous_passport_pubkey = 'pkA_rotated_' || v_a
+   where user_id = v_b;
+  select count(*) into n
+    from (
+      select claim.passport_pubkey
+        from (
+          select a.id as agent_id, a.passport_pubkey
+            from public.agents as a
+           where a.passport_pubkey is not null
+          union all
+          select a.id as agent_id, a.previous_passport_pubkey
+            from public.agents as a
+           where a.previous_passport_pubkey is not null
+        ) as claim
+       group by claim.passport_pubkey
+      having count(distinct claim.agent_id) > 1
+    ) as legacy_conflict
+   where legacy_conflict.passport_pubkey = 'pkA_rotated_' || v_a;
+  if n <> 1 then
+    raise exception '0035 preflight would not detect a legacy current-versus-retired collision';
+  end if;
+  alter table public.agents enable trigger agents_passport_key_namespace_sync;
+
   raise notice 'RLS invariants: PASS';
 end $$;
 

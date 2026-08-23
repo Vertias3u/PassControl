@@ -14,12 +14,19 @@ export default function robots(): MetadataRoute.Robots {
         // its URL, and it is a legitimate landing page for someone who has been
         // handed a receipt and is searching for how to check it. Crawlers take
         // the longest matching rule, so the explicit allow wins over the prefix.
-        allow: ["/", "/verify/receipt"],
+        // /@handle is the opposite case from /verify/<passportId> below: a
+        // public operator profile is opt-in and exists precisely to be found,
+        // so it is invited in rather than kept out.
+        allow: ["/", "/verify/receipt", "/@"],
         // The rest of /verify/* is public and meant to be shared in a README or
         // a ticket, but shareable is not indexable: a crawlable index of every
         // passport id anyone ever linked to is not something to hand a search
         // engine.
-        disallow: ["/dashboard", "/login/verify", "/api/", "/verify/"],
+        // /u/ is the same page as /@ reached by its internal path — middleware
+        // rewrites one onto the other. Both would index as duplicate content,
+        // so only the canonical /@ form is offered; every page sets
+        // alternates.canonical to match.
+        disallow: ["/dashboard", "/login/verify", "/api/", "/verify/", "/u/"],
       },
     ],
     sitemap: `${BASE}/sitemap.xml`,

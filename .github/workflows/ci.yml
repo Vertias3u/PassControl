@@ -152,9 +152,14 @@ jobs:
 
       - name: Apply migrations (fresh DB, in order)
         run: |
+          # -1 matches how scripts/migrate.sh and scripts/dev-stack.sh apply a
+          # migration: one file, one transaction. Without it psql autocommits
+          # each statement, so a migration that takes a transaction-scoped lock
+          # (0035) fails here while passing everywhere it actually runs — CI
+          # was testing a different thing from the one that ships.
           for f in db/migrations/*.sql; do
             echo "── applying $f"
-            psql -v ON_ERROR_STOP=1 "$DB_URL" -f "$f"
+            psql -1 -v ON_ERROR_STOP=1 "$DB_URL" -f "$f"
           done
 
       - name: RLS invariant test
@@ -162,6 +167,12 @@ jobs:
 
       - name: Invite-beta database invariant test
         run: psql -v ON_ERROR_STOP=1 -f db/tests/beta_launch_invariants.sql "$DB_URL"
+
+      - name: Public operator-profile invariant test
+        run: psql -v ON_ERROR_STOP=1 -f db/tests/public_profile_invariants.sql "$DB_URL"
+
+      - name: System-health database invariant test
+        run: psql -v ON_ERROR_STOP=1 -f db/tests/system_health_invariants.sql "$DB_URL"
 
       - name: Stop Supabase
         if: always()

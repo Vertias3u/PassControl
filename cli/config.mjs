@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { WORKSPACE_EXPORT_PROTOCOL } from "./protocols.mjs";
 
 export const CONFIG_FILE = ".passcontrol";
 
@@ -16,6 +17,11 @@ export const PACKAGE_VERSION = (() => {
     return "0.0.0";
   }
 })();
+// The CLI imports snapshots only through the shared protocol declaration. A
+// standalone package still has no app dependency, but no longer carries a
+// second numeric copy that can drift from system-health capability reporting.
+export const WORKSPACE_IMPORT_MAX_VERSION = WORKSPACE_EXPORT_PROTOCOL.maximum;
+
 export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek"];
 export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek"]);
 

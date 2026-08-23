@@ -70,6 +70,58 @@ function timestamp(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/**
+ * The newest usable `created_at` per agent in one bounded log scan.
+ *
+ * The single derivation of "when did we last see this agent from its calls".
+ * `buildFleetAttention` and `withLastSeenFromLogs` both read it, so the operator
+ * queue and the fleet table cannot report different answers — which they did,
+ * visibly, in one viewport, before this existed.
+ */
+function newestCallByAgent(logs: readonly AttentionLog[], nowMs: number): Map<string, number> {
+  const newest = new Map<string, number>();
+  for (const log of logs) {
+    if (!log.agent_id) continue;
+    const at = timestamp(log.created_at);
+    // A future timestamp is discarded rather than clamped, exactly as the
+    // attention scan discards it: a clock-skewed row must not become "now".
+    if (at === null || at > nowMs) continue;
+    const seen = newest.get(log.agent_id);
+    if (seen === undefined || at > seen) newest.set(log.agent_id, at);
+  }
+  return newest;
+}
+
+/**
+ * Resolve each agent's `last_seen_at` against the log scan, taking whichever
+ * evidence is newer.
+ *
+ * `agents.last_seen_at` is written only by the nightly reconcile flush of
+ * `lastseen:<agid>`, so it lags by up to a day — and for a Direct Agent Key
+ * agent it was never written at all until the proxy learned to stamp it, which
+ * left the fleet table reading "never" for an agent that had called minutes
+ * before. A recorded call is evidence the agent was seen, so it belongs here.
+ *
+ * The column can still legitimately LEAD: a passport stamps it at the challenge,
+ * before any call is recorded. So this takes the maximum, never a side. And it
+ * only ever adds evidence — an agent with neither a stamp nor a call keeps its
+ * honest `null`, because "never" is a real answer and must not be invented away.
+ */
+export function withLastSeenFromLogs<T extends { id: string; last_seen_at: string | null }>(
+  agents: readonly T[],
+  logs: readonly AttentionLog[],
+  now: Date = new Date()
+): T[] {
+  const newest = newestCallByAgent(logs, now.getTime());
+  return agents.map((agent) => {
+    const fromLogs = newest.get(agent.id);
+    if (fromLogs === undefined) return agent;
+    const stamped = timestamp(agent.last_seen_at);
+    if (stamped !== null && stamped >= fromLogs) return agent;
+    return { ...agent, last_seen_at: new Date(fromLogs).toISOString() };
+  });
+}
+
 function projectedDate(
   spent: number,
   limit: number | null,
@@ -102,12 +154,15 @@ export function buildFleetAttention(
     rows.push(log);
     byAgent.set(log.agent_id, rows);
   }
+  // Shared with the fleet table via `withLastSeenFromLogs`, so the queue and the
+  // table cannot answer "when was this agent last seen" differently.
+  const newestCall = newestCallByAgent(logs, nowMs);
 
   const items: FleetAttentionItem[] = [];
   for (const agent of agents) {
     if (agent.status === "revoked") continue;
     const rows = byAgent.get(agent.id) ?? [];
-    let lastSeenMs: number | null = null;
+    const lastSeenMs = newestCall.get(agent.id) ?? null;
     let recentRefusals = 0;
     let burnedTokens = 0;
     let burnedMicrocents = 0;
@@ -116,7 +171,6 @@ export function buildFleetAttention(
     for (const row of rows) {
       const at = timestamp(row.created_at);
       if (at === null || at > nowMs) continue;
-      if (lastSeenMs === null || at > lastSeenMs) lastSeenMs = at;
       const age = nowMs - at;
       if (age <= RECENT_REFUSAL_MS && (row.status ?? "").startsWith("blocked_")) {
         recentRefusals += 1;

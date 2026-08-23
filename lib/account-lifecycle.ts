@@ -3,14 +3,17 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { PROVIDERS } from "@/lib/providers";
 import { scanKeys } from "@/lib/reconcile";
 
-export const ACCOUNT_EXPORT_SCHEMA_VERSION = 2;
+// 3: the operator profile (0033). Bumped rather than added silently, because a
+// consumer that parsed version 2 has no idea `profile` exists and the whole
+// point of the number is that it can tell.
+export const ACCOUNT_EXPORT_SCHEMA_VERSION = 3;
 const PAGE_SIZE = 1_000;
 
 export const ACCOUNT_EXPORT_TABLES = [
   {
     key: "agents",
     table: "agents",
-    columns: "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until",
+    columns: "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label",
   },
   {
     key: "agentLogs",
@@ -98,11 +101,26 @@ async function loadBetaExport(admin: SupabaseClient | undefined, userId: string)
   return { application, invitations: invitations ?? [], feedback: feedback ?? null };
 }
 
-export async function loadAccountExport(db: SupabaseClient, user: User, admin?: SupabaseClient) {
+export async function loadAccountExport(db: SupabaseClient, user: User, admin: SupabaseClient) {
+  // The recovery-code count is the one figure here that no browser role may read
+  // for itself: 0031 revoked SELECT on `mfa_recovery_codes` from `authenticated`
+  // because the grant handed out `code_hash` — the offline verifier — to anyone
+  // who asked PostgREST for that column instead of the count. So it comes from
+  // the service role, scoped by the verified `user.id` rather than by RLS. The
+  // export ships the COUNT and never the hashes; see the `exclusions` list below.
+  // `admin` is REQUIRED for that reason — it used to be optional, and a defaulted
+  // `admin ?? db` here would fall back to the user client and 503 the whole export
+  // with `account_export_profile_unavailable`, which says nothing about the cause.
   const [{ data: profile, error: profileError }, { count: recoveryCodeCount, error: mfaError }] =
     await Promise.all([
-      db.from("users").select("id,email,plan,created_at").eq("id", user.id).maybeSingle(),
-      db.from("mfa_recovery_codes").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+      db
+        .from("users")
+        .select(
+          "id,email,plan,created_at,username,display_name,bio,website_url,company,timezone,profile_public,avatar_path,updated_at"
+        )
+        .eq("id", user.id)
+        .maybeSingle(),
+      admin.from("mfa_recovery_codes").select("id", { count: "exact", head: true }).eq("user_id", user.id),
     ]);
   if (profileError || mfaError) throw new Error("account_export_profile_unavailable");
 
@@ -121,6 +139,22 @@ export async function loadAccountExport(db: SupabaseClient, user: User, admin?: 
       createdAt: profile?.created_at ?? user.created_at ?? null,
       mfaRecoveryCodeCount: recoveryCodeCount ?? 0,
     },
+    // Everything the operator typed about themselves, including which of it was
+    // public. `avatar_key` is deliberately absent: it is a live capability
+    // token for /avatars/<key>, so putting it in a file people email around
+    // would hand out a working URL. Whether an avatar EXISTS is the useful
+    // fact, and that is what `avatar` reports.
+    profile: {
+      handle: profile?.username ?? null,
+      displayName: profile?.display_name ?? null,
+      bio: profile?.bio ?? null,
+      websiteUrl: profile?.website_url ?? null,
+      company: profile?.company ?? null,
+      timezone: profile?.timezone ?? null,
+      isPublic: profile?.profile_public === true,
+      avatar: profile?.avatar_path ? "stored" : null,
+      updatedAt: profile?.updated_at ?? null,
+    },
     data: { ...data, beta },
     exclusions: [
       "Provider credential plaintext and Vault references",
@@ -128,6 +162,7 @@ export async function loadAccountExport(db: SupabaseClient, user: User, admin?: 
       "MFA recovery-code hashes and owner-verification tokens",
       "Raw and hashed beta invitation tokens",
       "Ephemeral Redis counters, nonces and caches",
+      "Avatar image bytes and the avatar capability token",
     ],
   };
 }

@@ -11,6 +11,7 @@
 // against the JWK we publish, and tests/jws.test.ts pins exactly that.
 import { ed25519 } from "@noble/curves/ed25519";
 
+import { AGENT_TOKEN_PROTOCOL } from "@/cli/protocols.mjs";
 import { base64urlToBytes, bytesToBase64url, bytesToUtf8, utf8ToBytes } from "../encoding";
 
 /**
@@ -28,7 +29,7 @@ export const AGENT_TOKEN_TYP = "passcontrol-agent+jwt";
  * anything else fails the production build (tsc alone does not catch it).
  * Additive-only, same rule as RECEIPT_VER in lib/receipt.ts.
  */
-export const AGENT_TOKEN_VER = 1;
+export const AGENT_TOKEN_VER = AGENT_TOKEN_PROTOCOL.maximum;
 
 export interface SignInput {
   typ: string;

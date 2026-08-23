@@ -14,6 +14,12 @@ const COMMANDS = [
   { label: "Verify passport", hint: "Open the public verification tool", href: "/verify" },
 ] as const;
 
+const SYSTEM_HEALTH_COMMAND = {
+  label: "System health",
+  hint: "Restricted instance diagnostics",
+  href: "/dashboard/system",
+} as const;
+
 export interface CommandPaletteAgent {
   id: string;
   name: string;
@@ -47,7 +53,7 @@ export function agentCommandsForQuery(agents: readonly CommandPaletteAgent[], qu
     );
 }
 
-export function DashboardCommandPalette({ agents = [] }: { agents?: CommandPaletteAgent[] }) {
+export function DashboardCommandPalette({ agents = [], showSystemHealth = false }: { agents?: CommandPaletteAgent[]; showSystemHealth?: boolean }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -64,14 +70,15 @@ export function DashboardCommandPalette({ agents = [] }: { agents?: CommandPalet
 
   const { destinations, agentMatches } = useMemo(() => {
     const needle = query.trim().toLowerCase();
+    const commands = showSystemHealth ? [...COMMANDS, SYSTEM_HEALTH_COMMAND] : COMMANDS;
     const destinations = needle
-      ? COMMANDS.filter((command) => `${command.label} ${command.hint}`.toLowerCase().includes(needle))
-      : COMMANDS;
+      ? commands.filter((command) => `${command.label} ${command.hint}`.toLowerCase().includes(needle))
+      : commands;
     return {
       destinations,
       agentMatches: agentCommandsForQuery(agents, query),
     };
-  }, [agents, query]);
+  }, [agents, query, showSystemHealth]);
 
   return (
     <>

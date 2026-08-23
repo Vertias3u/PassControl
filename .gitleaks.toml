@@ -20,7 +20,11 @@ paths = [
   # and scripts/curate-public.sh runs its own independent secret grep over the
   # whole tree as a second layer, so allowlisting fixtures keeps gitleaks a clean
   # pass/fail gate without disabling real detection on shippable code.
-  '''tests/.*\.test\.ts$''',
+  # `tsx?` covers the component-rendering tests, which are newer than this rule:
+  # a `.test.tsx` fixture such as an avatar capability key is the same kind of
+  # made-up literal, but `.test.ts$` did not match it and the gate went red on a
+  # string that never existed anywhere but that assertion.
+  '''tests/.*\.test\.tsx?$''',
 ]
 regexes = [
   # The seeded keyless-demo passport, committed ON PURPOSE and documented at

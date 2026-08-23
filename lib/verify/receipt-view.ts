@@ -260,6 +260,77 @@ export function readRecordedEndpoint(receipt: string | null | undefined): string
 }
 
 /**
+ * The HTTP status a stored row's receipt records, or null.
+ *
+ * `res: { status, http }` has been on every receipt since v1, and `logBlocked`
+ * builds one too, so refused rows carry it as well. Nothing surfaced it, which
+ * is why the board reported a 401, a 404 and a 429 all as "Provider error" —
+ * and why an expired provider key was indistinguishable from a wrong model id
+ * without decoding a JWS by hand. Found the hard way on 2026-08-17.
+ *
+ * Presentation only, and retroactive: no migration, and every historical row
+ * already has the claim. `agent_logs` rejects UPDATE even for service_role
+ * (migration 0006), so a new column could never have been backfilled — reading
+ * the receipt is not a shortcut here, it is the only option that classifies
+ * history.
+ *
+ * ── This is a DISPLAY read of an UNVERIFIED payload ─────────────────────────
+ *
+ * Same contract as readRecordedEndpoint above: no signature is checked, the
+ * caller must label it as recorded rather than proven, and the claim is treated
+ * as untrusted. A status is refused unless it is an integer inside the real HTTP
+ * range — coercing a non-number to 0, or rendering 99, would put a status on the
+ * screen that no provider ever returned.
+ */
+export function readRecordedUpstreamStatus(receipt: string | null | undefined): number | null {
+  if (!receipt) return null;
+  const parts = receipt.trim().split(".");
+  if (parts.length !== 3) return null;
+  const claims = decodeSegment(parts[1] ?? "");
+  if (!claims) return null;
+
+  const res = claims.res;
+  // Arrays are objects; an array here is a malformed claim, not a one-element
+  // result, so it is refused rather than indexed into.
+  if (typeof res !== "object" || res === null || Array.isArray(res)) return null;
+
+  const http = (res as Record<string, unknown>).http;
+  if (typeof http !== "number" || !Number.isInteger(http)) return null;
+  if (http < 100 || http > 599) return null;
+  return http;
+}
+
+/**
+ * What an upstream status means, or null when there is no honest reading.
+ *
+ * The number alone is not the answer an operator needs. PassControl holds TWO
+ * credentials on a call — the agent's (passport visa or Direct Agent Key) and
+ * the tenant's provider key — and by the time a status like this exists the
+ * agent's has already been accepted. So a 401 here is ALWAYS about the injected
+ * provider key, and the wording must never let it read as the agent's, which
+ * would send an operator to rotate the one credential that is working.
+ *
+ * Deliberately silent on anything without a specific reading: an unexplained
+ * status beside the number is better than a plausible-sounding guess on a
+ * diagnostic surface.
+ */
+export function describeUpstreamStatus(status: number): string | null {
+  if (status === 401 || status === 403) {
+    return "The provider rejected the stored provider key — expired, revoked, or not valid for this account.";
+  }
+  if (status === 404) {
+    return "The provider has no such model or endpoint. Usually a model id the provider does not publish.";
+  }
+  if (status === 429) {
+    return "The provider rate-limited this call. PassControl's own budget was not the limit here.";
+  }
+  if (status >= 500 && status <= 599) {
+    return "The provider failed to answer. Nothing was refused by PassControl.";
+  }
+  return null;
+}
+
+/**
  * The checks that can be settled locally, before touching the network.
  *
  * Returns the step that fails and the reason, or null when the artifact gets as
@@ -389,6 +460,21 @@ const VERDICTS: Record<string, VerdictPresentation> = {
 
 /** An unrecognised status is shown as itself rather than dressed up as a known one. */
 export function describeVerdict(status: string, http: number): VerdictPresentation {
+  // `upstream_error` beside a 2xx is not the same event as `upstream_error`
+  // beside a 500, and the generic wording contradicts itself here: the provider
+  // did not "return an error", it returned 200 and then stopped part-way through
+  // the body — a stream that broke mid-answer. The generic line would put
+  // "returned an error. (HTTP 200)" on the public verification page, which is a
+  // sentence that argues with its own number.
+  if (status === "upstream_error" && http >= 200 && http < 300) {
+    return {
+      label: "Allowed, then cut off mid-answer",
+      detail:
+        "The gateway permitted this call and the provider began answering, but the connection ended before the answer was complete — so the caller received a partial response. The tokens recorded here are what the provider had produced by then." +
+        ` (HTTP ${http})`,
+      tone: "held",
+    };
+  }
   const known = VERDICTS[status];
   if (known) return { ...known, detail: `${known.detail} (HTTP ${http})` };
   return {
@@ -556,6 +642,26 @@ export function formatCost(microcents: number): CostPresentation {
   if (dollars >= 0.01) return { primary: `$${dollars.toFixed(2)}`, exact };
   if (dollars >= 0.0001) return { primary: `$${dollars.toFixed(4)}`, exact };
   return { primary: "Under $0.0001", exact };
+}
+
+/**
+ * The token line under the recorded cost.
+ *
+ * A cached call is why this is not just "in · out". Anthropic reports the cached
+ * part of a prompt separately, so a receipt for an agent with an 18k cached
+ * prefix records `in: 12` beside a cost several times larger than 12 input tokens
+ * could explain — and a stranger checking that receipt has no way to see where
+ * the money went. Naming the cache traffic makes the cost add up on the page.
+ *
+ * Omits either cache figure when the receipt does not carry it, so an uncached
+ * call reads exactly as it did before these claims existed.
+ */
+export function describeTokenUse(use: ReceiptClaims["use"]): string {
+  const n = (v: number) => v.toLocaleString("en-GB");
+  const parts = [`${n(use.in)} tokens in`, `${n(use.out)} out`];
+  if (use.cr) parts.push(`${n(use.cr)} cached read`);
+  if (use.cw) parts.push(`${n(use.cw)} written to cache`);
+  return parts.join(" · ");
 }
 
 const DATE = new Intl.DateTimeFormat("en-GB", {

@@ -8,12 +8,13 @@
 // Dependencies: only @noble/curves + the platform `fetch`. Runs on Node 18+,
 // edge runtimes, and the browser.
 import { ed25519 } from "@noble/curves/ed25519";
+import { RECEIPT_PROTOCOL } from "../cli/protocols.mjs";
 
 export const RECEIPT_TYP = "passcontrol-receipt+jwt";
 export const AGENT_TOKEN_TYP = "passcontrol-agent+jwt";
 
 /** The newest artifact version this verifier understands. */
-export const SUPPORTED_VER = 2;
+export const SUPPORTED_VER = RECEIPT_PROTOCOL.maximum;
 
 export type VerifyFailure =
   | "malformed"
@@ -66,7 +67,16 @@ export interface ReceiptClaims {
   mth: string;
   path: string;
   req?: { alg: string; dig: string; len: number };
-  use: { in: number; out: number };
+  /**
+   * Tokens the call consumed. `in` is the provider's own uncached input count;
+   * `cr` / `cw` are prompt-cache reads and writes, present only when the provider
+   * reported them, so the whole input is `in + (cr ?? 0) + (cw ?? 0)`. Do not sum
+   * them into `in` — it is already exclusive of both, and `cost` covers all three.
+   *
+   * Added after v2 shipped and readable by verifiers that predate them, because
+   * unknown claims inside a supported version are ignored by design.
+   */
+  use: { in: number; out: number; cr?: number; cw?: number };
   cost: number;
   res: { status: string; http: number };
   t0: number;

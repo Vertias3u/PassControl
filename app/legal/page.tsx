@@ -24,6 +24,7 @@ export default function LegalIndex() {
           <li><Link href="/legal/acceptable-use">Acceptable use policy</Link> — prohibited uses.</li>
           <li><Link href="/legal/cookies">Cookie and local-storage notice</Link>.</li>
           <li><Link href="/legal/subprocessors">Service providers and routing destinations</Link>.</li>
+          <li><Link href="/legal/recovery">Recovery and backup notice</Link> — what survives a restore, and what is re-entered by hand.</li>
         </ul>
       </section>
       <section><h2>Operator</h2><LegalContact /></section>

@@ -196,11 +196,25 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "owner.set",
         "owner.publish",
         "owner.verify",
+        "profile.update",
+        "profile.handle",
+        "profile.publish",
+        "profile.avatar",
+        "profile.avatar_removed",
+        "agent.publish",
         // Break-glass elevation (migration 0022). The most privileged action in
         // this list: it widens what an agent may reach, for a bounded time,
         // outside the stored capability. The audit row is the entire
         // justification for the feature existing.
         "agent.break_glass",
+        // Workspace configuration export and import. Export is a read, which
+        // makes it the odd one out in a list of mutations — it earns its place
+        // because the Recovery panel renders the newest row as "Last export",
+        // so the row is not a record of a change but the answer to "could I
+        // rebuild this workspace, and when did I last check". Import is an
+        // ordinary mutation: it creates agents.
+        "workspace.export",
+        "workspace.import",
       ].sort()
     );
   });

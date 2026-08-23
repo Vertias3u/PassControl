@@ -16,11 +16,13 @@ import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { ActivityWorkspace } from "@/components/dashboard/ActivityWorkspace";
 import { FleetAttentionQueue } from "@/components/dashboard/FleetAttentionQueue";
-import { buildFleetAttention } from "@/lib/dashboard-attention";
+import { buildFleetAttention, withLastSeenFromLogs } from "@/lib/dashboard-attention";
 import { partitionByClass } from "@/lib/call-class";
 import { shadowRevision } from "@/lib/policy-shadow";
 import { CloudBetaOperations } from "@/components/dashboard/CloudBetaOperations";
 import { FirstCallActivation } from "@/components/dashboard/FirstCallActivation";
+import { cookies } from "next/headers";
+import { hasExercisedControls, FIRST_CALL_DISMISSED_COOKIE } from "@/lib/first-call-activation";
 import { readCloudBetaQuotaSnapshot } from "@/lib/cloud-beta-quota";
 import { buildCloudSupportBundle, type CloudOperationsSignals } from "@/lib/cloud-operations";
 import { loadInstanceSigner, instanceIssuer } from "@/lib/crypto/instanceKey";
@@ -96,6 +98,19 @@ export default async function ControlTowerPage() {
 
   const agentList = agents ?? [];
   const attentionLogRows = logs ?? [];
+  // Resolved against the log scan for the FLEET TABLE only.
+  //
+  // `agents.last_seen_at` alone lags by up to a day (the nightly reconcile flush)
+  // and was never written at all for a Direct Agent Key agent, so the table read
+  // "never" beside an operator queue that named the exact minute — same fact,
+  // two answers, one viewport. Both now go through `withLastSeenFromLogs`.
+  //
+  // Deliberately NOT applied to `agentList` wholesale: the support bundle below
+  // reports the raw column, and a NULL there is diagnostic evidence that the
+  // reconcile flush is not running. Filling it in for a screen is presentation;
+  // filling it in inside a bundle an operator hands to support would hide the
+  // very failure the bundle exists to surface.
+  const fleetAgents = withLastSeenFromLogs(agentList, attentionLogRows, renderedAt);
   const displayLogs = attentionLogRows.slice(0, 100);
   const attentionQueue = buildFleetAttention(agentList, attentionLogRows);
   const blockedCalls = displayLogs.filter((l) => l.status.startsWith("blocked")).length;
@@ -112,6 +127,17 @@ export default async function ControlTowerPage() {
   // A count of null (the query errored) is treated as "set up": showing a
   // getting-started card because a count failed is the more annoying wrong guess.
   const needsFirstKey = (providerKeys.count ?? 1) === 0;
+  // Read off the admin_audit rows already fetched above — the activation guide's
+  // last step must not cost a fourth round trip for a rail most tenants have
+  // dismissed. Bounded to the same newest-100 window; see hasExercisedControls.
+  const controlsExercised = hasExercisedControls(adminAudit ?? []);
+  // Resolved here, on the server, so the activation guide's first paint is
+  // already correct. Reading it in the client instead deadlocked the guide —
+  // the reasoning is on the guard in FirstCallActivation.tsx. The cookie holds
+  // the operator id, so a second operator on the same browser is not silently
+  // treated as having finished someone else's onboarding.
+  const firstCallDismissed =
+    (await cookies()).get(FIRST_CALL_DISMISSED_COOKIE)?.value === user.id;
   const firstStoredProvider = providerKeys.data?.map((row) => row.provider).find(isProvider);
   const operationsSignals: CloudOperationsSignals = {
     providerCredentials: providerKeys.error
@@ -154,6 +180,8 @@ export default async function ControlTowerPage() {
         <FirstCallActivation
           userId={user.id}
           providerConfigured={!needsFirstKey}
+          controlsExercised={controlsExercised}
+          dismissed={firstCallDismissed}
           agents={agentList.map((agent) => ({
             id: agent.id,
             name: agent.name,
@@ -213,11 +241,11 @@ export default async function ControlTowerPage() {
           <SectionHeader
             eyebrow="Agent registry"
             title="Fleet"
-            description="Find an agent, understand its budget posture, or open its passport and capability controls."
+            description="Find an agent, understand its budget posture, or open its identity, capability, and public-listing controls."
           />
           <div className="pc-section__body p-0!">
             <FleetAttentionQueue items={attentionQueue} />
-            <AgentFleetTable agents={agentList} visaTtlSeconds={visaTtlSeconds()} />
+            <AgentFleetTable agents={fleetAgents} visaTtlSeconds={visaTtlSeconds()} />
           </div>
         </section>
 

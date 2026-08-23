@@ -96,7 +96,7 @@ path shape real SDKs send, then forwards to the provider's canonical upstream pa
 | `groq` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
 | `mistral` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
 | `together` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
-| `anthropic` | `POST /v1/messages`; `GET /v1/models`; `GET /v1/models/{id}` | `/v1/messages`; `/v1/models`; `/v1/models/{id}` |
+| `anthropic` | `POST /v1/messages`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/messages`; `/v1/models`; `/v1/models/{id}` |
 | `deepseek` | `POST /chat/completions` | `/chat/completions` |
 
 `GET .../models` is **narrowed to the visa's scope**: PassControl forwards to the provider,
@@ -115,6 +115,13 @@ it still cannot *call* an out-of-scope model. Exactly one
 extra segment is accepted, and it is URL-encoded into the upstream path, so it can only ever
 be a model id and never a route into anything else. Agent SDKs call it to detect a model's
 context length; without it that probe is refused around every prompt.
+
+Both discovery paths accept the `v1`-less spelling on **every** provider that serves them,
+including `anthropic`, because a client pointed at a base URL that already ends in `/v1` sends
+the short one and a client pointed at the host sends the long one — and it cannot know which we
+accept. Chat is not treated this way: `anthropic` still takes `POST /v1/messages` alone. Listing
+runs no model and spends nothing, so being generous about how a client spells it costs nothing;
+being generous about how it spells inference would widen what actually bills.
 
 Endpoints outside that allowlist are denied by default. The gateway does **not** proxy
 embeddings, files, fine-tuning, batches, responses, or token-counting endpoints. PassControl
@@ -260,8 +267,23 @@ includes tenant-scoped agent lifecycle, logs, audit, spend, and kill-switch endp
 | DELETE | `/agents/{id}` | write | Revoke (history preserved). |
 
 ### Provider credentials
-Provider keys are dashboard-only today. Add and rotate them in the Control Tower; raw
-provider secrets are never returned by the API and are never accepted by the control plane.
+Provider keys are dashboard-only today — **Settings → Provider credentials** in the Control
+Tower. Raw provider secrets are never returned by the API and are never accepted by the
+control plane; the panel lists stored credentials by **nickname** only, because the secret
+lives in Supabase Vault and has no column to render.
+
+You may store several credentials per provider, and exactly one of them is **in use** — the
+one the gateway injects. The four operations, and when each is the right one:
+
+| Action | What it does | Use it when |
+|---|---|---|
+| **Add a new key** | Stores another credential *alongside* the existing ones. Does **not** replace anything. The first key you store for a provider becomes the one in use; later ones do not. | You want a second account or environment available to switch between. |
+| **Replace secret** | Swaps the secret behind an existing nickname, in place. Which credential is in use does not change. | Your key expired or was rotated at the provider and you want the same slot to keep working. This is usually what you want. |
+| **Use this key** | Makes that credential the one the gateway injects, for every agent in the tenant. | You added a replacement as a new key and now want to cut over to it. |
+| **Delete** | Removes the credential row and its Vault secret. Refused for the credential currently in use — switch to another one first, so a delete can never quietly change which upstream account is billed. | You are retiring a credential you have already switched away from. |
+
+A switch or a replacement takes effect immediately: the gateway's 60-second provider-key cache
+is purged for the tenant's agents on every one of these writes.
 
 ### Kill switch
 | Method | Path | Scope | Description |

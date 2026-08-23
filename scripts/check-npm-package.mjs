@@ -35,10 +35,18 @@ const allowed = new Set([
   "package.json",
   "bin/passcontrol.mjs",
   "cli/config.mjs",
+  // Imported by the workspace recovery commands. Keeping it explicit here
+  // makes the package gate cover the same helper the executable loads.
+  "cli/workspace-import-report.mjs",
   // Verification is deliberately shipped in the CLI: `passcontrol verify` is the
   // one command a stranger runs against someone else's deployment, so it must
   // work from a bare `npm i -g passcontrol` with no config and no account.
   "cli/instance-key.mjs",
+  // The version capability matrix is imported by both the standalone verifier
+  // and compiled SDK verifier; omitting it makes receipt verification fail only
+  // after installation.
+  "cli/protocols.mjs",
+  "cli/protocols.d.mts",
   "cli/verify.mjs",
   "cli/mcp/gateway.mjs",
   "cli/mcp/integration.mjs",

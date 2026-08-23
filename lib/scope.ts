@@ -506,6 +506,19 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
     { method: "POST", path: ANTHROPIC_MESSAGES_PATH, upstreamPath: ANTHROPIC_MESSAGES_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH, param: true },
+    // Discovery only, and both spellings, for the same reason the deepseek note
+    // below gives: a client can't know which one we accept. Every other
+    // OpenAI-shape provider here already carries both. Observed in production
+    // on 2026-08-17 — one agent whose chat succeeded at `POST /v1/messages`
+    // while its discovery step tried `GET /models`, which was 8 of the 20
+    // refusals on the board.
+    //
+    // Chat is deliberately NOT given the same treatment: anthropic's only chat
+    // rule stays `v1/messages`. Listing runs no model and spends nothing, so
+    // being generous about how a client spells it costs nothing; being generous
+    // about how it spells inference would widen what actually bills.
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
   ],
   groq: [
     { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },

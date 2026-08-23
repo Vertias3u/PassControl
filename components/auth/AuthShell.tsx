@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { ArrowLeft, KeyRound, Route, ShieldCheck } from "lucide-react";
 import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
+import { instanceLabel } from "@/lib/instance-label";
 
 export function AuthShell({
   eyebrow,
@@ -16,7 +17,7 @@ export function AuthShell({
   children: ReactNode;
   showAccountTerms?: boolean;
 }) {
-  const instanceLabel = process.env.PASSCONTROL_INSTANCE_LABEL?.trim() || "PassControl control plane";
+  const label = instanceLabel();
   return (
     <main className="pc-auth">
       <a href="#auth-form" className="pc-skip-link">
@@ -62,7 +63,7 @@ export function AuthShell({
 
         <p className="pc-auth__instance">
           <span className="pc-live-dot" aria-hidden="true" />
-          {instanceLabel}
+          {label}
         </p>
       </section>
 

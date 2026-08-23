@@ -1,5 +1,31 @@
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 /** @type {import('next').NextConfig} */
 const isProd = process.env.NODE_ENV === "production";
+const repoRoot = path.dirname(fileURLToPath(import.meta.url));
+
+// Edge routes cannot read the checkout at request time. Freeze the exact bytes
+// we build against once here, rather than reporting whatever a mutable runtime
+// filesystem happens to contain. `env` is intentionally used so Next inlines
+// it into the Edge bundle; the sole consumer is server-only and authenticated.
+const migrationEntries = fs
+    .readdirSync(path.join(repoRoot, "db", "migrations"))
+    .filter((name) => name.endsWith(".sql"))
+    .sort()
+    .map((name) => ({
+      version: name,
+      checksum: createHash("sha256").update(fs.readFileSync(path.join(repoRoot, "db", "migrations", name))).digest("hex"),
+    }));
+const migrationManifest = JSON.stringify({
+  entries: migrationEntries,
+  head: migrationEntries.at(-1)?.version ?? "",
+  // Hash the canonical compact entries JSON, not the enclosing object: a
+  // consumer can reproduce it from the entries it received.
+  fingerprint: createHash("sha256").update(JSON.stringify(migrationEntries)).digest("hex"),
+});
 
 // The page Content-Security-Policy is NOT here any more. It is built per request
 // around a fresh nonce in middleware.ts (see lib/csp.ts), because a static header
@@ -40,6 +66,9 @@ const securityHeaders = [
 const noStore = { key: "Cache-Control", value: "private, no-store, max-age=0, must-revalidate" };
 
 const nextConfig = {
+  env: {
+    PASSCONTROL_INTERNAL_MIGRATION_MANIFEST: migrationManifest,
+  },
   reactStrictMode: true,
   // Don't advertise the framework — strip the default `X-Powered-By: Next.js`
   // header so responses reveal less about the stack to attackers.

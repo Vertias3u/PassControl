@@ -5,6 +5,7 @@
 // status for a human — same reasoning that put the gate evaluator in lib/gate.ts.
 import type { LogEntry } from "@/lib/log";
 import { classifyCall, housekeepingLabel, isHousekeeping } from "@/lib/call-class";
+import { readRecordedUpstreamStatus } from "@/lib/verify/receipt-view";
 
 export interface DepartureRow {
   id: string;
@@ -67,18 +68,46 @@ export function verdictFor(status: string | null): { word: string; tone: Departu
 // Fixed UTC, 24-hour. A locale-dependent time renders differently on the server
 // and the client and warns on hydration — and a departures board is meant to
 // read in one timezone anyway.
-const TIME = new Intl.DateTimeFormat("en-GB", {
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-  timeZone: "UTC",
-});
+// `departureTime` lived here — a UTC-pinned `HH:mm:ss` formatter. It is gone
+// rather than kept, because it had no callers left and a spare formatter beside
+// the one that replaced it is how the next person picks the wrong one. Both the
+// TIME column and the ×N tooltip now format through `useDashboardTime`, which
+// honours the operator's UTC/LOCAL toggle and names the zone. Its old reason for
+// existing — server and client must agree across hydration — is handled there
+// instead: that provider renders UTC until it has mounted and read the stored
+// preference, which is why the board flickers from UTC to local exactly once.
 
-export function departureTime(value: string | null): string {
-  if (!value) return "--:--:--";
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? TIME.format(new Date(parsed)) : "--:--:--";
+/**
+ * The ×N badge's tooltip.
+ *
+ * Takes the formatter rather than choosing one. It used to call `departureTime`,
+ * which is pinned to UTC, and then append a literal " UTC" — so with the board
+ * switched to local time a row reading `05:44:14 EEST` carried a tooltip reading
+ * `02:44:14 UTC` for that same row. The board's TIME column formats through
+ * `useDashboardTime`, which honours the toggle AND already names the zone, so
+ * the caller passes that in and this adds no zone of its own.
+ *
+ * A burst is never "×20 at 12:00:30" in general — the window chains member to
+ * member, so a steady pinger folds a long stretch onto one line and the operator
+ * needs the span. But when the members do share a second, "between X and X" is
+ * a span with no width, which reads as a rendering fault rather than a fact.
+ * So the degenerate case says one instant, and only the degenerate case.
+ */
+export function repeatBurstTitle(
+  count: number,
+  span: { from: string; to: string } | null,
+  formatTime: (value: string) => string
+): string {
+  const kept = "every one is stored. Click to show them.";
+  if (!span) return `${count} identical consecutive refusals, all stored. Click to show them.`;
+  const from = formatTime(span.from);
+  const to = formatTime(span.to);
+  // Compared AFTER formatting: two instants inside the same displayed second are
+  // one instant as far as this sentence is concerned, and printing them as a
+  // range would be a distinction the reader cannot see.
+  return from === to
+    ? `${count} identical consecutive refusals at ${from} — ${kept}`
+    : `${count} identical consecutive refusals between ${from} and ${to} — ${kept}`;
 }
 
 /**
@@ -234,13 +263,38 @@ export function groupSpan(group: DepartureGroup): { from: string; to: string } |
   return { from: oldest, to: newest };
 }
 
+/**
+ * The provider's HTTP status for a board line, or null.
+ *
+ * `DIVERTED` covered a 401, a 404 and a 429 alike, so an expired provider key
+ * and a wrong model id read identically — the distinction that cost a whole
+ * session on 2026-08-17. The code has always been on the receipt; this puts it
+ * on the line.
+ *
+ * UNANIMOUS OR NOTHING, and that is the whole subtlety. `groupDepartures` folds
+ * on agent+status+provider+model, which does not include the upstream code, so
+ * one line can legitimately stand for rows that failed for different reasons.
+ * Labelling it with the representative row's code would print a number that is
+ * wrong for the other members — the same class of error as drawing a burst at a
+ * single instant. A member that records nothing readable is a disagreement too:
+ * a code covering only the rows we could decode is a guess about the rest.
+ */
+export function groupUpstreamStatus(group: DepartureGroup): number | null {
+  const first = readRecordedUpstreamStatus(group.members[0]?.receipt);
+  if (first === null) return null;
+  for (const member of group.members) {
+    if (readRecordedUpstreamStatus(member.receipt) !== first) return null;
+  }
+  return first;
+}
+
 export function groupDepartures(
   rows: readonly DepartureRow[],
   windowMs: number = BURST_WINDOW_MS
 ): DepartureGroup[] {
   const groups: DepartureGroup[] = [];
   const kindOf = (r: DepartureRow) =>
-    `${r.agent_id ?? ""} ${r.status ?? ""} ${r.provider ?? ""} ${r.model ?? ""}`;
+    `${r.agent_id ?? ""}\x00${r.status ?? ""}\x00${r.provider ?? ""}\x00${r.model ?? ""}`;
   const timeOf = (r: DepartureRow) => {
     const parsed = r.created_at ? Date.parse(r.created_at) : NaN;
     return Number.isFinite(parsed) ? parsed : null;

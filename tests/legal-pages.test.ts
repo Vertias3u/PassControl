@@ -12,6 +12,7 @@ const LEGAL_PAGES = [
   "app/legal/acceptable-use/page.tsx",
   "app/legal/cookies/page.tsx",
   "app/legal/subprocessors/page.tsx",
+  "app/legal/recovery/page.tsx",
 ] as const;
 
 describe("pre-launch legal surface", () => {

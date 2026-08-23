@@ -31,11 +31,13 @@ function functionBody(name: string): string {
 }
 
 describe("MFA recovery codes are issued and consumed server-side", () => {
-  it("never writes mfa_recovery_codes with the user-scoped client", () => {
-    // 0029 revokes insert/update/delete from `authenticated`; a user-scoped write
-    // here would be both broken and the bypass.
-    expect(source).not.toMatch(/supabase\s*\n?\s*\.from\("mfa_recovery_codes"\)\s*\.(insert|update|delete)\(/);
-    expect(source).not.toMatch(/supabase\.from\("mfa_recovery_codes"\)\.(insert|update|delete)\(/);
+  it("never touches mfa_recovery_codes with the user-scoped client at all", () => {
+    // 0029 revoked insert/update/delete from `authenticated`; 0031 revokes SELECT
+    // too, so ANY user-scoped access to this table is now both broken and the
+    // bypass. The ban is on the method-agnostic shape deliberately: the previous
+    // version of this test banned only the three writes, which is why the read
+    // survived a security pass. The service path reads `admin.` / `serviceClient()`.
+    expect(source).not.toMatch(/\bsupabase\s*\n?\s*\.from\(\s*"mfa_recovery_codes"\s*\)/);
   });
 
   it("consumes a code through the service role, scoped by the verified user id", () => {
@@ -92,7 +94,92 @@ describe("MFA recovery codes are issued and consumed server-side", () => {
     expect(functionBody("submitLoginMfa")).not.toMatch(/mfaBlockedReason\(/);
   });
 
-  it("still lets the Security panel read its own remaining count", () => {
-    expect(functionBody("getMfaStatus")).toMatch(/\.from\("mfa_recovery_codes"\)\s*\n?\s*\.select\(/);
+  // ── PC-MFA-RECOVERY-HASH-001 ────────────────────────────────────────────────
+  // What used to be here asserted the opposite: "still lets the Security panel
+  // read its own remaining count", matching `.from("mfa_recovery_codes").select(`
+  // on the user-scoped client. It described the projection the app asks for
+  // (`count`) and mistook it for the capability the database grants (`SELECT`,
+  // every column, caller's choice via PostgREST). That is the whole bug, pinned
+  // as an invariant. It is inverted here.
+  it("counts remaining codes through the service role, not the browser's grant", () => {
+    const body = functionBody("getMfaStatus");
+    expect(body).toMatch(/serviceClient\(\)\s*\n?\s*\.from\("mfa_recovery_codes"\)/);
+  });
+
+  it("scopes the service-role count by the server-verified user id", () => {
+    // service_role has rolbypassrls, so RLS is no longer the tenant boundary
+    // here — this filter is. `user.id` comes from getUser() in the same request
+    // and is never an argument the browser can supply.
+    const body = functionBody("getMfaStatus");
+    expect(body).toMatch(/\.eq\("user_id",\s*user\.id\)/);
+    expect(source).not.toMatch(/export async function getMfaStatus\([^)]+\)/);
+  });
+
+  it("keeps the recovery table out of the account export's user-scoped reads", () => {
+    // loadAccountExport(db, user, admin) renders `mfaRecoveryCodeCount` and was the
+    // second reader of this table through the user client — revoking SELECT would
+    // have 503'd the export endpoint. The count moves to `admin` for the same
+    // reason getMfaStatus's did.
+    const lifecycle = readFileSync(join(process.cwd(), "lib/account-lifecycle.ts"), "utf8");
+    expect(lifecycle).not.toMatch(/\bdb\s*\n?\s*\.from\(\s*"mfa_recovery_codes"\s*\)/);
+    // Matched on the exact receiver, not on "the word admin appears nearby" — the
+    // loose version would have kept passing against a reverted `db.from(...)` with
+    // `admin` mentioned in the comment above it.
+    expect(lifecycle).toMatch(/\n\s*admin\.from\("mfa_recovery_codes"\)\.select\(/);
+  });
+
+  // ── Atomic replacement (the reliability half) ───────────────────────────────
+  it("replaces a recovery-code set in one transaction, never DELETE-then-INSERT", () => {
+    // Two round trips cannot be all-or-nothing. A failed INSERT after a committed
+    // DELETE leaves the user with no backup codes at all; a failed DELETE after a
+    // committed INSERT leaves the OLD codes valid while the operator believes they
+    // were replaced (new hashes are random, so they do not collide the set away).
+    for (const name of ["verifyMfaEnrollment", "regenerateRecoveryCodes"]) {
+      const body = functionBody(name);
+      expect(body, `${name} must not DELETE the set client-side`).not.toMatch(
+        /\.from\("mfa_recovery_codes"\)\s*\n?\s*\.delete\(/
+      );
+      expect(body, `${name} must not INSERT the set client-side`).not.toMatch(
+        /\.from\("mfa_recovery_codes"\)\s*\n?\s*\.insert\(/
+      );
+      expect(body, `${name} must replace through the atomic RPC`).toMatch(/replaceRecoveryCodes\(/);
+    }
+  });
+
+  it("hands the plaintext codes back only after the replacement committed", () => {
+    // Returning them first would show the user ten codes the database never stored.
+    for (const name of ["verifyMfaEnrollment", "regenerateRecoveryCodes"]) {
+      const body = functionBody(name);
+      const stored = body.indexOf("replaceRecoveryCodes(");
+      const returned = body.search(/return \{ recoveryCodes:/);
+      expect(stored, `${name} must store`).toBeGreaterThan(-1);
+      expect(returned, `${name} must return the codes`).toBeGreaterThan(-1);
+      expect(stored, `${name} must store before it returns`).toBeLessThan(returned);
+      expect(body, `${name} must bail out when the replacement fails`).toMatch(
+        /if \(!(stored|replaced)\) return \{ error:/
+      );
+    }
+  });
+
+  it("clears rather than replaces on the two reset paths", () => {
+    // Clearing is NOT replacing, and the distinction is load-bearing in both
+    // directions. `replace_mfa_recovery_codes_for_user` rejects an empty array on
+    // purpose, so that a caller bug can never wipe someone's backup codes while
+    // looking like an issuance — which means routing these two through it would
+    // fail at runtime. Equally, relaxing that guard so they COULD use it would
+    // reopen the hole it exists to close. Pinned so a later tidy-up does neither.
+    for (const name of ["submitLoginMfa", "unenrollMfa"]) {
+      const body = functionBody(name);
+      expect(body, `${name} clears the set outright`).toMatch(
+        /serviceClient\(\)\.from\("mfa_recovery_codes"\)\.delete\(\)/
+      );
+      expect(body, `${name} must not go through the replacement RPC`).not.toMatch(/replaceRecoveryCodes\(/);
+    }
+  });
+
+  it("routes the replacement through the service-role-only RPC", () => {
+    const body = functionBody("replaceRecoveryCodes");
+    expect(body).toMatch(/serviceClient\(\)\s*\n?\s*\.rpc\(\s*"replace_mfa_recovery_codes_for_user"/);
+    expect(body).toMatch(/p_user_id/);
   });
 });

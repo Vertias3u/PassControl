@@ -27,9 +27,28 @@ interface Agent {
   last_seen_at: string | null;
   expires_at?: string | null;
   allowed_scopes: unknown;
+  published?: boolean;
+  public_label?: string | null;
 }
 
 type EditorKind = "budgets" | "scopes";
+
+function publicListingSummary(agent: Agent): string {
+  if (!agent.passport_pubkey) return "Public listing requires a passport";
+  if (!agent.published) return "Not publicly listed";
+  return agent.public_label
+    ? `Selected for public profile as ${agent.public_label}`
+    : "Selected for public profile";
+}
+
+function publicListingAction(agent: Agent): string {
+  if (!agent.passport_pubkey) return "Add passport to list";
+  return agent.published ? "Manage public listing" : "Set up public listing";
+}
+
+function publicListingHref(agent: Agent): string {
+  return `/dashboard/agents/${agent.id}#${agent.passport_pubkey ? "agent-public" : "agent-identity"}`;
+}
 
 export function AgentFleetTable({
   agents,
@@ -44,7 +63,7 @@ export function AgentFleetTable({
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<"all" | "active" | "suspended" | "revoked" | "attention">("all");
   const [sort, setSort] = useState<"name" | "activity" | "spend" | "risk">("activity");
-  const { format, zoneLabel } = useDashboardTime();
+  const { format } = useDashboardTime();
   const toggle = (id: string, kind: EditorKind) =>
     setEditing((prev) => (prev?.id === id && prev.kind === kind ? null : { id, kind }));
 
@@ -146,6 +165,7 @@ export function AgentFleetTable({
                   <div className="pc-passport-suffix" title={a.passport_pubkey ?? "Direct Agent Key identity"}>
                     {a.passport_pubkey ? `${a.passport_pubkey.slice(0, 16)}…` : "Direct Agent Key"}
                   </div>
+                  <div className="pc-passport-suffix">{publicListingSummary(a)}</div>
                 </td>
                 <td>
                   <StatusPill status={a.status as StatusType} />
@@ -159,8 +179,14 @@ export function AgentFleetTable({
                     format={(value) => formatCentsAsUsdDisplay(Math.round(value))}
                   />
                 </td>
+                {/* The cell is a RELATIVE duration ("3h ago", "never"), which has
+                    no time zone — "never · Europe/Sofia" was the giveaway. The
+                    zone belongs to the absolute time, which is in the title, and
+                    `format` already appends it (`timeZoneName: "short"`) — so
+                    nothing is added here. Appending `zoneLabel` as well shipped
+                    "06:42:12 EEST · Europe/Sofia" to production for one deploy. */}
                 <td className="pc-last-seen" title={a.last_seen_at ? format(a.last_seen_at) : undefined}>
-                  {relativeTime(a.last_seen_at)} · {zoneLabel}
+                  {relativeTime(a.last_seen_at)}
                 </td>
                 <td>
                   <div className="pc-fleet-actions">
@@ -179,6 +205,7 @@ export function AgentFleetTable({
                         <button disabled={a.status === "revoked"} onClick={() => toggle(a.id, "scopes")}>
                           Edit scopes
                         </button>
+                        <Link className="pc-open-agent" href={publicListingHref(a)}>{publicListingAction(a)}</Link>
                         <button
                           disabled={pending || a.status === "revoked"}
                           onClick={() => start(() => setAgentSuspended(a.id, !suspended))}
@@ -204,7 +231,11 @@ export function AgentFleetTable({
                 <div className="pc-fleet-card__header">
                   <div>
                     <Link href={`/dashboard/agents/${agent.id}`}>{agent.name}</Link>
-                    <span>{agent.passport_pubkey ? `${agent.passport_pubkey.slice(0, 14)}…` : "Direct Agent Key"}</span>
+                    <span>
+                      {agent.passport_pubkey ? `${agent.passport_pubkey.slice(0, 14)}…` : "Direct Agent Key"}
+                      <br />
+                      {publicListingSummary(agent)}
+                    </span>
                   </div>
                   <StatusPill status={agent.status as StatusType} />
                 </div>
@@ -217,13 +248,14 @@ export function AgentFleetTable({
                     format={(value) => formatCentsAsUsdDisplay(Math.round(value))}
                   />
                 </div>
-                <p title={agent.last_seen_at ? format(agent.last_seen_at) : undefined}>Last activity: {relativeTime(agent.last_seen_at)} · {zoneLabel}</p>
+                <p title={agent.last_seen_at ? format(agent.last_seen_at) : undefined}>Last activity: {relativeTime(agent.last_seen_at)}</p>
                 <div className="pc-fleet-card__actions">
                   <Link href={`/dashboard/agents/${agent.id}`} className="pc-open-agent">
                     Open agent <ArrowUpRight aria-hidden="true" />
                   </Link>
                   <button className="ghost" onClick={() => toggle(agent.id, "budgets")}>Budgets</button>
                   <button className="ghost" disabled={agent.status === "revoked"} onClick={() => toggle(agent.id, "scopes")}>Scopes</button>
+                  <Link className="pc-open-agent" href={publicListingHref(agent)}>{publicListingAction(agent)}</Link>
                   <button
                     className="ghost"
                     disabled={pending || agent.status === "revoked"}

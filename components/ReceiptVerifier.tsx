@@ -27,6 +27,7 @@ import { createPassportSigil } from "@/lib/passport-art";
 import {
   applyStep,
   describeCall,
+  describeTokenUse,
   describeReceiptAuthentication,
   describeFailure,
   describeOwner,
@@ -526,8 +527,7 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
           <Fact label="Cost recorded">
             <span className="font-semibold">{cost.primary}</span>
             <span className="mt-1 block text-xs leading-5 text-muted-foreground">
-              {claims.use.in.toLocaleString("en-GB")} tokens in ·{" "}
-              {claims.use.out.toLocaleString("en-GB")} out
+              {describeTokenUse(claims.use)}
               {cost.exact ? ` · ${cost.exact}` : ""}
             </span>
           </Fact>

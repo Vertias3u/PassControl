@@ -58,7 +58,7 @@ export function GlobalKillSwitchBar({ initialArmed }: { initialArmed: boolean })
               Fleet safety · {label}
             </div>
             <div className="pc-kill-switch__description">
-              {desc}. The gateway also purges cached provider credentials.
+              {desc}. Per-agent suspension is independent and is not changed by this switch.
             </div>
           </div>
         </div>
@@ -98,9 +98,15 @@ export function GlobalKillSwitchBar({ initialArmed }: { initialArmed: boolean })
         description="This is a tenant-wide operational stop, not an individual agent suspension."
       >
           <div className="grid gap-4 p-5 pt-4">
+            {/* "Suspends every agent" was the wording here, and it was wrong in the
+                way that matters: it names the per-agent control, which this switch
+                deliberately does not touch (lib/fleet.ts:729-731 — disarming a
+                tenant must never resume an agent somebody suspended on purpose).
+                It also contradicted the bar's own description two elements up. */}
             <p className="m-0 text-sm leading-6 text-muted-foreground">
-              This immediately suspends <strong>every agent in your fleet</strong> and blocks all
-              their API calls until you disarm.
+              This immediately blocks new API calls for <strong>every agent in your fleet</strong>,
+              until you disarm. It does not change any agent&rsquo;s own suspended or active state,
+              so disarming resumes exactly the agents that were running before.
             </p>
             <div className="pc-critical-notice">
               <AlertTriangle aria-hidden="true" />

@@ -132,6 +132,29 @@ describe("verifying a receipt from the CLI", () => {
     expect(result.claims.cost).toBe(100);
   });
 
+  it("accepts a genuine v2 Direct Agent receipt", async () => {
+    const jws = sign(
+      {
+        iss: ISSUER,
+        jti: "direct-v2",
+        ver: 2,
+        auth: { kind: "direct_key", kid: "key-1", use: "bearer" },
+      },
+      RECEIPT_TYP
+    );
+    const result = await verifyReceipt(jws, { issuer: ISSUER, fetch: jwksFetch() });
+
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("rejects a receipt newer than v2", async () => {
+    const result = await verifyReceipt(
+      sign({ iss: ISSUER, jti: "future", ver: 3 }, RECEIPT_TYP),
+      { issuer: ISSUER, fetch: jwksFetch() }
+    );
+    expect(result).toMatchObject({ ok: false, reason: "unsupported_version" });
+  });
+
   it("rejects a tampered receipt", async () => {
     const jws = sign({ iss: ISSUER, jti: "r1", ver: 1, cost: 100 }, RECEIPT_TYP);
     const [header, , signature] = jws.split(".");

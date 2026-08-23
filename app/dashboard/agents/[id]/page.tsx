@@ -14,6 +14,10 @@ import { BreakGlassPanel } from "@/components/BreakGlassPanel";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { StatusPill, type StatusType } from "@/components/StatusPill";
 import { DirectAgentKeyPanel } from "@/components/DirectAgentKeyPanel";
+import { AgentPublicListing } from "@/components/AgentPublicListing";
+import { readProfile } from "@/lib/profile/manage";
+import { serviceClient } from "@/lib/supabase";
+import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { betaOperatorEmails } from "@/lib/beta-launch";
 
 export const dynamic = "force-dynamic";
@@ -110,6 +114,12 @@ export default async function AgentPassportPage({
 
   const passport = await requireAgentPassport(db, user.id, id);
   const firstVisa = passport.visas[0];
+  // The listing panel has to name whichever of the two opt-ins is still
+  // missing, so it needs the operator's own profile state. Tolerates null: a
+  // freshly signed-up operator has no row, and the panel then says the profile
+  // is not public, which is true.
+  const profile = await readProfile(serviceClient(), user.id);
+  const profileRecord = profile.ok ? profile.data : null;
 
   return (
     <DashboardShell
@@ -139,6 +149,7 @@ export default async function AgentPassportPage({
         <nav className="pc-agent-subnav" aria-label="Agent sections">
           <a href="#agent-overview">Overview</a>
           <a href="#agent-identity">Identity</a>
+          <a href="#agent-public">Public listing</a>
           <a href="#agent-policy">Live policy</a>
           <a href="#agent-policy-lab">Policy lab</a>
           <a href="#agent-activity">Activity</a>
@@ -170,6 +181,31 @@ export default async function AgentPassportPage({
           status={passport.agent.status}
           keys={passport.directKeys}
         />
+        {/* With identity, not with policy, and deliberately NOT a toggle in the
+            fleet table: a row-level switch in a list makes publishing something
+            you do by accident, and this is the one control on the dashboard
+            whose effect strangers can see. */}
+        <section id="agent-public" className="pc-section scroll-mt-40">
+          <SectionHeader
+            eyebrow="Public identity"
+            title="Public listing"
+            description={<>
+            Whether this agent appears on your public profile. It is the second of two
+            opt-ins — publishing your profile lists <strong>no agent</strong> by itself.
+            </>}
+          />
+          <div className="pc-section__body">
+            <AgentPublicListing
+              agentId={passport.agent.id}
+              agentName={passport.agent.name}
+              published={passport.agent.published}
+              publicLabel={passport.agent.publicLabel}
+              hasPassport={Boolean(passport.agent.passportId)}
+              profileHandle={profileRecord?.username ?? null}
+              profilePublic={profileRecord?.profile_public === true}
+            />
+          </div>
+        </section>
         <div id="agent-policy" className="scroll-mt-40">
         <AgentPolicySummary policy={passport.policy} />
         </div>

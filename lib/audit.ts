@@ -30,10 +30,34 @@ export const AUDIT_ACTIONS = [
   "owner.set",
   "owner.publish",
   "owner.verify",
+  // The operator's own identity. `profile.publish` and `profile.handle` are the
+  // two that matter to a reader of this trail: one changes what a stranger can
+  // see, and the other permanently consumes a handle out of a global namespace.
+  "profile.update",
+  "profile.handle",
+  "profile.publish",
+  "profile.avatar",
+  "profile.avatar_removed",
+  // Listing one agent publicly. Distinct from profile.publish: this is the
+  // second, independent opt-in, and an audit trail that conflated them could
+  // not answer "when did this agent become visible to strangers".
+  "agent.publish",
   "apikey.create",
   "apikey.revoke",
   "mfa.enroll",
   "mfa.disable",
+  // Taking a portable copy of the workspace configuration, and restoring one.
+  // `workspace.export` is written by BOTH the dashboard route and the
+  // control-plane read endpoint, because the Recovery panel reads the newest one
+  // back as "Last export" — a CLI export that wrote no row would leave the panel
+  // quietly claiming the operator has never taken one.
+  //
+  // Both strings have to be HERE or they do nothing at all: buildAuditRecord
+  // throws on an action outside this list and recordAdminAction swallows that
+  // throw, so a missing entry writes no row, raises nothing, and looks exactly
+  // like a workspace nobody has ever exported.
+  "workspace.export",
+  "workspace.import",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

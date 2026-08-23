@@ -120,16 +120,13 @@ async function findBy(
  * owner a mint until the collision is cleaned up; that is strictly better than
  * choosing an identity we have no basis to choose.
  *
- * THIS IS A READ-SIDE REFUSAL AND IT IS NOT THE WHOLE FIX. It makes an existing
- * collision unusable; it does not stop one being created, because two inserts
- * (or an insert and a rotation) can still race past each other's checks. A
- * future migration must give the two key states ONE GLOBAL NAMESPACE enforced
- * transactionally — a `passport_keys` table keyed by the public key, holding
- * both the current and the retired state with a single unique index and an FK
- * to `agents`, or a key-scoped lock inside a SECURITY DEFINER rotate/create
- * RPC — so that creation and rotation serialise against each other. Until that
- * exists, this refusal is the only thing between a copied public key and a
- * misattributed signature.
+ * THIS IS A READ-SIDE REFUSAL AND A SECOND LINE OF DEFENCE. Migration 0035
+ * makes the two columns reserve one transactional global namespace through an
+ * `agents` trigger, so creation, attach, rotation and cleanup cannot create a
+ * new cross-row collision. This check remains deliberately: a deployment that
+ * already held a collision cannot apply 0035 until an operator resolves it,
+ * and an authentication boundary must fail closed rather than assume every
+ * historical database completed that repair.
  *
  * Order of gates is policy, not preference: status, then expiry, then the
  * retired-key deadline. `status` stays first so a revoked agent reads as

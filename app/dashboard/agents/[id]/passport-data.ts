@@ -14,7 +14,7 @@ import { readLiveGrant, type BreakGlassGrant } from "@/lib/break-glass";
 // and only for the operator who can fix it — the same trade `fallbacks` already
 // makes against 0018.
 const AGENT_PASSPORT_COLUMNS =
-  "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, policy, policy_shadow, fallbacks, expires_at, previous_passport_pubkey, previous_valid_until, created_at, last_seen_at";
+  "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, policy, policy_shadow, fallbacks, expires_at, previous_passport_pubkey, previous_valid_until, created_at, last_seen_at, published, public_label";
 const PASSPORT_LOG_COLUMNS = "id, provider, model, status, created_at";
 // created_at is selected so the sample can be cut at the moment the CURRENT
 // draft was saved. Without it the panel attributes an earlier draft's verdicts
@@ -51,6 +51,11 @@ export interface AgentPassportRow extends Record<string, unknown> {
   previous_valid_until?: string | null;
   created_at: string;
   last_seen_at: string | null;
+  // 0033. Named rather than optional, on the same reasoning the comment above
+  // gives for policy_shadow: a single dashboard page that fails loudly, and
+  // only for the operator who can apply the migration.
+  published?: boolean;
+  public_label?: string | null;
 }
 
 export interface PassportLogRow extends Record<string, unknown> {
@@ -113,6 +118,12 @@ export interface AgentPassportView {
      */
     previousPassportId: string | null;
     previousValidUntil: string | null;
+    /** Listed on the operator's public /@handle page. The SECOND of two
+     *  opt-ins — nothing is visible unless users.profile_public holds too. */
+    published: boolean;
+    /** The name shown publicly. Never `name`: internal agent names are
+     *  customer-identifying, which is why 0033 gave this its own column. */
+    publicLabel: string | null;
   };
   visas: PassportVisaView[];
   policy: AgentPolicyView;
@@ -281,6 +292,11 @@ export function buildAgentPassportView(
       expiresAt: timestamp(agent.expires_at),
       previousPassportId: text(agent.previous_passport_pubkey) || null,
       previousValidUntil: timestamp(agent.previous_valid_until),
+      // Defaults to NOT published if the column is missing, which is the safe
+      // direction: an unmigrated deployment must never render a control that
+      // says an agent is already visible to strangers.
+      published: agent.published === true,
+      publicLabel: text(agent.public_label) || null,
     },
     visas: normalizeVisas(agent.allowed_scopes),
     policy: agentPolicyForDisplay(agent.policy ?? null),

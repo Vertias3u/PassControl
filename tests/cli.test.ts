@@ -125,6 +125,16 @@ describe("passcontrol CLI", () => {
     expect(stdout).not.toMatch(/\x1b\[/);
   }, 10000);
 
+  it("keeps system health authenticated, optional for status, and non-fatal in deep doctor", () => {
+    const source = readFileSync(CLI, "utf8");
+    const fetcher = source.slice(source.indexOf("async function fetchSystemHealth"), source.indexOf("function healthCompatibility"));
+    expect(fetcher).toContain('if (!config.apiKey) return { state: "skipped" }');
+    expect(fetcher).toContain('api("GET", "/system")');
+    expect(fetcher).toContain('message.startsWith("403 ") ? "restricted"');
+    const doctor = source.slice(source.indexOf("async function doctorCommand"), source.indexOf("async function checkInstanceSigningKey"));
+    expect(doctor).toContain("printSystemHealthDiagnostic(await fetchSystemHealth())");
+  });
+
   it("shows consequence-aware agent help from either help spelling", async () => {
     const direct = await runCli(["help", "agent"], { env: { NO_COLOR: "1" } });
     const flag = await runCli(["agent", "--help"], { env: { NO_COLOR: "1" } });

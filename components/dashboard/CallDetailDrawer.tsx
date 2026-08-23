@@ -7,7 +7,11 @@ import { departureDestination, type DepartureRow } from "@/lib/departures";
 import { isHousekeeping } from "@/lib/call-class";
 import type { LogEntry } from "@/lib/log";
 import { parseShadowVerdict } from "@/lib/policy-shadow";
-import { readRecordedEndpoint } from "@/lib/verify/receipt-view";
+import {
+  readRecordedEndpoint,
+  readRecordedUpstreamStatus,
+  describeUpstreamStatus,
+} from "@/lib/verify/receipt-view";
 import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
 
 export interface CallContext {
@@ -70,6 +74,8 @@ export function CallDetailDrawer({
   const shadow = row ? describeStoredShadow(row.policy_shadow_would, currentShadowRevision) : null;
   const tokens = row ? (row.input_tokens ?? 0) + (row.output_tokens ?? 0) : 0;
   const endpoint = readRecordedEndpoint(row?.receipt);
+  const upstreamStatus = readRecordedUpstreamStatus(row?.receipt);
+  const upstreamMeaning = upstreamStatus === null ? null : describeUpstreamStatus(upstreamStatus);
   const copyReceipt = async () => {
     if (!row?.receipt) return;
     await navigator.clipboard.writeText(row.receipt);
@@ -124,6 +130,20 @@ export function CallDetailDrawer({
               checking the signature, and the verifier below is the proof path. */}
           {endpoint ? (
             <div><dt>Endpoint (recorded on the receipt, not verified here)</dt><dd><code>{endpoint}</code></dd></div>
+          ) : null}
+          {/* The status the PROVIDER returned, which the board flattened into one
+              word: a 401, a 404 and a 429 all read "Provider error". On
+              2026-08-17 that made an expired provider key indistinguishable from
+              a wrong model id and cost a whole session. Same untrusted-claim
+              wording as the endpoint above — decoded, not verified. */}
+          {upstreamStatus !== null ? (
+            <div>
+              <dt>Provider response (recorded on the receipt, not verified here)</dt>
+              <dd>
+                <code>HTTP {upstreamStatus}</code>
+                {upstreamMeaning ? <small className="pc-call-detail__hint">{upstreamMeaning}</small> : null}
+              </dd>
+            </div>
           ) : null}
           <div><dt>Input tokens</dt><dd>{row.input_tokens?.toLocaleString() ?? "Not recorded"}</dd></div>
           <div><dt>Output tokens</dt><dd>{row.output_tokens?.toLocaleString() ?? "Not recorded"}</dd></div>

@@ -99,6 +99,13 @@ function matches(pattern: string, model: string): boolean {
   return new RegExp(`^${escaped}$`).test(model);
 }
 
+function priceFor(model: string, provider?: ProviderId): Price | undefined {
+  return (
+    PRICES.find((x) => (!provider || x.provider === provider) && matches(x.pattern, model)) ??
+    (provider ? FALLBACK_PRICES[provider] : undefined)
+  );
+}
+
 /** Cost in integer micro-cents for a token split. Falls back per provider when possible. */
 export function costMicrocents(
   model: string,
@@ -106,13 +113,61 @@ export function costMicrocents(
   outputTokens: number,
   provider?: ProviderId
 ): number {
-  const p =
-    PRICES.find((x) => (!provider || x.provider === provider) && matches(x.pattern, model)) ??
-    (provider ? FALLBACK_PRICES[provider] : undefined);
+  const p = priceFor(model, provider);
   // A known provider should always have a fallback row. Returning 0 here means a
   // provider was added without pricing rows, which should be treated as a bug.
   if (!p) return 0;
   return inputTokens * p.inputMicrocentsPerToken + outputTokens * p.outputMicrocentsPerToken;
+}
+
+// ── Prompt-cache rates ────────────────────────────────────────────────────────
+//
+// Anthropic prices cache traffic as a multiplier on the model's OWN input rate,
+// so these are derived rather than listed per model — a new model row gets
+// correct cache pricing for free, and the two can never drift apart.
+//
+//   read  — 0.1x. A cached prompt is the cheap case, and the reason agents cache.
+//   write — 1.25x at the default 5-minute TTL.
+//
+// Rounded UP to a whole µ¢/token for the same reason `mc()` is: a fractional rate
+// would truncate to 0 for the cheap models and stop counting entirely.
+const CACHE_READ_RATE = (inputRate: number) => Math.ceil(inputRate * 0.1);
+const CACHE_WRITE_RATE = (inputRate: number) => Math.ceil(inputRate * 1.25);
+
+/**
+ * Cost in integer micro-cents for a call INCLUDING its prompt-cache traffic.
+ *
+ * Use this for a settled call. `costMicrocents` above stays the estimate path: a
+ * pre-flight estimate is derived from the request body and cannot know what the
+ * provider will serve from cache.
+ *
+ * Known gap, deliberately not guessed at: a cache write made with the opt-in
+ * 1-hour TTL costs 2x rather than 1.25x, and Anthropic reports only the combined
+ * `cache_creation_input_tokens` unless the newer `usage.cache_creation` breakdown
+ * is present. Charging every write at 1.25x is therefore exact for the default
+ * TTL and under-charges a 1-hour writer by 0.75x on the write portion alone.
+ * Pricing every write at 2x instead would overcharge the common case by 60%,
+ * which is the larger error. Closing it properly means parsing
+ * `usage.cache_creation` into two buckets.
+ */
+export function costMicrocentsForUsage(
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+  },
+  model: string,
+  provider?: ProviderId
+): number {
+  const p = priceFor(model, provider);
+  if (!p) return 0;
+  return (
+    usage.inputTokens * p.inputMicrocentsPerToken +
+    usage.outputTokens * p.outputMicrocentsPerToken +
+    usage.cacheReadTokens * CACHE_READ_RATE(p.inputMicrocentsPerToken) +
+    usage.cacheWriteTokens * CACHE_WRITE_RATE(p.inputMicrocentsPerToken)
+  );
 }
 
 /** Cheap pre-flight usage estimate from a request body. */

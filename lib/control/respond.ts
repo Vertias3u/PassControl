@@ -26,7 +26,12 @@ const MESSAGES: Record<string, string> = {
   payload_too_large: "Request body is too large.",
   not_found: "Resource not found.",
   query_failed: "The request could not be completed. Please try again.",
+  export_unavailable: "The workspace export could not be built. Please try again.",
   auth_lookup_failed: "The request could not be completed. Please try again.",
+  system_forbidden: "This API key is not authorized to read system health.",
+  system_totp_required: "The account owning this API key must verify an authenticator app before reading system health.",
+  system_not_configured: "This instance names no system-health operators, so it authorizes no API key.",
+  system_allowlist_invalid: "This instance's system-health operator list is malformed and authorizes no API key.",
   internal_error: "Something went wrong. Please try again.",
 };
 

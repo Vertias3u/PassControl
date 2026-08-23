@@ -7,7 +7,8 @@ import {
   departureDestination,
   groupDepartures,
   groupSpan,
-  departureTime,
+  groupUpstreamStatus,
+  repeatBurstTitle,
   fare,
   flightCode,
   mergeDeparture,
@@ -75,16 +76,11 @@ describe("verdict vocabulary", () => {
 });
 
 describe("row rendering", () => {
-  it("renders time in UTC so the server and client agree", () => {
-    // A locale-dependent format would differ across the hydration boundary.
-    expect(departureTime("2026-08-01T09:07:03.000Z")).toBe("09:07:03");
-  });
-
-  it("survives a missing or unparseable timestamp", () => {
-    expect(departureTime(null)).toBe("--:--:--");
-    expect(departureTime("whenever")).toBe("--:--:--");
-  });
-
+  // The two `departureTime` cases that used to open this block went with the
+  // function: it had no callers left once the tooltip stopped pinning its own
+  // zone. Times on the board come from `useDashboardTime` now, and the
+  // hydration property they guarded is that provider's (it renders UTC until it
+  // has mounted and read the stored preference).
   it("builds a stable flight code from the provider and visa id", () => {
     expect(flightCode(row())).toBe("OP 9D8F");
   });
@@ -318,5 +314,103 @@ describe("a collapsed burst is honest about time and reachable", () => {
     expect(board).toMatch(/toggleGroup\(row\.id\)/);
     expect(board).toMatch(/expanded\.has\(group\.row\.id\)/);
     expect(board).toMatch(/group\.members\.map/);
+  });
+});
+
+// ── The provider's status code, on the board line ────────────────────────────
+//
+// DIVERTED covered a 401, a 404 and a 429 alike, so an expired provider key and
+// a wrong model id were the same word. The code has always been on the receipt.
+// The catch is grouping: a burst folds on agent+status+provider+model, which does
+// NOT include the upstream code, so one line can stand for rows that failed for
+// different reasons. Labelling that line with the newest member's code would put
+// a number on the board that is wrong for the rows behind it.
+describe("recorded provider status for a board line", () => {
+  const jws = (http: unknown) => {
+    const seg = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+    return `${seg({ alg: "EdDSA" })}.${seg({ res: { status: "upstream_error", http } })}.c2ln`;
+  };
+  const at = (s: number, http: unknown) =>
+    row({
+      id: `r${s}`,
+      created_at: new Date(Date.UTC(2026, 7, 17, 3, 6, s)).toISOString(),
+      status: "upstream_error",
+      model: "",
+      receipt: jws(http),
+    });
+
+  it("reports the code when a single row records one", () => {
+    expect(groupUpstreamStatus(groupDepartures([at(30, 401)])[0]!)).toBe(401);
+  });
+
+  it("reports the code when every member of a burst agrees", () => {
+    const [group] = groupDepartures([at(30, 401), at(29, 401), at(28, 401)]);
+    expect(group!.count).toBe(3);
+    expect(groupUpstreamStatus(group!)).toBe(401);
+  });
+
+  it("stays silent when the members disagree, rather than labelling the burst wrong", () => {
+    const [group] = groupDepartures([at(30, 401), at(29, 429)]);
+    expect(group!.count).toBe(2);
+    expect(groupUpstreamStatus(group!)).toBeNull();
+  });
+
+  it("stays silent when any member records nothing readable", () => {
+    // A partial answer across a burst is a guess about the rows it cannot read.
+    expect(groupUpstreamStatus(groupDepartures([at(30, 401), at(29, "401")])[0]!)).toBeNull();
+    expect(groupUpstreamStatus(groupDepartures([at(30, 401), at(29, undefined)])[0]!)).toBeNull();
+  });
+
+  it("reports nothing for a row with no receipt at all", () => {
+    expect(groupUpstreamStatus({ row: row({ id: "x" }), count: 1, members: [row({ id: "x" })] }))
+      .toBeNull();
+  });
+});
+
+// ── The ×N badge's tooltip ───────────────────────────────────────────────────
+//
+// Two things were wrong with it in production on 2026-08-17. It formatted its
+// own times in hardcoded UTC while the board's TIME column obeyed the UTC/LOCAL
+// toggle, so a board reading `05:44:14 EEST` carried a tooltip reading
+// `02:44:14 UTC` for the same row. And a burst whose members share a second
+// rendered "between 02:44:14 and 02:44:14" — a span with no width, which reads
+// like a bug even though the grouping was right.
+describe("repeatBurstTitle", () => {
+  // Stands in for `useDashboardTime().format(value, "time")`, which already
+  // appends the zone name — that is why the caller no longer adds one.
+  const fmt = (value: string) => `${value.slice(11, 19)} EEST`;
+
+  it("follows the caller's formatter rather than choosing a zone itself", () => {
+    const title = repeatBurstTitle(3, {
+      from: "2026-08-01T09:07:03.000Z",
+      to: "2026-08-01T09:08:41.000Z",
+    }, fmt);
+    expect(title).toContain("between 09:07:03 EEST and 09:08:41 EEST");
+    // The old copy hardcoded a trailing " UTC" next to a formatted local time.
+    expect(title).not.toMatch(/EEST UTC/);
+  });
+
+  it("states one instant when the burst has no width", () => {
+    const title = repeatBurstTitle(2, {
+      from: "2026-08-01T09:07:03.000Z",
+      to: "2026-08-01T09:07:03.000Z",
+    }, fmt);
+    expect(title).toContain("at 09:07:03 EEST");
+    expect(title).not.toContain("between");
+  });
+
+  it("says nothing about time when the rows carry none", () => {
+    // Rows with no timestamp never fold into a burst, but a group can still
+    // report a null span — claiming a time we do not have would be worse.
+    const title = repeatBurstTitle(2, null, fmt);
+    expect(title).toBe("2 identical consecutive refusals, all stored. Click to show them.");
+  });
+
+  it("always says every row is kept", () => {
+    // The badge hides rows. The one thing it must never imply is that they were
+    // dropped — the counters and the CSV export still count rows, not groups.
+    for (const span of [null, { from: "2026-08-01T09:07:03.000Z", to: "2026-08-01T09:08:41.000Z" }]) {
+      expect(repeatBurstTitle(4, span, fmt)).toMatch(/every one is stored|all stored/);
+    }
   });
 });

@@ -76,3 +76,24 @@ coverage/
 .env*
 !.env.example
 !.env.docker.example
+
+# Database dumps. `data.sql` was a real dump of a live project — 3 user emails, 10
+# mfa_recovery_codes verifiers, 5 agent_access_keys hashes, 157 agent_logs — and it
+# reached the index once, on a `git add -A` sweep. Migration 0031 had just taken those
+# recovery verifiers out of every browser's reach; a dump in the repo hands them back.
+# Root-anchored ON PURPOSE: a bare *.sql also matches db/migrations/, so the next
+# migration would go untracked without a word. Dumps live outside the repo.
+/*.sql
+/*.dump
+
+# Internal briefs, reviews and release checklists — same rule as the scratch block
+# above, and they arrived on the same sweep. Globs, not filenames: HANDOFF_*.md died
+# on 2026-07-28 for being dated variants, and two of them came back on this sweep.
+/CODEX_REDESIGN_BRIEF.md
+/DESIGN_*.md
+/HANDOFF_*.md
+/MARKET_BRIEF.md
+/RELEASETEST.md
+/REVIEW_*.md
+/featurestoadd.md
+/opuswork112.md

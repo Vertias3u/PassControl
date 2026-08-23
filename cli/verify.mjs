@@ -7,10 +7,13 @@
 // Nothing here needs a PassControl account, an API key, or a passport. You need
 // the artifact and the issuer's origin. That is the whole point.
 import { ed25519 } from "@noble/curves/ed25519";
+import { RECEIPT_PROTOCOL } from "./protocols.mjs";
 
 export const RECEIPT_TYP = "passcontrol-receipt+jwt";
 export const AGENT_TOKEN_TYP = "passcontrol-agent+jwt";
-export const SUPPORTED_VER = 1;
+// Receipts v2 add Direct Agent identity claims. This is a maximum, not an
+// equality check: v1 receipts remain independently verifiable forever.
+export const SUPPORTED_VER = RECEIPT_PROTOCOL.maximum;
 
 const fromB64url = (value) =>
   new Uint8Array(Buffer.from(String(value).replace(/-/g, "+").replace(/_/g, "/"), "base64"));
