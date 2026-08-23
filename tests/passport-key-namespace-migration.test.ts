@@ -27,11 +27,12 @@ describe("migration 0035 passport-key namespace", () => {
     // migration must therefore keep each SQL file in a single transaction.
     expect(migrationScript).toMatch(/psql\s+-1[\s\S]*-f\s+"\$f"/i);
     expect(localStackScript).toMatch(/\|\s+"\$\{PSQL\[@\]\}"\s+-1\s+-q/i);
-    // CI is a THIRD applier, and this assertion originally did not know that:
-    // its loop ran psql without -1, so 0035 failed there while passing under
-    // both migrators. An applier that does not match how migrations really run
-    // is not testing the thing that ships.
-    expect(ciWorkflow).toMatch(/psql\s+-1\s+-v\s+ON_ERROR_STOP=1\s+"\$DB_URL"\s+-f\s+"\$f"/i);
+    // CI used to be a THIRD applier with its own loop, and it diverged from
+    // the two migrators twice — no transaction for 0035's LOCK TABLE, then no
+    // ledger table for 0036's function body. It now runs scripts/migrate.sh,
+    // so there is nothing left to keep in sync: pin that, not a flag.
+    expect(ciWorkflow).toMatch(/bash\s+scripts\/migrate\.sh/);
+    expect(ciWorkflow).not.toMatch(/for\s+f\s+in\s+db\/migrations/);
   });
 
   it("refuses a legacy cross-agent current/retired collision before backfill", () => {
