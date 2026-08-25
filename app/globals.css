@@ -3117,6 +3117,41 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .pc-beta-feedback__rating input:checked + span { border-color: var(--pc-signal); color: #10150b; background: var(--pc-signal); }
 .pc-beta-feedback__rating input:focus-visible + span { outline: 2px solid var(--pc-signal); outline-offset: 2px; }
 
+/* Problem reports — the consent preview, the reporter's history, and triage. */
+.pc-report-preview { border: 1px solid var(--pc-line); border-radius: 0.5rem; padding: 0.7rem 0.85rem; }
+.pc-report-preview summary { color: var(--pc-paper); font-size: .78rem; font-weight: 650; cursor: pointer; }
+.pc-report-preview p { margin: 0.6rem 0 0; }
+.pc-report-preview pre {
+  overflow: auto; max-height: 18rem; margin: 0.6rem 0 0; padding: 0.75rem;
+  border: 1px solid var(--pc-line); border-radius: 0.4rem; background: rgba(255,255,255,0.02);
+  font-family: var(--font-pc-mono), monospace; font-size: 0.68rem; line-height: 1.5;
+}
+.pc-report-history { display: grid; gap: 0.4rem; margin: 0; padding: 0; list-style: none; }
+.pc-report-history li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem;
+  padding: 0.55rem 0.75rem; border: 1px solid var(--pc-line); border-radius: 0.45rem;
+  font-size: 0.78rem;
+}
+.pc-report-history li > span { color: var(--pc-copy); }
+.pc-report-history li > time { margin-left: auto; color: var(--pc-copy); font-size: 0.72rem; }
+.pc-report-history li[data-status="resolved"] { border-color: rgba(74,222,128,0.24); }
+.pc-report-history li[data-status="open"] strong { color: #e7b96d; }
+
+.pc-report-triage { display: grid; gap: 0.85rem; }
+.pc-report-triage article {
+  display: grid; gap: 0.7rem; padding: 0.9rem 1rem;
+  border: 1px solid var(--pc-line); border-radius: 0.55rem;
+}
+.pc-report-triage article[data-kind="security"] { border-color: rgba(247,108,92,0.35); }
+.pc-report-triage article[data-status="resolved"] { opacity: 0.72; }
+.pc-report-triage header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.65rem; font-size: 0.76rem; }
+.pc-report-triage header time { margin-left: auto; color: var(--pc-copy); }
+.pc-report-triage p { margin: 0; font-size: 0.84rem; line-height: 1.55; }
+.pc-report-triage dl { display: flex; flex-wrap: wrap; gap: 0.9rem; margin: 0; font-size: 0.72rem; }
+.pc-report-triage dt { color: var(--pc-copy); }
+.pc-report-triage dd { margin: 0; color: var(--pc-paper); }
+.pc-report-triage form { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
 .pc-dialog__body { display: grid; gap: 1rem; padding: 1.15rem 1.4rem 1.4rem; }
 .pc-dialog__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.65rem; }
 .pc-dialog__actions--spread { align-items: center; justify-content: space-between; }

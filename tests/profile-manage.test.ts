@@ -239,6 +239,15 @@ describe("setHandle", () => {
     });
   });
 
+  it("fails closed when the database has a newer reserved name than this build", async () => {
+    rpcResult = { data: [{ status: "reserved", username: "vertiasops", handle_locked_at: null }], error: null };
+    expect(await setHandle(admin(), USER_ID, "newhandle")).toEqual({
+      ok: false,
+      status: 409,
+      code: "reserved_handle",
+    });
+  });
+
   it("reports a locked handle distinctly, because that message is actionable", async () => {
     rpcResult = { data: [{ status: "locked", username: "vertiasops", handle_locked_at: "2026-02-01T00:00:00.000Z" }], error: null };
     expect(await setHandle(admin(), USER_ID, "newhandle")).toEqual({
@@ -363,11 +372,15 @@ describe("setProfilePublic", () => {
 });
 
 describe("avatars", () => {
-  it("issues a fresh key on every upload, so an old URL stops resolving", async () => {
-    await setAvatar(admin(), USER_ID, `${USER_ID}/avatar`);
+  it("stores the key the caller built the object path from", async () => {
+    // The caller mints the key first, because the path is derived from it —
+    // see tests/profile-avatar-immutability.test.ts for why that ordering is
+    // what makes the served URL safe to cache immutably.
+    const key = newAvatarKey();
+    await setAvatar(admin(), USER_ID, `${USER_ID}/${key}`, key);
     const patch = patches()[0]!;
-    expect(patch.avatar_path).toBe(`${USER_ID}/avatar`);
-    expect(typeof patch.avatar_key).toBe("string");
+    expect(patch.avatar_path).toBe(`${USER_ID}/${key}`);
+    expect(patch.avatar_key).toBe(key);
   });
 
   it("clears the key as well as the path, leaving no live URL behind", async () => {

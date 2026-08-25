@@ -20,6 +20,7 @@ export default function PrivacyPage() {
           <li><strong>Call records:</strong> agent and credential identifiers, provider, model, token counts, cost, outcome, latency, time, receipt and shadow-policy verdict.</li>
           <li><strong>Provider credentials:</strong> keys placed in the managed Vault. They are retrieved only after a call passes the gate.</li>
           <li><strong>Security and operations data:</strong> IP-derived rate-limit keys, nonces, budget reservations, audit events and scrubbed error diagnostics.</li>
+          <li><strong>Problem reports:</strong> the text you write when you report a problem, and — only if you tick the box after seeing exactly what it contains — a diagnostic summary of your workspace: agent, budget and failure metadata, plus which build of PassControl you were using. Text that looks like a key, token or visa is removed before it is stored. No prompts, model responses, provider keys, credential hashes, recovery codes or session tokens are included.</li>
           <li><strong>Communications:</strong> email address and message content when you contact Vertias or receive authentication, invitation, one-time setup-follow-up, feedback-request or recovery email.</li>
         </ul>
       </section>
@@ -45,6 +46,7 @@ export default function PrivacyPage() {
       </section>
       <section>
         <h2>6. Retention</h2>
+        <p>Resolved problem reports are deleted 180 days after they are resolved. A report that is still open is kept until it is answered, because deleting it would destroy the only record of a problem that has not been fixed.</p>
         <p>Pending or unaccepted beta applications are kept for no more than 180 days. Declined or withdrawn applications are scheduled for deletion after 30 days. Expired, revoked or used invitation metadata is removed after its relevant date is more than 30 days old. Setup feedback is kept for up to 180 days. The raw invitation token is never stored.</p>
         <p>Account, configuration, audit and call metadata are retained while your beta account is active. Permanent workspace deletion removes linked beta application and feedback records through the same account cascade, except for limited records that must be preserved for legal obligations or legal claims. Processor backups and logs expire under each provider's retention process.</p>
         <p>Do not place data in PassControl that you cannot lawfully retain under this model.</p>

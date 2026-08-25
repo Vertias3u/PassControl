@@ -1,3 +1,4 @@
+import { redactLogString } from "./redact";
 import { sanitizeValue } from "./seclog";
 
 type SentryEvent = Record<string, unknown>;
@@ -35,25 +36,18 @@ const SAFE_CONTEXT_KEYS = new Set([
 const SECRET_FIELD_RE =
   /(auth|authorization|cookie|token|secret|password|key|visa|passport|signature|payload|body|dsn|supabase|service|cache|plaintext)/i;
 
-const SECRET_VALUE_PATTERNS: RegExp[] = [
-  /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi,
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-  /\bsk-(?:ant-)?[A-Za-z0-9._-]{6,}\b/g,
-  /\bpc_[A-Za-z0-9._-]{6,}\b/g,
-  /\b[A-Za-z0-9_-]{40,}\b/g,
-];
-
 let sentryPromise: Promise<SentryModule | null> | null = null;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function redactString(value: string): string {
-  let out = String(sanitizeValue(value));
-  for (const pattern of SECRET_VALUE_PATTERNS) out = out.replace(pattern, "[redacted]");
-  return out;
-}
+/**
+ * The secret-value patterns moved to lib/redact.ts when problem reports needed
+ * them too. Keeping the local name means every call site below is unchanged,
+ * and there is now one definition rather than two that drift.
+ */
+const redactString = redactLogString;
 
 function scrubUnknown(value: unknown, key = ""): unknown {
   if (key && SECRET_FIELD_RE.test(key)) return "[redacted]";

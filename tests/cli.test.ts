@@ -135,6 +135,17 @@ describe("passcontrol CLI", () => {
     expect(doctor).toContain("printSystemHealthDiagnostic(await fetchSystemHealth())");
   });
 
+  it("surfaces the observation time when cached system health is reported", () => {
+    const source = readFileSync(CLI, "utf8");
+    const formatters = source.slice(
+      source.indexOf("function systemHealthLabel"),
+      source.indexOf("function appConfigDir")
+    );
+    expect(formatters).toContain("generated_at");
+    expect(formatters).toContain("observed_at");
+    expect(formatters).toMatch(/Observed|observed/);
+  });
+
   it("shows consequence-aware agent help from either help spelling", async () => {
     const direct = await runCli(["help", "agent"], { env: { NO_COLOR: "1" } });
     const flag = await runCli(["agent", "--help"], { env: { NO_COLOR: "1" } });

@@ -34,10 +34,12 @@ import { revalidatePath } from "next/cache";
 
 import { recordAdminAction } from "@/lib/audit";
 import { mfaAuthorizedUser } from "@/lib/mfa";
-import { AVATAR_MAX_BYTES, sniffAvatar } from "@/lib/profile/image";
+import { AVATAR_MAX_BYTES, sniffAvatar, stripAvatarMetadata } from "@/lib/profile/image";
 import {
+  avatarObjectPath,
   clearAvatar,
   ensureProfileRow,
+  newAvatarKey,
   readProfile,
   setAvatar,
   setHandle,
@@ -229,15 +231,20 @@ export async function publishProfile(isPublic: boolean): Promise<ProfileActionSt
 /**
  * Store a new avatar.
  *
- * ORDER MATTERS: the bytes are uploaded FIRST, and only then does setAvatar()
- * mint a new key and point the row at them. The other way round, an upload that
- * fails after the row was updated would leave a fresh key resolving to the
- * previous picture — a URL the operator believes is new, serving something they
- * thought they had replaced.
+ * The key is minted FIRST and the object path is built from it, so each upload
+ * occupies its own object and no two keys ever name the same bytes.
  *
- * The object path is fixed at `<userId>/avatar` and overwritten in place, so an
- * operator only ever occupies one object. The key is what changes, and that is
- * what makes the served URL safe to cache immutably.
+ * That ordering is not a preference between two risks — it dissolves them. A
+ * fixed `<userId>/avatar` overwritten in place looks safe because the key still
+ * changes, but the PREVIOUS key stays live until the row update lands, and it
+ * resolves through avatar_object_path() to whatever is at that path: the new
+ * image. If the update then fails, it stays that way for good, while the
+ * operator is told the image could not be stored. `/avatars/<key>` is served
+ * `immutable` for a year on the promise that this cannot happen.
+ *
+ * The cost is bookkeeping, handled in both directions below: a failed row
+ * update removes the object nothing now names, and a successful one removes the
+ * object the previous key named.
  */
 export async function uploadAvatar(formData: FormData): Promise<ProfileActionState> {
   const acting = await actingUser();
@@ -254,7 +261,12 @@ export async function uploadAvatar(formData: FormData): Promise<ProfileActionSta
     return { error: "That image is larger than 256 KB. Crop or re-save it and try again." };
   }
 
-  const bytes = new Uint8Array(await file.arrayBuffer());
+  // Strip before sniffing. PNG and WebP are chunked containers, so metadata
+  // removal is a byte-slice — refusing the file instead was telling operators
+  // to go and do by hand something the server can simply do. JPEG is still
+  // refused by the sniff below, because its EXIF genuinely cannot be removed
+  // without an image library.
+  const bytes = stripAvatarMetadata(new Uint8Array(await file.arrayBuffer()));
   // The uploader's declared MIME type and the filename are never consulted —
   // both are claims made by whoever is uploading. Only the bytes decide.
   const sniffed = sniffAvatar(bytes);
@@ -263,16 +275,37 @@ export async function uploadAvatar(formData: FormData): Promise<ProfileActionSta
   }
 
   const admin = serviceClient();
-  const objectPath = `${acting.userId}/avatar`;
+
+  // Read the outgoing object before anything replaces it. The row is the only
+  // record of where it lives, and the update below overwrites that field.
+  const previous = await readProfile(admin, acting.userId);
+  const previousPath = previous.ok ? (previous.data?.avatar_path ?? null) : null;
+
+  const avatarKey = newAvatarKey();
+  const objectPath = avatarObjectPath(acting.userId, avatarKey);
   const upload = await admin.storage.from(AVATAR_BUCKET).upload(objectPath, bytes, {
     // The DETECTED type, never the declared one.
     contentType: sniffed.contentType,
-    upsert: true,
+    // The path carries 128 bits of fresh randomness, so a collision is not a
+    // real case — and overwriting would mean silently replacing bytes some
+    // other key already promised were immutable.
+    upsert: false,
   });
   if (upload.error) return { error: "The image could not be stored. Please try again." };
 
-  const result = await setAvatar(admin, acting.userId, objectPath);
-  if (!result.ok) return { error: explain(result.code) };
+  const result = await setAvatar(admin, acting.userId, objectPath, avatarKey);
+  if (!result.ok) {
+    // Nothing names these bytes now. Leaving them would be an orphan in a
+    // bucket with no sweep — the same thing account deletion refuses to do.
+    await admin.storage.from(AVATAR_BUCKET).remove([objectPath]);
+    return { error: explain(result.code) };
+  }
+
+  // The old key stopped resolving the moment the row changed, so its object is
+  // unreachable. Best-effort: a failure here costs storage, not correctness.
+  if (previousPath && previousPath !== objectPath) {
+    await admin.storage.from(AVATAR_BUCKET).remove([previousPath]);
+  }
 
   await recordAdminAction({
     userId: acting.userId,
@@ -342,7 +375,7 @@ function describeRejection(reason: string): string {
     // files that carry it instead of silently publishing somebody's GPS
     // coordinates on a page anyone can fetch.
     case "carries_metadata":
-      return "That image carries embedded metadata (EXIF or a text chunk), which we cannot strip. Re-save it without metadata and try again.";
+      return "That image carries metadata we could not remove automatically. Re-save it without metadata and try again.";
     case "malformed":
       return "That file is not a complete image.";
     default:

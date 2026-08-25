@@ -93,10 +93,22 @@ export async function deleteAccount(confirmation: string): Promise<DeleteAccount
   // A failure here leaves an image nothing references, which is a quota
   // nuisance rather than a disclosure (the avatar_key that addressed it went
   // with the row), so it is reported and does not abort the deletion.
+  //
+  // The whole prefix, not just the path the row named. Since the object path is
+  // derived from the avatar key (see profile-actions.ts), an account can hold
+  // more than one object whenever an earlier best-effort cleanup failed — and
+  // the row that named them is gone by now, so this is the last moment anything
+  // can find them. Under the old fixed `<userId>/avatar` path there was only
+  // ever one, which is why removing a single path used to be sufficient.
   let avatarOrphaned = false;
-  if (avatarPath) {
-    const removal = await admin.storage.from("avatars").remove([avatarPath]);
-    avatarOrphaned = Boolean(removal.error);
+  const listed = await admin.storage.from("avatars").list(user.id);
+  const targets = new Set<string>(avatarPath ? [avatarPath] : []);
+  for (const entry of listed.data ?? []) targets.add(`${user.id}/${entry.name}`);
+  if (targets.size > 0) {
+    const removal = await admin.storage.from("avatars").remove([...targets]);
+    // A failed enumeration counts as orphaned even if the removal succeeded:
+    // the objects it could not list are exactly the ones nothing will find.
+    avatarOrphaned = Boolean(removal.error) || Boolean(listed.error);
     if (avatarOrphaned) {
       await captureError(new Error("Account deletion could not remove the stored avatar"), {
         route: "dashboard/settings/account-delete",

@@ -16,6 +16,12 @@ export interface AttentionAgent {
   spent_tokens: number | null;
   spent_microcents: number | null;
   expires_at?: string | null;
+  /**
+   * The reconcile/challenge stamp. Optional because most callers care only
+   * about budgets — but when it IS present it must be resolved the same way the
+   * fleet table resolves it, or the two disagree. See buildFleetAttention.
+   */
+  last_seen_at?: string | null;
 }
 
 export interface AttentionLog {
@@ -156,13 +162,28 @@ export function buildFleetAttention(
   }
   // Shared with the fleet table via `withLastSeenFromLogs`, so the queue and the
   // table cannot answer "when was this agent last seen" differently.
+  //
+  // Sharing the scan is not enough on its own: the table takes the MAXIMUM of
+  // this scan and the stored column, and the scan is bounded (ATTENTION_SCAN_DAYS
+  // / ATTENTION_SCAN_LIMIT). A busy tenant's older calls fall outside it, and
+  // reading the scan alone would print "No recent activity" beside the timestamp
+  // the table renders from the column. So the same maximum is taken below.
   const newestCall = newestCallByAgent(logs, nowMs);
 
   const items: FleetAttentionItem[] = [];
   for (const agent of agents) {
     if (agent.status === "revoked") continue;
     const rows = byAgent.get(agent.id) ?? [];
-    const lastSeenMs = newestCall.get(agent.id) ?? null;
+    // Same rule as withLastSeenFromLogs: whichever evidence is newer, and a
+    // future stamp is discarded rather than clamped (timestamp() does not, so
+    // it is checked here exactly as newestCallByAgent checks a log row).
+    const fromLogs = newestCall.get(agent.id) ?? null;
+    const stamped = timestamp(agent.last_seen_at ?? null);
+    const fromColumn = stamped !== null && stamped <= nowMs ? stamped : null;
+    const evidence = [fromLogs, fromColumn].filter((at): at is number => at !== null);
+    // Max, not a preferred side — and still null when there is no evidence at
+    // all, because "never" is a real answer and must not be invented away.
+    const lastSeenMs = evidence.length === 0 ? null : Math.max(...evidence);
     let recentRefusals = 0;
     let burnedTokens = 0;
     let burnedMicrocents = 0;

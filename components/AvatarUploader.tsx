@@ -113,7 +113,7 @@ export function AvatarUploader({
       const encoded = await reencode(file);
       if (!encoded) {
         setProblem(
-          "That image could not be prepared. Use a PNG or WebP under 256 KB, or crop it smaller."
+          "That image could not be prepared. Try a PNG, JPEG or WebP, or crop it smaller."
         );
         return;
       }
@@ -147,9 +147,9 @@ export function AvatarUploader({
       <div className="pc-profile-avatar__body">
         <strong>Avatar</strong>
         <p>
-          PNG or WebP, up to 256 KB. It is cropped square and re-encoded in your browser before
-          it is sent, which removes any location or camera data the original carried — we cannot
-          strip that on our side, so a file that still has it is refused.
+          PNG, JPEG or WebP, up to 256 KB. It is cropped square and re-encoded in your browser,
+          and any location or camera data the original carried is removed — in the browser, and
+          again on our side. JPEG is converted for you; the stored avatar is always PNG or WebP.
         </p>
         {problem && (
           <p className="pc-field-note is-warning" role="alert">

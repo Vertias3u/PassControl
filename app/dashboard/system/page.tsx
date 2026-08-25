@@ -4,15 +4,18 @@ import { SystemHealthRefresh } from "@/components/dashboard/SystemHealthRefresh"
 import { SystemHealthRestricted } from "@/components/dashboard/SystemHealthRestricted";
 import { SystemHealthSnapshotView } from "@/components/dashboard/SystemHealthSnapshot";
 import { getSystemHealthSnapshot } from "@/lib/system-health";
+import { getCachedSystemHealthSnapshot } from "@/lib/system-health/cache";
 import { systemOperatorGate } from "@/lib/system-health/operator";
 import { betaOperatorEmails } from "@/lib/beta-launch";
 
 export const dynamic = "force-dynamic";
-export const fetchCache = "force-no-store";
-export const revalidate = 0;
 export const metadata = { title: "System health" };
 
-export default async function SystemHealthPage() {
+export default async function SystemHealthPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ refresh?: string | string[] }>;
+}) {
   const gate = await systemOperatorGate();
 
   // Redirect only where the destination can actually resolve the refusal:
@@ -38,7 +41,12 @@ export default async function SystemHealthPage() {
     );
   }
 
-  const snapshot = await getSystemHealthSnapshot();
+  const params = await searchParams;
+  // Normal navigation reuses an instance-level snapshot for 45 seconds. The
+  // existing operator control opts into the deeper uncached probes explicitly.
+  const snapshot = typeof params.refresh === "string"
+    ? await getSystemHealthSnapshot()
+    : await getCachedSystemHealthSnapshot();
   return (
     <DashboardShell
       userId={gate.user.id}
@@ -48,6 +56,7 @@ export default async function SystemHealthPage() {
       title="System health"
       description="A safe, point-in-time view of local application wiring and dependencies."
       actions={<SystemHealthRefresh />}
+      migrationHealth={snapshot.migrations}
     >
       <SystemHealthSnapshotView snapshot={snapshot} />
     </DashboardShell>

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error — plain .mjs CLI module, no types
-import { bareGatewayOrigin, requirePassportGateway } from "../cli/config.mjs";
+import { bareGatewayOrigin, probeGatewayOrigin, requirePassportGateway } from "../cli/config.mjs";
 
 // The control-plane half of this rule shipped first: `api()` validates before it
 // puts a `pc_` key on the wire, and tests/cli-control-gateway.test.ts pins it.
@@ -200,7 +200,11 @@ describe("no passport-path URL is built from the raw gateway string", () => {
   // it had passed through `trimSlash`, which tidies a string without judging the
   // destination. So each base expression is traced back to its assignment in the
   // same file, and every assignment must come from the rule.
-  const VALIDATOR = /bareGatewayOrigin\(|requirePassportGateway\(|requireControlGateway\(/;
+  // probeGatewayOrigin is the credential-free member of this family: same
+  // bareGatewayOrigin call, returning null instead of throwing, for reports
+  // like `passcontrol version` that must not abort on a bad gateway.
+  const VALIDATOR =
+    /bareGatewayOrigin\(|requirePassportGateway\(|requireControlGateway\(|probeGatewayOrigin\(/;
   // The shape of the defect itself: the configuration string, or a cosmetic
   // tidy-up of it, standing in for a validated destination.
   const RAW_CONFIG = /config\.gateway|current\.gateway|trimSlash\(|opts\.gateway/;
@@ -235,5 +239,35 @@ describe("no passport-path URL is built from the raw gateway string", () => {
       if (!validated || fromRawConfig) unvalidated.push(base);
     }
     expect(unvalidated).toEqual([]);
+  });
+});
+
+describe("probeGatewayOrigin — the credential-free member of the family", () => {
+  // `passcontrol version` reads an unauthenticated endpoint, so nothing secret
+  // travels. It is still bound by the same origin rule, for two reasons that
+  // are not about secrecy: a diagnostic that reports a stranger's build as your
+  // gateway's is worse than one that reports nothing, and an unvalidated
+  // destination makes the command a beacon a checked-in `.passcontrol` can aim.
+  it("returns a bare origin for a legitimate gateway", () => {
+    expect(probeGatewayOrigin({ gateway: "https://passcontrol.example.com" })).toBe(
+      "https://passcontrol.example.com"
+    );
+    expect(probeGatewayOrigin({ gateway: "http://127.0.0.1:3000" })).toBe("http://127.0.0.1:3000");
+  });
+
+  it("refuses everything bareGatewayOrigin refuses, without throwing", () => {
+    const hostile = [
+      "http://attacker.example.com",            // plain HTTP off-loopback
+      "https://trusted.example@attacker.example", // userinfo
+      "https://attacker.example/path/prefix",   // path prefix
+      "https://attacker.example/?x=1",          // query
+      "https://attacker.example/#f",            // fragment
+      "not-a-url",
+      "",
+      undefined,
+    ];
+    for (const gateway of hostile) {
+      expect(probeGatewayOrigin({ gateway })).toBeNull();
+    }
   });
 });

@@ -215,6 +215,14 @@ describe("buildAuditRecord — admin-action audit row", () => {
         // ordinary mutation: it creates agents.
         "workspace.export",
         "workspace.import",
+        // Problem reports (migration 0038). Filing is the reporter's action and
+        // is audited under the reporter; triage is the operator's and is
+        // audited under the operator, so the trail answers "who decided this"
+        // rather than "who was complained about". Neither row carries the
+        // report body: admin_audit is served by GET /api/control/v1/audit, and
+        // the text belongs in exactly one column of one server-only table.
+        "problem.report",
+        "problem.triage",
       ].sort()
     );
   });

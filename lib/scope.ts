@@ -491,7 +491,10 @@ function isSafeParamSegment(segment: string | undefined): segment is string {
 const OPENAI_CHAT_PATH = ["v1", "chat", "completions"] as const;
 const OPENAI_MODELS_PATH = ["v1", "models"] as const;
 const ANTHROPIC_MESSAGES_PATH = ["v1", "messages"] as const;
+// The versionless spellings, for providers whose base URL already carries its
+// own version segment (deepseek, and gemini's OpenAI-compat base `/v1beta/openai`).
 const DEEPSEEK_CHAT_PATH = ["chat", "completions"] as const;
+const VERSIONLESS_MODELS_PATH = ["models"] as const;
 
 const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
   openai: [
@@ -552,6 +555,20 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
     // upstream path. Without this row deepseek was the only OpenAI-shape provider
     // that rejected that spelling.
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: DEEPSEEK_CHAT_PATH },
+  ],
+  // Gemini via Google's OpenAI-compatibility endpoint. The base URL already
+  // ends in `/v1beta/openai`, so every upstream path here is versionless —
+  // structurally the deepseek case, not the openai one. Both client spellings
+  // are accepted and normalised for the reason the deepseek note above gives:
+  // a client configured with a host-style base URL sends `v1/chat/completions`
+  // and cannot know we serve it unversioned.
+  gemini: [
+    { method: "POST", path: DEEPSEEK_CHAT_PATH, upstreamPath: DEEPSEEK_CHAT_PATH },
+    { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: DEEPSEEK_CHAT_PATH },
+    { method: "GET", path: VERSIONLESS_MODELS_PATH, upstreamPath: VERSIONLESS_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: VERSIONLESS_MODELS_PATH },
+    { method: "GET", path: VERSIONLESS_MODELS_PATH, upstreamPath: VERSIONLESS_MODELS_PATH, param: true },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: VERSIONLESS_MODELS_PATH, param: true },
   ],
 };
 

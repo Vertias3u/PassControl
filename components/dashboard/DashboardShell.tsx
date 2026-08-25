@@ -7,6 +7,7 @@ import {
   ExternalLink,
   Gauge,
   LogOut,
+  MessageSquareWarning,
   Network,
   Settings,
   Stethoscope,
@@ -23,9 +24,13 @@ import { DashboardStickyOffsets } from "@/components/dashboard/DashboardStickyOf
 import { instanceLabel } from "@/lib/instance-label";
 import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
+import { getCachedMigrationHealth } from "@/lib/system-health/cache";
 import { systemOperatorEmails } from "@/lib/system-health/operator";
+import { MigrationBanner } from "@/components/dashboard/MigrationBanner";
+import { mfaAuthorizedUser } from "@/lib/mfa";
+import type { SystemHealthSnapshot } from "@/lib/system-health";
 
-export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "settings" | "beta" | "system";
+export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "settings" | "beta" | "system" | "report";
 
 const NAV: Array<{
   id: DashboardArea;
@@ -86,6 +91,7 @@ export async function DashboardShell({
   children,
   contentClassName,
   showBetaOperator = false,
+  migrationHealth,
 }: {
   userId: string;
   active: DashboardArea;
@@ -96,10 +102,12 @@ export async function DashboardShell({
   children: ReactNode;
   contentClassName?: string;
   showBetaOperator?: boolean;
+  /** Reuse the detailed page's snapshot so its banner cannot disagree. */
+  migrationHealth?: SystemHealthSnapshot["migrations"];
 }) {
   const db = await userClient();
   const now = new Date().toISOString();
-  const [{ data: commandAgents, error: agentError }, { data: grants, error: grantError }, profile, { data: auth }] =
+  const [{ data: commandAgents, error: agentError }, { data: grants, error: grantError }, profile, mfa] =
     await Promise.all([
       db
         .from("agents")
@@ -118,10 +126,10 @@ export async function DashboardShell({
       // freshly signed-up operator legitimately has none and the chip falls
       // back to the deployment label it has always shown.
       readProfile(serviceClient(), userId),
-      // Navigation only: resolve the email from Auth rather than from an
-      // unverified caller prop. The page itself still uses the strict operator
-      // gate, including verified TOTP, before it reads a health snapshot.
-      db.auth.getUser(),
+      // This navigation and banner are themselves privileged diagnostics. Use
+      // the same strict, signed-AAL gate as the destination page, not merely a
+      // verified factor on an aal1 session.
+      mfaAuthorizedUser(db),
     ]);
   const profileRecord = profile.ok ? profile.data : null;
   const agentNames = new Map((commandAgents ?? []).map((agent) => [agent.id, agent.name]));
@@ -131,8 +139,18 @@ export async function DashboardShell({
     agentName: agentNames.get(grant.agent_id) ?? `Agent …${String(grant.agent_id).slice(-8)}`,
     expiresAt: grant.expires_at,
   }));
-  const showSystemHealth = systemOperatorEmails().has(auth.user?.email?.trim().toLowerCase() ?? "")
-    && (auth.user?.factors ?? []).some((factor) => factor.factor_type === "totp" && factor.status === "verified");
+  const showSystemHealth = mfa.ok
+    && systemOperatorEmails().has(mfa.user.email?.trim().toLowerCase() ?? "")
+    && (mfa.user.factors ?? []).some((factor) => factor.factor_type === "totp" && factor.status === "verified");
+
+  // Serial, and only for an operator. It cannot join the Promise.all above
+  // because it depends on `auth` resolving first — which is the point: a tenant
+  // never pays for this read, and never sees how far behind the instance is.
+  // getCachedMigrationHealth is the cheap collector (one bounded query, no Redis ping,
+  // no vault probe) precisely so it can sit on every dashboard load.
+  const migrations = showSystemHealth
+    ? migrationHealth !== undefined ? migrationHealth : await getCachedMigrationHealth()
+    : null;
 
   return (
     <DashboardTimeProvider>
@@ -151,6 +169,10 @@ export async function DashboardShell({
           <summary aria-label="Open navigation">Menu</summary>
           <div className="pc-mobile-nav__panel">
             <Navigation active={active} mobile showBetaOperator={showBetaOperator} showSystemHealth={showSystemHealth} />
+            <Link href="/dashboard/report" className="pc-nav-link">
+              <MessageSquareWarning aria-hidden="true" />
+              <span>Report a problem</span>
+            </Link>
             <form action={signOut}>
               <button type="submit" className="pc-nav-link w-full">
                 <LogOut aria-hidden="true" />
@@ -205,6 +227,16 @@ export async function DashboardShell({
           <Navigation active={active} showBetaOperator={showBetaOperator} showSystemHealth={showSystemHealth} />
 
           <div className="pc-sidebar__footer">
+            {/*
+              Reachable from every page on purpose: people report where they got
+              stuck, not from a support page they went looking for. A plain Link
+              rather than a modal, so the shell — which renders on every
+              dashboard route — pays nothing for it.
+            */}
+            <Link href="/dashboard/report" className="pc-nav-link">
+              <MessageSquareWarning aria-hidden="true" />
+              <span>Report a problem</span>
+            </Link>
             <Link href="/verify" className="pc-nav-link">
               <ExternalLink aria-hidden="true" />
               <span>Verify passport</span>
@@ -241,6 +273,9 @@ export async function DashboardShell({
           />
 
           <main id="pc-main" className={cn("pc-content", contentClassName)}>
+            {/* Above the page's own content on purpose: a schema mismatch
+                changes how everything below it should be read. */}
+            {migrations ? <MigrationBanner migrations={migrations} /> : null}
             {children}
           </main>
         </div>

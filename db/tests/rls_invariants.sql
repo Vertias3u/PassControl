@@ -28,11 +28,12 @@ declare
   v_key_a uuid;
   n int;
   bad text;
+  ok boolean;
 begin
   -- (0) RLS enabled on every sensitive table.
   select string_agg(relname, ', ') into bad from pg_class
    where relnamespace = 'public'::regnamespace and relkind = 'r'
-     and relname in ('users','agents','agent_logs','provider_credentials','admin_audit','agent_spend_checkpoint','api_keys','mfa_recovery_codes','agent_access_keys','agent_owners','retired_usernames')
+     and relname in ('users','agents','agent_logs','provider_credentials','admin_audit','agent_spend_checkpoint','api_keys','mfa_recovery_codes','agent_access_keys','agent_owners','retired_usernames','reserved_usernames','profile_verifications','onboarding_state','problem_reports')
      and relrowsecurity = false;
   if bad is not null then raise exception 'RLS disabled on: %', bad; end if;
 
@@ -154,6 +155,24 @@ begin
     raise exception 'retired_usernames must not be readable by a browser role';
   end if;
 
+  -- The two manual identity registries are never browser capabilities. A
+  -- profile may read its own ordinary fields; it may neither inspect protected
+  -- names/assignments nor mint the check rendered to strangers.
+  if has_table_privilege('authenticated', 'public.reserved_usernames', 'SELECT')
+     or has_table_privilege('authenticated', 'public.reserved_usernames', 'INSERT')
+     or has_table_privilege('authenticated', 'public.reserved_usernames', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.reserved_usernames', 'DELETE')
+     or has_table_privilege('anon', 'public.reserved_usernames', 'SELECT') then
+    raise exception 'reserved_usernames must be server-only';
+  end if;
+  if has_table_privilege('authenticated', 'public.profile_verifications', 'SELECT')
+     or has_table_privilege('authenticated', 'public.profile_verifications', 'INSERT')
+     or has_table_privilege('authenticated', 'public.profile_verifications', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.profile_verifications', 'DELETE')
+     or has_table_privilege('anon', 'public.profile_verifications', 'SELECT') then
+    raise exception 'profile_verifications must be server-only';
+  end if;
+
   -- api_keys: an owner may revoke their own key (UPDATE revoked_at), but must not
   -- be able to escalate an existing key's `scope` (read->write) or tamper
   -- `key_hash` via a direct PostgREST PATCH. Privileged columns are server-only.
@@ -255,6 +274,46 @@ begin
     raise exception 'authenticated must keep SELECT on public.users (users_self scopes it)';
   end if;
 
+  -- Onboarding stores only a preference and one whole-flow milestone. The table
+  -- is browser-read-only; no client may forge completed_at. Two no-argument RPCs
+  -- bind writes to auth.uid(), and completion recomputes real ordered evidence.
+  if not has_table_privilege('authenticated', 'public.onboarding_state', 'SELECT')
+     or has_table_privilege('authenticated', 'public.onboarding_state', 'INSERT')
+     or has_table_privilege('authenticated', 'public.onboarding_state', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.onboarding_state', 'DELETE')
+     or has_table_privilege('anon', 'public.onboarding_state', 'SELECT')
+     or has_table_privilege('anon', 'public.onboarding_state', 'INSERT')
+     or has_table_privilege('anon', 'public.onboarding_state', 'UPDATE') then
+    raise exception 'onboarding_state has the wrong browser grants';
+  end if;
+  if has_function_privilege('anon', 'public.dismiss_onboarding()', 'EXECUTE')
+     or has_function_privilege('anon', 'public.complete_onboarding()', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.dismiss_onboarding()', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.complete_onboarding()', 'EXECUTE') then
+    raise exception 'onboarding persistence RPCs have the wrong execution grants';
+  end if;
+
+  -- problem_reports is server-only in BOTH directions, and the read half is the
+  -- half that is easy to get wrong. RLS filters rows, not columns: a table-level
+  -- SELECT grant plus an owner policy would hand every tenant the schema_head
+  -- and app_version columns, which /dashboard/system restricts to named
+  -- operators with verified TOTP because how far behind a database is doubles as
+  -- a list of the fixes it lacks. The write half is simpler: an INSERT grant
+  -- routes around lib/redact.ts, which is the only thing keeping a pasted
+  -- provider key out of a durable table. Neither role holds anything here.
+  if has_table_privilege('authenticated', 'public.problem_reports', 'SELECT')
+     or has_table_privilege('authenticated', 'public.problem_reports', 'INSERT')
+     or has_table_privilege('authenticated', 'public.problem_reports', 'UPDATE')
+     or has_table_privilege('authenticated', 'public.problem_reports', 'DELETE')
+     or has_table_privilege('anon', 'public.problem_reports', 'SELECT')
+     or has_table_privilege('anon', 'public.problem_reports', 'INSERT') then
+    raise exception 'problem_reports must be server-only';
+  end if;
+  if has_function_privilege('anon', 'public.purge_problem_reports()', 'EXECUTE')
+     or has_function_privilege('authenticated', 'public.purge_problem_reports()', 'EXECUTE') then
+    raise exception 'purge_problem_reports must not be callable from a browser session';
+  end if;
+
   -- mfa_recovery_codes is credential material, and it defeats everything above if
   -- it is writable. A recovery code is redeemed at /login/verify as an EMERGENCY
   -- RESET: consume one, unenroll the TOTP factor, land in at aal1 — a recovery
@@ -348,7 +407,14 @@ begin
     values (v_a, '__rls_A__', 'pkA_'||v_a, 'active'), (v_b, '__rls_B__', 'pkB_'||v_b, 'active');
   insert into public.agent_logs (agent_id, user_id, passport_id, jti, status)
     select id, user_id, 'pk', 'j', 'ok' from public.agents where user_id in (v_a, v_b);
-  insert into public.admin_audit (user_id, action) values (v_a, 'agent.create'), (v_b, 'agent.create');
+  insert into public.agent_logs (agent_id, user_id, passport_id, jti, model, status)
+    select id, user_id, 'pk', 'j-inference', 'test-model', 'ok'
+      from public.agents where user_id = v_a;
+  insert into public.admin_audit (user_id, action)
+    values (v_a, 'killswitch.master'), (v_b, 'agent.create');
+  insert into public.provider_credentials (user_id, provider, label, vault_secret_id)
+    values (v_a, 'openai', '__rls_A__', gen_random_uuid());
+  insert into public.onboarding_state (user_id, dismissed_at) values (v_b, now());
   insert into public.api_keys (user_id, name, key_prefix, key_hash, scope)
     values (v_a, 'A', 'pc_aaaa', 'hash_a_'||v_a, 'read'), (v_b, 'B', 'pc_bbbb', 'hash_b_'||v_b, 'read');
   insert into public.mfa_recovery_codes (user_id, code_hash)
@@ -378,6 +444,18 @@ begin
   if n <> 0 then raise exception 'tenant leak: A saw B''s admin_audit'; end if;
   select count(*) into n from public.api_keys where user_id = v_b;
   if n <> 0 then raise exception 'tenant leak: A saw B''s api_keys'; end if;
+  select public.dismiss_onboarding() into ok;
+  if not ok then raise exception 'A could not persist its onboarding dismissal through the RPC'; end if;
+  select public.complete_onboarding() into ok;
+  if not ok then raise exception 'A could not persist verified onboarding completion through the RPC'; end if;
+  select count(*) into n from public.onboarding_state;
+  if n <> 1 then raise exception 'A should see exactly its own onboarding row, saw %', n; end if;
+  begin
+    execute format('insert into public.onboarding_state (user_id, completed_at) values (%L, now())', v_b);
+    raise exception 'authenticated could directly write another tenant onboarding row';
+  exception
+    when insufficient_privilege then null;
+  end;
   -- Recovery codes are no longer tenant-scoped-by-RLS, they are unreachable: the
   -- grant is gone (0031), so there is no "own rows" read left to leak. Asserted
   -- behaviourally rather than by privilege introspection alone, because this is

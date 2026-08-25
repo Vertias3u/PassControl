@@ -153,7 +153,17 @@ describe("the derivation's standing assumption", () => {
       "DEEPSEEK_CHAT_PATH",
       '["chat", "completions"]',
     ]);
-    const MODEL_FREE = new Set(["OPENAI_MODELS_PATH", '["models"]']);
+    // Recorded decision (2026-08-25): `VERSIONLESS_MODELS_PATH` (= ["models"])
+    // arrived with the gemini provider, whose OpenAI-compat base already carries
+    // `/v1beta/openai` and so serves the listing unversioned. It is the same
+    // model-metadata listing as OPENAI_MODELS_PATH with the version segment in
+    // the base instead of the path — it runs no inference and bills nothing, so
+    // it is housekeeping, exactly like the two spellings already here.
+    const MODEL_FREE = new Set([
+      "OPENAI_MODELS_PATH",
+      "VERSIONLESS_MODELS_PATH",
+      '["models"]',
+    ]);
 
     const rules = [...block.matchAll(/method:\s*"([A-Z]+)",\s*path:\s*(\[[^\]]*\]|\w+)/g)];
     expect(rules.length).toBeGreaterThan(0);

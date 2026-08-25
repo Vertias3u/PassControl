@@ -255,6 +255,21 @@ export interface DepartureGroup {
  * rendering an unverified claim as a fact. The span is what the rows support, so
  * the span is what the board offers.
  */
+/**
+ * A stable name for a burst, for UI state that must outlive its membership.
+ *
+ * NOT `group.row.id`. Rows arrive newest first, so the representative is the
+ * NEWEST member and it changes the moment another call of the same kind lands
+ * over realtime. Anything keyed on it — an expanded burst, most obviously —
+ * loses its entry while the operator is looking at it.
+ *
+ * The oldest member is the fixed end: new arrivals are newer by construction,
+ * so they extend the burst without renaming it.
+ */
+export function groupKey(group: DepartureGroup): string {
+  return group.members[group.members.length - 1]?.id ?? group.row.id;
+}
+
 export function groupSpan(group: DepartureGroup): { from: string; to: string } | null {
   if (group.count < 2) return null;
   const oldest = group.members[group.members.length - 1]?.created_at;

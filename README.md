@@ -142,6 +142,7 @@ Add a **non-critical** provider key in the Control Tower, issue a passport, and 
 ```bash
 passcontrol init             # gateway + passport + provider/model → writes .passcontrol
 passcontrol doctor --deep    # verifies config, prerequisites, and mints a test visa
+passcontrol version          # CLI vs gateway vs database schema, in one table
 passcontrol call "Say hello in 3 words"
 passcontrol spend            # confirms governed spend
 ```
@@ -276,6 +277,7 @@ The primary interface is `passcontrol <command>`. Highlights:
 |---|---|
 | Config, gateway status, suggested next steps | `passcontrol status` |
 | Check local setup / mint a test visa | `passcontrol doctor --deep` |
+| Compare CLI, gateway and database versions | `passcontrol version` |
 | Make a governed model call | `passcontrol call "Summarize this"` |
 | Run the local MCP server | `passcontrol mcp` |
 | Run the auto-refreshing bridge for an agent | `passcontrol sidecar` |
@@ -409,6 +411,28 @@ your full provider surface).
 - **Instant revocation** assumes Redis is configured for persistence / no-eviction. If Redis evicts
   suspend/kill keys, enforcement falls back to short visa TTLs and the durable agent-status check at
   the next mint.
+
+## What the CLI sends, and where
+
+No telemetry, no analytics, no usage reporting — none of this tool's operation is
+reported anywhere. There is exactly **one** outbound request PassControl makes that
+you did not ask for, and it is worth naming precisely rather than leaving you to
+find it in a packet capture:
+
+Once every 24 hours, `passcontrol` asks `registry.npmjs.org` for the latest published
+version number so it can tell you when your install is old. It sends nothing but the
+HTTP request itself — no identifiers, no configuration, no workspace or agent data.
+It is skipped entirely when stdout is not a terminal (so it never fires inside an
+agent run, a CI job, or a piped command), skipped under `--json`, and skipped when
+`CI` is set.
+
+To turn it off completely:
+
+```bash
+export PASSCONTROL_NO_UPDATE_CHECK=1   # or the conventional NO_UPDATE_NOTIFIER=1
+```
+
+It never downloads or installs anything. Upgrading stays a command you type.
 
 ## Security
 

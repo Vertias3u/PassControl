@@ -16,7 +16,7 @@
 import { ed25519 } from "@noble/curves/ed25519";
 import { requireGatewayOrigin } from "./gateway.js";
 
-export type ProviderId = "openai" | "anthropic" | "groq" | "mistral" | "together" | "deepseek";
+export type ProviderId = "openai" | "anthropic" | "groq" | "mistral" | "together" | "deepseek" | "gemini";
 
 export interface PassControlOptions {
   /**

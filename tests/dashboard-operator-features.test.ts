@@ -56,6 +56,48 @@ describe("operator-priority dashboard read models", () => {
     expect(item?.projectedExhaustionAt).not.toBeNull();
   });
 
+  it("uses the stamped column when the agent's calls fall outside the scan", () => {
+    // The mirror image of the 2026-08-17 bug below, and it survived the fix.
+    // The attention scan is bounded (ATTENTION_SCAN_DAYS / ATTENTION_SCAN_LIMIT
+    // in app/dashboard/page.tsx), so a busy tenant's older calls are simply not
+    // in `logs`. The fleet table still renders a time, because it resolves
+    // through withLastSeenFromLogs against the column. Reading the scan alone
+    // here puts "No recent activity" beside a real timestamp in one viewport --
+    // the same contradiction, pointing the other way.
+    const item = buildFleetAttention(
+      [agent({ last_seen_at: "2026-08-08T09:00:00.000Z" })],
+      [],
+      NOW
+    )[0];
+    expect(item?.lastSeenAt).toBe("2026-08-08T09:00:00.000Z");
+  });
+
+  it("still prefers a call newer than the stamp", () => {
+    const item = buildFleetAttention(
+      [agent({ last_seen_at: "2026-08-08T09:00:00.000Z" })],
+      [log({ created_at: "2026-08-08T11:00:00.000Z" })],
+      NOW
+    )[0];
+    expect(item?.lastSeenAt).toBe("2026-08-08T11:00:00.000Z");
+  });
+
+  it("prefers a stamp newer than the newest call", () => {
+    // The column legitimately LEADS: a passport stamps it at the challenge,
+    // before any call is recorded. This is the branch withLastSeenFromLogs
+    // documents, and the queue has to agree with it or the two disagree again.
+    const item = buildFleetAttention(
+      [agent({ last_seen_at: "2026-08-08T11:30:00.000Z" })],
+      [log({ created_at: "2026-08-08T11:00:00.000Z" })],
+      NOW
+    )[0];
+    expect(item?.lastSeenAt).toBe("2026-08-08T11:30:00.000Z");
+  });
+
+  it("keeps 'never' honest in the queue too", () => {
+    const item = buildFleetAttention([agent({ last_seen_at: null })], [], NOW)[0];
+    expect(item?.lastSeenAt).toBeNull();
+  });
+
   it("does not pad an entirely healthy queue", () => {
     const healthy = agent({ budget_tokens: null, budget_cents: null, spent_tokens: 0, spent_microcents: 0 });
     expect(buildFleetAttention([healthy], [log()], NOW)).toEqual([]);

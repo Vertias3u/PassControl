@@ -53,7 +53,7 @@ const response = await client.chat.completions.create({
 });
 ```
 
-The same wrapper supports `groq`, `mistral`, `together` and `deepseek` by changing the literal
+The same wrapper supports `groq`, `mistral`, `together`, `deepseek` and `gemini` by changing the literal
 passed to `clientOptions`. The request remains in the OpenAI chat-completions shape.
 
 ## Anthropic

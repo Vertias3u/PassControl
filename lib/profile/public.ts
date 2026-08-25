@@ -45,6 +45,7 @@ export const PUBLIC_PROFILE_FIELDS = [
   "company",
   "avatarKey",
   "memberSince",
+  "verified",
   "owner",
   "publishedAgentCount",
 ] as const;
@@ -93,6 +94,8 @@ export interface PublicProfileView {
   /** Feeds /avatars/<key>. Null when the operator has no avatar. */
   avatarKey: string | null;
   memberSince: string | null;
+  /** True only when the server-only platform registry has a current row. */
+  verified: boolean;
   /** Null when no owner is bound, or when the owner has not published one. */
   owner: PublicProfileOwnerView | null;
   publishedAgentCount: number;
@@ -201,6 +204,9 @@ export function buildPublicProfileView(row: unknown): PublicProfileView | null {
     company: text(row.company),
     avatarKey: text(row.avatar_key),
     memberSince: date(row.member_since),
+    // Exact boolean only. Schema drift, strings and numbers all resolve down
+    // to no badge; a public identity surface must never guess upward.
+    verified: row.is_verified === true,
     owner: buildPublicProfileOwnerView(row),
     publishedAgentCount: Number.isFinite(count) && count > 0 ? Math.floor(count) : 0,
   };

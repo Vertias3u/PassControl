@@ -77,56 +77,26 @@ describe("the first-call guide reuses the first-run provider read", () => {
     expect(all.slice(0, all.indexOf("]);"))).toMatch(/provider_credentials/);
   });
 
-  it("resolves the guide's dismissal on the server, not in an effect", () => {
-    // This replaced an assertion that pinned the opposite and was wrong for it.
-    //
-    // Dismissal used to be read from localStorage in an effect, with the guard
-    // treating "not yet known" as "hide". That deadlocks: the server renders
-    // null, so the client component never mounts, so the effect never runs.
-    // Every dismissible stage was invisible on a cold load, in production, and
-    // the old source-grep could not see it because the source looked correct.
-    // The behavioural check lives in tests/first-call-steps-rendering.test.tsx;
-    // this one keeps the two halves of the cookie from drifting apart.
-    expect(firstCall).toContain("if (dismissible && dismissed) return null;");
-    // The prose above the guard explains why localStorage was abandoned, so
-    // match on use, not on the word.
-    expect(firstCall).not.toMatch(/localStorage\s*\.\s*(get|set|remove)Item/);
-    expect(dashboard).toContain("FIRST_CALL_DISMISSED_COOKIE");
-    expect(dashboard).toContain("?.value === user.id");
-
-    // The cookie name is declared in the plain shared module, NOT in the client
-    // component, and importing it from the client component is the bug this
-    // pins. A `"use client"` export reaches a server component as a client
-    // reference rather than the string, so `cookies().get(NAME)` returned null
-    // while `getAll()` listed the cookie and the guide would not stay dismissed.
-    // Type-checks fine; invisible to every source-grep that does not look here.
-    expect(read("lib/first-call-activation.ts")).toContain(
-      'export const FIRST_CALL_DISMISSED_COOKIE = "pc-first-call-dismissed"'
-    );
-    expect(firstCall).not.toMatch(/export const FIRST_CALL_DISMISSED_COOKIE/);
-    const dashboardImports = dashboard.slice(0, dashboard.indexOf("export const dynamic"));
-    expect(dashboardImports).toMatch(
-      /import \{[^}]*FIRST_CALL_DISMISSED_COOKIE[^}]*\} from "@\/lib\/first-call-activation"/
-    );
-
-    const dismissible = firstCall.slice(firstCall.indexOf("const dismissible ="));
-    const line = dismissible.slice(0, dismissible.indexOf(";"));
-    expect(line).toContain('state.stage === "complete"');
-    expect(line).toContain('state.stage === "verify"');
+  it("resolves durable dismissal/completion on the server and stores completion from reality", () => {
+    expect(dashboard).toContain('from("onboarding_state")');
+    expect(dashboard).toContain('select("dismissed_at, completed_at")');
+    expect(dashboard).toContain("onboardingStateHidden(onboardingState)");
+    expect(firstCall).toContain("if (hidden) return null;");
+    expect(firstCall).toContain('.rpc("complete_onboarding")');
+    expect(firstCall).toContain('.rpc("dismiss_onboarding")');
+    expect(firstCall).not.toMatch(/localStorage\s*\.\s*(get|set|remove)Item|document\.cookie/);
+    expect(dashboard).not.toMatch(/cookies\(\)|FIRST_CALL_DISMISSED_COOKIE/);
   });
 
-  it("declares the dismissal cookie in the cookie notice", () => {
-    // An identity product that sets an undeclared client-visible cookie is a
-    // compliance defect, not a styling one. The notice enumerates storage by
-    // name, so a new cookie has to arrive there in the same change.
-    expect(read("app/legal/cookies/page.tsx")).toContain("pc-first-call-dismissed");
+  it("removes the retired dismissal cookie from the storage notice", () => {
+    expect(read("app/legal/cookies/page.tsx")).not.toContain("pc-first-call-dismissed");
   });
 
   it("derives the last activation step from audit rows it already fetched", () => {
     // A rail most tenants have dismissed must not cost a round trip. admin_audit
     // is loaded once, for ActivityWorkspace, and step 4 reads the same rows.
-    expect(dashboard).toContain("hasExercisedControls(adminAudit ?? [])");
-    expect(dashboard).toContain("controlsExercised={controlsExercised}");
+    expect(dashboard).toContain("latestControlExerciseAt(adminAudit ?? [])");
+    expect(dashboard).toContain("controlExerciseAt={controlExerciseAt}");
     expect(dashboard.match(/from\("admin_audit"\)/g) ?? []).toHaveLength(1);
   });
 

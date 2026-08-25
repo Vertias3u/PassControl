@@ -15,6 +15,8 @@ type CheckState = SystemHealthSnapshot["checks"][number]["state"];
 type OverallState = SystemHealthSnapshot["overall"];
 type HealthCategory = SystemHealthSnapshot["checks"][number]["category"];
 type MigrationState = SystemHealthSnapshot["migrations"]["state"];
+type FunctionalityState = NonNullable<SystemHealthSnapshot["checks"][number]["impact"]>["functionality"]["state"];
+type SecurityState = NonNullable<SystemHealthSnapshot["checks"][number]["impact"]>["security"]["state"];
 
 const stateCopy: Record<CheckState, string> = {
   ready: "Ready",
@@ -36,6 +38,20 @@ const migrationCopy: Record<MigrationState, string> = {
   behind: "Behind",
   ahead: "Ahead",
   incompatible: "Incompatible",
+  unknown: "Unknown",
+};
+
+const functionalityCopy: Record<FunctionalityState, string> = {
+  full: "Full",
+  partial: "Partial",
+  unavailable: "Unavailable",
+  unknown: "Unknown",
+};
+
+const securityCopy: Record<SecurityState, string> = {
+  nominal: "Nominal",
+  protected: "Protected by fail-closed mode",
+  degraded: "Degraded",
   unknown: "Unknown",
 };
 
@@ -156,6 +172,18 @@ function Card({ snapshot, category, title, description, Icon }: {
                 <div>
                   <strong>{check.label}</strong>
                   <p>{check.summary}</p>
+                  {check.impact ? (
+                    <div className="pc-system-health-card__impact">
+                      <p data-impact="functionality" data-state={check.impact.functionality.state}>
+                        <strong>Functionality: {functionalityCopy[check.impact.functionality.state]}</strong>{" "}
+                        {check.impact.functionality.summary}
+                      </p>
+                      <p data-impact="security" data-state={check.impact.security.state}>
+                        <strong>Security: {securityCopy[check.impact.security.state]}</strong>{" "}
+                        {check.impact.security.summary}
+                      </p>
+                    </div>
+                  ) : null}
                   {check.action ? <p className="pc-system-health-card__action">{check.action}</p> : null}
                 </div>
               </li>

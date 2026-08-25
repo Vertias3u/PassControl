@@ -20,7 +20,6 @@ import { PassportIssuanceModal } from "@/components/PassportIssuanceModal";
 import { browserClient } from "@/lib/supabase/client";
 import type { ProviderId } from "@/lib/providers";
 import {
-  FIRST_CALL_DISMISSED_COOKIE,
   activationDiagnosis,
   authenticationProofLabel,
   deriveFirstCallActivation,
@@ -64,8 +63,8 @@ function stepState(current: string, step: StepName) {
 export function FirstCallActivation({
   userId,
   providerConfigured,
-  controlsExercised,
-  dismissed: dismissedOnServer,
+  controlExerciseAt,
+  initiallyHidden,
   agents,
   initialLogs,
   integrations,
@@ -73,12 +72,9 @@ export function FirstCallActivation({
 }: {
   userId: string;
   providerConfigured: boolean;
-  controlsExercised: boolean;
-  /**
-   * Resolved on the server from the dismissal cookie. It is a prop and not a
-   * local lookup for a reason — see the guard at the bottom of this component.
-   */
-  dismissed: boolean;
+  controlExerciseAt: string | null;
+  /** Resolved from the tenant-scoped onboarding row before the first paint. */
+  initiallyHidden: boolean;
   agents: FirstCallAgent[];
   initialLogs: FirstCallRow[];
   integrations: string[];
@@ -86,7 +82,7 @@ export function FirstCallActivation({
 }) {
   const [logs, setLogs] = useState(initialLogs);
   const [live, setLive] = useState(false);
-  const [dismissed, setDismissed] = useState(dismissedOnServer);
+  const [hidden, setHidden] = useState(initiallyHidden);
   // Which on-ramp, if any, currently has an unrecoverable secret on screen. Each
   // on-ramp is rendered inside a stage branch, so advancing the stage unmounts it
   // and destroys a private key the user cannot be shown again. The on-ramps' own
@@ -95,20 +91,39 @@ export function FirstCallActivation({
   // which flips providerConfigured or refreshes `agents` underneath us.
   const [revealing, setRevealing] = useState<"provider" | "agent" | null>(null);
   const derived = useMemo(
-    () => deriveFirstCallActivation({ providerConfigured, controlsExercised, agents, logs }),
-    [providerConfigured, controlsExercised, agents, logs]
+    () => deriveFirstCallActivation({ providerConfigured, controlExerciseAt, agents, logs }),
+    [providerConfigured, controlExerciseAt, agents, logs]
   );
   // Safe to pin by stage name alone: both held variants are field-free, so there
   // is no captured row or agent id that could go stale while the hold is active.
   const state: FirstCallActivation = revealing ? { stage: revealing } : derived;
 
+  const persistProgress = async (operation: "dismiss" | "complete") => {
+    // Neither RPC accepts a user id. The database binds the row to auth.uid(),
+    // and completion independently re-checks ordered call/control evidence.
+    const { data, error } = operation === "dismiss"
+      ? await browserClient().rpc("dismiss_onboarding")
+      : await browserClient().rpc("complete_onboarding");
+    return !error && data === true;
+  };
+
   useEffect(() => {
     setLogs(initialLogs);
   }, [initialLogs]);
 
-  // Both terminal-ish stages are dismissible. `verify` has to be: a tenant that
-  // never touches a stop control would otherwise carry this rail forever.
-  const dismissible = state.stage === "complete" || state.stage === "verify";
+  useEffect(() => {
+    setHidden(initiallyHidden);
+  }, [initiallyHidden]);
+
+  // `complete` is still derived from the admitted call plus a real stop-control
+  // audit row. Persist only the whole-flow milestone after reality reaches it;
+  // provider/agent/call step flags would go stale when their source rows change.
+  useEffect(() => {
+    if (state.stage !== "complete" || initiallyHidden) return;
+    void persistProgress("complete");
+    // The current render keeps the proof visible. The durable timestamp hides
+    // it on later loads and on other devices.
+  }, [initiallyHidden, state.stage, userId]);
 
   useEffect(() => {
     const supabase = browserClient();
@@ -130,35 +145,16 @@ export function FirstCallActivation({
     };
   }, [userId]);
 
-  const dismiss = () => {
-    try {
-      // Value is the operator id, not a bare flag: one browser can hold two
-      // sessions over time, and a shared machine must not start a second
-      // operator halfway through the guide.
-      const secure = location.protocol === "https:" ? "; secure" : "";
-      document.cookie = `${FIRST_CALL_DISMISSED_COOKIE}=${encodeURIComponent(userId)}; path=/; max-age=31536000; samesite=lax${secure}`;
-    } catch {
-      // A blocked preference must not make the dismiss control fail.
-    }
-    setDismissed(true);
+  const dismiss = async () => {
+    // Keep the guide visible if persistence fails. Pretending a database-backed
+    // preference was saved would recreate the resurrection bug on next load.
+    if (await persistProgress("dismiss")) setHidden(true);
   };
 
-  // Dismissal is resolved before the first paint, and it has to be.
-  //
-  // This used to start as `null` and get filled in by a localStorage read in an
-  // effect, with the guard treating "not yet known" as "hide it". That
-  // deadlocked: the server rendered null, so the client component never
-  // mounted, so the effect never ran, so nothing ever un-hid it. The completion
-  // card had therefore never appeared on a fresh dashboard load — only after a
-  // client-side navigation, which is how it survived review. A cookie is
-  // readable by the server, so the answer is known when the first HTML is
-  // produced and there is no window to hide.
-  //
-  // Cost of the change, stated because operators will notice: anyone who
-  // dismissed the old localStorage key sees the guide once more. In practice
-  // that is close to nobody, since the card they would have dismissed it from
-  // was not rendering on a cold load in the first place.
-  if (dismissible && dismissed) return null;
+  // The row is resolved on the server, avoiding a hydration flash. Dismissal is
+  // a durable preference, so it remains respected even if reality later moves
+  // back to an earlier computed step.
+  if (hidden) return null;
 
   if (state.stage === "complete") {
     return (

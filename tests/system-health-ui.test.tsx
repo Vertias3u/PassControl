@@ -30,7 +30,18 @@ const snapshot: SystemHealthSnapshot = {
   checks: [
     { id: "build_identity", category: "application", label: "Release identity", state: "ready", summary: "Available.", action: null },
     { id: "database", category: "database", label: "Migration ledger", state: "attention", summary: "Migration ledger needs attention.", action: "Apply the expected migration." },
-    { id: "redis", category: "runtime", label: "Runtime dependency", state: "unknown", summary: "Status is unavailable.", action: null },
+    {
+      id: "redis",
+      category: "runtime",
+      label: "Runtime dependency",
+      state: "degraded",
+      summary: "Functionality is partial.",
+      action: "Restore Redis connectivity.",
+      impact: {
+        functionality: { state: "partial", summary: "Redis-backed functionality is unavailable." },
+        security: { state: "degraded", summary: "Revocation guarantees are weakened; Direct Agent Key verification remains fail-closed." },
+      },
+    },
     { id: "receipt_signing", category: "trust", label: "Signing material", state: "ready", summary: "Configured locally.", action: null },
   ],
 };
@@ -42,7 +53,9 @@ describe("System Health dashboard surface", () => {
       expect(html).toContain(title.replace("&", "&amp;"));
     }
     expect(html).toContain("Needs attention");
-    expect(html).toContain("Unknown");
+    expect(html).toContain("Functionality: Partial");
+    expect(html).toContain("Security: Degraded");
+    expect(html).toContain("Direct Agent Key verification remains fail-closed.");
     expect(html).toContain("Migration ledger: Behind");
     expect(html).toContain("Release version");
     expect(html).toContain("0.6.1");
@@ -57,13 +70,16 @@ describe("System Health dashboard surface", () => {
     const refresh = readFileSync(resolve(process.cwd(), "components/dashboard/SystemHealthRefresh.tsx"), "utf8");
     expect(page).toContain("export const dynamic = \"force-dynamic\"");
     expect(page).toContain("systemOperatorGate()");
-    expect(page).toContain("getSystemHealthSnapshot()");
+    expect(page).toContain("getCachedSystemHealthSnapshot()");
+    expect(page).toMatch(/refresh[\s\S]*getSystemHealthSnapshot\(\)/);
+    expect(page).toContain("migrationHealth={snapshot.migrations}");
     expect(page).toContain('redirect("/login/verify")');
     // A refused operator is explained to, not bounced to /dashboard.
     expect(page).toContain("SystemHealthRestricted");
-    expect(refresh).toContain("router.refresh()");
+    expect(refresh).toContain("router.replace(");
+    expect(refresh).toContain("?refresh=");
     expect(refresh).toContain("useTransition");
-    expect(refresh).not.toMatch(/setInterval|setTimeout|fetch\s*\(/);
+    expect(refresh).not.toMatch(/setInterval|setTimeout|fetch\s*\(|router\.refresh\(\)/);
   });
 
   it("only offers the navigation entry to the configured operator address", () => {
@@ -71,7 +87,8 @@ describe("System Health dashboard surface", () => {
     const commands = readFileSync(resolve(process.cwd(), "components/dashboard/DashboardCommandPalette.tsx"), "utf8");
     expect(shell).toContain("showSystemHealth");
     expect(shell).toContain('href: "/dashboard/system"');
-    expect(shell).toContain("systemOperatorEmails().has");
+    expect(shell).toContain("mfaAuthorizedUser(db)");
+    expect(shell).toMatch(/mfa\.ok[\s\S]*systemOperatorEmails\(\)\.has/);
     expect(shell).toContain('factor.factor_type === "totp" && factor.status === "verified"');
     expect(commands).toContain("showSystemHealth");
     expect(commands).toContain('href: "/dashboard/system"');

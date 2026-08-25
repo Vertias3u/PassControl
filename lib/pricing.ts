@@ -78,6 +78,31 @@ const PRICES: Price[] = [
   { provider: "deepseek", pattern: "deepseek-v4-pro", inputMicrocentsPerToken: mc(0.435), outputMicrocentsPerToken: mc(0.87) },
   { provider: "deepseek", pattern: "deepseek-chat", inputMicrocentsPerToken: mc(0.14), outputMicrocentsPerToken: mc(0.28) },
   { provider: "deepseek", pattern: "deepseek-reasoner", inputMicrocentsPerToken: mc(0.435), outputMicrocentsPerToken: mc(0.87) },
+  // Gemini (Google's OpenAI-compatibility endpoint). Two of Google's published
+  // rates do not fit a flat per-model table, and both are resolved the same way
+  // this file resolves everything else — round UP, never under-reserve:
+  //   * 2.5 Pro is tiered by prompt length (<=200k vs >200k). The >200k rate is
+  //     used, because the cheaper one would under-reserve every long prompt and
+  //     a budget cap that under-reserves does not hold. Do NOT "correct" these
+  //     down to the headline $1.25/$10 figures.
+  //   * Flash and Flash-Lite price audio input above text/image/video. There is
+  //     no modality dimension here either, so the audio rate is used.
+  // Most-specific pattern first: flash-lite must precede flash, or `*` in
+  // "gemini-2.5-flash*" swallows it.
+  { provider: "gemini", pattern: "gemini-2.5-flash-lite*", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.4) },
+  { provider: "gemini", pattern: "gemini-2.5-flash*", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(2.5) },
+  { provider: "gemini", pattern: "gemini-2.5-pro*", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(15) },
+  { provider: "gemini", pattern: "gemini-3.5-flash-lite*", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(2.5) },
+  { provider: "gemini", pattern: "gemini-3.5-flash*", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(9) },
+  // 3.6 / 3.7 Flash carry promotional rates Google lists as running through
+  // 2026-12-31. They revert to something higher afterwards, so these two rows
+  // have an expiry the others do not — re-check them before that date.
+  { provider: "gemini", pattern: "gemini-3.6-flash*", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
+  { provider: "gemini", pattern: "gemini-3.7-flash*", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
+  // Conservative catch-all, mirroring the `claude-*` row: an unlisted Gemini
+  // model bills at the most expensive verified Gemini rate rather than falling
+  // through to 0 and billing nothing.
+  { provider: "gemini", pattern: "gemini-*", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(15) },
 ];
 
 const FALLBACK_PRICES = PRICES.reduce<Partial<Record<ProviderId, Price>>>((acc, price) => {

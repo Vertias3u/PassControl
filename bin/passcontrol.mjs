@@ -27,6 +27,7 @@ import {
   requireControlApiKey,
   requireControlGateway,
   operatorEnv,
+  probeGatewayOrigin,
   requirePassportGateway,
   requirePassport,
   step,
@@ -49,6 +50,7 @@ import {
   supportsWrite,
 } from "../cli/presets.mjs";
 import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
+import { checkForUpdate } from "../cli/update-check.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
 import {
   checkIssuerPublishesKey,
@@ -147,6 +149,7 @@ ${heading("Quick start")}
 ${heading("Operate")}
   ${cmd} status [--no-network] [--json]
                                  show active config and instance state
+  ${cmd} version [--json]         CLI, gateway and database schema versions
   ${cmd} doctor [--deep] [--fix]  diagnose setup and repair a stopped dashboard
   ${cmd} call "hi"                mint a visa and make a governed model call
   ${cmd} sidecar [--port 8788] [--allow-connect host[,host]]
@@ -375,7 +378,8 @@ function systemHealthLabel(result) {
   if (result.state === "restricted") return "restricted (control key cannot read system health)";
   if (result.state !== "available") return `unavailable (${safeHealthText(result.reason)})`;
   const build = systemBuildSummary(result.health);
-  return `${safeHealthText(result.health.overall, "reported")} · v${build.version} ${build.channel} ${build.commit} · migrations ${build.migrationState} (${build.appliedMigrationHead} → ${build.migrationHead}) · protocols ${healthCompatibility(result.health).state}`;
+  const observed = safeHealthText(result.health.generated_at, "unknown");
+  return `${safeHealthText(result.health.overall, "reported")} · observed ${observed} · v${build.version} ${build.channel} ${build.commit} · migrations ${build.migrationState} (${build.appliedMigrationHead} → ${build.migrationHead}) · protocols ${healthCompatibility(result.health).state}`;
 }
 
 function systemHealthForJson(result) {
@@ -383,6 +387,7 @@ function systemHealthForJson(result) {
   return {
     state: "available",
     overall: safeHealthText(result.health.overall, "reported"),
+    observed_at: safeHealthText(result.health.generated_at, "unknown"),
     protocol_compatibility: healthCompatibility(result.health).state,
     build: systemBuildSummary(result.health),
   };
@@ -403,7 +408,8 @@ function printSystemHealthDiagnostic(result) {
   }
   const compatibility = healthCompatibility(result.health);
   const build = systemBuildSummary(result.health);
-  ok(`System health ${safeHealthText(result.health.overall, "reported")} · v${build.version} ${build.channel} ${build.commit} · migrations ${build.migrationState} (${build.appliedMigrationHead} → ${build.migrationHead}) · protocol compatibility ${compatibility.state}`);
+  const observed = safeHealthText(result.health.generated_at, "unknown");
+  ok(`System health ${safeHealthText(result.health.overall, "reported")} · observed ${observed} · v${build.version} ${build.channel} ${build.commit} · migrations ${build.migrationState} (${build.appliedMigrationHead} → ${build.migrationHead}) · protocol compatibility ${compatibility.state}`);
   for (const check of Array.isArray(result.health.checks) ? result.health.checks : []) {
     if (!check || typeof check !== "object") continue;
     const label = safeHealthText(check.label, "System check");
@@ -1429,22 +1435,34 @@ async function tryCommand() {
   step("Next: add a real provider key in the Control Tower and re-point your agent at the gateway (see the README).");
 }
 
-async function api(method, pathPart, body) {
+async function api(method, pathPart, body, { timeoutMs } = {}) {
   // Destination first, key second — same order and same reason as the SDK's
   // ControlClient. `config.gateway` is whatever PASSCONTROL_GATEWAY said, and
   // this is the one place a long-lived fleet-wide `pc_` key goes on the wire, so
   // the URL is built from the validated origin rather than from that string.
   const origin = requireControlGateway(config);
   const apiKey = requireControlApiKey(config);
-  const res = await fetch(`${origin}/api/control/v1${pathPart}`, {
-    method,
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      ...(body ? { "content-type": "application/json" } : {}),
-      ...(method !== "GET" ? { "idempotency-key": crypto.randomUUID() } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  // Unbounded by default, deliberately: a fleet mutation must not be abandoned
+  // halfway because a caller guessed a duration. `timeoutMs` is opt-in, for the
+  // one kind of caller that is a REPORT — where a gateway that never answers is
+  // itself the finding, and hanging turns a diagnostic into a hang.
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let res;
+  try {
+    res = await fetch(`${origin}/api/control/v1${pathPart}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        ...(body ? { "content-type": "application/json" } : {}),
+        ...(method !== "GET" ? { "idempotency-key": crypto.randomUUID() } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   const text = await res.text();
   let json = {};
   try {
@@ -1913,6 +1931,133 @@ async function configureCommand(rest, opts = {}) {
   ok(`wrote ${target}`);
 }
 
+// ── Which build is which ─────────────────────────────────────────────────────
+//
+// Version drift between the CLI, the gateway and the database is the support
+// question that hides behind every other support question, and until now the
+// CLI could only answer a third of it. `passcontrol version` printed its own
+// number and stopped.
+//
+// The three rows come from three different places on purpose, and each degrades
+// on its own:
+//
+//   CLI      — the installed package. Always available.
+//   Server   — GET /api/version on the configured gateway. Unauthenticated,
+//              because the release version is already on the site footer.
+//   Schema   — the migration block of /api/control/v1/system, which is behind
+//              the operator gate. How far behind a database is doubles as a
+//              list of the fixes it does not have, so it stays authenticated;
+//              on a self-host the operator is the person running this, and on
+//              Cloud a tenant correctly cannot read the instance's lag.
+
+/** The gateway's own build, or null. Never throws: this is a report, not a gate. */
+async function serverVersion() {
+  // Same origin rule as every other outbound path in this file, even though no
+  // credential travels here — see probeGatewayOrigin.
+  const origin = probeGatewayOrigin();
+  if (!origin) return { version: null, detail: "the configured gateway is not a bare origin" };
+  try {
+    const res = await fetchWithTimeout(`${origin}/api/version`);
+    // A gateway that predates this endpoint is a real PassControl gateway, and
+    // saying "unreachable" about one that answered would send an operator to
+    // debug their network instead of deploying.
+    if (res.status === 404) return { version: null, detail: "running a build older than /api/version" };
+    if (!res.ok) return { version: null, detail: `the gateway answered ${res.status}` };
+    const body = await res.json();
+    const version = typeof body?.version === "string" ? body.version : null;
+    return { version, detail: version ? null : "the gateway did not report a version" };
+  } catch {
+    return { version: null, detail: "unreachable" };
+  }
+}
+
+/**
+ * The migration block, or why it could not be read.
+ *
+ * Every branch is a distinct, actionable answer. "not checked" is not the same
+ * as "forbidden", and neither is the same as a gateway that is simply down —
+ * collapsing them is how an operator ends up debugging the wrong thing.
+ */
+async function schemaState() {
+  if (!config.apiKey) return { state: "unchecked", detail: "no control API key configured" };
+  try {
+    // Bounded: `doctor` exists to explain an unavailable gateway, so this line
+    // must never be the reason the report does not print.
+    const snapshot = await api("GET", "/system", undefined, { timeoutMs: 2500 });
+    const migrations = snapshot?.data?.migrations ?? snapshot?.migrations ?? null;
+    if (!migrations) return { state: "unchecked", detail: "the gateway returned no migration block" };
+    return { state: migrations.state ?? "unknown", migrations };
+  } catch (error) {
+    const message = String(error?.message ?? error);
+    if (/system_forbidden|system_not_configured|system_totp_required|system_allowlist_invalid/.test(message)) {
+      return { state: "unchecked", detail: "this control key is not an operator of that instance" };
+    }
+    // A bare "fetch failed" reads as a bug in the CLI rather than as a gateway
+    // that is not running, which is what it almost always means.
+    if (/fetch failed|ECONNREFUSED|ENOTFOUND|aborted/i.test(message)) {
+      return { state: "unchecked", detail: "the gateway is unreachable" };
+    }
+    // Never echo the upstream error body into this report: it is remote text,
+    // and "401 invalid_api_key no (req ?)" tells an operator less than the
+    // sentence it is standing in for.
+    if (/invalid_api_key|\b401\b/.test(message)) {
+      return { state: "unchecked", detail: "the control API key was rejected" };
+    }
+    if (/\b404\b/.test(message)) {
+      return { state: "unchecked", detail: "this gateway is too old to report its schema" };
+    }
+    return { state: "unchecked", detail: "the gateway did not answer the system check" };
+  }
+}
+
+const SCHEMA_WORD = {
+  current: "compatible",
+  behind: "the database is missing migrations this build expects",
+  ahead: "the database is newer than this build — was the app rolled back?",
+  incompatible: "the applied migrations do not match this build",
+  unknown: "could not be determined",
+};
+
+async function versionCommand({ json = false } = {}) {
+  const [server, schema] = await Promise.all([serverVersion(), schemaState()]);
+  const migrations = schema.migrations ?? null;
+  const serverLabel =
+    server.version === null
+      ? `not reported (${server.detail})`
+      : `${server.version}${server.version === CLI_VERSION ? "  ✓" : "  ✗ different build from this CLI"}`;
+
+  if (json) {
+    console.log(JSON.stringify({
+      cli: CLI_VERSION,
+      server: server.version,
+      server_detail: server.detail,
+      server_matches_cli: server.version === null ? null : server.version === CLI_VERSION,
+      schema: migrations
+        ? {
+            state: schema.state,
+            applied_head: migrations.applied_head ?? null,
+            expected_head: migrations.expected_head ?? null,
+            missing_count: migrations.missing_count ?? 0,
+            extra_count: migrations.extra_count ?? 0,
+          }
+        : { state: schema.state, detail: schema.detail ?? null },
+    }, null, 2));
+    return;
+  }
+
+  console.log(`${heading("PassControl")}\n`);
+  console.log(formatLabel("CLI", CLI_VERSION, 18));
+  console.log(formatLabel("Server", serverLabel, 18));
+  if (migrations) {
+    console.log(formatLabel("Database schema", migrations.applied_head ?? "none recorded", 18));
+    console.log(formatLabel("Expected schema", migrations.expected_head ?? "unknown", 18));
+    console.log(formatLabel("Status", `${schema.state} — ${SCHEMA_WORD[schema.state] ?? "see the dashboard"}`, 18));
+    if (migrations.action) step(migrations.action);
+  } else {
+    console.log(formatLabel("Database schema", `not checked (${schema.detail})`, 18));
+  }
+}
+
 async function doctorCommand(opts = {}) {
   const gateway = await gatewayStatus(false);
   console.log(`${heading("PassControl doctor")}\n`);
@@ -1922,6 +2067,16 @@ async function doctorCommand(opts = {}) {
   );
   (config.apiKey ? ok : step)(`Control API key ${config.apiKey ? "configured" : "missing (needed only for agent/kill commands)"}`);
   step(`Config source: ${configPathLabel(config.sources)}`);
+  // The check that answers "why did this work yesterday". A database behind the
+  // build it serves is not visible from any other line in this report.
+  const schema = await schemaState();
+  if (schema.migrations) {
+    (schema.state === "current" ? ok : fail)(
+      `Database migrations ${schema.state} — ${SCHEMA_WORD[schema.state] ?? "see the dashboard"}`
+    );
+  } else {
+    step(`Database migrations not checked (${schema.detail})`);
+  }
 
   if (opts.fix) {
     console.log("");
@@ -2230,13 +2385,29 @@ async function main() {
   const { opts, rest } = parseArgv(process.argv.slice(2));
   const [command, ...commandRest] = rest;
 
+  // Started here and awaited at the very end, so the registry lookup overlaps
+  // the command instead of being tacked onto the exit. On anything that touches
+  // the network — which is most of this CLI — it costs nothing measurable, and
+  // it can never turn a registry outage into a slow `passcontrol call`.
+  // .catch() rather than try/catch: an unhandled rejection from a background
+  // nicety must not take down a command that already did its job.
+  const updateNotice = checkForUpdate({
+    current: CLI_VERSION,
+    json: Boolean(opts.json),
+  }).catch(() => null);
+  const announceUpdate = async () => {
+    const notice = await updateNotice;
+    if (notice) console.log(`\n${notice}`);
+  };
+
   if (opts.help || command === "help") {
     const target = command === "help" ? commandRest[0] : command;
     console.log(target === "agent" || target === "fleet" ? agentUsage() : usage());
     return;
   }
   if (opts.version || command === "version") {
-    console.log(`passcontrol ${CLI_VERSION}`);
+    await versionCommand({ json: Boolean(opts.json) });
+    await announceUpdate();
     return;
   }
 
@@ -2324,6 +2495,8 @@ async function main() {
     default:
       throw new Error(`Unknown command "${command}". Run \`passcontrol help\`.`);
   }
+  // Only on success. A notice printed under a failure buries the error.
+  await announceUpdate();
 }
 
 main().catch((error) => {

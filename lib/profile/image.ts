@@ -207,6 +207,100 @@ function sniffWebp(bytes: Uint8Array): AvatarSniffResult {
   return { ok: true, contentType: "image/webp", width, height };
 }
 
+function concat(parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const part of parts) { out.set(part, at); at += part.length; }
+  return out;
+}
+
+/**
+ * Remove metadata instead of refusing the file that carries it.
+ *
+ * The refusal above rested on a premise that is only half true. "Metadata
+ * cannot be stripped without an image library" holds for JPEG, whose EXIF sits
+ * in a segment structure entangled with the entropy-coded scan — which is why
+ * JPEG is still refused. It does NOT hold for PNG or WebP. Both are chunked
+ * containers: every chunk carries its own length and its own CRC, so dropping
+ * one is a byte-slice and everything remaining stays valid. No re-encode, no
+ * dependency, no pixel touched.
+ *
+ * The cost of not knowing that was an operator being told to strip a PNG they
+ * had already stripped by hand — advice they could not act on, about a file
+ * this function can simply clean.
+ *
+ * Anything it cannot parse is returned unchanged; sniffAvatar is what refuses.
+ * It never mutates the input.
+ */
+export function stripAvatarMetadata(bytes: Uint8Array): Uint8Array {
+  if (startsWith(bytes, PNG_MAGIC)) return stripPng(bytes);
+  if (ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WEBP") return stripWebp(bytes);
+  return bytes;
+}
+
+function stripPng(bytes: Uint8Array): Uint8Array {
+  const kept: Uint8Array[] = [bytes.subarray(0, 8)];
+  let offset = 8;
+  let removed = false;
+  while (offset + 8 <= bytes.length) {
+    const length = be32(bytes, offset);
+    const type = ascii(bytes, offset + 4, 4);
+    if (!Number.isSafeInteger(length) || length < 0) return bytes;
+    const next = offset + 12 + length;
+    if (next > bytes.length) return bytes;
+    if (PNG_METADATA_CHUNKS.has(type)) removed = true;
+    else kept.push(bytes.subarray(offset, next));
+    if (type === "IEND") break;
+    offset = next;
+  }
+  return removed ? concat(kept) : bytes;
+}
+
+/** VP8X advertises what the container holds; those bits must follow the chunks. */
+const VP8X_EXIF_FLAG = 0x08;
+const VP8X_XMP_FLAG = 0x04;
+
+function stripWebp(bytes: Uint8Array): Uint8Array {
+  if (bytes.length < 20) return bytes;
+  const declared = le32(bytes, 4);
+  if (declared + 8 > bytes.length) return bytes;
+  const end = Math.min(bytes.length, declared + 8);
+
+  const kept: Uint8Array[] = [];
+  let offset = 12;
+  let removed = false;
+  while (offset + 8 <= end) {
+    const type = ascii(bytes, offset, 4);
+    const length = le32(bytes, offset + 4);
+    if (!Number.isSafeInteger(length) || length < 0) return bytes;
+    const dataAt = offset + 8;
+    if (dataAt + length > end) return bytes;
+    const padded = length + (length % 2);
+    if (WEBP_METADATA_CHUNKS.has(type)) {
+      removed = true;
+    } else if (type === "VP8X" && length >= 1) {
+      // Copied, never mutated in place: subarray shares the caller's buffer.
+      const chunk = bytes.slice(offset, dataAt + padded);
+      chunk[8] = (chunk[8] ?? 0) & ~(VP8X_EXIF_FLAG | VP8X_XMP_FLAG);
+      kept.push(chunk);
+    } else {
+      kept.push(bytes.subarray(offset, dataAt + padded));
+    }
+    offset = dataAt + padded;
+  }
+  if (!removed) return bytes;
+
+  // "WEBP" plus every surviving chunk. The RIFF length counts everything after
+  // the length field itself — stale, it sends decoders past the end.
+  const bodyLength = 4 + kept.reduce((sum, part) => sum + part.length, 0);
+  const header = new Uint8Array(12);
+  header.set([0x52, 0x49, 0x46, 0x46], 0);
+  header.set([bodyLength & 0xff, (bodyLength >>> 8) & 0xff, (bodyLength >>> 16) & 0xff, (bodyLength >>> 24) & 0xff], 4);
+  header.set([0x57, 0x45, 0x42, 0x50], 8);
+  return concat([header, ...kept]);
+}
+
 /**
  * Decide what these bytes are, from the bytes.
  *

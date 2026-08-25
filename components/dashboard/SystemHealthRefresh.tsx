@@ -9,7 +9,9 @@ export function SystemHealthRefresh() {
   const [refreshing, startTransition] = useTransition();
 
   const refresh = () => {
-    startTransition(() => router.refresh());
+    startTransition(() => {
+      router.replace(`/dashboard/system?refresh=${Date.now()}`, { scroll: false });
+    });
   };
 
   return (

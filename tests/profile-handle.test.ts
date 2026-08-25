@@ -140,6 +140,20 @@ describe("the reserved list", () => {
     }
   });
 
+  it("reserves high-risk company and product identities by default", () => {
+    for (const word of [
+      "anthropic",
+      "claude",
+      "openai",
+      "chatgpt",
+      "google",
+      "microsoft",
+      "walmart",
+    ]) {
+      expect(validateHandle(word), word).toEqual({ ok: false, reason: "reserved_handle" });
+    }
+  });
+
   // A reserved word that cannot be typed as a handle anyway is dead weight, and
   // more importantly it hides a typo in the list.
   it("contains only strings that are otherwise valid handles", () => {

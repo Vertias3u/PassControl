@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const rpc = vi.fn();
+const redisReads = vi.hoisted(() => ({
+  get: vi.fn(),
+  smembers: vi.fn(),
+  exists: vi.fn(),
+}));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => ({ rpc }) }));
-vi.mock("@/lib/state/redis", () => ({ redis: () => ({ ping: vi.fn() }) }));
+vi.mock("@/lib/state/redis", () => ({ redis: () => redisReads }));
 vi.mock("@/lib/system-health/build-identity", () => ({
   getBuildIdentity: () => ({ version: "0.0.0", commit: "a".repeat(40), channel: "development", migrations: { entries: [] } }),
 }));
@@ -19,6 +24,9 @@ beforeEach(() => {
   vi.unstubAllEnvs();
   rpc.mockReset();
   rpc.mockResolvedValue({ data: { ledger, vault }, error: null });
+  redisReads.get.mockReset().mockResolvedValue(null);
+  redisReads.smembers.mockReset().mockResolvedValue([]);
+  redisReads.exists.mockReset().mockResolvedValue(0);
 });
 
 describe("system health snapshot", () => {
@@ -77,6 +85,47 @@ describe("system health snapshot", () => {
     expect(snapshot.migrations.state).toBe("unknown");
     expect(snapshot.overall).toBe("degraded");
     expect(snapshot.checks.find((check) => check.id === "database")?.state).toBe("degraded");
+  });
+
+  it("exercises the representative commands used by kill-switch and suspension reads", async () => {
+    const snapshot = await getSystemHealthSnapshot();
+    const redis = snapshot.checks.find((entry) => entry.id === "redis");
+    expect(redis?.state).toBe("ready");
+    expect(redis?.impact?.functionality.state).toBe("full");
+    expect(redis?.impact?.security.state).toBe("nominal");
+    expect(redisReads.get).toHaveBeenCalledWith("killswitch:platform");
+    expect(redisReads.smembers).toHaveBeenCalledWith("killswitch:denylist");
+    expect(redisReads.exists).toHaveBeenCalledWith("suspended:__passcontrol-health-probe__");
+  });
+
+  it("separates partial Redis functionality from weakened fail-open revocation", async () => {
+    const snapshot = await getSystemHealthSnapshot({
+      redisPing: async () => { throw new Error("down"); },
+    });
+    const redis = snapshot.checks.find((entry) => entry.id === "redis");
+    expect(redis).toMatchObject({
+      state: "degraded",
+      impact: {
+        functionality: { state: "partial" },
+        security: { state: "degraded" },
+      },
+    });
+    expect(redis?.summary).toMatch(/functionality is partial/i);
+    expect(redis?.impact?.security.summary).toMatch(/revocation guarantees are weakened/i);
+    expect(redis?.impact?.security.summary).toMatch(/Direct Agent Key verification remains fail-closed/i);
+  });
+
+  it("reports the deliberate fail-closed kill-switch opt-in without homogenising credentials", async () => {
+    vi.stubEnv("KILL_SWITCH_FAIL_CLOSED", "true");
+    const snapshot = await getSystemHealthSnapshot({
+      redisPing: async () => { throw new Error("down"); },
+    });
+    const redis = snapshot.checks.find((entry) => entry.id === "redis");
+    expect(redis?.impact?.functionality.state).toBe("partial");
+    expect(redis?.impact?.security.state).toBe("protected");
+    expect(redis?.impact?.security.summary).toMatch(/configured to fail closed/i);
+    expect(redis?.impact?.security.summary).toMatch(/Direct Agent Key verification remains fail-closed/i);
+    expect(redis?.impact?.security.summary).not.toMatch(/all credentials|same fail mode/i);
   });
 
   it("distinguishes exact-prefix extras from gaps, duplicates, mismatches, and unvetted rows", () => {

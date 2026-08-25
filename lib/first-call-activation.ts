@@ -123,25 +123,21 @@ export type FirstCallActivation =
  */
 export const CONTROL_EXERCISE_ACTIONS = ["killswitch.master", "agent.suspend"] as const;
 
-/**
- * Name of the cookie recording that an operator dismissed the activation guide.
- * Written by the client component, read by the dashboard server component.
- *
- * It lives HERE, in a plain module, and must not move into the component. That
- * component is `"use client"`, and a value imported from a client module into a
- * server component does not arrive as the value — the server got a client
- * reference, so `cookies().get(NAME)` returned null while `getAll()` plainly
- * listed the cookie, and the guide simply refused to stay dismissed. Nothing
- * type-checks differently and no test that greps the source can see it.
- *
- * Declared in `app/legal/cookies/page.tsx`; a new client-visible cookie has to
- * appear in that notice.
- */
-export const FIRST_CALL_DISMISSED_COOKIE = "pc-first-call-dismissed";
+/** The only persisted onboarding fields; no derived step belongs here. */
+export interface OnboardingStateRow {
+  dismissed_at: string | null;
+  completed_at: string | null;
+}
+
+/** A durable terminal preference; every non-terminal step is still real state. */
+export function onboardingStateHidden(row: OnboardingStateRow | null | undefined): boolean {
+  return Boolean(row?.dismissed_at || row?.completed_at);
+}
 
 /** Only the column this decision needs. Not a full admin_audit row type. */
 export interface ControlAuditRow {
   action: string;
+  created_at: string;
 }
 
 /**
@@ -155,9 +151,19 @@ export interface ControlAuditRow {
  * lying quietly.
  */
 export function hasExercisedControls(rows: readonly ControlAuditRow[]): boolean {
-  return rows.some((entry) =>
-    (CONTROL_EXERCISE_ACTIONS as readonly string[]).includes(entry.action)
-  );
+  return latestControlExerciseAt(rows) !== null;
+}
+
+/** Newest trustworthy timestamp in the dashboard's bounded audit window. */
+export function latestControlExerciseAt(rows: readonly ControlAuditRow[]): string | null {
+  let latest: { value: string; time: number } | null = null;
+  for (const entry of rows) {
+    if (!(CONTROL_EXERCISE_ACTIONS as readonly string[]).includes(entry.action)) continue;
+    const time = Date.parse(entry.created_at);
+    if (!Number.isFinite(time)) continue;
+    if (!latest || time > latest.time) latest = { value: entry.created_at, time };
+  }
+  return latest?.value ?? null;
 }
 
 export function deriveFirstCallActivation(input: {
@@ -170,7 +176,7 @@ export function deriveFirstCallActivation(input: {
    * proof `authenticationProofLabel` above refuses to produce. Every call site
    * has to answer the question.
    */
-  controlsExercised: boolean;
+  controlExerciseAt: string | null;
 }): FirstCallActivation {
   if (!input.providerConfigured) return { stage: "provider" };
 
@@ -195,11 +201,17 @@ export function deriveFirstCallActivation(input: {
   const admitted = inference.find((row) => row.status === "ok");
   if (admitted?.agent_id) {
     const agent = byId.get(admitted.agent_id)!;
+    const controlTime = input.controlExerciseAt ? Date.parse(input.controlExerciseAt) : Number.NaN;
+    const controlVerified = Number.isFinite(controlTime) && inference.some((row) => {
+      if (row.status !== "ok") return false;
+      const callTime = Date.parse(row.created_at);
+      return Number.isFinite(callTime) && callTime <= controlTime;
+    });
     // One admitted call proves the path is OPEN. It says nothing about whether
     // this operator can close it, and closing it is the entire product — so the
-    // guide does not end here unless a stop control has actually been used.
+    // guide does not end unless a stop control was used after an admitted call.
     return {
-      stage: input.controlsExercised ? "complete" : "verify",
+      stage: controlVerified ? "complete" : "verify",
       agentId: agent.id,
       agentName: agent.name,
       row: admitted,

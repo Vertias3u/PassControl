@@ -8,6 +8,8 @@ import {
   authenticationProofLabel,
   deriveFirstCallActivation,
   hasExercisedControls,
+  latestControlExerciseAt,
+  onboardingStateHidden,
   type FirstCallRow,
 } from "@/lib/first-call-activation";
 
@@ -24,14 +26,21 @@ const row = (status: FirstCallRow["status"], model = "gpt-5-mini"): FirstCallRow
 });
 
 describe("first-call activation state", () => {
+  it("hides durable dismissal or completion without storing any step result", () => {
+    expect(onboardingStateHidden(null)).toBe(false);
+    expect(onboardingStateHidden({ dismissed_at: null, completed_at: null })).toBe(false);
+    expect(onboardingStateHidden({ dismissed_at: "2026-08-24T12:00:00.000Z", completed_at: null })).toBe(true);
+    expect(onboardingStateHidden({ dismissed_at: null, completed_at: "2026-08-24T12:00:00.000Z" })).toBe(true);
+  });
+
   it("keeps provider setup, agent creation and call proof as separate states", () => {
-    expect(deriveFirstCallActivation({ providerConfigured: false, controlsExercised: false, agents: [], logs: [] }).stage)
+    expect(deriveFirstCallActivation({ providerConfigured: false, controlExerciseAt: null, agents: [], logs: [] }).stage)
       .toBe("provider");
-    expect(deriveFirstCallActivation({ providerConfigured: true, controlsExercised: false, agents: [], logs: [] }).stage)
+    expect(deriveFirstCallActivation({ providerConfigured: true, controlExerciseAt: null, agents: [], logs: [] }).stage)
       .toBe("agent");
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [],
     }).stage).toBe("call");
@@ -40,13 +49,13 @@ describe("first-call activation state", () => {
   it("treats only a stored ok row as first-call completion", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("blocked_scope")],
     }).stage).toBe("diagnose");
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("ok")],
     })).toMatchObject({ stage: "complete", agentId: "agent-1", receiptRecorded: true });
@@ -71,7 +80,7 @@ describe("first-call activation state", () => {
   it("does not complete on a successful capability probe alone", () => {
     const state = deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [probeRow()],
     });
@@ -84,7 +93,7 @@ describe("first-call activation state", () => {
   it("reports no connection when nothing at all has arrived", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [],
     })).toMatchObject({ stage: "call", connected: false });
@@ -93,7 +102,7 @@ describe("first-call activation state", () => {
   it("completes on the real call even when a probe arrived first", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("ok"), probeRow()],
     })).toMatchObject({ stage: "complete", agentId: "agent-1" });
@@ -104,7 +113,7 @@ describe("first-call activation state", () => {
     // row, but the refusal is the one the operator has to act on.
     const state = deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [probeRow(), row("blocked_scope")],
     });
@@ -118,7 +127,7 @@ describe("first-call activation state", () => {
     const refusedProbe: FirstCallRow = { ...probeRow(), id: "log-killed", status: "blocked_killed", receipt: null };
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [refusedProbe],
     })).toMatchObject({ stage: "diagnose", agentId: "agent-1" });
@@ -127,7 +136,7 @@ describe("first-call activation state", () => {
   it("keeps a suspended identity in the flow so its refusal can be diagnosed", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "suspended" }],
       logs: [row("blocked_suspended")],
     })).toMatchObject({ stage: "diagnose", agentId: "agent-1" });
@@ -147,14 +156,14 @@ describe("first-call activation state", () => {
     ] as const) {
       expect(deriveFirstCallActivation({
         providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
         agents: [{ id: "agent-1", name: "Scout", status: "active" }],
         logs: [row(status)],
       }).stage).toBe("diagnose");
     }
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [{ ...row("ok"), receipt: null }],
     })).toMatchObject({ stage: "complete", receiptRecorded: false });
@@ -262,6 +271,20 @@ describe("first-call failure language", () => {
 });
 
 describe("first-call dashboard integration", () => {
+  it("persists only dismissal/completion in onboarding_state and never a computed step", () => {
+    const page = read("app/dashboard/page.tsx");
+    const component = read("components/dashboard/FirstCallActivation.tsx");
+    expect(page).toContain('from("onboarding_state")');
+    expect(page).toContain('select("dismissed_at, completed_at")');
+    expect(page).toContain("onboardingStateHidden");
+    expect(component).toContain('.rpc("dismiss_onboarding")');
+    expect(component).toContain('.rpc("complete_onboarding")');
+    expect(component).not.toContain('from("onboarding_state")');
+    expect(component).not.toMatch(/first_provider|provider_complete|agent_complete|call_complete/i);
+    expect(page).not.toContain("FIRST_CALL_DISMISSED_COOKIE");
+    expect(component).not.toContain("document.cookie");
+  });
+
   it("reuses the bounded dashboard log scan and listens for stored rows", () => {
     const page = read("app/dashboard/page.tsx");
     const component = read("components/dashboard/FirstCallActivation.tsx");
@@ -322,19 +345,28 @@ describe("first-call control verification", () => {
   it("stops at verify until a stop control has been exercised", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: false,
+      controlExerciseAt: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [okRow()],
     })).toMatchObject({ stage: "verify", agentId: "agent-1", receiptRecorded: true });
   });
 
-  it("completes once a stop control has been exercised", () => {
+  it("completes once a stop control has been exercised after the call", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlsExercised: true,
+      controlExerciseAt: "2026-08-12T12:01:00.000Z",
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [okRow()],
     })).toMatchObject({ stage: "complete", agentId: "agent-1", receiptRecorded: true });
+  });
+
+  it("does not complete from a stale stop-control event that predates the call", () => {
+    expect(deriveFirstCallActivation({
+      providerConfigured: true,
+      controlExerciseAt: "2026-08-12T11:59:00.000Z",
+      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
+      logs: [okRow()],
+    })).toMatchObject({ stage: "verify", agentId: "agent-1" });
   });
 
   it("does not let the flag skip an earlier stage", () => {
@@ -350,13 +382,13 @@ describe("first-call control verification", () => {
           logs: [],
         },
       }[stage];
-      expect(deriveFirstCallActivation({ ...input, controlsExercised: true }).stage).toBe(stage);
+      expect(deriveFirstCallActivation({ ...input, controlExerciseAt: "2026-08-12T12:01:00.000Z" }).stage).toBe(stage);
     }
   });
 
   it("counts both stop controls and nothing that setup also writes", () => {
     for (const action of CONTROL_EXERCISE_ACTIONS) {
-      expect(hasExercisedControls([{ action }]), action).toBe(true);
+      expect(hasExercisedControls([{ action, created_at: "2026-08-12T12:01:00.000Z" }]), action).toBe(true);
     }
     expect(hasExercisedControls([])).toBe(false);
     // `agent.update` is the one that matters here. It is emitted by the scope
@@ -364,8 +396,17 @@ describe("first-call control verification", () => {
     // the scope editor — so accepting it would let the guide close the loop on
     // its own advice with no stop control ever touched. The rest are plain setup.
     for (const action of ["agent.update", "agent.create", "provider_key.add", "apikey.create"]) {
-      expect(hasExercisedControls([{ action }]), action).toBe(false);
+      expect(hasExercisedControls([{ action, created_at: "2026-08-12T12:01:00.000Z" }]), action).toBe(false);
     }
+  });
+
+  it("returns the newest valid qualifying audit timestamp", () => {
+    expect(latestControlExerciseAt([
+      { action: "killswitch.master", created_at: "2026-08-12T12:01:00.000Z" },
+      { action: "agent.update", created_at: "2026-08-12T12:03:00.000Z" },
+      { action: "agent.suspend", created_at: "2026-08-12T12:02:00.000Z" },
+      { action: "agent.suspend", created_at: "not-a-date" },
+    ])).toBe("2026-08-12T12:02:00.000Z");
   });
 
   it("pins the audit action strings to the writers that emit them", () => {

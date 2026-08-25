@@ -47,6 +47,7 @@ function profileRow(overrides: Record<string, unknown> = {}) {
     owner_subject: null,
     owner_tier: null,
     owner_verified_at: null,
+    is_verified: false,
     published_agent_count: 0,
     ...overrides,
   };
@@ -91,6 +92,13 @@ describe("the public field set", () => {
     const view = buildPublicProfileView(profileRow());
     expect(view).not.toBeNull();
     expect(Object.keys(view!).sort()).toEqual([...PUBLIC_PROFILE_FIELDS].sort());
+  });
+
+  it("renders the platform check only from an exact database boolean", () => {
+    expect(buildPublicProfileView(profileRow({ is_verified: true }))!.verified).toBe(true);
+    for (const value of [false, null, undefined, 1, "true", "yes"]) {
+      expect(buildPublicProfileView(profileRow({ is_verified: value }))!.verified, String(value)).toBe(false);
+    }
   });
 
   it("exposes exactly the advertised agent fields", () => {

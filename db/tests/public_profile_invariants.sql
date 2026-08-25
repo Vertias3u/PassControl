@@ -95,6 +95,26 @@ begin
   select count(*) into n from public.public_operator_profile('TESTOP');
   if n <> 1 then raise exception 'handle lookup is not case-folded'; end if;
 
+  -- A social check is absent by default, appears only with a server-written
+  -- registry row, and is removed by deleting that row. The public RPC returns
+  -- only the boolean, never issuer/note metadata.
+  select count(*) into n
+    from public.public_operator_profile('testop') p
+   where p.is_verified;
+  if n <> 0 then raise exception 'an ordinary profile was marked verified'; end if;
+
+  insert into public.profile_verifications (user_id, issuer, note)
+  values (v_u, 'Vertias', 'manual invariant fixture');
+  select count(*) into n
+    from public.public_operator_profile('testop') p
+   where p.is_verified;
+  if n <> 1 then raise exception 'a manually verified profile did not receive its check'; end if;
+  delete from public.profile_verifications where user_id = v_u;
+  select count(*) into n
+    from public.public_operator_profile('testop') p
+   where p.is_verified;
+  if n <> 0 then raise exception 'a removed verification kept its public check'; end if;
+
   -- An agent with no passport cannot be verified, so it must not be listed —
   -- 0023 made passport_pubkey nullable for Direct Agent Key agents.
   insert into public.agents (user_id, name, passport_pubkey, public_label, published)
@@ -176,6 +196,19 @@ begin
   -- The trigger must not block an unrelated update to the same row, or every
   -- profile edit after a handle retirement would fail.
   update public.users set display_name = 'Renamed' where id = v_other;
+
+  -- A protected identity is refused at the database boundary, including a
+  -- direct users UPDATE. Assigning it to one account is the only exception.
+  begin
+    update public.users set username = 'openai' where id = v_u;
+    raise exception 'a protected company identity was claimable by default';
+  exception when unique_violation then
+    null;
+  end;
+  update public.reserved_usernames set assigned_user_id = v_u where username = 'openai';
+  update public.users set username = 'openai' where id = v_u;
+  update public.users set username = 'testop_reassigned' where id = v_u;
+  update public.reserved_usernames set assigned_user_id = null where username = 'openai';
 
   -- A published handle stops moving, and the DATABASE says so too (0034).
   --

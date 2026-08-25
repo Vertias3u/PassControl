@@ -37,6 +37,11 @@ export const PROVIDER_UPSTREAMS = {
   mistral: { hostname: "api.mistral.ai", basePath: "" },
   together: { hostname: "api.together.ai", basePath: "" },
   deepseek: { hostname: "api.deepseek.com", basePath: "" },
+  // Gemini's OpenAI-compat base carries a two-segment prefix, unlike groq's
+  // single `/openai`. Listing it here is what makes a CONNECT to Google refuse
+  // as `provider_tunnel_not_governed` — and, deliberately, what makes it
+  // permanently ineligible for `--allow-connect`.
+  gemini: { hostname: "generativelanguage.googleapis.com", basePath: "/v1beta/openai" },
 };
 
 const HOST_BY_NAME = new Map(

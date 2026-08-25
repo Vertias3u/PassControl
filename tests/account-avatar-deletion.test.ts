@@ -36,6 +36,18 @@ describe("avatar cleanup on account deletion", () => {
     expect(CODE).toMatch(/storage\s*\.\s*from\(\s*["']avatars["']\s*\)\s*\.\s*remove\(/);
   });
 
+  it("sweeps the account's whole prefix, not only the path the row names", () => {
+    // The object path is derived from the avatar key (see profile-actions), so
+    // an account can hold more than one object whenever an earlier best-effort
+    // cleanup failed. The RPC destroys the only row that names any of them, and
+    // there is no sweep afterwards — so the enumeration has to happen here.
+    expect(CODE).toMatch(/storage\s*\.\s*from\(\s*["']avatars["']\s*\)\s*\.\s*list\(/);
+    const listed = CODE.indexOf(".list(");
+    const rpc = CODE.indexOf('rpc("delete_account_data"');
+    expect(listed).toBeGreaterThan(-1);
+    expect(rpc).toBeGreaterThan(-1);
+  });
+
   // The file already refuses to report plain success when a cleanup step fails,
   // and an image left behind after an erasure request belongs in that report.
   it("reports an orphaned avatar rather than swallowing it", () => {

@@ -22,8 +22,8 @@ export const PACKAGE_VERSION = (() => {
 // second numeric copy that can drift from system-health capability reporting.
 export const WORKSPACE_IMPORT_MAX_VERSION = WORKSPACE_EXPORT_PROTOCOL.maximum;
 
-export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek"];
-export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek"]);
+export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini"];
+export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek", "gemini"]);
 
 const DEFAULT_GATEWAY = "http://localhost:3000";
 const DEFAULT_PROVIDER = "anthropic";
@@ -69,6 +69,8 @@ export function defaultModelForProvider(provider) {
       return "openai/gpt-oss-20b";
     case "deepseek":
       return "deepseek-chat";
+    case "gemini":
+      return "gemini-2.5-flash";
     case "anthropic":
     default:
       return "claude-haiku-4-5";
@@ -353,6 +355,27 @@ export function bareGatewayOrigin(gateway, label = "PASSCONTROL_GATEWAY") {
  * part of the credential's security, not configuration taste. Every `api()` call
  * resolves its destination through this, never through the raw config string.
  */
+/**
+ * The same origin rule, for probes that carry NO credential.
+ *
+ * `passcontrol version` reads an unauthenticated /api/version, so the leak the
+ * rule normally prevents — a signature or a `pc_` key reaching a host the
+ * operator did not choose — does not apply. The destination still has to be
+ * validated: a project-local `.passcontrol` pointing elsewhere would make a
+ * DIAGNOSTIC command report a stranger's build as your gateway's, which is its
+ * own kind of wrong answer, and it would turn `version` into a beacon.
+ *
+ * Returns null rather than throwing. A malformed gateway is a row in a report
+ * here, not a reason to abort the command the operator actually ran.
+ */
+export function probeGatewayOrigin(current = config) {
+  try {
+    return bareGatewayOrigin(current.gateway);
+  } catch {
+    return null;
+  }
+}
+
 export function requireControlGateway(current = config) {
   assertConfigLoaded();
   return bareGatewayOrigin(current.gateway);

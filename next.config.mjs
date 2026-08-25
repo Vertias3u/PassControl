@@ -11,14 +11,49 @@ const repoRoot = path.dirname(fileURLToPath(import.meta.url));
 // we build against once here, rather than reporting whatever a mutable runtime
 // filesystem happens to contain. `env` is intentionally used so Next inlines
 // it into the Edge bundle; the sole consumer is server-only and authenticated.
-const migrationEntries = fs
-    .readdirSync(path.join(repoRoot, "db", "migrations"))
+const migrationsDir = path.join(repoRoot, "db", "migrations");
+
+/**
+ * Absent and empty must land in the same place.
+ *
+ * The guard below exists to explain a manifest that would ship empty, and its
+ * comment names `.vercelignore` as the cause — but an ignore rule removes the
+ * DIRECTORY from the upload, not just its contents. Letting the ENOENT escape
+ * meant the one scenario the guard was written for was the one it could never
+ * report: the build died on `ENOENT ... scandir` instead. Any other error
+ * (permissions, a file where the directory should be) is still a real fault and
+ * still thrown.
+ */
+function readMigrationEntries() {
+  let names;
+  try {
+    names = fs.readdirSync(migrationsDir);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return [];
+    throw error;
+  }
+  return names
     .filter((name) => name.endsWith(".sql"))
     .sort()
     .map((name) => ({
       version: name,
-      checksum: createHash("sha256").update(fs.readFileSync(path.join(repoRoot, "db", "migrations", name))).digest("hex"),
+      checksum: createHash("sha256").update(fs.readFileSync(path.join(migrationsDir, name))).digest("hex"),
     }));
+}
+
+const migrationEntries = readMigrationEntries();
+// An empty manifest is not a usable build: System Health would report the
+// ledger "unknown" forever and no check could ever fail. Refuse to build one
+// rather than deploy a diagnostic that cannot diagnose. This fired for real —
+// .vercelignore's `*.sql` glob excluded db/migrations from the Vercel upload,
+// and the only symptom was a degraded panel on an already-live deployment.
+if (isProd && migrationEntries.length === 0) {
+  throw new Error(
+    "No migrations found in db/migrations — the migration manifest would ship empty. " +
+      "On Vercel this usually means .vercelignore excluded them from the upload."
+  );
+}
+
 const migrationManifest = JSON.stringify({
   entries: migrationEntries,
   head: migrationEntries.at(-1)?.version ?? "",

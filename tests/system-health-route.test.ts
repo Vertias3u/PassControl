@@ -7,7 +7,7 @@ vi.mock("@/lib/control/auth", () => ({ authenticateApiKey: (...args: any[]) => a
 vi.mock("@/lib/ratelimit", () => ({ rateLimit: async () => ({ success: true, remaining: 1 }) }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => ({ auth: { admin: {} } }) }));
 vi.mock("@/lib/system-health/operator", () => ({ systemOperatorForControl: (...args: any[]) => operator(...args) }));
-vi.mock("@/lib/system-health", () => ({ getSystemHealthSnapshot: (...args: any[]) => snapshot(...args) }));
+vi.mock("@/lib/system-health/cache", () => ({ getCachedSystemHealthSnapshot: (...args: any[]) => snapshot(...args) }));
 
 import { GET } from "@/app/api/control/v1/system/route";
 

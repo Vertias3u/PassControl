@@ -4,6 +4,7 @@ import { useActionState } from "react";
 import { useFormStatus } from "react-dom";
 import { ArrowRight, CheckCircle2 } from "lucide-react";
 import { applyForBeta } from "@/app/beta/actions";
+import { BETA_PROVIDERS, BETA_PROVIDER_LABELS } from "@/lib/beta-providers";
 
 function Submit() {
   const { pending } = useFormStatus();
@@ -49,14 +50,18 @@ export function BetaApplicationForm() {
         </label>
         <label>
           <span>Model provider</span>
+          {/* Rendered from BETA_PROVIDERS rather than typed out, because the
+              hand-written list here had already fallen behind the accepted set.
+              BETA_PROVIDER_LABELS is a total Record, so a new provider cannot
+              reach the form without a label. */}
           <select name="provider" defaultValue="undecided" required>
-            <option value="undecided">Not decided</option>
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Anthropic</option>
-            <option value="groq">Groq</option>
-            <option value="mistral">Mistral</option>
-            <option value="together">Together</option>
-            <option value="deepseek">DeepSeek</option>
+            {[...BETA_PROVIDERS]
+              .sort((a, b) => (a === "undecided" ? -1 : b === "undecided" ? 1 : 0))
+              .map((provider) => (
+                <option key={provider} value={provider}>
+                  {BETA_PROVIDER_LABELS[provider]}
+                </option>
+              ))}
           </select>
         </label>
       </div>

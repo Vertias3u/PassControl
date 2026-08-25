@@ -30,6 +30,7 @@ import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 
 import { VertiasLogo } from "@/components/VertiasLogo";
+import { VerifiedProfileBadge } from "@/components/VerifiedProfileBadge";
 import { createPassportSigil } from "@/lib/passport-art";
 import {
   lookupPublicProfile,
@@ -282,8 +283,9 @@ function ProfileCard({
             )}
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="m-0 text-xl font-bold leading-7 text-foreground">
-              {profile.displayName ?? `@${profile.handle}`}
+            <h2 className="m-0 flex items-center gap-1.5 text-xl font-bold leading-7 text-foreground">
+              <span>{profile.displayName ?? `@${profile.handle}`}</span>
+              <VerifiedProfileBadge verified={profile.verified} />
             </h2>
             <p className="mt-1 mb-0 font-mono text-sm text-muted-foreground">@{profile.handle}</p>
             {profile.company && (

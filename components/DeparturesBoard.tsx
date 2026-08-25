@@ -18,6 +18,7 @@ import {
   departureCounts,
   departureDestination,
   groupDepartures,
+  groupKey,
   groupSpan,
   groupUpstreamStatus,
   repeatBurstTitle,
@@ -123,7 +124,7 @@ export function DeparturesBoard({
     const grouped = groupDepartures(visibleRows);
     // An expanded burst becomes its members again, in place.
     return grouped.flatMap((group) =>
-      group.count > 1 && expanded.has(group.row.id)
+      group.count > 1 && expanded.has(groupKey(group))
         ? group.members.map((member) => ({ row: member, count: 1, members: [member] }))
         : [group]
     );
@@ -324,7 +325,7 @@ export function DeparturesBoard({
                           aria-label={`Show the ${count} calls in this burst`}
                           onClick={(event) => {
                             event.stopPropagation();
-                            toggleGroup(row.id);
+                            toggleGroup(groupKey(group));
                           }}
                         >
                           ×{count}
@@ -388,7 +389,7 @@ export function DeparturesBoard({
                       className="pc-live-calls__repeat"
                       title={repeatTitle(count, span)}
                       aria-label={`Show the ${count} calls in this burst`}
-                      onClick={(event) => { event.stopPropagation(); toggleGroup(row.id); }}
+                      onClick={(event) => { event.stopPropagation(); toggleGroup(groupKey(group)); }}
                     >
                       ×{count}
                     </button>

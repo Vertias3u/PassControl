@@ -44,6 +44,9 @@ const RULES: Record<ProviderId, readonly ExhaustionRule[]> = {
   groq: [],
   mistral: [],
   together: [],
+  // No verified credit-exhaustion signature for Gemini yet. Empty on purpose —
+  // see the note above; a guessed pattern here would misclassify a real error.
+  gemini: [],
 };
 
 function errorObject(body: string): Record<string, unknown> | null {

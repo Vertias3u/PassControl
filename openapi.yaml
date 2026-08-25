@@ -129,7 +129,7 @@ paths:
               type: object
               required: [provider, model]
               properties:
-                provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek] }
+                provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini] }
                 model: { type: string, minLength: 1, maxLength: 200 }
                 timestamp:
                   type: string
@@ -322,7 +322,7 @@ components:
     Scope:
       type: object
       properties:
-        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek] }
+        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini] }
         models: { type: array, items: { type: string } }
     Agent:
       type: object
@@ -373,7 +373,7 @@ components:
         evaluated_at: { type: string, format: date-time }
         policy_time: { type: string, format: date-time }
         agent_id: { type: string, format: uuid }
-        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek] }
+        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini] }
         model: { type: string }
         method: { type: string, const: POST }
         path: { type: array, items: { type: string } }

@@ -1,6 +1,6 @@
 {
   "name": "passcontrol",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Identity, scope and budget controls for AI agents while provider keys stay server-side.",
   "license": "BUSL-1.1",
   "homepage": "https://passcontrol.vertias.eu",

@@ -3,7 +3,7 @@ export const runtime = "edge";
 
 import { control } from "@/lib/control/handler";
 import { errorResponse, jsonResponse } from "@/lib/control/respond";
-import { getSystemHealthSnapshot } from "@/lib/system-health";
+import { getCachedSystemHealthSnapshot } from "@/lib/system-health/cache";
 import { systemOperatorForControl } from "@/lib/system-health/operator";
 import type { SystemOperatorReason } from "@/lib/system-health/operator";
 
@@ -23,7 +23,7 @@ const handler = control("read", async ({ userId, db, requestId }) => {
     // nobody" instead of debugging one opaque 403 for four different causes.
     return errorResponse(403, REFUSALS[operator.reason] ?? "system_forbidden", requestId);
   }
-  return jsonResponse(await getSystemHealthSnapshot(), requestId);
+  return jsonResponse(await getCachedSystemHealthSnapshot(), requestId);
 });
 
 export function GET(req: Request): Promise<Response> {

@@ -10,6 +10,7 @@ export const DEFAULT_ALLOWED_MODELS: Record<ProviderId, string> = {
   mistral: "mistral-*",
   together: "openai/gpt-oss-*",
   deepseek: "deepseek-*",
+  gemini: "gemini-*",
 };
 
 export const DEFAULT_CLIENT_MODELS: Record<ProviderId, string> = {
@@ -19,6 +20,7 @@ export const DEFAULT_CLIENT_MODELS: Record<ProviderId, string> = {
   mistral: "mistral-small-latest",
   together: "openai/gpt-oss-20b",
   deepseek: "deepseek-chat",
+  gemini: "gemini-2.5-flash",
 };
 
 /** Runtime model ids are copied into environment/configuration blocks and sent

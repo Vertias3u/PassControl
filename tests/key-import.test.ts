@@ -162,6 +162,7 @@ describe("key-shape provider detection", () => {
     ["mistral", "plain-mistral-key-with-no-public-prefix"],
     ["together", "plain-together-key-with-no-public-prefix"],
     ["deepseek", "sk-example-shared-prefix"],
+    ["gemini", "AIza-test-not-a-real-key"],
   ] satisfies Array<[ProviderId, string]>) (
     "lets an explicit %s dropdown selection override every heuristic",
     (provider, key) => {
@@ -202,6 +203,9 @@ describe("server-side provider model probe", () => {
     ["mistral", "https://api.mistral.ai/v1/models"],
     ["together", "https://api.together.ai/v1/models"],
     ["deepseek", "https://api.deepseek.com/models"],
+    // Gemini's compat base already ends in a version segment, so the listing is
+    // `/models`, NOT `/v1/models` — the doubled-version trap.
+    ["gemini", "https://generativelanguage.googleapis.com/v1beta/openai/models"],
   ] satisfies Array<[ProviderId, string]>) (
     "uses %s's model-listing URL and existing auth-header helper",
     async (provider, expectedUrl) => {

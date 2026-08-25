@@ -1,4 +1,9 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
+// Re-exported so existing server-side importers keep working. The declarations
+// moved to a Node-free module because the signup form is a client component —
+// see lib/beta-providers.ts.
+export { BETA_PROVIDERS, BETA_PROVIDER_LABELS, type BetaProvider } from "./beta-providers";
+import { BETA_PROVIDERS, type BetaProvider } from "./beta-providers";
 
 export const BETA_INTEGRATIONS = [
   "hermes",
@@ -8,15 +13,6 @@ export const BETA_INTEGRATIONS = [
   "other",
 ] as const;
 
-export const BETA_PROVIDERS = [
-  "openai",
-  "anthropic",
-  "groq",
-  "mistral",
-  "together",
-  "deepseek",
-  "undecided",
-] as const;
 
 export const BETA_MONTHLY_CALL_BUCKETS = [
   "under-1000",
@@ -27,7 +23,7 @@ export const BETA_MONTHLY_CALL_BUCKETS = [
 ] as const;
 
 export type BetaIntegration = (typeof BETA_INTEGRATIONS)[number];
-export type BetaProvider = (typeof BETA_PROVIDERS)[number];
+
 export type BetaMonthlyCallBucket = (typeof BETA_MONTHLY_CALL_BUCKETS)[number];
 export type BetaInviteSource = "shared" | "database";
 

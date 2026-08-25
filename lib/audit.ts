@@ -58,6 +58,13 @@ export const AUDIT_ACTIONS = [
   // like a workspace nobody has ever exported.
   "workspace.export",
   "workspace.import",
+  // A problem report was filed, and an operator's triage decision on one. The
+  // reporter's own id owns the first; the OPERATOR's id owns the second, so the
+  // trail says who acted rather than who was acted upon. Neither carries the
+  // report's text — see the metadata rule above; the body lives in one column
+  // in one table, not copied into a trail the control API serves.
+  "problem.report",
+  "problem.triage",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

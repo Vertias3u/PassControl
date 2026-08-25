@@ -28,6 +28,7 @@ import {
   AVATAR_MAX_BYTES,
   AVATAR_MAX_DIMENSION,
   sniffAvatar,
+  stripAvatarMetadata,
 } from "@/lib/profile/image";
 
 /** Big-endian u32, as PNG writes every length and every dimension. */
@@ -211,5 +212,81 @@ describe("the caps themselves", () => {
   // backstop for a path that somehow skips this function.
   it("stays under the bucket's own limit", () => {
     expect(AVATAR_MAX_BYTES).toBeLessThanOrEqual(524288);
+  });
+});
+
+// ── Stripping, instead of refusing ──────────────────────────────────────────
+//
+// The refusal was built on a premise that is only half true. "Metadata cannot
+// be stripped without an image library" holds for JPEG, whose EXIF lives in a
+// segment structure entangled with the entropy-coded scan — which is why JPEG
+// is refused outright. It does NOT hold for PNG or WebP. Both are chunked
+// containers: every chunk carries its own length and its own CRC, so removing
+// one is a byte-slice, and everything that remains stays valid.
+//
+// The cost of getting that wrong was a real operator, on a real PNG they had
+// already stripped by hand, being told to go and strip it again.
+describe("stripAvatarMetadata", () => {
+  const textChunk = chunk("tEXt", ascii("Software\0Something"));
+  const exifChunk = chunk("eXIf", [1, 2, 3, 4]);
+
+  it("removes a PNG text chunk and leaves an acceptable image", () => {
+    const dirty = png({ extra: textChunk });
+    expect(sniffAvatar(dirty).ok).toBe(false);
+    accepted(stripAvatarMetadata(dirty), "image/png");
+  });
+
+  it("removes every refused PNG chunk at once", () => {
+    const dirty = png({ extra: [...textChunk, ...exifChunk, ...chunk("zTXt", [1]), ...chunk("iTXt", [2])] });
+    accepted(stripAvatarMetadata(dirty), "image/png");
+  });
+
+  it("keeps the chunks that are not metadata", () => {
+    // pHYs is on every PNG this repo ships. Stripping it would be vandalism.
+    const cleaned = stripAvatarMetadata(png({ extra: [...chunk("pHYs", [0, 0, 0, 1, 0, 0, 0, 1, 1]), ...textChunk] }));
+    const text = [...cleaned].map((b) => String.fromCharCode(b)).join("");
+    expect(text).toContain("pHYs");
+    expect(text).not.toContain("tEXt");
+  });
+
+  it("returns a clean file untouched, byte for byte", () => {
+    const clean = png();
+    expect(stripAvatarMetadata(clean)).toEqual(clean);
+  });
+
+  it("removes EXIF and XMP from a WebP and keeps it parseable", () => {
+    const dirty = webp({ extra: [...chunkRiff("EXIF", [9, 9]), ...chunkRiff("XMP ", [7])] });
+    expect(sniffAvatar(dirty).ok).toBe(false);
+    accepted(stripAvatarMetadata(dirty), "image/webp");
+  });
+
+  it("keeps the WebP RIFF length honest after removing a chunk", () => {
+    // A stale length field makes every downstream decoder read past the end.
+    const cleaned = stripAvatarMetadata(webp({ extra: chunkRiff("EXIF", [9, 9]) }));
+    const declared = cleaned[4]! + (cleaned[5]! << 8) + (cleaned[6]! << 16) + (cleaned[7]! << 24);
+    expect(declared + 8).toBe(cleaned.length);
+  });
+
+  it("clears the VP8X flags for the chunks it removed", () => {
+    // VP8X advertises EXIF (0x08) and XMP (0x04) in its first byte. Leaving
+    // those set describes chunks that are no longer there.
+    const dirty = webp({ extra: chunkRiff("EXIF", [9, 9]) });
+    const flagged = new Uint8Array(dirty);
+    flagged[20] = 0x08; // VP8X data begins at 20 in this fixture
+    const cleaned = stripAvatarMetadata(flagged);
+    expect(cleaned[20]! & 0x0c).toBe(0);
+  });
+
+  it("does not touch bytes it cannot parse", () => {
+    // Garbage in, same garbage out — sniffAvatar is what refuses it.
+    const junk = new Uint8Array([1, 2, 3, 4, 5]);
+    expect(stripAvatarMetadata(junk)).toEqual(junk);
+  });
+
+  it("never mutates the caller's buffer", () => {
+    const dirty = png({ extra: textChunk });
+    const before = new Uint8Array(dirty);
+    stripAvatarMetadata(dirty);
+    expect(dirty).toEqual(before);
   });
 });

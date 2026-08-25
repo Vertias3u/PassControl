@@ -66,6 +66,7 @@ describe("public_operator_profile", () => {
       "bio",
       "company",
       "display_name",
+      "is_verified",
       "member_since",
       "owner_subject",
       "owner_tier",
@@ -114,6 +115,21 @@ describe("public_operator_profile", () => {
     // In the WHERE this would suppress the whole profile for an operator who
     // never published an owner binding.
     expect(src).toMatch(/on o\.user_id = u\.id and o\.published/i);
+  });
+
+  it("derives the social check from the server-only verification registry", () => {
+    const src = body(sql, PROFILE);
+    expect(src).toMatch(/left join public\.profile_verifications/i);
+    expect(src).toMatch(/v\.user_id = u\.id/i);
+    expect(src).toMatch(/\(v\.user_id is not null\)/i);
+  });
+
+  it("drops the old OUT-row signature before adding the verification column", () => {
+    const lower = sql.toLowerCase();
+    const drop = lower.indexOf("drop function if exists public.public_operator_profile(text)");
+    const create = lower.indexOf("create or replace function public.public_operator_profile");
+    expect(drop).toBeGreaterThan(-1);
+    expect(create).toBeGreaterThan(drop);
   });
 
   // A key with no stored object resolves to 404 at avatar_object_path, and the
@@ -308,7 +324,11 @@ describe("the handle lock (0034)", () => {
 });
 
 describe("the profile columns", () => {
-  const sql = liveDefinitionOf(PROFILE);
+  // These constraints live on tables, not in the function's latest
+  // definition. 0040 legitimately redefines public_operator_profile without
+  // repeating 0033's column DDL, so resolve the migration that introduced the
+  // schema explicitly rather than coupling this block to the RPC helper above.
+  const sql = readFileSync(join(MIGRATIONS_DIR, "0033_operator_profile.sql"), "utf8");
 
   it("keep the two opt-ins separate", () => {
     expect(sql).toMatch(/add column if not exists profile_public\s+boolean not null default false/i);

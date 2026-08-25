@@ -6,6 +6,7 @@ import {
   departureCounts,
   departureDestination,
   groupDepartures,
+  groupKey,
   groupSpan,
   groupUpstreamStatus,
   repeatBurstTitle,
@@ -310,10 +311,15 @@ describe("a collapsed burst is honest about time and reachable", () => {
     // The grouping only stays honest if the ×N is a way IN to the rows. A test
     // asserting `members` exists while nothing in the UI can reach them would
     // guard a feature that does not exist.
+    //
+    // Both sides go through groupKey(), never `row.id`: the representative is
+    // the NEWEST member, so a burst keyed on it loses its expansion the moment
+    // another call of the same kind arrives. See the groupKey suite below.
     const board = readFileSync(join(process.cwd(), "components/DeparturesBoard.tsx"), "utf8");
-    expect(board).toMatch(/toggleGroup\(row\.id\)/);
-    expect(board).toMatch(/expanded\.has\(group\.row\.id\)/);
+    expect(board).toMatch(/toggleGroup\(groupKey\(group\)\)/);
+    expect(board).toMatch(/expanded\.has\(groupKey\(group\)\)/);
     expect(board).toMatch(/group\.members\.map/);
+    expect(board).not.toMatch(/toggleGroup\(row\.id\)/);
   });
 });
 
@@ -412,5 +418,51 @@ describe("repeatBurstTitle", () => {
     for (const span of [null, { from: "2026-08-01T09:07:03.000Z", to: "2026-08-01T09:08:41.000Z" }]) {
       expect(repeatBurstTitle(4, span, fmt)).toMatch(/every one is stored|all stored/);
     }
+  });
+});
+
+describe("groupKey", () => {
+  // An operator clicks ×7 to expand a burst of refusals and starts reading. The
+  // client is still live, another refusal of the same kind lands within the
+  // burst window, and it becomes the group's representative — because rows
+  // arrive newest first and groupDepartures takes the first row it sees. Keyed
+  // on that row, the expansion lookup misses and the burst silently re-collapses
+  // under the cursor. The key has to name the BURST, not its newest member.
+  const burst = (ids: string[]) =>
+    ids.map((id, index) =>
+      row({
+        id,
+        status: "denied_scope",
+        // Newest first, one second apart, well inside the burst window.
+        created_at: new Date(Date.parse("2026-08-01T09:07:03.000Z") - index * 1000).toISOString(),
+      })
+    );
+
+  it("survives a newer member joining the burst", () => {
+    const before = groupDepartures(burst(["c", "b", "a"]));
+    expect(before).toHaveLength(1);
+    const after = groupDepartures(burst(["d", "c", "b", "a"]));
+    expect(after).toHaveLength(1);
+    expect(groupKey(after[0]!)).toBe(groupKey(before[0]!));
+  });
+
+  it("is not the representative row, which is what moved", () => {
+    const after = groupDepartures(burst(["d", "c", "b", "a"]));
+    expect(after[0]!.row.id).toBe("d");
+    expect(groupKey(after[0]!)).not.toBe("d");
+  });
+
+  it("still distinguishes two separate groups", () => {
+    const groups = groupDepartures([
+      ...burst(["c", "b", "a"]),
+      row({ id: "z", status: "denied_scope", created_at: "2026-07-01T00:00:00.000Z" }),
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groupKey(groups[0]!)).not.toBe(groupKey(groups[1]!));
+  });
+
+  it("names an ordinary single row by that row", () => {
+    const groups = groupDepartures([row({ id: "solo" })]);
+    expect(groupKey(groups[0]!)).toBe("solo");
   });
 });

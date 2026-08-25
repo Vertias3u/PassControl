@@ -301,6 +301,11 @@ export async function setHandle(
       return { ok: false, status: 409, code: "no_profile" };
     case "locked":
       return { ok: false, status: 409, code: "handle_locked" };
+    // 0040 puts the list in Postgres as well as this build. This branch matters
+    // during a rolling deploy: a newer database may know a protected identity
+    // an older application bundle does not. Drift still refuses the claim.
+    case "reserved":
+      return { ok: false, status: 409, code: "reserved_handle" };
     // Held by somebody, or retired. Deliberately the same answer for both —
     // 0033 raises unique_violation for the retired case precisely so there is
     // no oracle for which handles have ever been used.
@@ -358,7 +363,28 @@ export async function setProfilePublic(
 }
 
 /**
+ * Where one avatar key's bytes live.
+ *
+ * The key is IN the path, and that is the whole point. `/avatars/<key>` is
+ * served `immutable` for a year on the claim that a key can only ever name one
+ * set of bytes — which holds only if two keys can never name the same object.
+ * A per-user path overwritten in place breaks it: the previous key, still live
+ * until the row update lands, resolves straight to the replacement image.
+ *
+ * Keeping the owner's uuid as the prefix is what lets the bucket's own policies
+ * stay per-owner; the uuid never reaches a public surface, because the public
+ * surface only ever carries the key (see app/avatars/[key]/route.ts).
+ */
+export function avatarObjectPath(userId: string, key: string): string {
+  return `${userId}/${key}`;
+}
+
+/**
  * Point the profile at freshly uploaded avatar bytes.
+ *
+ * The key is supplied rather than minted here: the caller needs it BEFORE the
+ * upload, to build the object path from it. Minting a second one at this point
+ * would hand back a key that names nothing.
  *
  * A new key every time, so a previously shared /avatars/<key> URL stops
  * resolving rather than silently serving the new picture — and so the URL can
@@ -367,10 +393,13 @@ export async function setProfilePublic(
 export async function setAvatar(
   admin: ProfileDatabase,
   userId: string,
-  objectPath: string
+  objectPath: string,
+  avatarKey: string
 ): Promise<ProfileResult<ProfileRecord>> {
   if (!objectPath.trim()) return { ok: false, status: 400, code: "invalid_avatar_path" };
-  return patchProfile(admin, userId, { avatar_path: objectPath, avatar_key: newAvatarKey() });
+  // A blank key would store bytes that avatar_object_path() can never resolve.
+  if (!avatarKey.trim()) return { ok: false, status: 400, code: "invalid_avatar_key" };
+  return patchProfile(admin, userId, { avatar_path: objectPath, avatar_key: avatarKey });
 }
 
 /**

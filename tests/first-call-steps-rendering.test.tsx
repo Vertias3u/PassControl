@@ -44,8 +44,8 @@ const html = (initialLogs: ReturnType<typeof log>[]) =>
     <FirstCallActivation
       userId="u1"
       providerConfigured
-      controlsExercised={false}
-      dismissed={false}
+      controlExerciseAt={null}
+      initiallyHidden={false}
       agents={agents}
       initialLogs={initialLogs}
       integrations={["generic"]}
@@ -89,8 +89,8 @@ describe("first-call stepper markup", () => {
       <FirstCallActivation
         userId="u1"
         providerConfigured
-        controlsExercised={false}
-        dismissed
+        controlExerciseAt={null}
+        initiallyHidden
         agents={agents}
         initialLogs={[log("ok")]}
         integrations={["generic"]}

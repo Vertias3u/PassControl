@@ -21,8 +21,7 @@ import { partitionByClass } from "@/lib/call-class";
 import { shadowRevision } from "@/lib/policy-shadow";
 import { CloudBetaOperations } from "@/components/dashboard/CloudBetaOperations";
 import { FirstCallActivation } from "@/components/dashboard/FirstCallActivation";
-import { cookies } from "next/headers";
-import { hasExercisedControls, FIRST_CALL_DISMISSED_COOKIE } from "@/lib/first-call-activation";
+import { latestControlExerciseAt, onboardingStateHidden } from "@/lib/first-call-activation";
 import { readCloudBetaQuotaSnapshot } from "@/lib/cloud-beta-quota";
 import { buildCloudSupportBundle, type CloudOperationsSignals } from "@/lib/cloud-operations";
 import { loadInstanceSigner, instanceIssuer } from "@/lib/crypto/instanceKey";
@@ -66,6 +65,7 @@ export default async function ControlTowerPage() {
     kill,
     providerKeys,
     quota,
+    { data: onboardingState },
   ] =
     await Promise.all([
     db.from("agents").select("*").order("created_at", { ascending: false }),
@@ -94,6 +94,11 @@ export default async function ControlTowerPage() {
       .order("created_at", { ascending: false })
       .limit(6),
     readCloudBetaQuotaSnapshot(user.id, renderedAt),
+    db
+      .from("onboarding_state")
+      .select("dismissed_at, completed_at")
+      .eq("user_id", user.id)
+      .maybeSingle(),
   ]);
 
   const agentList = agents ?? [];
@@ -129,15 +134,9 @@ export default async function ControlTowerPage() {
   const needsFirstKey = (providerKeys.count ?? 1) === 0;
   // Read off the admin_audit rows already fetched above — the activation guide's
   // last step must not cost a fourth round trip for a rail most tenants have
-  // dismissed. Bounded to the same newest-100 window; see hasExercisedControls.
-  const controlsExercised = hasExercisedControls(adminAudit ?? []);
-  // Resolved here, on the server, so the activation guide's first paint is
-  // already correct. Reading it in the client instead deadlocked the guide —
-  // the reasoning is on the guard in FirstCallActivation.tsx. The cookie holds
-  // the operator id, so a second operator on the same browser is not silently
-  // treated as having finished someone else's onboarding.
-  const firstCallDismissed =
-    (await cookies()).get(FIRST_CALL_DISMISSED_COOKIE)?.value === user.id;
+  // dismissed. Bounded to the same newest-100 window; completion persistence
+  // re-checks the full ordered history inside complete_onboarding().
+  const controlExerciseAt = latestControlExerciseAt(adminAudit ?? []);
   const firstStoredProvider = providerKeys.data?.map((row) => row.provider).find(isProvider);
   const operationsSignals: CloudOperationsSignals = {
     providerCredentials: providerKeys.error
@@ -180,8 +179,8 @@ export default async function ControlTowerPage() {
         <FirstCallActivation
           userId={user.id}
           providerConfigured={!needsFirstKey}
-          controlsExercised={controlsExercised}
-          dismissed={firstCallDismissed}
+          controlExerciseAt={controlExerciseAt}
+          initiallyHidden={onboardingStateHidden(onboardingState)}
           agents={agentList.map((agent) => ({
             id: agent.id,
             name: agent.name,
