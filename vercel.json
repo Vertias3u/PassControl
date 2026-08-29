@@ -1,13 +1,9 @@
 {
-  "buildCommand": "npm run check:legal && npm run build",
+  "buildCommand": "npm run build",
   "crons": [
     {
       "path": "/api/cron/reconcile",
       "schedule": "0 0 * * *"
-    },
-    {
-      "path": "/api/cron/beta-retention",
-      "schedule": "15 0 * * *"
     }
   ]
 }

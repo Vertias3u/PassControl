@@ -1,8 +1,13 @@
 # Cloud Passport SDK
 
-Use this path when you control JavaScript or TypeScript application code. If an application
-accepts only a base URL and static API key, use a Cloud Direct Agent Key instead. The local
-sidecar remains an advanced compatibility fallback; it is not the default Cloud path.
+Use this path when you control JavaScript or TypeScript application code — it needs no local
+process at all.
+
+If an application accepts only a base URL and static API key, it cannot sign a challenge, so it
+has two options: a **Cloud Direct Agent Key** (simplest, lower-assurance bearer possession) or the
+**passport connector** (`passcontrol sidecar`), which signs on its behalf. The connector is not
+self-hosting and works against Cloud — it is one local process, and the SDK remains the default
+Cloud path only because it needs none.
 
 ## What stays where
 

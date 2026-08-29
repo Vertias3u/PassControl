@@ -158,14 +158,6 @@ describe("passcontrol call — where the passport signature goes", () => {
 // gateway directly instead of going through the guarded `api()` helper, so it is
 // the one entrypoint that puts both a passport signature and a control-plane
 // bearer on the same unvalidated destination.
-describe("passcontrol try — the demo passport takes the same route", () => {
-  it("refuses a non-loopback HTTP gateway before signing or arming anything", async () => {
-    const result = await run(["try"], { PASSCONTROL_GATEWAY: "http://gw.example.com:1" });
-    expect(output(result)).toMatch(/PASSCONTROL_GATEWAY must be a bare HTTPS origin/);
-    expect(output(result)).not.toMatch(/fetch failed|ECONNREFUSED|kill switch/i);
-  }, 20000);
-});
-
 describe("the long-running passport entrypoints refuse before they start", () => {
   // Both would otherwise bind a port / attach a stdio transport and then mint on
   // demand, so a refusal has to land before the process settles into serving.

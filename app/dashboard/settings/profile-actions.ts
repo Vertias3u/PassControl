@@ -33,6 +33,7 @@
 import { revalidatePath } from "next/cache";
 
 import { recordAdminAction } from "@/lib/audit";
+import { PASSCONTROL_CONTACT_EMAIL } from "@/lib/contact";
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import { AVATAR_MAX_BYTES, sniffAvatar, stripAvatarMetadata } from "@/lib/profile/image";
 import {
@@ -357,7 +358,7 @@ export async function removeAvatar(): Promise<ProfileActionState> {
   return {
     profile: result.data,
     notice: orphaned
-      ? "Your avatar was removed and its link no longer works. The stored file could not be deleted — contact hello@vertias.eu."
+      ? `Your avatar was removed and its link no longer works. The stored file could not be deleted — contact ${PASSCONTROL_CONTACT_EMAIL}.`
       : "Avatar removed.",
   };
 }

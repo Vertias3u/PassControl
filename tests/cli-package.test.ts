@@ -4,7 +4,7 @@ import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error — plain .mjs build script, no types
-import { build, importedPackages, packageOf, shippedFiles } from "../scripts/build-cli-package.mjs";
+import { build, importedPackages, packageOf, rewriteNpmReadmeLinks, shippedFiles } from "../scripts/build-cli-package.mjs";
 
 // The published CLI has now shipped the same defect twice from two different
 // causes, and neither was visible to any check that existed:
@@ -198,6 +198,49 @@ describe("the CLI package is built from the shipped files, not the app manifest"
     );
     expect(readme).not.toMatch(/\]\((?:\.\/)?docs\//u);
     expect(readme).toContain("](./LICENSE)");
+  });
+
+  // npmjs.com renders this file, and for a CLI it is the busiest page the project
+  // has. It used to be the root README.md — the PRIVATE repo's front page — so npm
+  // got a second copy of the pitch that no guard compared to anything, and it
+  // drifted: no kill-switch GIF, no tutorial link, and two of the six providers
+  // the public page advertises. Nothing was broken, so nothing went red.
+  //
+  // Equality against the rewritten public README is the whole property: npm and
+  // GitHub render one document, and there is no second copy left to drift.
+  it("publishes the same document the public repository does", () => {
+    const readme = readFileSync(`${built.outDir}/README.md`, "utf8");
+    // Two-name fallback, as docs-integrations.test.ts documents: the source is
+    // PUBLIC_README.md here and README.md inside the curated mirror, where
+    // curate-public.sh has already renamed it. This file ships, so reading the
+    // private name unconditionally would pass here and throw ENOENT publicly —
+    // the exact way the mirror's suite has gone red twice before.
+    const publicSource = ["../PUBLIC_README.md", "../README.md"].reduce<string | null>(
+      (found, candidate) => {
+        if (found !== null) return found;
+        try {
+          return readFileSync(new URL(candidate, import.meta.url), "utf8");
+        } catch {
+          return null;
+        }
+      },
+      null,
+    );
+    if (publicSource === null) throw new Error("neither PUBLIC_README.md nor README.md exists — the guard is not reading anything");
+
+    expect(
+      readme,
+      "the npm README is no longer the public README — npm and GitHub have drifted apart again",
+    ).toEqual(rewriteNpmReadmeLinks(publicSource, repoRoot, built.outDir));
+
+    // Named individually so a failure says which asset the npm page lost, not
+    // merely that two long strings differ.
+    expect(readme, "the npm page lost the kill-switch GIF").toContain(
+      "https://raw.githubusercontent.com/Vertias3u/PassControl/main/docs/demo/kill-switch.gif",
+    );
+    expect(readme, "the npm page lost its link to the tutorial").toContain(
+      "https://github.com/Vertias3u/PassControl/blob/main/TUTORIAL.md",
+    );
   });
 });
 

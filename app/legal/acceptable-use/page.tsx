@@ -1,4 +1,5 @@
 import { LegalPage } from "@/components/legal/LegalPage";
+import { PASSCONTROL_CONTACT_EMAIL, PASSCONTROL_CONTACT_MAILTO } from "@/lib/contact";
 
 export const metadata = { title: "Acceptable use policy" };
 
@@ -18,7 +19,7 @@ export default function AcceptableUsePage() {
         <li>misrepresent PassControl receipts, agent identity, decisions or audit history.</li>
       </ul></section>
       <section><h2>Enforcement</h2><p>Access may be limited or suspended while suspected abuse is investigated. Where appropriate and lawful, the operator may preserve relevant records, notify affected providers or authorities, and permanently end access. Good-faith vulnerability reports should follow the repository's <a href="https://github.com/Vertias3u/PassControl/blob/main/SECURITY.md">security policy</a>.</p></section>
-      <section><h2>Questions</h2><p>If you are unsure whether a use is permitted, ask first at <a href="mailto:hello@vertias.eu">hello@vertias.eu</a>.</p></section>
+      <section><h2>Questions</h2><p>If you are unsure whether a use is permitted, ask first at <a href={PASSCONTROL_CONTACT_MAILTO}>{PASSCONTROL_CONTACT_EMAIL}</a>.</p></section>
     </LegalPage>
   );
 }

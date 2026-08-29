@@ -227,7 +227,7 @@ the passport in the global PassControl profile; generated client configs contain
 absolute Node executable and CLI path:
 
 ```bash
-passcontrol init --global
+passcontrol login                              # or `passcontrol init --global` to do it by hand
 passcontrol configure claude-desktop --write   # or: cursor
 # Claude Code: passcontrol configure claude-code prints the CLI-managed add command
 ```

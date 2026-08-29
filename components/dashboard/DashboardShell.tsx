@@ -50,7 +50,6 @@ function Navigation({ active, mobile = false, showBetaOperator = false, showSyst
   const entries = [
     ...NAV,
     ...(showSystemHealth ? [{ id: "system" as const, label: "System health", href: "/dashboard/system", Icon: Stethoscope }] : []),
-    ...(showBetaOperator ? [{ id: "beta" as const, label: "Beta ops", href: "/dashboard/beta", Icon: UsersRound }] : []),
   ];
   return (
     <nav aria-label="Control Tower" className={mobile ? "pc-mobile-nav__links" : "pc-sidebar__nav"}>

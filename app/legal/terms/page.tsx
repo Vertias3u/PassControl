@@ -1,4 +1,5 @@
 import { LegalContact, LegalPage } from "@/components/legal/LegalPage";
+import { PASSCONTROL_CONTACT_EMAIL, PASSCONTROL_CONTACT_MAILTO } from "@/lib/contact";
 
 export const metadata = { title: "Free beta terms" };
 
@@ -15,7 +16,7 @@ export default function TermsPage() {
       <section><h2>8. Ending use</h2><p>You may stop using the beta at any time. An authenticated operator can export account data and permanently delete the workspace from Dashboard → Settings → Account data. Access may be ended for breach, security risk, legal necessity, prolonged inactivity or discontinuation of the beta. Reasonable notice will be given where practical and safe.</p></section>
       <section><h2>9. Disclaimers and liability</h2><p>The beta is provided “as is” and “as available,” to the fullest extent permitted by law. No guarantee is made that it will be uninterrupted, error-free, secure against every attack, or suitable for your purpose.</p><p>To the fullest extent permitted by law, Kristiyan Ivanov is not liable for indirect, incidental, special or consequential loss, lost profits, lost data, model outputs, provider charges or business interruption arising from the free beta. Nothing excludes liability that cannot lawfully be excluded, or any mandatory consumer right.</p></section>
       <section><h2>10. Law and changes</h2><p>Bulgarian law governs these terms, subject to mandatory protections and jurisdiction rights that apply to you. Material changes will be communicated before they take effect; continued use after that date means acceptance.</p></section>
-      <section><h2>11. Contact</h2><p>Questions, notices and deletion assistance: <a href="mailto:hello@vertias.eu">hello@vertias.eu</a>.</p></section>
+      <section><h2>11. Contact</h2><p>Questions, notices and deletion assistance: <a href={PASSCONTROL_CONTACT_MAILTO}>{PASSCONTROL_CONTACT_EMAIL}</a>.</p></section>
     </LegalPage>
   );
 }

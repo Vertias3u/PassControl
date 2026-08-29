@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { VertiasLogo } from "@/components/VertiasLogo";
 import styles from "@/app/legal/legal.module.css";
+import { PASSCONTROL_CONTACT_EMAIL, PASSCONTROL_CONTACT_MAILTO } from "@/lib/contact";
 import { LEGAL_IS_DRAFT, PUBLIC_SERVICE_ADDRESS, legalDateLabel } from "@/lib/legal-config";
 
 export const LEGAL_UPDATED = legalDateLabel();
@@ -64,7 +65,7 @@ export function LegalPage({
 
       <footer className={styles.footer}>
         <span>© 2026 Kristiyan Ivanov · Vertias project · Sofia, Bulgaria</span>
-        <a href="mailto:hello@vertias.eu">hello@vertias.eu</a>
+        <a href={PASSCONTROL_CONTACT_MAILTO}>{PASSCONTROL_CONTACT_EMAIL}</a>
       </footer>
     </div>
   );
@@ -77,7 +78,7 @@ export function LegalContact() {
       Individual operating the Vertias project<br />
       Sofia, Bulgaria<br />
       {PUBLIC_SERVICE_ADDRESS && <>Public service address: {PUBLIC_SERVICE_ADDRESS}<br /></>}
-      <a href="mailto:hello@vertias.eu">hello@vertias.eu</a>
+      <a href={PASSCONTROL_CONTACT_MAILTO}>{PASSCONTROL_CONTACT_EMAIL}</a>
     </address>
   );
 }

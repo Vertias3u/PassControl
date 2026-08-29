@@ -93,9 +93,17 @@ describe("content security policy", () => {
       expect(directive(policy, "script-src")).not.toContain("unsafe-eval");
     });
 
-    it("is limited to the anonymous marketing page", () => {
-      expect(PRERENDERED_PUBLIC_PATHS).toEqual(["/"]);
+    it("is limited to anonymous, read-only public pages", () => {
+      expect(PRERENDERED_PUBLIC_PATHS).toEqual([
+        "/",
+        "/learn",
+        "/learn/ai-agent-security",
+        "/learn/ai-agent-identity",
+        "/learn/ai-agent-credential-gateway",
+        "/learn/verifiable-ai-agent-audit-trails",
+      ]);
       expect(isPrerenderedPublicPath("/")).toBe(true);
+      expect(isPrerenderedPublicPath("/updates")).toBe(false);
       // Everything that touches a credential or a session must be nonced.
       for (const path of ["/login", "/signup", "/dashboard", "/dashboard/agents/abc"]) {
         expect(isPrerenderedPublicPath(path)).toBe(false);

@@ -1,6 +1,6 @@
 {
   "name": "passcontrol",
-  "version": "0.6.2",
+  "version": "0.8.0",
   "description": "Identity, scope and budget controls for AI agents while provider keys stay server-side.",
   "license": "BUSL-1.1",
   "homepage": "https://passcontrol.vertias.eu",
@@ -64,8 +64,6 @@
     "check:release": "node scripts/check-release-integrity.mjs",
     "check:legal": "node scripts/check-legal-readiness.mjs",
     "check:paid-legal": "node scripts/check-legal-readiness.mjs --paid-commercial-launch",
-    "check:cloud-beta": "npm run check:legal && node scripts/check-cloud-beta-readiness.mjs",
-    "canary:cloud-beta": "node scripts/cloud-beta-canary.mjs",
     "check:npm-pack": "npm run check:release && npm run build:cli && node scripts/check-npm-package.mjs",
     "release:cli": "npm run check:npm-pack && npm publish ./dist-cli",
     "prepublishOnly": "node -e \"console.error('Publish the CLI package, not the app manifest: npm run release:cli');process.exit(1)\"",

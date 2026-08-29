@@ -8,6 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519";
 import {
+  CLOUD_GATEWAY,
   CONFIG_FILE,
   OPENAI_SHAPE_PROVIDERS,
   PROVIDERS,
@@ -21,6 +22,7 @@ import {
   formatChallengeError,
   formatProxyError,
   globalConfigPath,
+  mergeConfigFile,
   heading,
   ok,
   redact,
@@ -52,6 +54,9 @@ import {
 import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
 import { checkForUpdate } from "../cli/update-check.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
+import { loginCommand } from "../cli/login.mjs";
+import { logoutCommand } from "../cli/logout.mjs";
+import { proveItWorks } from "../cli/selftest.mjs";
 import {
   checkIssuerPublishesKey,
   generateInstanceKey,
@@ -73,18 +78,18 @@ const CLI_VERSION = (() => {
   }
 })();
 
-// Fixed demo credentials for `passcontrol try` — LOCAL demo stack ONLY. The demo
-// passport can only ever reach the keyless `demo` provider (no real key, no cost,
-// no real upstream); the demo provider + these seeds exist only when the stack is
-// brought up with PASSCONTROL_DEMO=1. Hardcoding them is safe, like the seeded dev
-// password — they grant nothing in a real deployment.
-// App-side source of truth: lib/demo/identity.ts (duplicated here to keep the shipped plain-ESM CLI transpilation-free).
-const DEMO_PASSPORT_ID = "kZCFp7d2x4VDruiulJ21gogYbczBDAGZa-OuwR3qgh8";
-const DEMO_PASSPORT_SECRET = "XqsVuXtmWiu6bKEmmqov2Q2TwkOVdzlZMWR-NWubSKo";
 const DEMO_API_KEY = "pc_demolocaltrydemolocaltrydemolocaltry0000";
 const DASHBOARD_STATE_FILE = "local-dashboard.json";
 const APP_STATE_FILE = "app.json";
 const PUBLIC_REPO_URL = "https://github.com/Vertias3u/PassControl.git";
+// The hosted demo. `try` cannot simply DEFAULT here: its second step arms and
+// disarms the tenant kill switch, so concurrent visitors would collide on shared
+// demo-tenant state and an aborted run would leave the public demo killed. It is
+// offered as a browser link instead — the one zero-install way to see the
+// pipeline when there is no local stack yet.
+// One literal, in cli/config.mjs. The demo and the Cloud gateway are the same
+// origin, and keeping two copies is how they stop being the same origin.
+const HOSTED_DEMO_URL = CLOUD_GATEWAY;
 const LOCAL_DASHBOARD_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const LOCAL_STACK_PORTS = [54321, 54322, 54324, 54327, 8079];
 // The local stack (Supabase + Redis + dashboard) lives in a PassControl repo
@@ -141,23 +146,26 @@ ${heading("Usage:")}
   ${cmd} <command> [options]
 
 ${heading("Quick start")}
-  ${cmd} init [--global]          configure this project
-  ${cmd} start [--dashboard-only] start the whole local stack (dashboard + Supabase + Redis)
-  ${cmd} open                     start if needed and open the Control Tower
-  ${cmd} try                      run the 60-second keyless guided demo
+  Cloud. No Docker, no database — this CLI is the only thing you install.
+  ${cmd} login [--project]        sign in through your browser and set this machine up
+  ${cmd} call "hi"                mint a visa and make a governed model call
+  ${cmd} mcp                      passport identity for Claude Desktop, Cursor, Claude Code
+  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]]
+                                 passport identity for any tool that takes an api_key
 
 ${heading("Operate")}
   ${cmd} status [--no-network] [--json]
                                  show active config and instance state
   ${cmd} version [--json]         CLI, gateway and database schema versions
   ${cmd} doctor [--deep] [--fix]  diagnose setup and repair a stopped dashboard
-  ${cmd} call "hi"                mint a visa and make a governed model call
-  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]]
-                                 start the local agent bridge
+  ${cmd} open                     open the Control Tower in a browser
+  ${cmd} logout [--revoke-agent]  revoke this machine's key and clear its credentials
+  ${cmd} init [--global]          configure by hand, without a browser
 
 ${heading("Manage")}
   ${cmd} agent list [--json]      list agents
-  ${cmd} agent create <name>      create an agent passport
+  ${cmd} agent create <name> [--write]
+                                 create an agent passport (--write saves it here)
   ${cmd} agent rotate <id> [--grace <seconds>]
                                  rotate locally and reveal the new secret once
   ${cmd} agent suspend <id>       suspend an agent
@@ -177,7 +185,6 @@ ${heading("Integrate")}
   ${cmd} env [integration]        print settings without writing anything
   ${cmd} configure <integration> [--write] [--force]
                                  preview or write integration config
-  ${cmd} mcp                      start the stdio MCP server
   integrations: ${integrationChoices()}
 
 ${heading("Trust")}
@@ -187,9 +194,12 @@ ${heading("Trust")}
   ${cmd} verify token <jwt> --audience <aud> --issuer <origin>
                                  verify an agent-to-agent token
 
-${heading("Local stack")}
+${heading("Self-host — run your own gateway")}
+  Clones the app and runs Docker + Supabase + Redis here. You operate it, and
+  your instance signs its own receipts — they verify against your JWKS, not ours.
   ${cmd} setup [--no-open] [--port-offset N] [--app-dir DIR]
-                                 clone if needed, start services, open dashboard
+                                 clone the app, start Docker + Supabase + Redis
+  ${cmd} start [--dashboard-only] start the whole local stack (clones the app if missing)
   ${cmd} stop [--dashboard-only]  stop the whole local stack (dashboard + Supabase + Redis)
   ${cmd} restart                  restart the CLI-managed local dashboard
   ${cmd} local-logs [--follow]    show local dashboard logs
@@ -199,8 +209,8 @@ ${heading("Local stack")}
 
 ${heading("Config:")}
   Env vars win, then nearest .passcontrol, then ~/.config/passcontrol/config.
-  Installed globally, the local-stack commands (setup/start/reset) use a cloned
-  app checkout, resolved in this order:
+  Only the self-host commands (setup/start/reset) ever clone anything. Installed
+  globally, they resolve a cloned app checkout in this order:
     --app-dir DIR → PASSCONTROL_APP_ROOT → surrounding checkout → remembered
     checkout in ~/.config/passcontrol/app.json (survives npm uninstall; clear
     it with \`${cmd} unlink\`).
@@ -214,6 +224,7 @@ function agentUsage() {
 ${heading("Usage:")}
   ${cmd} agent list
   ${cmd} agent create <name> [--provider <provider>] [--scope <model-pattern>]
+                          [--write [--project] [--force]]
   ${cmd} agent rotate <id> [--grace <seconds>]
   ${cmd} agent suspend <id>
   ${cmd} agent resume <id>
@@ -221,6 +232,7 @@ ${heading("Usage:")}
 
 ${heading("Examples")}
   ${cmd} agent create prod-summarizer --provider anthropic --scope 'claude-*'
+  ${cmd} agent create this-box --write        # save the passport here, never print it
   ${cmd} agent rotate <id> --grace 3600
   ${cmd} agent suspend <id>
 
@@ -530,6 +542,14 @@ function checkDockerInstalled() {
       };
 }
 
+// Every docker call the CLI makes needs a bound, not just the daemon probe. A
+// wedged Docker Desktop leaves its CLI socket present and answers nothing, so an
+// unbounded `docker ps` waits forever — which is how `doctor --deep` hung
+// indefinitely on the very check that exists to REPORT a wedged engine. The
+// value is the cold-start allowance argued for in checkDockerDaemon below;
+// sharing it keeps one number rather than three that drift.
+const DOCKER_TIMEOUT_MS = 15_000;
+
 function checkDockerDaemon() {
   if (!commandExists("docker")) {
     return {
@@ -548,7 +568,7 @@ function checkDockerDaemon() {
     // where Docker was available throughout, and it would tell a first-time user
     // on a slow laptop to go start something already running. A wedged engine
     // still gets caught; it just takes fifteen seconds to say so.
-    execFileSync("docker", ["info"], { stdio: "ignore", timeout: 15_000 });
+    execFileSync("docker", ["info"], { stdio: "ignore", timeout: DOCKER_TIMEOUT_MS });
     return { ok: true, message: "Docker daemon: running." };
   } catch (error) {
     // A timeout and a stopped daemon need different things from the reader, so
@@ -594,9 +614,18 @@ async function promptLine(question, fallback) {
   }
 }
 
-async function confirmYes(question) {
+/**
+ * Yes/no prompt. Enter means YES unless `{ default: false }` is passed.
+ *
+ * The option exists for one caller — `passcontrol login` asking before it
+ * replaces a passport secret. That answer is unrecoverable, so the reply an
+ * operator gives by reflex has to be the one that changes nothing. Every other
+ * caller keeps the enter-means-yes behaviour it was written against.
+ */
+async function confirmYes(question, { default: fallback = true } = {}) {
   const answer = (await promptLine(question, "")).toLowerCase();
-  return answer === "" || answer === "y" || answer === "yes";
+  if (answer === "") return fallback;
+  return answer === "y" || answer === "yes";
 }
 
 // Resolve the stack checkout, cloning the public repo on demand when the CLI is
@@ -694,7 +723,7 @@ function localSupabaseIsRunning() {
       execFileSync(
         "docker",
         ["ps", "-q", "--filter", `label=com.supabase.cli.project=${localSupabaseProjectId()}`, "--filter", "name=supabase_db"],
-        { encoding: "utf8" }
+        { encoding: "utf8", timeout: DOCKER_TIMEOUT_MS }
       ).trim()
     );
   } catch {
@@ -863,7 +892,7 @@ function ownSupabaseDatabaseIsRunning(offset = 0) {
     if (!root) return false;
     const project = `${path.basename(root)}${offset ? `-${offset}` : ""}`;
     return Boolean(
-      execFileSync("docker", ["ps", "-q", "--filter", `name=^/supabase_db_${project}$`], { encoding: "utf8" }).trim()
+      execFileSync("docker", ["ps", "-q", "--filter", `name=^/supabase_db_${project}$`], { encoding: "utf8", timeout: DOCKER_TIMEOUT_MS }).trim()
     );
   } catch {
     return false;
@@ -910,8 +939,16 @@ async function runLocalPrerequisiteChecks({ offset = 0, report = false, enforce 
   }
 
   if (enforce) {
-    const failure = results.find((result) => !result.ok);
-    if (failure) throw new Error(failure.message);
+    // Every failure, not just the first. These checks are independent, and each
+    // one a first-time user hits is its own install-and-come-back detour; finding
+    // them one run at a time turns a single setup into three sittings. `results`
+    // already holds them all — only the reporting was lossy.
+    const failures = results.filter((result) => !result.ok);
+    if (failures.length > 0) {
+      // `fail()` marks the first line; the rest carry their own marker so a
+      // four-item list does not read as one failure with three stray sentences.
+      throw new Error(failures.map((failure) => failure.message).join("\n\u2717 "));
+    }
   }
   return results;
 }
@@ -1331,110 +1368,6 @@ async function callCommand(rest, opts) {
   ok("done - check the dashboard audit log + spend for this call.");
 }
 
-// `passcontrol try` — the 60-second, no-key, no-accounts experience. Uses the
-// seeded demo passport (demo scope only) to make a GOVERNED call through the
-// keyless `demo` provider, then arms the kill switch to show the same call
-// blocked. Everything is real (visa, scope, budget, kill) except the model.
-async function tryCommand() {
-  // Covers the demo proxy call AND the kill-switch PUT below, which builds its
-  // own control-plane URL rather than going through the guarded `api()`.
-  const gateway = requirePassportGateway(config);
-  const demo = { gateway, passportId: DEMO_PASSPORT_ID, passportSecret: DEMO_PASSPORT_SECRET };
-
-  const demoCall = async () => {
-    const { visa } = await mintVisa(demo);
-    return fetch(`${gateway}/api/v1/demo/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${visa}` },
-      body: JSON.stringify({
-        model: "demo-1",
-        max_tokens: 64,
-        messages: [{ role: "user", content: "Say hi in exactly three words" }],
-      }),
-    });
-  };
-  const setKill = async (armed) => {
-    const res = await fetch(`${gateway}/api/control/v1/kill-switch`, {
-      method: "PUT",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${DEMO_API_KEY}`,
-        "idempotency-key": crypto.randomUUID(),
-      },
-      body: JSON.stringify({ armed }),
-    });
-    if (!res.ok) throw new Error(`kill-switch ${armed ? "on" : "off"} → ${res.status} ${await res.text()}`);
-  };
-
-  console.log(`${heading("PassControl — 60-second try (no provider key, no accounts)")}\n`);
-  step(`gateway: ${gateway}`);
-
-  // 1. Governed, keyless call.
-  let res;
-  try {
-    res = await demoCall();
-  } catch (e) {
-    const msg = e?.message || String(e);
-    if (/unknown_passport|Challenge failed|challenge/i.test(msg)) {
-      // Gateway reachable, but the demo passport isn't seeded in ITS database.
-      fail(`The gateway is up, but the demo passport isn't seeded here (${msg}).`);
-      step("Seed + enable the demo on this stack:");
-      step("  PASSCONTROL_DEMO=1 npm run dev:stack    # seeds the demo passport + control key");
-      step("  PASSCONTROL_DEMO=1 npm run dev:docker   # enables the keyless demo provider");
-    } else {
-      fail(`Could not reach the gateway at ${gateway} (${msg}).`);
-      step("Bring the local demo stack up first:");
-      step("  PASSCONTROL_DEMO=1 npm run dev:stack    # Supabase + Redis + migrate + seed the demo passport");
-      step("  PASSCONTROL_DEMO=1 npm run dev:docker   # start the gateway with the demo provider enabled");
-    }
-    process.exitCode = 1;
-    return;
-  }
-  if (res.status === 404) {
-    fail("The demo provider is not enabled on this gateway.");
-    step("Start it with PASSCONTROL_DEMO=1 (e.g. `PASSCONTROL_DEMO=1 npm run dev:docker`).");
-    process.exitCode = 1;
-    return;
-  }
-  if (res.status === 401 || res.status === 403) {
-    fail(`Demo passport not accepted (${res.status}). Re-seed the demo stack: PASSCONTROL_DEMO=1 npm run seed`);
-    process.exitCode = 1;
-    return;
-  }
-  if (!res.ok) {
-    fail(`Unexpected ${res.status}: ${await res.text()}`);
-    process.exitCode = 1;
-    return;
-  }
-
-  const json = await res.json().catch(() => ({}));
-  const text = json?.choices?.[0]?.message?.content ?? JSON.stringify(json);
-  const usage = json?.usage ?? {};
-  ok("Governed keyless call succeeded — the passport signed the challenge, the gateway issued a short-lived visa and enforced scope + budget, and no key was needed:");
-  console.log(`\n  ${text}\n`);
-  step(`tokens: ${usage.total_tokens ?? "?"} (prompt ${usage.prompt_tokens ?? "?"} + completion ${usage.completion_tokens ?? "?"})`);
-
-  // 2. Kill switch blocks the very next call.
-  console.log("");
-  step("arming the kill switch…");
-  await setKill(true);
-  try {
-    const blocked = await demoCall();
-    if (blocked.status === 403) {
-      ok(`Kill switch works — the same call is now ${blocked.status} blocked_suspended.`);
-    } else {
-      fail(`Expected 403 after arming the kill switch, got ${blocked.status}.`);
-    }
-  } finally {
-    await setKill(false);
-    step("kill switch disarmed.");
-  }
-
-  console.log("");
-  ok("That's PassControl: cryptographic identity → short-lived visa → governed call → instant kill. The provider key never touched the agent.");
-  step("Next: add a real provider key in the Control Tower and re-point your agent at the gateway (see the README).");
-}
-
 async function api(method, pathPart, body, { timeoutMs } = {}) {
   // Destination first, key second — same order and same reason as the SDK's
   // ControlClient. `config.gateway` is whatever PASSCONTROL_GATEWAY said, and
@@ -1527,10 +1460,39 @@ async function agentCommand(rest, opts) {
         scopes: [{ provider, models: [scopeModel] }],
       });
       ok(`created agent ${created.id} (${created.name})`);
+
+      // --write puts the passport somewhere durable INSTEAD of on the terminal.
+      // Ordering matters: the file is written before anything is printed, so a
+      // failure to write can still fall through to printing. The reverse — print
+      // suppressed, write failed — loses the key permanently.
+      if (opts.write) {
+        const target = opts.project ? path.join(process.cwd(), CONFIG_FILE) : globalConfigPath();
+        // Refuse rather than prompt. This command is run non-interactively (CI,
+        // provisioning scripts) at least as often as by hand, and PassControl has
+        // no copy of whatever is already in that file — an overwrite is not
+        // undoable by us or by anyone.
+        const existing = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "";
+        if (/^PASSPORT_SECRET=(.+)$/mu.exec(existing)?.[1]?.trim() && !opts.force) {
+          throw new Error(
+            `${target} already holds a passport secret, and PassControl has no copy of it.\n` +
+              "  Re-run with --force to replace it, or without --write to print the new one instead."
+          );
+        }
+        mergeConfigFile(target, { PASSPORT_ID: passportId, PASSPORT_SECRET: b64url(priv) });
+        ok(`wrote the passport to ${target} — it was not printed`);
+        break;
+      }
+
       step("Store these - the secret is shown once and is the agent's passport:");
       console.log(`  PASSPORT_ID=${passportId}`);
       console.log(`  PASSPORT_SECRET=${b64url(priv)}`);
-      step("Paste them into .passcontrol, then run `passcontrol call \"hi\"`.");
+      // The paste is the fallback, not the lesson. Copying a private key between
+      // a browser, a clipboard and a file is how a passport secret once ended up
+      // in a Hermes `api_key` field — and for a second machine it is not even
+      // necessary: `login` there mints its own passport and copies nothing.
+      step("Running this agent on ANOTHER machine? Run `passcontrol login` there instead —");
+      step("it creates its own passport locally and no secret is ever copied.");
+      step("Otherwise store the secret like a password, or re-run with --write to save it here.");
       break;
     }
     case "suspend":
@@ -1581,6 +1543,10 @@ async function agentCommand(rest, opts) {
           ? `The OLD key keeps working until ${until}. Both keys authenticate until then — deploy the new one before it passes.`
           : "The old key stops working immediately."
       );
+      // No --write here, deliberately: see the note above the reveal. What this
+      // CAN say is that a machine you control does not need the rotation at all.
+      step("Rotating only to set up a new machine? `passcontrol login` there creates its own");
+      step("passport instead, and leaves this one working everywhere it already runs.");
       break;
     }
     default:
@@ -2110,14 +2076,24 @@ async function doctorCommand(opts = {}) {
   printSystemHealthDiagnostic(await fetchSystemHealth());
   await runLocalPrerequisiteChecks({ report: true });
   if (config.passportId && config.passportSecret) {
-    try {
-      const visa = await mintVisa(config);
-      ok(`Visa mint works (expires in ${visa.expires_in ?? 300}s)`);
-    } catch (error) {
-      fail(`Visa mint failed: ${error.message}`);
-    }
+    // The whole chain, not just the mint. "Visa mint works" proves the passport
+    // authenticates and says nothing about scope, budget, the proxy or receipts —
+    // so the most useful diagnostic in the tool was the one thing `login` already
+    // did better. Shared implementation (cli/selftest.mjs) rather than a second
+    // copy, because two copies of a five-leg check drift.
+    const proof = await proveItWorks({
+      origin: requirePassportGateway(config),
+      passportId: config.passportId,
+      passportSecret: config.passportSecret,
+      apiKey: config.apiKey,
+      fetchImpl: fetch,
+    });
+    if (proof.receipt === "verified") ok("End to end: governed call made, receipt verified");
+    else if (proof.call) step("Governed call works; its receipt was not verified (see above)");
+    else if (proof.visa) step("Passport authenticates; no governed call was possible here");
+    else fail("Passport could not authenticate — see the reason above");
   } else {
-    step("Skipping visa mint check: no passport configured.");
+    step("Skipping the end-to-end check: no passport configured.");
   }
 
   if (config.apiKey) {
@@ -2250,11 +2226,32 @@ async function openDashboard(opts = {}) {
   const url = parsed.protocol === "http:" && LOCAL_DASHBOARD_HOSTS.has(parsed.hostname)
     ? (await startDashboard(opts)).url
     : config.gateway;
+  openUrl(url);
+}
+
+/**
+ * Open a URL in the operator's browser. Nothing else.
+ *
+ * Extracted from openDashboard because openDashboard is NOT a URL opener: for a
+ * localhost gateway it routes through startDashboard, which is
+ * `ensureAppRoot({ clone: true })`. Any new caller that reached for the obvious
+ * function would have put a self-host `git clone` on the Cloud path — and
+ * tests/cli-cloud-path-no-clone.test.ts could not have seen it, because that
+ * guard pins DIRECT cloning callers and startDashboard is legitimately one.
+ *
+ * So this is the safe half, with no stack logic attached.
+ * tests/cli-login-shape.test.ts pins both that it exists and that openDashboard
+ * still delegates to it — a second hand-rolled spawn would pass the first check
+ * and quietly lose the degradation below.
+ */
+function openUrl(url) {
   const platform = process.platform;
   const command =
     platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
   const args = platform === "win32" ? ["/c", "start", "", url] : [url];
   const child = spawn(command, args, { detached: true, stdio: "ignore" });
+  // A headless box, a container, or a machine with no handler: say the URL out
+  // loud rather than appearing to hang.
   child.on("error", () => step(`Open this URL: ${url}`));
   child.unref();
   ok(`opening ${url}`);
@@ -2416,6 +2413,14 @@ async function main() {
     case "status":
       await printCockpit({ noNetwork: Boolean(opts.noNetwork), json: Boolean(opts.json) });
       break;
+    case "login":
+      // openUrl, never openDashboard: the latter routes a localhost gateway
+      // through startDashboard, which clones the self-host repo.
+      await loginCommand(opts, { openUrl, promptLine, confirmYes });
+      break;
+    case "logout":
+      await logoutCommand(opts, { confirmYes });
+      break;
     case "init":
       await initCommand(opts);
       break;
@@ -2447,8 +2452,18 @@ async function main() {
       await callCommand(commandRest, opts);
       break;
     case "try":
-      await tryCommand();
-      break;
+      // Removed, not silently dropped. `passcontrol try` is named in the help
+      // text and README of every published release up to this one, so somebody
+      // is following a page that still lists it. `Unknown command "try"` reads
+      // as a broken install; this reads as a changelog.
+      //
+      // CLI_VERSION, never a typed literal — tests/site-metadata.test.ts exists
+      // because advertised version strings drift the moment they are hand-written.
+      throw new Error(
+        `\`passcontrol try\` was removed in ${CLI_VERSION}.\n` +
+          "  `passcontrol login` now does the same thing with YOUR agent rather than a\n" +
+          "  shared demo one: a governed call and a signed receipt you can verify."
+      );
     case "sidecar":
       await sidecarCommand(commandRest, opts);
       break;

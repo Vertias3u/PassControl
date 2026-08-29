@@ -4,9 +4,17 @@ PassControl supports two honest Hermes paths, verified against Hermes Agent **0.
 Hermes uses its current `model.provider: custom` configuration. Legacy
 `OPENAI_BASE_URL`/`LLM_MODEL` instructions were removed by Hermes and are not used here.
 
-Hermes does not expose the custom `fetch` hook needed by `passcontrol/sdk`. Cloud therefore uses
-a Direct Agent Key for Hermes today. Passport authentication requires the advanced local sidecar
-below; issuing a passport alone does not configure Hermes.
+Hermes does not expose the custom `fetch` hook needed by `passcontrol/sdk`, so Hermes cannot sign
+a challenge by itself. Two consequences, and the second one is the one people get wrong:
+
+1. A **Direct Agent Key** is the simplest Cloud path, and the default below.
+2. **Passport identity in Hermes is available on Cloud**, but only with the connector running —
+   something has to do the signing. See "Passport connector" below.
+
+**Issuing a passport alone does not configure Hermes.** A passport is a signing key, not a bearer
+token. Pasting `PASSPORT_SECRET` into Hermes's `api_key` field does not authenticate — the gateway
+refuses it with `401` — and it exposes the private key to a third-party config file. If that has
+happened, rotate the passport.
 
 ## PassControl Cloud — Direct Agent Key
 
@@ -37,10 +45,11 @@ PassControl's native Anthropic Messages route; choose one of the OpenAI-shaped p
 above. This is a request-shape constraint, not a claim that Anthropic is unsupported by
 PassControl generally.
 
-## Self-hosted — passport sidecar
+## Passport connector — works against Cloud *and* self-hosted
 
-For higher-assurance passport identity, keep the passport in PassControl's local config and
-let the sidecar mint and refresh short-lived visas. Hermes receives only a placeholder key:
+The connector is **not** self-hosting. It is one foreground process — no Docker, no database —
+that keeps the passport in PassControl's local config and mints and refreshes short-lived visas
+against whichever gateway you configured, Cloud included. Hermes receives only a placeholder key:
 
 ```bash
 passcontrol init --global
@@ -58,9 +67,12 @@ model:
   api_key: "passcontrol"
 ```
 
-The dummy key is stripped by the sidecar. The passport private key stays in the trusted
-local PassControl config, a visa is refreshed automatically, and the real provider key stays
-in the self-hosted Vault.
+The dummy key is stripped by the connector. The passport private key stays in the trusted local
+PassControl config and is never sent anywhere; a visa is refreshed automatically; and the real
+provider key stays in the Vault — PassControl Cloud's, or your own if you self-host.
+
+To point the connector at Cloud, set the gateway once (`passcontrol init --global`) to
+`https://passcontrol.vertias.eu`. The base URL Hermes uses stays `http://127.0.0.1:8788/...`.
 
 ## Prove the route
 

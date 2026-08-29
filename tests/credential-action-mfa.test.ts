@@ -40,7 +40,31 @@ const MUST_GATE = [
   "attachAgentPassport",
   // A `pc_` developer key is control-plane authority: fleet reads, budget writes,
   // the kill switch. It is the most consequential credential in the file.
-  "createApiKey",
+  //
+  // The gate names the internal helper, not the exported `createApiKey`, because
+  // there are now TWO callers: the Settings form and `approveCliDevice` (the
+  // `passcontrol login` device flow). Gating the wrapper would have meant a second
+  // `api_keys` insert with a second copy of the gate, and the whole argument in this
+  // file's header is that a shared helper is what makes the next caller safe by
+  // default. Both wrappers are pinned as delegating, below.
+  "mintApiKeyForUser",
+  // …and approveCliDevice gates AGAIN, in its own body, on purpose.
+  //
+  // Inheriting the helper's gate is enough to protect the mint. It is not enough
+  // to protect the LOOKUP that runs first: approveCliDevice's opening act is to
+  // resolve an attacker-supplied `user_code` against Redis. With only the
+  // inherited gate, an aal1 session on an MFA-enrolled account can tell "no such
+  // code" apart from "verify your second factor" — the brute-force oracle, handed
+  // over for free — and can burn a real operator's attempt budget before any gate
+  // runs. Same belt-and-braces as revokeDirectAgentKey, which is in this list even
+  // though suspend and kill already stop the credential.
+  "approveCliDevice",
+  // Mints nothing — it is the READ behind the approval screen — and is in this
+  // list for the same reason setActiveProviderKey is: what it grants is not a
+  // credential but authority over one. It is the call that answers "is this code
+  // live?", so leaving it ungated while approve was gated would hand an aal1
+  // session the whole brute-force oracle and cost the attacker nothing.
+  "inspectCliDevice",
   // Revoking a Direct Agent Key is a write against a credential row.
   "revokeDirectAgentKey",
   // Choosing WHICH stored provider credential the gateway injects. It mints
@@ -75,6 +99,31 @@ describe("credential-minting Server Actions clear the strict MFA gate", () => {
     expect(functionBody("setMasterKill")).not.toMatch(/requireCredentialMfa\(/);
     expect(functionBody("setAgentSuspended")).not.toMatch(/requireCredentialMfa\(/);
     expect(functionBody("revokeApiKey")).not.toMatch(/requireCredentialMfa\(/);
+  });
+
+  it("keeps the device-flow DENY reachable without a step-up", () => {
+    // Same rule as setMasterKill / revokeApiKey above, applied to the new surface:
+    // denyCliDevice is how an operator refuses a login prompt they did not start —
+    // which is precisely the response to a phishing attempt. Putting a TOTP prompt
+    // between a suspicious code and the button that kills it would make the safe
+    // action the slow one.
+    //
+    // Its sibling approveCliDevice is gated, and gated EARLY (see MUST_GATE). The
+    // asymmetry is the whole design: approve is a mint, deny is a stop.
+    expect(functionBody("denyCliDevice")).not.toMatch(/requireCredentialMfa\(/);
+  });
+
+  it("gates approveCliDevice BEFORE it looks the code up, not just before it mints", () => {
+    // Ordering is the entire value of the second gate. A gate that runs after the
+    // Redis lookup still stops the mint, but the lookup has already answered
+    // "is this code real?" to an unverified caller and already decremented that
+    // code's attempt budget. Both are the attack, not the mint.
+    const body = functionBody("approveCliDevice");
+    const gate = body.indexOf("requireCredentialMfa(");
+    const lookup = body.search(/lookupCliDevice\(|devauth/u);
+    expect(gate, "approveCliDevice must gate in its own body").toBeGreaterThan(-1);
+    expect(lookup, "approveCliDevice must resolve the user_code").toBeGreaterThan(-1);
+    expect(gate, "gate BEFORE the lookup — the lookup is the oracle").toBeLessThan(lookup);
   });
 
   // ── Why ONE revocation is gated and the others are not ────────────────────
@@ -137,6 +186,19 @@ describe("credential-minting Server Actions clear the strict MFA gate", () => {
     // …and the module says so at the gate, so the next reader does not have to
     // rediscover it from lib/mfa.ts.
     expect(source).toMatch(/second factor enforced wherever a second factor exists/);
+  });
+
+  it("routes BOTH pc_ key mints through the one gated helper", () => {
+    // createApiKey is the Settings form; approveCliDevice is `passcontrol login`.
+    // Neither may hold its own gate, because neither may hold its own insert — see
+    // the single-sink assertion in tests/credential-mint-server-only.test.ts, which
+    // is the half of this pair that has teeth. This half pins that the delegation
+    // target is the gated helper and not some new ungated one.
+    for (const name of ["createApiKey", "approveCliDevice"]) {
+      expect(functionBody(name), `${name} must delegate its mint`).toMatch(
+        /mintApiKeyForUser\(/,
+      );
+    }
   });
 
   it("gates the key-import on-ramp through the shared helpers it delegates to", () => {

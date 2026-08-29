@@ -1,13 +1,9 @@
 /** Build the internal request used by the Cloudflare Cron Trigger. */
-export const BETA_RETENTION_CRON = "15 0 * * *";
 
 export function createReconcileRequest(env) {
   return createCronRequest(env, "/api/cron/reconcile");
 }
 
-export function createRetentionRequest(env) {
-  return createCronRequest(env, "/api/cron/beta-retention");
-}
 
 function createCronRequest(env, pathname) {
   if (!env?.CRON_SECRET) throw new Error("CRON_SECRET is not configured.");
@@ -35,9 +31,3 @@ export async function runReconcile(fetchHandler, env, ctx) {
   }
 }
 
-export async function runBetaRetention(fetchHandler, env, ctx) {
-  const response = await fetchHandler(createRetentionRequest(env), env, ctx);
-  if (!response.ok) {
-    throw new Error(`PassControl beta retention returned HTTP ${response.status}.`);
-  }
-}

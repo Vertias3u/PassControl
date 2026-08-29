@@ -223,6 +223,15 @@ describe("buildAuditRecord — admin-action audit row", () => {
         // the text belongs in exactly one column of one server-only table.
         "problem.report",
         "problem.triage",
+        // `passcontrol login`. The approve row records a WRITE-scoped
+        // control-plane key minted without anyone opening the Settings form, so
+        // it is the one trail that says a CLI on some machine was given fleet
+        // authority — and by whom. Deny is recorded too: refusing a prompt you
+        // did not start is a security event, and a trail that only kept the
+        // approvals could not tell a quiet workspace from a targeted one.
+        // Neither row carries the user_code or the token.
+        "cli.device.approve",
+        "cli.device.deny",
       ].sort()
     );
   });

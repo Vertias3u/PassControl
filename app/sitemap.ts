@@ -4,7 +4,7 @@ const BASE = "https://passcontrol.vertias.eu";
 
 // Emitted at /sitemap.xml. The marketing page's sections are in-page anchors,
 // which sitemaps don't enumerate, so only the entry points are listed: the
-// marketing page and the two public verification surfaces.
+// marketing page, the public content pages, and two public verification surfaces.
 //
 // /verify and /verify/receipt are both indexable — they are paste boxes with
 // nothing private in the URL. The individual /verify/<passport-id> pages are
@@ -17,6 +17,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       lastModified: new Date(),
       changeFrequency: "weekly",
       priority: 1,
+    },
+    {
+      url: `${BASE}/updates`,
+      lastModified: new Date(),
+      changeFrequency: "weekly",
+      priority: 0.7,
     },
     {
       url: `${BASE}/verify`,

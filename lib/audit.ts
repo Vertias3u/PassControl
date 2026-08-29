@@ -65,6 +65,14 @@ export const AUDIT_ACTIONS = [
   // in one table, not copied into a trail the control API serves.
   "problem.report",
   "problem.triage",
+  // `passcontrol login` — an operator approved or refused a CLI device flow.
+  // The approve row is the paper trail for a WRITE-scoped control-plane key that
+  // was minted without anyone visiting the Settings form, so it matters more than
+  // its neighbours, not less. Neither row carries the user_code or the token: the
+  // code is a live credential handle for its 600s and the token is a credential
+  // outright. `prefix` is what makes the key identifiable in Settings afterwards.
+  "cli.device.approve",
+  "cli.device.deny",
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

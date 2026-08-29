@@ -245,6 +245,37 @@ paths:
                     properties: { armed: { type: boolean }, affected: { type: integer } }
         "422": { $ref: "#/components/responses/Error" }
 
+  /keys/self/revoke:
+    post:
+      summary: Revoke the API key making this request
+      operationId: revokeOwnApiKey
+      description: >
+        Revokes the control key that authenticated this request, and only that
+        key. There is deliberately no key id in the request or the path:
+        possession of a key grants authority over itself and over nothing else,
+        so this endpoint cannot be used to enumerate or reach another key. Backs
+        `passcontrol logout`. A 404 and a 409 both mean the key cannot be used
+        again — missing and already-revoked are conflated on purpose so another
+        tenant's key stays indistinguishable from absence.
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200":
+          description: The key is revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      revoked_at: { type: string, format: date-time }
+                      prefix: { type: string, example: "pc_a1b2c3d4" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     bearerAuth:

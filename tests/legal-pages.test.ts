@@ -66,9 +66,12 @@ describe("pre-launch legal surface", () => {
 
   it("names every infrastructure processor and separates model routing destinations", async () => {
     const providers = await source("app/legal/subprocessors/page.tsx");
-    for (const name of ["Vercel", "Supabase", "Upstash", "Resend", "Sentry"]) {
+    for (const name of ["Vercel", "Supabase", "Upstash", "Resend", "ImprovMX", "Sentry"]) {
       expect(providers).toContain(`\"${name}\"`);
     }
+    expect(providers).toContain("Inbound forwarding for owner, support, privacy and legal contact mail");
+    expect(providers).toContain("https://improvmx.com/transparency/privacy-policy/");
+    expect(providers).toContain("https://improvmx.com/transparency/gdpr-compliance/");
     expect(providers).toContain("User-selected routing destinations");
     for (const name of ["OpenAI", "Anthropic", "Groq", "Mistral", "Together", "DeepSeek"]) {
       expect(providers).toContain(name);
@@ -97,5 +100,26 @@ describe("pre-launch legal surface", () => {
     const home = await source("app/page.tsx");
     expect(home).toContain('href="/legal/privacy"');
     expect(home).toContain('href="/legal/terms"');
+  });
+
+  it("publishes one routable PassControl owner address across every contact surface", async () => {
+    const contact = await source("lib/contact.ts");
+    expect(contact).toContain('PASSCONTROL_CONTACT_EMAIL = "owner@passcontrol.vertias.eu"');
+
+    const contactSurfaces = await Promise.all([
+      source("app/page.tsx"),
+      source("app/llms.txt/route.ts"),
+      source("components/legal/LegalPage.tsx"),
+      source("app/legal/acceptable-use/page.tsx"),
+      source("app/legal/subprocessors/page.tsx"),
+      source("app/legal/terms/page.tsx"),
+      source("app/legal/privacy/page.tsx"),
+      source("app/dashboard/settings/account-actions.ts"),
+      source("app/dashboard/settings/profile-actions.ts"),
+    ]);
+    for (const file of contactSurfaces) {
+      expect(file).toContain("PASSCONTROL_CONTACT_EMAIL");
+      expect(file).not.toContain("hello@vertias.eu");
+    }
   });
 });

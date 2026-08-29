@@ -13,6 +13,7 @@ import {
   SelfHostCommands,
 } from "@/components/PassControlSiteClient";
 import { VertiasLogo } from "@/components/VertiasLogo";
+import { PASSCONTROL_CONTACT_EMAIL, PASSCONTROL_CONTACT_MAILTO } from "@/lib/contact";
 import { RELEASE_VERSION } from "@/lib/version";
 import styles from "./home.module.css";
 
@@ -44,7 +45,7 @@ const JSON_LD = {
       name: "Kristiyan Ivanov",
       alternateName: "Vertias",
       url: "https://vertias.eu",
-      email: "hello@vertias.eu",
+      email: PASSCONTROL_CONTACT_EMAIL,
       address: {
         "@type": "PostalAddress",
         addressLocality: "Sofia",
@@ -349,12 +350,13 @@ export default function LandingPage() {
             <p className={styles.signature}>Identity crosses the boundary. Secrets do not.</p>
           </div>
           <div className={styles.footerLinks}>
+            <a href="/updates">Updates</a>
             <a href="/verify">Verify a receipt</a>
             <a href="/legal/privacy">Privacy</a>
             <a href="/legal/terms">Beta terms</a>
             <a href={REPO_URL} target="_blank" rel="noreferrer">Source</a>
             <a href={`${REPO_URL}/blob/main/SECURITY.md`} target="_blank" rel="noreferrer">Security</a>
-            <a href="mailto:hello@vertias.eu">Contact</a>
+            <a href={PASSCONTROL_CONTACT_MAILTO}>Contact</a>
           </div>
           <p className={styles.legal}>
             Source-available under BSL 1.1 · © <CurrentYear /> Kristiyan Ivanov · Vertias project · Sofia, Bulgaria

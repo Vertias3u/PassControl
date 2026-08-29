@@ -74,15 +74,11 @@ values:
 `NEXT_PUBLIC_*` values are also needed during the build because Next embeds public configuration in
 browser assets. Use the same Supabase project at build and runtime.
 
-The custom Worker entry point delegates all HTTP requests to OpenNext and handles two scheduled
-events. The five-minute trigger calls the authenticated `/api/cron/reconcile` route and the daily
-trigger calls `/api/cron/beta-retention`, both internally with `CRON_SECRET`. Neither duplicates
-application logic or creates a second write path.
+The custom Worker entry point delegates all HTTP requests to OpenNext and handles its scheduled
+events. The five-minute trigger calls the authenticated `/api/cron/reconcile` route internally with
+`CRON_SECRET`.
+No trigger duplicates application logic or creates a second write path.
 
-Before letting anyone else onto the deployment, run `npm run check:cloud-beta`. It requires the
-production environment plus explicit acknowledgements for restore-tested backup, Supabase Auth,
-SMTP, advisors, and rollback; it inspects shapes and variable names and never prints secret values.
-`npm run canary:cloud-beta` then exercises one real governed call end to end.
 
 ## The outbound step (owner only)
 

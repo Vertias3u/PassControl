@@ -26,6 +26,20 @@ export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", 
 export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek", "gemini"]);
 
 const DEFAULT_GATEWAY = "http://localhost:3000";
+
+/**
+ * The hosted Cloud instance — the one origin this CLI knows by name.
+ *
+ * Declared HERE, once, because two copies drift: `bin/passcontrol.mjs` had the
+ * only literal (as `HOSTED_DEMO_URL`) and now imports this instead.
+ *
+ * It is NOT the same thing as DEFAULT_GATEWAY above, and the difference matters.
+ * DEFAULT_GATEWAY is what an already-configured operator falls back to while
+ * working locally. This is where a machine with NO configuration at all should
+ * be pointed — which is `passcontrol login` and nothing else, because login is
+ * the one command whose whole job is running before any config exists.
+ */
+export const CLOUD_GATEWAY = "https://passcontrol.vertias.eu";
 const DEFAULT_PROVIDER = "anthropic";
 const CONFIG_KEYS = [
   "PASSCONTROL_GATEWAY",
@@ -225,8 +239,23 @@ export function configPathLabel(sources = configSources) {
   return "none";
 }
 
+/**
+ * Write the whole config. Every CONFIG_KEY is emitted, so a key absent from
+ * `values` is BLANKED — that is correct for `init`, which collects all of them,
+ * and wrong for any caller that means to change a subset. Use mergeConfigFile
+ * for those.
+ *
+ * The chmod is not redundant with the `mode` option. Node applies `mode` only
+ * when it CREATES the file, so overwriting a config that already exists as 0644
+ * leaves it 0644 — and this file holds a passport secret. The directory mode is
+ * applied on the global path only: for a project-local `.passcontrol` the
+ * dirname is the user's own project directory, and silently 0700-ing that is a
+ * surprising thing for a config write to do.
+ */
 export function writeConfigFile(file, values) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const dir = path.dirname(file);
+  const isGlobal = path.resolve(file) === path.resolve(globalConfigPath());
+  fs.mkdirSync(dir, { recursive: true, ...(isGlobal ? { mode: 0o700 } : {}) });
   const lines = [
     "# PassControl CLI config.",
     "# Keep this file private: it can contain a passport secret.",
@@ -236,6 +265,33 @@ export function writeConfigFile(file, values) {
     lines.push(`${key}=${values[key] ?? ""}`);
   }
   fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
+  // Explicit, because `mode` above is a no-op on an existing file.
+  try {
+    fs.chmodSync(file, 0o600);
+    if (isGlobal) fs.chmodSync(dir, 0o700);
+  } catch {
+    // Windows and some network filesystems have no meaningful POSIX mode. A
+    // config that is written but not tightened beats a login that dies here.
+  }
+}
+
+/**
+ * Change SOME keys, keeping the rest.
+ *
+ * `passcontrol login` writes three credential keys. Routing that through
+ * writeConfigFile would emit `PROVIDER=`, `MODEL=` and `PASSCONTROL_GATEWAY=`
+ * as empty strings and wipe a working setup — right result, wrong side effect,
+ * and invisible until the next call failed against the wrong provider.
+ */
+export function mergeConfigFile(file, patch) {
+  let existing = {};
+  try {
+    existing = readConfigFile(file);
+  } catch {
+    // No file yet, or unreadable. A first login lands here, and writing the
+    // patch alone is exactly right — there is nothing to preserve.
+  }
+  writeConfigFile(file, { ...existing, ...patch });
 }
 
 export function heading(message = "") {

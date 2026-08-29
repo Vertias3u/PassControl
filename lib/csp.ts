@@ -83,9 +83,9 @@ export function needsExternalJwks(pathname: string): boolean {
  * baked at build time. Under 'strict-dynamic' every one of those scripts is
  * refused and the page never hydrates — verified in a browser, not assumed.
  *
- * Only the anonymous marketing page is on this list, deliberately. It holds no
- * session and no user data, and keeping it prerendered is what lets a launch
- * spike be absorbed by the CDN instead of by functions. Every page that touches
+ * Only anonymous, content-only public pages are on this list. They hold no
+ * session or user data, and prerendering lets discovery traffic be absorbed by
+ * the CDN instead of by functions. Every page that touches
  * credentials or a session (/login, /signup, /dashboard/**) is dynamically
  * rendered specifically so it can be nonced.
  *
@@ -93,7 +93,14 @@ export function needsExternalJwks(pathname: string): boolean {
  * page static that is NOT here, its scripts will be blocked — make it dynamic
  * (`export const dynamic = "force-dynamic"`) instead of relaxing the policy.
  */
-export const PRERENDERED_PUBLIC_PATHS: readonly string[] = ["/"];
+export const PRERENDERED_PUBLIC_PATHS: readonly string[] = [
+  "/",
+  "/learn",
+  "/learn/ai-agent-security",
+  "/learn/ai-agent-identity",
+  "/learn/ai-agent-credential-gateway",
+  "/learn/verifiable-ai-agent-audit-trails",
+];
 
 export function isPrerenderedPublicPath(pathname: string): boolean {
   return PRERENDERED_PUBLIC_PATHS.includes(pathname);
@@ -127,9 +134,11 @@ export function buildContentSecurityPolicy({
   //
   // A prerendered page cannot use the nonce at all (its scripts were emitted at
   // build time), so it falls back to host allowlisting plus 'unsafe-inline' for
-  // Next's inline flight data. That is weaker, and it is why the list of such
-  // pages is one anonymous page long. 'unsafe-eval' is gone in production
-  // either way — that part is not a tradeoff.
+  // Next's inline flight data. That is weaker, and it is why every entry on
+  // PRERENDERED_PUBLIC_PATHS has to be anonymous content with no session and no
+  // user data — see that list's own comment for the rule that admits a page to
+  // it. 'unsafe-eval' is gone in production either way — that part is not a
+  // tradeoff.
   const scriptSrc = prerendered
     ? ["'self'", "'unsafe-inline'", ...(isProduction ? [] : ["'unsafe-eval'"])]
     : [

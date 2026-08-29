@@ -1,4 +1,5 @@
 import { LegalContact, LegalPage } from "@/components/legal/LegalPage";
+import { PASSCONTROL_CONTACT_EMAIL, PASSCONTROL_CONTACT_MAILTO } from "@/lib/contact";
 
 export const metadata = { title: "Privacy notice" };
 
@@ -41,7 +42,7 @@ export default function PrivacyPage() {
       </section>
       <section>
         <h2>5. Who receives data</h2>
-        <p>PassControl uses Vercel, Supabase, Upstash, Resend and, when configured, Sentry. Their roles and links are listed on the <a href="/legal/subprocessors">service providers page</a>. Your chosen model provider receives calls you route to it. Data may be processed outside the EEA using the safeguards made available by those providers.</p>
+        <p>PassControl uses Vercel, Supabase, Upstash, Resend, ImprovMX and, when configured, Sentry. Their roles and links are listed on the <a href="/legal/subprocessors">service providers page</a>. Your chosen model provider receives calls you route to it. Data may be processed outside the EEA using the safeguards made available by those providers.</p>
         <p>Personal data is not sold. PassControl currently uses no advertising or behavioural-analytics service. Beta emails are text-only and contain no open-tracking pixel or click-tracking wrapper.</p>
       </section>
       <section>
@@ -54,7 +55,7 @@ export default function PrivacyPage() {
       <section>
         <h2>7. Your rights</h2>
         <p>Depending on the circumstances, you may request access, correction, deletion, restriction, portability or object to processing based on legitimate interests. Where processing relies on consent, you may withdraw it without affecting earlier processing.</p>
-        <p>Authenticated operators can download a machine-readable account export or permanently delete their workspace from Dashboard → Settings → Account data. An MFA step-up is required when MFA is enrolled. You may also email <a href="mailto:hello@vertias.eu">hello@vertias.eu</a>; identity may be verified before acting on a request.</p>
+        <p>Authenticated operators can download a machine-readable account export or permanently delete their workspace from Dashboard → Settings → Account data. An MFA step-up is required when MFA is enrolled. You may also email <a href={PASSCONTROL_CONTACT_MAILTO}>{PASSCONTROL_CONTACT_EMAIL}</a>; identity may be verified before acting on a request.</p>
         <p>You may complain to Bulgaria's <a href="https://cpdp.bg/en/lodging-complaints-and-alerts/">Commission for Personal Data Protection</a>.</p>
       </section>
       <section>

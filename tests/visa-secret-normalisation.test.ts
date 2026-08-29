@@ -182,10 +182,6 @@ describe("VISA_SECRET whitespace normalisation", () => {
     expect(await verifyVisa(token)).toMatchObject({ sub: "pid" });
   });
 
-  // The weak-but-padded secret the fallback above tolerates is refused before
-  // launch by check-cloud-beta-readiness.mjs, which measures the floor on the
-  // trimmed value. That assertion lives in tests/cloud-beta-readiness.test.mjs
-  // (importing the .mjs gate from TypeScript has no declaration file).
 });
 
 describe("visa.ts and passwordRecovery.ts derive the same key", () => {

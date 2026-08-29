@@ -20,11 +20,21 @@ response is synthesized, by a keyless provider that never touches a vault.
 
 The hosted demo includes the public **signed-receipt verifier** at
 [`/verify/receipt`](https://passcontrol.vertias.eu/verify/receipt). Verification runs in your
-browser; the receipt is never uploaded to PassControl.
+browser; the receipt is never uploaded to PassControl. Release-by-release changes are collected
+in the public [PassControl updates](https://passcontrol.vertias.eu/updates) archive. The
+[AI agent security learning center](https://passcontrol.vertias.eu/learn) explains identity,
+credential isolation, least privilege, budgets, revocation and audit evidence without treating
+one product layer as the whole security stack.
 
 **Hermes Agent:** the dashboard prints Hermes's current custom-provider YAML for a reveal-once
-Direct Agent Key. The self-hosted CLI prints the passport-sidecar form with `passcontrol env
-hermes`. See [`docs/integrations/hermes.md`](./docs/integrations/hermes.md).
+Direct Agent Key — the simplest path. For passport identity in Hermes, run the connector and
+print its form with `passcontrol env hermes`; that works against Cloud too.
+See [`docs/integrations/hermes.md`](./docs/integrations/hermes.md).
+
+**Never paste a passport private key into a client's `api_key` field.** A passport is a signing
+key, not a bearer token — a client that only stores a static string cannot sign a challenge, so
+the call is refused and the key is exposed. Static-key clients take a Direct Agent Key or the
+connector.
 
 ![PassControl kill switch — a live agent's calls flip from 200 OK to 403 BLOCKED the instant the kill switch is armed, then back when it's released](docs/demo/kill-switch.gif)
 
@@ -40,8 +50,16 @@ governed agent in ~15 minutes.
 
 ```bash
 npm install -g passcontrol
-passcontrol setup      # boots the self-hostable stack + opens the Control Tower
+passcontrol login      # approve once in your browser — this machine is set up
 ```
+
+Nothing else to install: the npm package is the CLI, not the stack. `login` ends by making one
+governed call and verifying its **signed receipt** against our published key, so you watch the
+thing work rather than being told it does. Want a look first? The
+[hosted demo](https://passcontrol.vertias.eu) runs the same pipeline in your browser, keyless.
+
+Prefer to run the whole gateway yourself? `passcontrol setup` does that, and needs **Docker
+Desktop, the Supabase CLI, and Node 18+** — see [Self-host](#self-host).
 
 ---
 
@@ -95,8 +113,9 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 - 🧰 **Drop-in for your SDK** (OpenAI, Anthropic, and OpenAI-compatible Groq / Mistral / Together /
   DeepSeek) — **or any agent or desktop chat app** that takes a base URL and a key (OpenHands,
   Aider, Cline, Continue, Chatbox, Jan, Msty, Cherry Studio, Open WebUI, LibreChat…): a Cloud
-  Direct Agent Key on the hosted service, or the self-hosted visa sidecar. None of them has
-  native passport support; the sidecar is what supplies passport identity locally
+  Direct Agent Key on the hosted service, or the passport connector. None of them has native
+  passport support; the connector is what supplies passport identity to a static-key tool —
+  against Cloud or a self-hosted gateway
 - 🔌 **Local MCP server** for Claude Desktop, Cursor, and Claude Code — governed `chat` and
   `list_models` tools with no provider key or passport secret in the client config
 - 🪪 **Agent passport page** — a per-agent identity document: a sigil derived from the
@@ -107,49 +126,54 @@ agent ──sign──▶ challenge ──visa──▶  ┌──────�
 
 ## Install & first run
 
-**Global CLI (recommended):**
+**Cloud — one command, and nothing else installed.** The published npm package is the CLI
+only: no dashboard, no database, no Docker, no Supabase.
 
 ```bash
 npm install -g passcontrol
-passcontrol --version     # confirms the install
-passcontrol setup         # prereq checks → fetches the stack → boots it → opens the dashboard
+passcontrol login            # opens your browser, you approve once, this machine is set up
 ```
 
-The published npm package is **just the CLI** (a handful of files, no provider keys). `passcontrol
-setup` detects the global install and offers to clone the self-hostable stack (Supabase + Redis +
-dashboard) into `~/passcontrol`, install its dependencies, and start it — one command from nothing
-to a running Control Tower. It first checks your prerequisites (Docker running, Supabase CLI, Node
-version, free ports) and tells you exactly what to fix if something's missing.
+`login` prints an 8-character code, copies it to your clipboard, and opens the approval page.
+Paste it, press **Approve**, and the CLI generates an Ed25519 keypair *on your machine* — only
+the public half is ever sent — creates your agent, and writes a working config. No 43-character
+secrets travel between a browser and a terminal.
 
-- Change the checkout location: `--app-dir <path>` or `PASSCONTROL_APP_ROOT=<path>`
-- Non-interactive: `--yes`
-- Skip opening the browser: `--no-open`
-- Ports already taken by another local Supabase? `passcontrol setup --port-offset 100`
-  (offsets Supabase + Redis together, e.g. API `54421`, DB `54422`; the dashboard stays on `:3000`)
+Then it proves it worked, before handing the terminal back:
 
-During `dev:stack` the seed step (`scripts/seed.mjs`) asks you to **choose an account email
-and password**. Then log in to the Control Tower at **http://localhost:3000** with those.
+```
+✓ minted a visa with the passport this machine just created
+✓ governed call ok — demo/demo-1, 12 tokens
+✓ receipt verified against https://passcontrol.vertias.eu/.well-known/jwks.json
 
-> ⚠️ **No shared default credentials ship**, on any install. The account you create guards the
-> real provider keys in your local Vault — and the stack stops being localhost-only the moment
-> you reach it from another device (Tailscale, LAN), so choose a real password. Non-interactive
-> runs (CI, piped output) get a generated password printed once. Deployed installs create
-> accounts through normal signup, gated by `INVITE_CODE`.
+  Your agent is live. Anyone can check that call for themselves:
+  passcontrol verify receipt eyJhbGc… --issuer https://passcontrol.vertias.eu
+```
 
-Add a **non-critical** provider key in the Control Tower, issue a passport, and copy the one-time
-`PASSPORT_ID` / `PASSPORT_SECRET`. Then, in your project directory:
+That last line is the part nobody else has. It is a signed record of one governed call that a
+stranger can verify offline against a public key, with no account and no access to your logs.
+
+You type the code in yourself on purpose. **We will never send you an approval link with the
+code already filled in**; if you receive one, it is not from us, and approving it would hand
+whoever sent it a key to your workspace.
+
+Now point an agent at it:
 
 ```bash
-passcontrol init             # gateway + passport + provider/model → writes .passcontrol
-passcontrol doctor --deep    # verifies config, prerequisites, and mints a test visa
-passcontrol version          # CLI vs gateway vs database schema, in one table
-passcontrol call "Say hello in 3 words"
-passcontrol spend            # confirms governed spend
+passcontrol sidecar          # holds the passport, mints visas, forwards to Cloud
+passcontrol env openhands    # ready-to-paste settings for your agent
 ```
 
-You'll see a streamed response and an `ok` row in the dashboard Audit Log — the complete governed
-loop: **passport → visa → vault key injection → proxied call → audit**. That last call uses your
-real key from the local Vault, so start with a throwaway one.
+Finished with a machine? `passcontrol logout` revokes its control key and clears its
+credentials, leaving your provider and model settings alone.
+
+**Configuring by hand, or wiring up CI?** `passcontrol init` walks through gateway + passport +
+provider/model with no browser, and plain environment variables work everywhere the config file
+does.
+
+**Want to run the whole thing yourself?** That is [Self-host](#self-host) below. `passcontrol
+setup` is the self-host command, and it is the one that wants Docker and the Supabase CLI —
+neither `login` nor the sidecar wants either.
 
 > Working from a **source clone** instead of the global install? Everything below works as
 > `npm run cli -- <command>`; after `npm link` in the clone, the short `passcontrol <command>` form
@@ -161,7 +185,7 @@ PassControl ships a local stdio MCP server. Store the passport once in the owner
 profile, then let the CLI merge a secret-free entry into your client config:
 
 ```bash
-passcontrol init --global
+passcontrol login                              # or `passcontrol init --global` to do it by hand
 passcontrol configure claude-desktop --write   # or: cursor
 # Claude Code: passcontrol configure claude-code prints its `claude mcp add` command
 ```
@@ -171,14 +195,25 @@ contains only absolute Node/CLI paths—no passport or provider key. `chat` stil
 gateway's identity, scope, budget, endpoint, and kill-switch checks. Preview without writing via
 `passcontrol configure claude-desktop`, or print the JSON with `passcontrol env claude-desktop`.
 
-## Real agents & the visa sidecar
+## Real agents & the passport connector
 
-> **This is the self-hosted / advanced path.** On PassControl Cloud, a tool that accepts only a
-> base URL and an API key gets a **Direct Agent Key** — issued reveal-once from the dashboard,
-> bound to one agent, with no local process to run. Reach for the sidecar when you are
-> self-hosting, or when you specifically want passport identity inside a static-key tool. If you
-> control the application's JavaScript, neither applies: use the SDK
-> ([`docs/integrations/passport-sdk.md`](./docs/integrations/passport-sdk.md)).
+> **The connector is not self-hosting.** It is a small local signer — one foreground process,
+> no Docker, no database — that holds your passport and talks to whichever gateway you configure,
+> **including PassControl Cloud**. Running it is the same shape as running a cloud provider's
+> local auth proxy: the control plane stays hosted, only the signing key stays yours.
+>
+> Pick by what your client can do, not by where the gateway lives:
+>
+> | Your client | Credential | Local process? |
+> |---|---|---|
+> | You control its JS/TS | **Passport** via [the SDK](./docs/integrations/passport-sdk.md) | none |
+> | Claude Desktop / Cursor / Claude Code | **Passport** via `passcontrol mcp` | the MCP server |
+> | Takes only a base URL + API key | **Passport** via this connector | the connector |
+> | Takes only a base URL + API key | **Direct Agent Key** — simplest | none |
+>
+> A Direct Agent Key is lower-assurance bearer possession, issued reveal-once from the dashboard
+> and bound to one agent. It is the right default for a static-key tool. The connector is what you
+> reach for when you want passport identity in that same tool — on Cloud or self-hosted alike.
 
 A visa is deliberately short-lived so it's revocable — but a real coding agent runs a **long,
 multi-call session** that would outlive a single visa. The **sidecar** solves this: a tiny local
@@ -275,6 +310,8 @@ The primary interface is `passcontrol <command>`. Highlights:
 
 | Need | Command |
 |---|---|
+| Set this machine up through the browser | `passcontrol login` |
+| Revoke this machine's key and clear its credentials | `passcontrol logout` |
 | Config, gateway status, suggested next steps | `passcontrol status` |
 | Check local setup / mint a test visa | `passcontrol doctor --deep` |
 | Compare CLI, gateway and database versions | `passcontrol version` |
@@ -355,6 +392,50 @@ any Redis**. Deploy on Vercel, Cloudflare Workers through the tested OpenNext pa
 Auth/SMTP checklist, five-minute Cron Trigger, local `workerd` preview, and owner-only deploy handoff.
 
 ### Local (Docker) — the fastest path
+
+```bash
+npm install -g passcontrol
+passcontrol setup         # prereq checks → fetches the stack → boots it → opens the dashboard
+```
+
+`passcontrol setup` detects the global install and offers to clone the self-hostable stack (Supabase + Redis +
+dashboard) into `~/passcontrol`, install its dependencies, and start it — one command from nothing
+to a running Control Tower. It first checks your prerequisites (Docker running, Supabase CLI, Node
+version, free ports) and tells you exactly what to fix if something's missing.
+
+- Change the checkout location: `--app-dir <path>` or `PASSCONTROL_APP_ROOT=<path>`
+- Non-interactive: `--yes`
+- Skip opening the browser: `--no-open`
+- Ports already taken by another local Supabase? `passcontrol setup --port-offset 100`
+  (offsets Supabase + Redis together, e.g. API `54421`, DB `54422`; the dashboard stays on `:3000`)
+
+During `dev:stack` the seed step (`scripts/seed.mjs`) asks you to **choose an account email
+and password**. Then log in to the Control Tower at **http://localhost:3000** with those.
+
+> ⚠️ **No shared default credentials ship**, on any install. The account you create guards the
+> real provider keys in your local Vault — and the stack stops being localhost-only the moment
+> you reach it from another device (Tailscale, LAN), so choose a real password. Non-interactive
+> runs (CI, piped output) get a generated password printed once. Deployed installs create
+> accounts through normal signup, gated by `INVITE_CODE`.
+
+Add a **non-critical** provider key in the Control Tower, issue a passport, and copy the one-time
+`PASSPORT_ID` / `PASSPORT_SECRET`. Then, in your project directory:
+
+```bash
+passcontrol init             # gateway + passport + provider/model → writes .passcontrol
+passcontrol doctor --deep    # verifies config, prerequisites, and mints a test visa
+passcontrol version          # CLI vs gateway vs database schema, in one table
+passcontrol call "Say hello in 3 words"
+passcontrol spend            # confirms governed spend
+```
+
+You'll see a streamed response and an `ok` row in the dashboard Audit Log — the complete governed
+loop: **passport → visa → vault key injection → proxied call → audit**. That last call uses your
+real key from the local Vault, so start with a throwaway one.
+
+> Working from a **source clone** instead of the global install? Everything below works as
+> `npm run cli -- <command>`; after `npm link` in the clone, the short `passcontrol <command>` form
+> works too.
 
 `passcontrol setup` (above) is the one-command route. Under the hood it runs the bundled Docker
 stack: local Supabase (Postgres + Vault + Auth), Redis-over-REST, migrations applied inside the DB

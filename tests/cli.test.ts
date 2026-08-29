@@ -9,6 +9,61 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 const execFileAsync = promisify(execFile);
 const CLI = path.join(process.cwd(), "bin/passcontrol.mjs");
 
+// Any case that runs `setup` or `doctor --deep` shells out to the real CLI, which
+// probes `docker info` under its OWN bound (checkDockerDaemon). A vitest budget
+// shorter than that bound cannot pass on a machine whose Docker daemon is wedged:
+// the probe is still waiting when vitest gives up, so the case goes red for a
+// reason that has nothing to do with what it asserts, and reads as a real failure.
+//
+// That happened — a 10s budget against a 15s probe. Derived from the source rather
+// than typed, so raising the probe cannot silently re-open it.
+function dockerProbeTimeoutMs(source = readFileSync(CLI, "utf8")): number {
+  const body = source.slice(source.indexOf("function checkDockerDaemon"));
+  const declared = body.match(/timeout:\s*([0-9_]+|[A-Z_][A-Z0-9_]*)/u)?.[1];
+  if (!declared) throw new Error("checkDockerDaemon declares no timeout — the derived budget would be a guess");
+  // The bound may be written inline or, as now, shared through a named constant
+  // so all three docker calls carry one number. Resolve either.
+  const literal = /^[0-9_]+$/u.test(declared)
+    ? declared
+    : source.match(new RegExp(`const ${declared}\\s*=\\s*([0-9_]+)`, "u"))?.[1];
+  if (!literal) throw new Error(`could not resolve the docker timeout \`${declared}\` to a number`);
+  return Number(literal.replace(/_/gu, ""));
+}
+
+/**
+ * Each `execFileSync("docker", ...)` call, sliced to its own closing paren by
+ * balancing. A non-greedy regex stops at the first `)` it sees, which inside
+ * these calls is an interpolated helper — and it then reports a bounded call as
+ * unbounded because the timeout sits past that point.
+ */
+function dockerCalls(source: string): string[] {
+  const calls: string[] = [];
+  for (const match of source.matchAll(/execFileSync\(\s*"docker"/gu)) {
+    let depth = 0;
+    for (let i = match.index + "execFileSync".length; i < source.length; i += 1) {
+      if (source[i] === "(") depth += 1;
+      else if (source[i] === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          calls.push(source.slice(match.index, i + 1));
+          break;
+        }
+      }
+    }
+  }
+  return calls;
+}
+
+const DOCKER_PROBE_MS = dockerProbeTimeoutMs();
+
+/**
+ * A wedged daemon makes EVERY docker call wait out its own bound, and `doctor
+ * --deep` makes more than one, so budgeting for a single probe is not enough —
+ * at one probe's worth this sat exactly on the boundary. Count the call sites.
+ */
+const DOCKER_CALL_SITES = (readFileSync(CLI, "utf8").match(/execFileSync\(\s*"docker"/gu) ?? []).length;
+const DOCKER_BOUND_MS = DOCKER_PROBE_MS * Math.max(DOCKER_CALL_SITES, 1) + 15_000;
+
 let tmp = "";
 
 async function runCli(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
@@ -196,7 +251,7 @@ describe("passcontrol CLI", () => {
     ).rejects.toMatchObject({
       stderr: expect.stringMatching(/Docker.*not installed.*install Docker Desktop/is),
     });
-  }, 10000);
+  }, DOCKER_BOUND_MS);
 
   it("lists local prerequisites in doctor --deep", async () => {
     const { stdout, stderr } = await runCli(["doctor", "--deep"]);
@@ -207,7 +262,7 @@ describe("passcontrol CLI", () => {
     expect(output).toContain("Supabase CLI");
     expect(output).toContain("Node.js");
     expect(output).toContain("Local stack ports");
-  }, 10000);
+  }, DOCKER_BOUND_MS);
 
   it("bounds the Docker daemon probe so doctor cannot hang on a wedged Desktop socket", () => {
     const source = readFileSync(path.join(process.cwd(), "bin/passcontrol.mjs"), "utf8");
@@ -218,7 +273,7 @@ describe("passcontrol CLI", () => {
     // separately (see "waits long enough for a cold daemon"), because asserting
     // an exact 2_000 here turned a tuning decision into a contract, and that
     // number was too small: it reported "not running" about a cold daemon.
-    expect(body).toMatch(/timeout:\s*[0-9_]+/);
+    expect(body).toMatch(/timeout:\s*([0-9_]+|[A-Z_][A-Z0-9_]*)/u);
   });
 
   it("refuses to clone the app into a non-empty directory", async () => {
@@ -611,12 +666,23 @@ describe("passcontrol CLI", () => {
 describe("the Docker daemon probe in setup/doctor", () => {
   const source = readFileSync(CLI, "utf8");
 
+  it("bounds every docker call, not just the daemon probe", () => {
+    // `doctor --deep` hung indefinitely against a wedged Docker Desktop even
+    // though checkDockerDaemon was bounded: the port check ran `docker ps` with
+    // no timeout at all. A socket that accepts and never answers makes any
+    // unbounded docker call wait forever, so the bound has to be on all of them.
+    const calls = dockerCalls(source);
+    expect(calls.length, "no docker calls found — this guard would be vacuous").toBeGreaterThan(0);
+    const unbounded = calls.filter((call) => !/timeout:/u.test(call));
+    expect(unbounded, `docker calls with no timeout:\n${unbounded.join("\n---\n")}`).toEqual([]);
+  });
+
   it("waits long enough for a cold daemon, while still being bounded", () => {
-    const probe = source.slice(source.indexOf("function checkDockerDaemon"));
-    const timeout = probe.match(/timeout:\s*([0-9_]+)/)?.[1]?.replace(/_/g, "");
-    expect(timeout, "the docker info probe must declare a timeout").toBeDefined();
-    expect(Number(timeout)).toBeGreaterThanOrEqual(10_000);
-    expect(Number(timeout)).toBeLessThanOrEqual(60_000);
+    // Resolves a named constant as well as an inline literal: the bound moved
+    // into DOCKER_TIMEOUT_MS so all three docker calls share one number.
+    const timeout = dockerProbeTimeoutMs(source);
+    expect(timeout).toBeGreaterThanOrEqual(10_000);
+    expect(timeout).toBeLessThanOrEqual(60_000);
   });
 
   it("tells a timeout apart from a daemon that is actually down", () => {

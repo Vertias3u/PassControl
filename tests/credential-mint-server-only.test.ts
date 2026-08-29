@@ -34,7 +34,11 @@ function functionBody(name: string): string {
 
 describe("credential minting runs server-side, not as the dashboard user", () => {
   it("mints a pc_ control-plane key with the service role", () => {
-    const body = functionBody("createApiKey");
+    // The helper, not the exported `createApiKey` — `passcontrol login`'s
+    // approveCliDevice is the second caller, and it delegates here rather than
+    // carrying its own insert. The single-sink test at the bottom is what enforces
+    // that, and it is the assertion to keep if any of these are ever traded away.
+    const body = functionBody("mintApiKeyForUser");
     expect(body).toMatch(/serviceClient\(\)\s*\.from\("api_keys"\)\s*\.insert\(/);
     // The precise regression: a user-scoped insert here is the replayable request.
     expect(body).not.toMatch(/\bdb\s*\.from\("api_keys"\)\s*\.insert\(/);
@@ -50,7 +54,7 @@ describe("credential minting runs server-side, not as the dashboard user", () =>
     // A service-role write bypasses RLS entirely, so the MFA gate stops being
     // defence-in-depth and becomes the only check. It must run first, and against
     // this same request's verified user.
-    for (const name of ["createApiKey", "createAgentForUser"]) {
+    for (const name of ["mintApiKeyForUser", "createAgentForUser"]) {
       const body = functionBody(name);
       const gate = body.indexOf("requireCredentialMfa(");
       const write = body.search(/serviceClient\(\)|fleet\.createAgent\(/);
@@ -64,7 +68,7 @@ describe("credential minting runs server-side, not as the dashboard user", () =>
     // The one way to turn a service-role mint into something worse than the bug it
     // replaced: accept a user id from input and hand it to a client that bypasses
     // RLS. Both sinks must write the id derived from requireUser()/getUser().
-    expect(functionBody("createApiKey")).toMatch(/user_id:\s*user\.id/);
+    expect(functionBody("mintApiKeyForUser")).toMatch(/user_id:\s*user\.id/);
     expect(functionBody("createAgentForUser")).toMatch(/fleet\.createAgent\(\s*serviceClient\(\),\s*user\.id/);
     expect(source).not.toMatch(/input\.user_id|input\.userId/);
   });
@@ -102,6 +106,48 @@ describe("credential minting runs server-side, not as the dashboard user", () =>
       expect(source).not.toMatch(new RegExp(`\\.rpc\\("${legacy}"`));
     }
     expect(source).not.toMatch(/\bdb\.rpc\(/);
+  });
+
+  // This is the assertion with teeth, and it is the reason the rest of this file
+  // can name a single function instead of maintaining a list.
+  //
+  // Every other guard here is of the form "the mint we know about is done safely".
+  // None of them says anything about a mint nobody added to the list — and a list
+  // that must be updated by the same person adding the risk is not a control. The
+  // `passcontrol login` flow is exactly the case that would have tested it: a new
+  // Server Action that needs a `pc_` key and could trivially have written its own
+  // insert with its own copy of the gate, passing every assertion above.
+  //
+  // One sink means one place to audit, one place the service role appears, and one
+  // place the MFA gate can go missing from. If this ever needs to become two, that
+  // is a decision to write down and defend, not a number to bump here.
+  it("creates the FK target before writing the key", () => {
+    // `api_keys.user_id references public.users(id)` and profile rows are lazy —
+    // no trigger on auth.users. Without this, a brand-new operator's very first
+    // credential fails on a foreign key and is shown "Something went wrong".
+    //
+    // createAgentForUser and issueDirectAgent both learned this already; the key
+    // mint had not, which is why `passcontrol login` — now the first command a
+    // new operator runs — hit it immediately. Ordering matters as much as the
+    // call: the row has to exist before the insert, not merely somewhere nearby.
+    const body = functionBody("mintApiKeyForUser");
+    const ensure = body.indexOf("ensureProfileRow(");
+    const insert = body.search(/\.from\("api_keys"\)\s*\.insert\(/u);
+    expect(ensure, "mintApiKeyForUser must ensure the profile row").toBeGreaterThan(-1);
+    expect(insert).toBeGreaterThan(-1);
+    expect(ensure, "ensure BEFORE the insert").toBeLessThan(insert);
+    // Service role: 0032 revoked INSERT on public.users from `authenticated`.
+    expect(body).toMatch(/ensureProfileRow\(\s*serviceClient\(\)/u);
+  });
+
+  it("keeps exactly ONE api_keys insert in the module", () => {
+    // `.upsert` is included deliberately: it mints a working key exactly as well
+    // as `.insert`, and a pattern that named only one would let the other through
+    // while this test still reported "exactly one".
+    const inserts = source.match(/\.from\("api_keys"\)\s*\.(?:insert|upsert)\(/gu) ?? [];
+    expect(inserts, "add a caller for mintApiKeyForUser, not a second write").toHaveLength(1);
+    // …and it is inside the gated helper, not merely somewhere in the file.
+    expect(functionBody("mintApiKeyForUser")).toMatch(/\.from\("api_keys"\)\s*\.insert\(/);
   });
 
   it("leaves the ungated stops on the user-scoped client", () => {

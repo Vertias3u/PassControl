@@ -13,6 +13,7 @@ import {
 import { logSecurityEvent } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
 import { recordAdminAction } from "@/lib/audit";
+import { IDLE_WINDOW_MS } from "@/lib/control/auth";
 import { ensureProfileRow } from "@/lib/profile/manage";
 import { generateApiKey } from "@/lib/apikeys";
 import {
@@ -22,7 +23,15 @@ import {
   type ProviderId,
 } from "@/lib/providers";
 import { purgeAgentCaches, purgeAgentFallbacks, purgeProviderKeysCache } from "@/lib/state/redis";
-import { rateLimit } from "@/lib/ratelimit";
+import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
+import {
+  GRANT_TTL_S,
+  approveDeviceAuthorization,
+  denyDeviceAuthorization,
+  resolveUserCode,
+  type PendingDevice,
+} from "@/lib/state/device-auth";
+import { normalizeUserCode } from "@/lib/device-codes";
 import { open, seal } from "@/lib/crypto/aesgcm";
 import { stashKeyImport, takeKeyImport } from "@/lib/state/redis";
 import * as fleet from "@/lib/fleet";
@@ -671,8 +680,10 @@ export async function completeKeyImport(input: {
 }> {
   const auth = await requireUser();
   const { user } = auth;
-  // Redeem by id. takeKeyImport deletes unconditionally, so a replayed id after
-  // this point finds nothing — the handoff is single-use, not merely expiring.
+  // Redeem by id. takeKeyImport is an atomic GETDEL, so a replayed id after this
+  // point finds nothing — the handoff is single-use, not merely expiring, and
+  // two racing redemptions cannot both succeed. That last clause was untrue until
+  // 2026-08-27; see tests/key-import-atomic.test.ts.
   const token = String(input?.handoff ?? "");
   const sealed = token.length > 0 && token.length <= 200
     ? await takeKeyImport(user.id, token)
@@ -873,20 +884,51 @@ export async function deleteProviderKey(input: { credentialId: string }) {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Mint a developer API key for the public control-plane API. The full token is
- *  returned ONCE here and never stored (only its hash + display prefix are). */
-export async function createApiKey(input: { name: string; scope: "read" | "write" }): Promise<{
-  token: string;
-  prefix: string;
-}> {
-  const { db, user } = await requireUser();
+/**
+ * The ONE place a `pc_` control-plane key is written. Not exported — this file is
+ * "use server", so an export is an HTTP-addressable endpoint, and this must only
+ * be reachable through a caller that has already decided the request is legitimate.
+ *
+ * Two callers today: `createApiKey` (the Settings form) and `approveCliDevice`
+ * (`passcontrol login`). A third must reuse this rather than add an insert, and
+ * `tests/credential-mint-server-only.test.ts` fails the build if it does otherwise
+ * — it asserts this module contains exactly one api_keys insert. That guard exists
+ * because every OTHER assertion in that file only checks that the mints we already
+ * know about are done safely, which says nothing about one nobody enumerated.
+ */
+async function mintApiKeyForUser(
+  db: Awaited<ReturnType<typeof userClient>>,
+  user: NonNullable<Awaited<ReturnType<typeof db.auth.getUser>>["data"]["user"]>,
+  name: string,
+  scope: "read" | "write",
+  // Null means the key never expires, which is what every key minted before
+  // migration 0041 is and what a key created by hand in Settings stays. Only the
+  // device flow passes a window, because only the device flow mints a key per
+  // MACHINE — and machines get decommissioned while their owner forgets the key
+  // ever existed. `authenticateApiKey` rolls this deadline forward on every use,
+  // so the window retires idle keys and never a working one.
+  expiresAt: string | null = null
+): Promise<{ token: string; prefix: string }> {
   // A `pc_` key is control-plane authority — fleet reads, budget and scope writes,
   // the kill switch — and it is returned in full exactly once. It is the most
   // consequential credential minted anywhere in this file.
   await requireCredentialMfa(db, user);
-  const name = String(input?.name ?? "").trim();
-  if (name.length < 1 || name.length > 80) throw new Error("Name must be 1–80 characters.");
-  if (input?.scope !== "read" && input?.scope !== "write") throw new Error("Scope must be read or write.");
+
+  // The FK target. `api_keys.user_id references public.users(id)`, and profile
+  // rows are created LAZILY here — there is no trigger on auth.users, by the
+  // deliberate choice documented on ensureProfileRow itself.
+  //
+  // This was missing, and it is a PRE-EXISTING bug rather than one the device
+  // flow introduced: `createApiKey` never ensured the row either, so Settings →
+  // Create API key already failed with a bare "Something went wrong" for any
+  // account that had not yet stored a provider key or saved a profile — the two
+  // paths that happened to create it as a side effect.
+  //
+  // `passcontrol login` is what made it matter. It is now the FIRST command a new
+  // operator runs, before any provider key exists, so the rare case became the
+  // default one. Found by running the flow in a browser; every test in the suite
+  // was green, because a source-shape guard cannot see a foreign key.
+  await ensureProfileRow(serviceClient(), user);
 
   const { token, prefix, hash } = await generateApiKey();
   // Service role, not `db` — same reason as createAgentForUser above, and this is
@@ -899,18 +941,206 @@ export async function createApiKey(input: { name: string; scope: "read" | "write
     name,
     key_prefix: prefix,
     key_hash: hash,
-    scope: input.scope,
+    scope,
+    expires_at: expiresAt,
   });
-  if (error) failGeneric("createApiKey", error);
+  if (error) failGeneric("mintApiKeyForUser", error);
 
   await recordAdminAction({
     userId: user.id,
     action: "apikey.create",
     targetType: "api_key",
-    metadata: { name, scope: input.scope, prefix },
+    // The window is part of what was granted, so a reader of the trail can tell a
+    // permanent key from an expiring one without joining back to the row.
+    metadata: { name, scope, prefix, ...(expiresAt ? { expires_at: expiresAt } : {}) },
+  });
+  return { token, prefix };
+}
+
+/** Validate a key name. Shared so the CLI path cannot skip what the form does. */
+function validateApiKeyName(value: unknown): string {
+  const name = String(value ?? "").trim();
+  if (name.length < 1 || name.length > 80) throw new Error("Name must be 1–80 characters.");
+  return name;
+}
+
+/** Mint a developer API key for the public control-plane API. The full token is
+ *  returned ONCE here and never stored (only its hash + display prefix are). */
+export async function createApiKey(input: { name: string; scope: "read" | "write" }): Promise<{
+  token: string;
+  prefix: string;
+}> {
+  const { db, user } = await requireUser();
+  const name = validateApiKeyName(input?.name);
+  if (input?.scope !== "read" && input?.scope !== "write") throw new Error("Scope must be read or write.");
+  const minted = await mintApiKeyForUser(db, user, name, input.scope);
+  revalidatePath("/");
+  return minted;
+}
+
+// ── `passcontrol login` — browser approval of a CLI device flow ──────────────
+//
+// The CLI opens a login, prints an 8-character code, and polls. The operator
+// brings that code here and approves once. What they are approving is a
+// WRITE-SCOPED control-plane key on their own tenant, so the screen says so and
+// this file treats it exactly like the Settings mint — because it is one.
+//
+// The code travels terminal → browser, never the reverse and never in a URL.
+// See tests/cli-login-shape.test.ts for why that direction is load-bearing: a
+// pre-filled approval link lets an attacker start the flow, send the link, and
+// collect a key on the tenant of whoever clicks Approve.
+
+const CLI_DEVICE_LOOKUP_LIMIT = 10;
+const CLI_DEVICE_LOOKUP_WINDOW_S = 60;
+
+/**
+ * Resolve a user code, rate-limited FAIL-CLOSED.
+ *
+ * Not exported. Every caller below reaches the same reader so the limiter and
+ * the attempt counter cannot be skipped by adding one more entry point.
+ *
+ * Fail-closed and not fail-open, unlike the kill-switch reads: this call is the
+ * oracle that answers "is this code live?", so an unreadable Redis must not
+ * degrade into an unmetered guessing endpoint. It is the `rateLimitFailClosed`
+ * argument from the Direct Agent Key edge, applied to a different unauthenticated
+ * -ish surface — the session is authenticated, but the CODE is attacker-supplied.
+ */
+async function lookupCliDevice(
+  userId: string,
+  rawCode: string,
+  { count = true }: { count?: boolean } = {}
+): Promise<{ code: string; pending: PendingDevice } | null> {
+  const limit = await rateLimitFailClosed(
+    `cli-device:${userId}`,
+    CLI_DEVICE_LOOKUP_LIMIT,
+    CLI_DEVICE_LOOKUP_WINDOW_S
+  );
+  if (!limit.success) throw new Error("Too many attempts. Wait a minute and try again.");
+
+  // Reject a malformed code before it costs a round trip. normalizeUserCode does
+  // NOT map homoglyphs — the alphabet excludes them, so a `0` is a wrong code and
+  // repairing it would silently widen the guess space.
+  const code = normalizeUserCode(rawCode);
+  if (!code) return null;
+
+  const pending = await resolveUserCode(code, { count });
+  return pending ? { code, pending } : null;
+}
+
+/** What the approval screen shows before the operator commits. Never a secret. */
+export async function inspectCliDevice(rawCode: string): Promise<{
+  clientName: string;
+  ip: string;
+  requestedAt: string;
+} | null> {
+  const { db, user } = await requireUser();
+  // Gated for the same reason approveCliDevice is, and it must be the SAME answer
+  // in both places: if viewing were ungated while approving were not, an aal1
+  // session would still get the oracle and lose nothing.
+  await requireCredentialMfa(db, user);
+  const found = await lookupCliDevice(user.id, rawCode);
+  if (!found) return null;
+  return {
+    clientName: found.pending.clientName,
+    ip: found.pending.ip,
+    requestedAt: new Date(found.pending.createdAt).toISOString(),
+  };
+}
+
+/**
+ * Approve a pending CLI login: mint a write-scoped key and seal it for collection.
+ *
+ * The gate runs FIRST — before the lookup, not merely before the mint. That
+ * ordering is the point and `tests/credential-action-mfa.test.ts` pins it: a gate
+ * placed after the lookup still stops the mint, but the lookup has already told
+ * an unverified caller whether the code is real and already spent one of that
+ * code's five attempts. Both of those are the attack; the mint is just the prize.
+ */
+export async function approveCliDevice(rawCode: string): Promise<{ clientName: string }> {
+  const { db, user } = await requireUser();
+  await requireCredentialMfa(db, user);
+
+  // Does not consume an attempt: inspectCliDevice already charged for resolving
+  // this code, and charging twice per approval quartered the operator's budget.
+  const found = await lookupCliDevice(user.id, rawCode, { count: false });
+  if (!found) throw new Error("That code is not valid, or it has expired. Run `passcontrol login` again.");
+
+  // Write scope is not a default we drifted into: the CLI's next two calls are
+  // agent create and passport rotate, both of which lib/control/handler.ts
+  // requires write for. A read-only login could not finish provisioning.
+  const minted = await mintApiKeyForUser(
+    db,
+    user,
+    `CLI on ${found.pending.clientName}`,
+    "write",
+    // A window, because this is the one mint bound to a MACHINE. `passcontrol
+    // login` is meant to be run on every laptop, container and CI runner an
+    // operator has, and machines are decommissioned far more often than anyone
+    // remembers to revoke a key. Rolling, so a machine still in use never loses
+    // it — see IDLE_WINDOW_MS in lib/control/auth.ts.
+    new Date(Date.now() + IDLE_WINDOW_MS).toISOString()
+  );
+
+  // The token goes into Redis SEALED, never in plaintext, and is keyed by the
+  // hash of a device code only the CLI holds. Same handling as the key-import
+  // handoff above, and for the same reason: a credential at rest in a cache is a
+  // credential readable by anyone who can read the cache.
+  await approveDeviceAuthorization({
+    userCode: found.code,
+    deviceCodeHash: found.pending.deviceCodeHash,
+    sealedGrant: await seal(
+      JSON.stringify({
+        version: 1,
+        userId: user.id,
+        token: minted.token,
+        prefix: minted.prefix,
+        expiresAt: Date.now() + GRANT_TTL_S * 1000,
+      })
+    ),
+  });
+
+  await recordAdminAction({
+    userId: user.id,
+    action: "cli.device.approve",
+    targetType: "api_key",
+    // Prefix only. The token is not audit metadata, and neither is the code.
+    metadata: { clientName: found.pending.clientName, prefix: minted.prefix },
   });
   revalidatePath("/");
-  return { token, prefix };
+  return { clientName: found.pending.clientName };
+}
+
+/**
+ * Refuse a pending CLI login. Deliberately NOT behind requireCredentialMfa.
+ *
+ * This is a stop, and every credential in this file keeps at least one stop
+ * reachable without a step-up — the rule that also leaves setMasterKill and
+ * revokeApiKey ungated. Deny is the correct response to a code you did not
+ * expect, so putting a TOTP prompt between a suspicious prompt and the button
+ * that kills it would make the safe action the slow one.
+ *
+ * ACCEPTED COST, stated rather than hidden: this makes deny a code-validity
+ * oracle too, and lets someone who guesses a live code kill a real operator's
+ * login. It is bounded by the same fail-closed limiter and the same five-attempt
+ * cap as every other reader — and the blast radius is a login that has to be
+ * re-run, against an alternative where a phished operator cannot quickly refuse.
+ */
+export async function denyCliDevice(rawCode: string): Promise<void> {
+  const { user } = await requireUser();
+  const found = await lookupCliDevice(user.id, rawCode);
+  if (!found) return;
+
+  await denyDeviceAuthorization({
+    userCode: found.code,
+    deviceCodeHash: found.pending.deviceCodeHash,
+  });
+  await recordAdminAction({
+    userId: user.id,
+    action: "cli.device.deny",
+    targetType: "api_key",
+    metadata: { clientName: found.pending.clientName },
+  });
+  revalidatePath("/");
 }
 
 /** Revoke an API key (soft delete). Ownership enforced by RLS — the update

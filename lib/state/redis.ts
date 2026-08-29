@@ -400,12 +400,28 @@ export async function stashKeyImport(
 }
 
 /**
- * Redeem a handoff EXACTLY once. The delete is unconditional and happens even
- * on a miss, so a captured id cannot be replayed for the rest of its TTL.
+ * Redeem a handoff EXACTLY once — atomically.
+ *
+ * `getdel`, not `get` then `del`. This used to be the two-round-trip pair, under
+ * a docstring that already claimed "EXACTLY once". It was not: two concurrent
+ * redemptions of one id both read before either deleted, and both walked away
+ * with the ciphertext. `tests/key-import-atomic.test.ts` reproduces it — eight
+ * concurrent callers, eight copies of the sealed key.
+ *
+ * What that was worth to an attacker is narrow: the id is a `crypto.randomUUID`
+ * that lives for a couple of minutes, and `completeKeyImport` re-checks the
+ * tenant inside the sealed payload afterwards. But the property was written down
+ * and relied on by the caller's own comment, and single-use is the only thing
+ * separating "a handoff" from "a bearer token with a TTL".
+ *
+ * Redis decides it server-side in one call, so concurrency cannot split it. The
+ * delete still happens on a miss in the sense that matters — there is nothing
+ * left to replay either way.
+ *
+ * NOT wrapped in a catch. A Redis fault must propagate: reporting a fault as
+ * `null` would be indistinguishable from "already redeemed", which is exactly
+ * the answer that must stay trustworthy.
  */
 export async function takeKeyImport(userId: string, id: string): Promise<string | null> {
-  const key = k.keyImport(userId, id);
-  const sealed = asCachedString(await redis().get<unknown>(key));
-  await redis().del(key);
-  return sealed ?? null;
+  return asCachedString(await redis().getdel<unknown>(k.keyImport(userId, id))) ?? null;
 }

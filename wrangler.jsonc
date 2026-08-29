@@ -3,7 +3,10 @@
   "name": "passcontrol-cloud",
   "main": "cloudflare/worker.mjs",
   "compatibility_date": "2026-08-08",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
   "vars": {
     "PASSCONTROL_TRUST_CF_CONNECTING_IP": "true"
   },
@@ -18,6 +21,8 @@
     }
   ],
   "triggers": {
-    "crons": ["*/5 * * * *", "15 0 * * *"]
+    "crons": [
+      "*/5 * * * *"
+    ]
   }
 }

@@ -8,6 +8,17 @@ import { hashApiKey, isApiKeyFormat } from "@/lib/apikeys";
 
 export type Scope = "read" | "write";
 
+/**
+ * How long a control key survives without being used.
+ *
+ * Rolling, not absolute. A key in daily use never expires, because a key someone
+ * is actively using is a key someone would notice losing; an absolute cap would
+ * break working CI on a schedule and buy nothing for it. What this retires is the
+ * decommissioned laptop — which is the threat `passcontrol login` created by
+ * minting a write-scoped key per machine.
+ */
+export const IDLE_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+
 export type AuthResult =
   | { ok: true; userId: string; scope: Scope; keyId: string }
   | { ok: false; status: number; code: string };
@@ -23,17 +34,42 @@ export async function authenticateApiKey(req: Request): Promise<AuthResult> {
   const db = serviceClient();
   const { data, error } = await db
     .from("api_keys")
-    .select("id, user_id, scope, revoked_at")
+    .select("id, user_id, scope, revoked_at, expires_at")
     .eq("key_hash", hash)
     .maybeSingle();
   if (error) return { ok: false, status: 500, code: "auth_lookup_failed" };
-  // Not found and revoked are indistinguishable to the caller (no enumeration).
+  // Not found, revoked and expired are all indistinguishable to the caller.
+  //
+  // A distinct `expired_api_key` would confirm to an unauthenticated caller that
+  // a guessed key had once existed — the same enumeration oracle the revoked
+  // branch has always refused to be. The operator learns which it is from the
+  // dashboard, where they are already authenticated.
   if (!data || data.revoked_at) return { ok: false, status: 401, code: "invalid_api_key" };
+  const expiresAt = data.expires_at ? Date.parse(data.expires_at) : null;
+  // `null` means never expires, and every key predating migration 0041 is null —
+  // adding the column must not retire anything anyone is already using. An
+  // UNPARSEABLE value is treated as expired rather than as absent: a column this
+  // one reads for an authentication decision must fail closed on nonsense.
+  if (data.expires_at != null && (!Number.isFinite(expiresAt) || (expiresAt as number) <= Date.now())) {
+    return { ok: false, status: 401, code: "invalid_api_key" };
+  }
 
   // Best-effort last-used stamp; never blocks or throws into the request path.
+  //
+  // The expiry rides along with it, and only for a key that already HAS one. Two
+  // things follow, both deliberate:
+  //
+  //   a key with no expiry is never given one by being used — the window is a
+  //     property of how the key was minted, not something authentication decides;
+  //   the push happens only past the refusals above, so a probe against a dead
+  //     key cannot keep it alive for another window, which would make the expiry
+  //     unreachable in exactly the abandoned-machine case it exists for.
   void db
     .from("api_keys")
-    .update({ last_used_at: new Date().toISOString() })
+    .update({
+      last_used_at: new Date().toISOString(),
+      ...(data.expires_at ? { expires_at: new Date(Date.now() + IDLE_WINDOW_MS).toISOString() } : {}),
+    })
     .eq("id", data.id)
     .then(
       () => {},

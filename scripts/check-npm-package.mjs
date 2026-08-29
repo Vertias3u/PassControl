@@ -48,6 +48,13 @@ const allowed = new Set([
   "cli/protocols.mjs",
   "cli/protocols.d.mts",
   "cli/verify.mjs",
+  // `passcontrol login` — the first command a Cloud user runs. bin/passcontrol.mjs
+  // imports it unconditionally, so a missing file is not a degraded login, it is
+  // an install that cannot start. It carries no dependency of its own: the
+  // clipboard is a `spawn` of pbcopy/clip/wl-copy, deliberately not a package.
+  "cli/login.mjs",
+  "cli/logout.mjs",
+  "cli/selftest.mjs",
   "cli/mcp/gateway.mjs",
   "cli/mcp/integration.mjs",
   "cli/mcp/README.md",

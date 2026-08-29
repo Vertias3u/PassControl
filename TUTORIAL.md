@@ -27,7 +27,53 @@ minted from it), **scope** (which provider/model/endpoints that agent may use).
 
 ---
 
-## 2. Run it locally (one command stack)
+## 2. Get a working setup
+
+Two paths. **Take the first one unless you specifically want to operate the gateway yourself** —
+it is one command, it needs nothing else installed, and it ends with a governed call you can
+watch happen.
+
+### The fast path — Cloud
+
+```bash
+npm install -g passcontrol
+passcontrol login            # browser opens, you approve once, this machine is set up
+```
+
+`login` prints an 8-character code, copies it to your clipboard, and opens the approval page.
+Paste it, press **Approve**. The CLI generates an Ed25519 keypair *on your machine* — only the
+public half is ever sent — creates your agent, and writes the config itself. Nothing is copied
+between a browser and a terminal, which is where the one real support incident in this project
+came from: a passport secret pasted into a provider `api_key` field.
+
+Then it proves the setup works before it hands the terminal back:
+
+```
+✓ minted a visa with the passport this machine just created
+✓ governed call ok — demo/demo-1, 12 tokens
+✓ receipt verified against https://passcontrol.vertias.eu/.well-known/jwks.json
+
+  Your agent is live. Anyone can check that call for themselves:
+  passcontrol verify receipt eyJhbGc… --issuer https://passcontrol.vertias.eu
+```
+
+That is the whole governed loop — **passport → visa → scope + budget → call → signed receipt** —
+already done, in one command. §5 explains what that receipt is and why a stranger can check it.
+
+The code travels from your terminal **to** the browser, never the other way and never in a link.
+**We will never send you an approval URL with the code already filled in** — approving one of
+those would hand whoever sent it a key to your workspace.
+
+Done with a machine later? `passcontrol logout` revokes its control key and clears its
+credentials.
+
+**If you took this path, skip to §4** — §3 is the by-hand setup, and `login` already did it.
+
+### The other path — run the gateway yourself
+
+Everything below is self-hosting: your own Postgres, your own Vault, your own signing key, and
+your instance signs its own receipts. It is the right choice if the data cannot leave your
+network, and it is more to operate.
 
 **Prerequisites:** [Docker Desktop](https://www.docker.com/) running, the
 [Supabase CLI](https://supabase.com/docs/guides/local-development), and Node 18+.
@@ -70,7 +116,11 @@ You should land on the **Control Tower** dashboard — empty fleet, no spend yet
 
 ---
 
-## 3. Your first governed call
+## 3. Your first governed call (self-host path)
+
+> Came through `passcontrol login` in §2? **This section is already done for you** — your agent,
+> passport and config exist, and you have watched one governed call succeed. Add a provider key
+> in the Control Tower when you want to call a real model, then go to §4.
 
 **a. Add a provider key.** In the Control Tower, open **Provider Keys** → add an
 **Anthropic** key (`sk-ant-…`). Use a **non-critical** key. It goes straight into the local
@@ -335,15 +385,30 @@ INSTANCE_SIGNING_KEY=<the new seed>
 
 ## 6. Use it with a real agent (Hermes, OpenHands, Aider, Cline, …)
 
-Most agents want a **static API key**, but a visa expires in minutes. The **visa sidecar**
-bridges that: it holds your passport, mints/refreshes the visa in the background, and injects
-it — so the agent points at a normal-looking endpoint and never holds a real key *or* a
-long-lived token.
+Most agents want a **static API key**, but a visa expires in minutes — and a static-key agent
+cannot sign a challenge, so it cannot mint one. The **passport connector** bridges that: it holds
+your passport, mints and refreshes the visa in the background, and injects it — so the agent
+points at a normal-looking endpoint and never holds a real key *or* a long-lived token.
 
 ```bash
 # Reuses PASSCONTROL_GATEWAY + PASSPORT_ID/PASSPORT_SECRET from .passcontrol.
 passcontrol sidecar        # -> http://127.0.0.1:8788
 ```
+
+> **Never put `PASSPORT_SECRET` in the agent's API-key field.** A passport is a signing key, not
+> a bearer token: the gateway refuses it with `401`, and the private key is now sitting in a
+> third-party config file. The connector exists precisely so the agent never sees it. If it has
+> already happened, rotate the passport.
+
+### This works against PassControl Cloud too
+
+The connector is **not** self-hosting — it reads whatever gateway you configured and forwards
+there. Point it at Cloud and you get passport identity in a static-key agent with no stack to
+run: that is the `passcontrol login` path in §2, then `passcontrol sidecar` here. No Docker, no
+Supabase — the published CLI ships the CLI only.
+
+On Cloud your agent can also skip the connector entirely and use a **Direct Agent Key**: lower
+assurance, but no local process at all.
 
 Then point your agent at the sidecar exactly like a provider, API key = anything:
 

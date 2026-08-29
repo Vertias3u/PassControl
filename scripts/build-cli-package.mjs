@@ -67,7 +67,7 @@ function filesBelow(root, current = root) {
   }).sort();
 }
 
-/** npm ships a deliberately tiny CLI artifact, while the canonical README also
+/** npm ships a deliberately tiny CLI artifact, while the public README also
  * links to app docs, examples and source files that are not in that tarball.
  * Turn only those absent relative targets into stable public-repository URLs;
  * links such as ./LICENSE that really ship stay local to the package. */
@@ -128,7 +128,19 @@ function build() {
   execFileSync(tsc, ["-p", "tsconfig.sdk.json"], { cwd: repoRoot, stdio: "inherit" });
   fs.copyFileSync(path.join(repoRoot, "sdk", "README.md"), path.join(outDir, "sdk", "README.md"));
 
+  // npm renders the packaged README, so it must be the SAME document GitHub
+  // shows: PUBLIC_README.md, which curate-public.sh publishes as the mirror's
+  // README.md. The root README.md is the PRIVATE repo's front page, and shipping
+  // that one gave npm a second, unguarded copy of the pitch — which drifted. It
+  // lost the kill-switch GIF, the tutorial link, and four of the six providers
+  // the public page advertises, on the highest-traffic page a CLI has.
+  //
+  // Named by both spellings for the same reason check-release-integrity.mjs is:
+  // this script ships publicly, and inside the mirror the file has already been
+  // renamed to README.md, where the copy is a no-op.
   const readmePath = path.join(outDir, "README.md");
+  const publicReadme = path.join(repoRoot, "PUBLIC_README.md");
+  if (fs.existsSync(publicReadme)) fs.copyFileSync(publicReadme, readmePath);
   fs.writeFileSync(
     readmePath,
     rewriteNpmReadmeLinks(fs.readFileSync(readmePath, "utf8"), repoRoot, outDir),

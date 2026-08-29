@@ -1,4 +1,5 @@
 import { RELEASE_SERIES } from "@/lib/version";
+import { PASSCONTROL_CONTACT_EMAIL } from "@/lib/contact";
 
 export const runtime = "edge";
 
@@ -54,11 +55,16 @@ budget-scoped token. Revocation is instant and per-agent; every call is audited.
 
 ## Links
 - Live keyless demo (no signup, no key): https://passcontrol.vertias.eu
+- AI agent security guides: https://passcontrol.vertias.eu/learn
+- What is AI agent security?: https://passcontrol.vertias.eu/learn/ai-agent-security
+- AI agent identity: https://passcontrol.vertias.eu/learn/ai-agent-identity
+- AI agent credential gateways: https://passcontrol.vertias.eu/learn/ai-agent-credential-gateway
+- Verifiable AI agent audit trails: https://passcontrol.vertias.eu/learn/verifiable-ai-agent-audit-trails
 - Source code: https://github.com/Vertias3u/PassControl
 - Security policy: https://github.com/Vertias3u/PassControl/blob/main/SECURITY.md
 - Builder: https://vertias.eu
 - Legal notices: https://passcontrol.vertias.eu/legal
-- Contact: hello@vertias.eu
+- Contact: ${PASSCONTROL_CONTACT_EMAIL}
 `;
 
 export function GET(): Response {
