@@ -16,10 +16,43 @@ const execFileAsync = promisify(execFile);
 const CLI = fileURLToPath(new URL("../bin/passcontrol.mjs", import.meta.url));
 
 /**
- * A PATH carrying node (for the shebang) and /usr/bin (for `which`), but neither
- * docker nor supabase — so both of those checks fail in the same run.
+ * A PATH carrying node (for the shebang) and `which` (the CLI probes with it,
+ * bin/passcontrol.mjs:529) and NOTHING else — so every prerequisite check fails
+ * in the same run.
+ *
+ * This used to be `[dirname(process.execPath), "/usr/bin", "/bin"]`, which only
+ * excluded docker by accident of where each host installs it. On GitHub's
+ * ubuntu runners docker IS `/usr/bin/docker`, so the premise "neither is on
+ * PATH" was false and `setup` correctly never mentioned Docker — the assertion
+ * below failed, on a run where nothing was wrong with the product. It was
+ * equally fragile locally: `dirname(process.execPath)` is `/usr/local/bin` on a
+ * Homebrew node, which is exactly where Docker Desktop symlinks on macOS.
+ *
+ * A directory we build ourselves is the only PATH whose contents we know. The
+ * premise is then asserted rather than assumed — see the check below, because a
+ * test that silently loses its own precondition passes for the wrong reason.
  */
-const BARE_PATH = [path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter);
+const BARE_BIN = fs.mkdtempSync(path.join(os.tmpdir(), "passcontrol-bare-bin-"));
+for (const tool of ["which", "where"]) {
+  for (const dir of ["/usr/bin", "/bin", "/usr/local/bin"]) {
+    const real = path.join(dir, tool);
+    if (fs.existsSync(real)) {
+      fs.symlinkSync(real, path.join(BARE_BIN, tool));
+      break;
+    }
+  }
+}
+fs.symlinkSync(process.execPath, path.join(BARE_BIN, path.basename(process.execPath)));
+afterAll(() => fs.rmSync(BARE_BIN, { recursive: true, force: true }));
+
+const BARE_PATH = BARE_BIN;
+
+/** Resolve a command the same way the CLI does, against the bare PATH only. */
+function resolvableOnBarePath(command: string): boolean {
+  return fs
+    .readdirSync(BARE_BIN)
+    .some((entry) => entry === command || entry === `${command}.exe`);
+}
 
 /**
  * An empty config home, because "a machine with nothing set up" has to mean the
@@ -70,6 +103,20 @@ async function runCli(args: string[], env: Record<string, string | undefined>): 
 // the complete list existed, just not on the path a first-time user takes.
 describe("setup reports every missing prerequisite at once", () => {
   it("names both Docker and the Supabase CLI when neither is on PATH", async () => {
+    // The premise, asserted. If docker or supabase were reachable on this PATH
+    // the run below would rightly not mention them, and the assertion that
+    // follows would fail while nothing was wrong with the product. That is
+    // exactly how this test broke in CI, so the precondition is now checked
+    // rather than trusted.
+    expect(
+      resolvableOnBarePath("docker"),
+      "the bare PATH leaked a docker binary, so this test can no longer prove what it claims",
+    ).toBe(false);
+    expect(
+      resolvableOnBarePath("supabase"),
+      "the bare PATH leaked a supabase binary, so this test can no longer prove what it claims",
+    ).toBe(false);
+
     const output = await runCli(["setup", "--no-open"], {});
 
     // Non-vacuity: an empty or crashed run must not read as a pass.
