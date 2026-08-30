@@ -119,10 +119,33 @@ describe("Core dashboard boundary", () => {
     // globals.css, so nothing here may reach for a cookie or a picker.
     const settings = curated("app/dashboard/settings/page.tsx");
     const layout = curated("app/layout.tsx");
+    const shell = curated("components/dashboard/DashboardShell.tsx");
 
     for (const token of ["AccentThemePicker", "cloud-theme", "ACCENT_COOKIE", "readAccent"]) {
       expect(settings, token).not.toContain(token);
       expect(layout, token).not.toContain(token);
+      expect(shell, token).not.toContain(token);
+    }
+    // The shell is where the accent is applied, so it is where the strip has to
+    // land cleanly — its root div must survive with its classes intact.
+    expect(shell).toContain('className="pc-app min-h-screen bg-background text-foreground"');
+    expect(shell).not.toContain("accentVars");
+    // Comments survive curation. A Cloud-only route named in one ships to the
+    // mirror as documentation of a page that does not exist there, and curation's
+    // own pruned-module check does not see it: that check matches DIRECTORY refs
+    // (the app/ prefix plus a trailing slash) while a comment writes the ROUTE, a
+    // leading slash and no trailing one. Different string, same leak. It has now
+    // bitten three times — once naming the Cloud theme module, then in both files
+    // below naming three pruned routes.
+    //
+    // The route names are assembled rather than written out for the same reason
+    // the marker tokens at the top of this file are: this file ships, and spelling
+    // one of them next to the app/ prefix trips the very check described above.
+    for (const cloudRoute of ["learn", "updates", "legal"]) {
+      const route = `/${cloudRoute}`;
+      expect(shell, route).not.toContain(route);
+      expect(layout, route).not.toContain(route);
+      expect(settings, route).not.toContain(route);
     }
     expect(settings).not.toContain('id="appearance"');
     // The strip must not take the surrounding element with it: the layout still

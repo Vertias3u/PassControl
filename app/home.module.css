@@ -199,8 +199,8 @@
 
 .navCta:hover,
 .primaryButton:hover {
-  background: #cafb6f;
-  border-color: #cafb6f;
+  background: var(--pc-brand-bright);
+  border-color: var(--pc-brand-bright);
 }
 
 .secondaryButton {
@@ -582,7 +582,7 @@
 }
 
 .demoControls form > button:hover:not(:disabled) {
-  background: #cafb6f;
+  background: var(--pc-brand-bright);
 }
 
 .demoControls form > button:disabled {

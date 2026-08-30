@@ -87,12 +87,13 @@ export const viewport: Viewport = {
   colorScheme: "dark",
 };
 
-export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  // The accent is resolved here, on the server, and emitted in the first byte of
-  // HTML. Setting it from a client effect instead would paint the default colour
-  // and then repaint — a visible flash on every navigation, worst on exactly the
-  // slow first load a new user gets. `style` (not a <style> tag) is what keeps
-  // this inside `style-src 'self' 'unsafe-inline'`; see lib/csp.ts.
+// Deliberately NOT where any per-request state is read. Calling cookies() or
+// headers() here opts EVERY route in the app out of static rendering, including
+// the public pages this deployment prerenders for logged-out visitors. Measured
+// once: a single cookie read in this file turned more than half the static routes
+// server-rendered. Anything per-request belongs on the dashboard shell instead,
+// whose routes are already dynamic because they require a session.
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html
       lang="en"

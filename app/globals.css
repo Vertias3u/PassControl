@@ -5,7 +5,7 @@
 
 /* ============================================================================
    PassControl "Control Tower" theme — dark-first mission-control.
-   Base: Space Black / Ice Gray / Vertias Green. Status is first-class.
+   Base: Space Black / Ice Gray / the accent below. Status is first-class.
    ============================================================================ */
 :root {
   /* The one brand accent, in both notations every rule below needs. Core's value
@@ -37,6 +37,13 @@
   --border: #333333;
   --input: #333333;
   --ring: var(--pc-brand);
+  /* Two tints of the accent, derived rather than typed. The auth pages used to
+     carry them as three literal greens, which is how a
+     self-hosted /login kept rendering the company's colour long after the tokens
+     landed: a literal cannot follow --pc-brand. Both are color-mix so Core's sky
+     and every Cloud accent get their own tint for free. */
+  --pc-brand-bright: color-mix(in srgb, var(--pc-brand) 80%, #ffffff);
+  --pc-brand-dim: color-mix(in srgb, var(--pc-brand) 70%, #98a394);
   --radius: 0.375rem; /* 6px base (design lg) */
 
   /* semantic status (first-class) */
@@ -124,6 +131,18 @@
   --pc-quiet: #98a394;
   --pc-signal: var(--pc-brand);
   --pc-signal-soft: rgba(var(--pc-brand-rgb), 0.1);
+  /* --primary and --ring are declared on :root, where var(--pc-brand) is
+     SUBSTITUTED — a custom property resolves against the element that declares
+     it, so descendants inherit the resolved colour, not a live reference. The
+     accent theme overrides --pc-brand here on .pc-app, which therefore did not
+     reach them: every `button` (background: var(--primary)) and every focus ring
+     stayed green on a violet dashboard. Re-declaring them on the same element
+     that carries the override makes them resolve against it. --pc-signal was
+     already right for exactly this reason; these two were the ones missed. */
+  --primary: var(--pc-brand);
+  --ring: var(--pc-brand);
+  --pc-brand-bright: color-mix(in srgb, var(--pc-brand) 80%, #ffffff);
+  --pc-brand-dim: color-mix(in srgb, var(--pc-brand) 70%, #98a394);
   --pc-orange: #e97840;
   --pc-sidebar: 228px;
 
@@ -2103,7 +2122,7 @@ a.pc-metric-card:hover {
 .pc-flow-steps b svg { width: 10px; height: 10px; }
 .pc-flow-steps .is-current { border-color: rgba(var(--pc-brand-rgb), 0.24); color: #dce7d7; background: rgba(var(--pc-brand-rgb), 0.07); }
 .pc-flow-steps .is-current b { color: var(--pc-brand); }
-.pc-flow-steps .is-complete { color: #8ead65; }
+.pc-flow-steps .is-complete { color: var(--pc-brand-dim); }
 
 .pc-boundary-note,
 .pc-secret-warning {
@@ -2693,7 +2712,7 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
   padding: 0.75rem 0.85rem;
   border: 1px solid rgba(var(--pc-brand-rgb), 0.24);
   border-radius: 0.5rem;
-  color: #c6f27a;
+  color: var(--pc-brand-bright);
   background: rgba(var(--pc-brand-rgb), 0.06);
   font-size: 0.78rem;
   line-height: 1.5;
@@ -2704,14 +2723,14 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
   text-align: right;
 }
 .pc-auth-form__assist a { color: #aeb5ad; }
-.pc-auth-form__assist a:hover { color: #c6f27a; }
+.pc-auth-form__assist a:hover { color: var(--pc-brand-bright); }
 .pc-auth-form__switch {
   margin: 0.35rem 0 0;
   color: #858c84;
   font-size: 0.8rem;
   text-align: center;
 }
-.pc-auth-form__switch a { color: #c6f27a; }
+.pc-auth-form__switch a { color: var(--pc-brand-bright); }
 .pc-auth__privacy {
   margin: 2rem 0 0;
   padding-top: 1.25rem;
@@ -2721,10 +2740,10 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
   line-height: 1.6;
 }
 .pc-auth__privacy a {
-  color: #a9d858;
+  color: var(--pc-brand-dim);
   text-underline-offset: 0.16em;
 }
-.pc-auth__privacy a:hover { color: #c6f27a; }
+.pc-auth__privacy a:hover { color: var(--pc-brand-bright); }
 
 @media (max-width: 840px) {
   .pc-auth { display: block; }

@@ -151,9 +151,17 @@ export async function DashboardShell({
     ? migrationHealth !== undefined ? migrationHealth : await getCachedMigrationHealth()
     : null;
 
+  // Per-request state belongs on this shell and never in app/layout.tsx: calling
+  // cookies() or headers() in the root layout opts EVERY route out of static
+  // rendering, including the pages this deployment prerenders for people who are
+  // not logged in. Every dashboard route is already dynamic because it requires a
+  // session, so reading per-request state here costs nothing.
+
   return (
     <DashboardTimeProvider>
-    <div className="pc-app min-h-screen bg-background text-foreground">
+    <div
+      className="pc-app min-h-screen bg-background text-foreground"
+    >
       <a href="#pc-main" className="pc-skip-link">
         Skip to content
       </a>
