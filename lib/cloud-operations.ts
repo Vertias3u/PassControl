@@ -1,4 +1,5 @@
-import type { CloudBetaQuotaSnapshot } from "@/lib/cloud-beta-quota";
+
+type OperationsQuota = null;
 
 export interface CloudFailureGuideItem {
   title: string;
@@ -9,18 +10,6 @@ export interface CloudFailureGuideItem {
 
 /** The wire and stored refusal vocabulary, translated without conflating gates. */
 export const CLOUD_FAILURE_GUIDE: readonly CloudFailureGuideItem[] = [
-  {
-    title: "Monthly beta allowance",
-    codes: ["beta_quota_exceeded"],
-    meaning: "The temporary Cloud workspace or shared beta allowance has been used up.",
-    action: "Wait for the shown UTC reset or ask the PassControl operator for beta capacity.",
-  },
-  {
-    title: "Quota counter unavailable",
-    codes: ["quota_unavailable"],
-    meaning: "PassControl could not safely read the Cloud allowance, so it refused the call.",
-    action: "Retry after service health recovers; changing the agent budget will not help.",
-  },
   {
     title: "Burst protection",
     codes: ["rate_limited"],
@@ -80,13 +69,14 @@ export interface CloudOperationsSignals {
  * Missing optional setup is informative, not an incident. Only a broken read,
  * missing receipt signer, or constrained shared/workspace capacity opens it.
  */
+// `quota` is null wherever there is no hosted allowance to report — every
+// self-hosted deployment. The signal checks below are Core's own and run either
+// way; only the three capacity checks depend on a hosted counter existing. Same
+// shape as the optional Cloud contributor in lib/problem-diagnostics.ts.
 export function cloudOperationsNeedsAttention(
-  quota: CloudBetaQuotaSnapshot,
+  quota: OperationsQuota,
   signals: CloudOperationsSignals
 ): boolean {
-  if (quota.state === "unavailable") return true;
-  if (quota.state === "available" && (quota.workspace.utilization ?? 0) >= 0.8) return true;
-  if (["unavailable", "near-limit", "exhausted"].includes(quota.globalCapacity)) return true;
   return signals.receiptSigning === "missing"
     || signals.receiptSigning === "unavailable"
     || signals.agentRegistry === "unavailable"
@@ -95,7 +85,7 @@ export function cloudOperationsNeedsAttention(
 
 interface BuildSupportBundleInput {
   generatedAt: string;
-  quota: CloudBetaQuotaSnapshot;
+  quota: OperationsQuota;
   signals: CloudOperationsSignals;
   controls: { workspaceKillArmed: boolean; platformKillArmed: boolean };
   agents: readonly Record<string, unknown>[];
@@ -207,9 +197,12 @@ export function buildCloudSupportBundle(input: BuildSupportBundleInput) {
     schema_version: 1,
     generated_at: input.generatedAt,
     notice: "Redacted operational metadata. No prompts, receipts, provider keys, or raw credentials.",
-    quota: input.quota,
+    // Omitted, not nulled, when there is no hosted allowance — the same choice
+    // ProblemSupportBundle already makes for the same two fields
+    // (lib/problem-diagnostics.ts: `quota?`, `quota_counter?`). Two bundles
+    // disagreeing about how "no Cloud contribution" is spelled is how a reader
+    // ends up believing one of them is broken.
     service_health: {
-      quota_counter: input.quota.state,
       agent_registry: input.signals.agentRegistry,
       activity_log: input.signals.activityLog,
     },

@@ -60,7 +60,6 @@ import {
 } from "@/lib/providers/fallbacks";
 import { readCurrentAgentFallbacks } from "@/lib/state/fallbacks";
 import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
-import { consumeCloudBetaQuota } from "@/lib/cloud-beta-quota";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 
 // Per-agent request-rate cap (independent of the token budget): bounds raw call
@@ -97,26 +96,6 @@ function err(status: number, code: string) {
   });
 }
 
-function quotaUnavailable(
-  req: Request,
-  provider: string,
-  agentId: string,
-  jti: string,
-  route = "api.proxy"
-) {
-  waitUntil(
-    captureSecurityEvent("proxy.cloud_beta_quota_unavailable", {
-      route,
-      method: req.method,
-      status: 503,
-      provider,
-      agentId,
-      jti,
-      code: "quota_unavailable",
-    })
-  );
-  return err(503, "quota_unavailable");
-}
 
 interface Ctx {
   params: Promise<{ provider: string; path: string[] }>;
@@ -711,16 +690,6 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     return errR(403, "blocked_suspended");
   }
 
-  // Temporary Cloud launch guard, deliberately outside RESERVE_LUA. Count only
-  // after the cheap per-agent limiter and emergency controls pass, so a killed,
-  // suspended, or already-rate-limited agent cannot exhaust the shared beta.
-  const betaQuota = await consumeCloudBetaQuota(userId);
-  if (!betaQuota.ok) {
-    if (betaQuota.reason === "unavailable") {
-      return quotaUnavailable(req, provider, agentId, jti);
-    }
-    return err(429, "beta_quota_exceeded");
-  }
 
   // ── Read body once (small); extract model + stream; mutate for usage ─────────
   // POST bodies must be JSON (the proxy parses + re-serializes them); reject other
@@ -1640,15 +1609,6 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     return errR(403, "blocked_suspended");
   }
 
-  // Match the real provider path: emergency controls and the per-agent limiter
-  // protect the shared beta ceiling rather than consuming it.
-  const betaQuota = await consumeCloudBetaQuota(userId);
-  if (!betaQuota.ok) {
-    if (betaQuota.reason === "unavailable") {
-      return quotaUnavailable(req, "demo", agentId, jti, "api.proxy.demo");
-    }
-    return err(429, "beta_quota_exceeded");
-  }
 
   // Parse body (model + stream).
   if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) {

@@ -1,11 +1,11 @@
-import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
+import { DashboardBrand } from "@/components/dashboard/DashboardBrand";
 
 export function DashboardSkeleton({ variant = "overview" }: { variant?: "overview" | "settings" | "agent" }) {
   return (
     <div className="pc-app min-h-screen bg-background text-foreground" data-state="loading" aria-busy="true" aria-label="Loading dashboard">
       <div className="pc-shell-grid">
         <aside className="pc-sidebar">
-          <div className="pc-sidebar__brand"><VertiasLogo size={27} /><span><VertiasWordmark size={17} /><small>PassControl</small></span></div>
+          <div className="pc-sidebar__brand"><DashboardBrand markSize={27} wordmarkSize={17} /></div>
           <div className="pc-skeleton pc-skeleton--line" />
           <div className="pc-skeleton pc-skeleton--nav" />
           <div className="pc-skeleton pc-skeleton--nav" />

@@ -88,9 +88,6 @@ describe("the first-call guide reuses the first-run provider read", () => {
     expect(dashboard).not.toMatch(/cookies\(\)|FIRST_CALL_DISMISSED_COOKIE/);
   });
 
-  it("removes the retired dismissal cookie from the storage notice", () => {
-    expect(read("app/legal/cookies/page.tsx")).not.toContain("pc-first-call-dismissed");
-  });
 
   it("derives the last activation step from audit rows it already fetched", () => {
     // A rail most tenants have dismissed must not cost a round trip. admin_audit
@@ -126,7 +123,7 @@ describe("what the Control Tower is left showing", () => {
     expect(at("<DeparturesBoard")).toBeLessThan(at("<SpendChart"));
     expect(at("<SpendChart")).toBeLessThan(at("<AgentFleetTable"));
     expect(at("<AgentFleetTable")).toBeLessThan(at("<ActivityWorkspace"));
-    expect(at("<ActivityWorkspace")).toBeLessThan(at("<CloudBetaOperations"));
+    expect(at("<ActivityWorkspace")).toBeLessThan(at("<OperationsPanel"));
     expect(read("components/FleetOverviewCards.tsx")).toContain("pc-overview-status-rail");
   });
 

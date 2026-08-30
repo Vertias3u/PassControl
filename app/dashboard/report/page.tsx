@@ -15,7 +15,7 @@ import { userClient } from "@/lib/supabase/server";
 import { serviceClient } from "@/lib/supabase";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { buildProblemDiagnostics } from "@/lib/problem-diagnostics";
-import { betaOperatorEmails } from "@/lib/beta-launch";
+import { operatorEmails } from "@/lib/operator-allowlist";
 import { loadOwnProblemReports } from "@/lib/problem-reports";
 
 export const dynamic = "force-dynamic";
@@ -40,7 +40,7 @@ export default async function ProblemReportPage() {
   return (
     <DashboardShell
       userId={auth.user.id}
-      showBetaOperator={betaOperatorEmails().has(auth.user.email?.trim().toLowerCase() ?? "")}
+      showBetaOperator={operatorEmails().has(auth.user.email?.trim().toLowerCase() ?? "")}
       active="report"
       eyebrow="Support"
       title="Report a problem"

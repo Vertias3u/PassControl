@@ -1,343 +1,261 @@
 import type { Metadata } from "next";
 import {
   ArrowDown,
-  ArrowUpRight,
+  ArrowRight,
   Check,
-  Cloud,
+  KeyRound,
   Server,
   ShieldCheck,
+  Terminal,
 } from "lucide-react";
-import {
-  CurrentYear,
-  DemoConsole,
-  SelfHostCommands,
-} from "@/components/PassControlSiteClient";
-import { VertiasLogo } from "@/components/VertiasLogo";
-import { PASSCONTROL_CONTACT_EMAIL, PASSCONTROL_CONTACT_MAILTO } from "@/lib/contact";
-import { RELEASE_VERSION } from "@/lib/version";
 import styles from "./home.module.css";
 
-const REPO_URL = "https://github.com/Vertias3u/PassControl";
-const INVITE_URL = "/beta";
-
-// One source for the visible questions and FAQPage structured data.
-const FAQ_ITEMS = [
-  {
-    q: "Where does my provider key live?",
-    a: "In PassControl Cloud it is stored server-side and fetched only after a call passes the gate. In a self-hosted deployment it remains in infrastructure you operate. The agent does not receive it.",
-  },
-  {
-    q: "Does my agent need a new SDK?",
-    a: "Usually not. Compatible tools use a PassControl base URL and scoped agent credential. Passport authentication remains available when stronger cryptographic identity is needed.",
-  },
-  {
-    q: "Can I inspect or run PassControl myself?",
-    a: "Yes. The core is source-available under BSL 1.1 and includes a self-hosted deployment path.",
-  },
-] as const;
-
-const JSON_LD = {
-  "@context": "https://schema.org",
-  "@graph": [
-    {
-      "@type": "Person",
-      "@id": "https://vertias.eu/#owner",
-      name: "Kristiyan Ivanov",
-      alternateName: "Vertias",
-      url: "https://vertias.eu",
-      email: PASSCONTROL_CONTACT_EMAIL,
-      address: {
-        "@type": "PostalAddress",
-        addressLocality: "Sofia",
-        addressCountry: "BG",
-      },
-      sameAs: [REPO_URL],
-    },
-    {
-      "@type": "WebSite",
-      "@id": "https://passcontrol.vertias.eu/#website",
-      url: "https://passcontrol.vertias.eu",
-      name: "PassControl",
-      inLanguage: "en",
-      publisher: { "@id": "https://vertias.eu/#owner" },
-    },
-    {
-      "@type": "SoftwareApplication",
-      "@id": "https://passcontrol.vertias.eu/#software",
-      name: "PassControl",
-      applicationCategory: "SecurityApplication",
-      applicationSubCategory: "AI agent identity and credential gateway",
-      operatingSystem: "Cross-platform (self-hosted; Docker)",
-      url: "https://passcontrol.vertias.eu",
-      downloadUrl: REPO_URL,
-      softwareVersion: RELEASE_VERSION,
-      license: "https://spdx.org/licenses/BUSL-1.1.html",
-      publisher: { "@id": "https://vertias.eu/#owner" },
-      description:
-        "Give every AI agent its own identity, scope and budget. PassControl checks each model call while keeping provider keys out of agent environments.",
-      featureList: [
-        "Per-agent identity and credentials",
-        "Provider and model scope",
-        "Per-agent token and cost budgets",
-        "Layered kill switch",
-        "Verifiable call receipts",
-        "Server-side provider-key use",
-      ],
-      offers: {
-        "@type": "Offer",
-        price: "0",
-        priceCurrency: "USD",
-        description: "Free invite-only Cloud beta and a free self-hosted path under BSL 1.1.",
-      },
-    },
-    {
-      "@type": "FAQPage",
-      "@id": "https://passcontrol.vertias.eu/#faq",
-      mainEntity: FAQ_ITEMS.map((item) => ({
-        "@type": "Question",
-        name: item.q,
-        acceptedAnswer: { "@type": "Answer", text: item.a },
-      })),
-    },
-  ],
-};
-
 export const metadata: Metadata = {
-  title: "PassControl — API key control for AI agents",
+  title: "PassControl — Self-hosted control for AI agents",
   description:
-    "Give every AI agent its own identity, scope and budget. PassControl checks each model call while keeping provider keys out of agent environments.",
-  alternates: { canonical: "https://passcontrol.vertias.eu" },
-  openGraph: {
-    title: "PassControl — Agents get access. You keep control.",
-    description:
-      "Identity, scope and budgets for every model call, without putting provider keys in agent environments.",
-    type: "website",
-    url: "https://passcontrol.vertias.eu",
-    siteName: "PassControl",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "PassControl — Agents get access. You keep control.",
-    description:
-      "Check identity, scope and budget before each model call while provider keys stay server-side.",
-  },
+    "Run an identity, scope, budget, and credential boundary for AI agents on infrastructure you control.",
 };
 
-function Brand({ compact = false }: { compact?: boolean }) {
-  return (
-    <span className={styles.brand}>
-      <VertiasLogo size={compact ? 24 : 27} />
-      <span className={styles.wordmark}>ver<span>·</span>tias</span>
-      {!compact && <span className={styles.productName}>/ PassControl</span>}
-    </span>
-  );
-}
-
-const CALL_STEPS = [
-  "Identity verified",
-  "Scope allowed",
-  "Budget reserved",
-  "Provider call dispatched",
-  "Receipt returned",
+const controls = [
+  {
+    number: "01",
+    title: "Identify every caller",
+    copy: "Give each agent a short-lived passport tied to a tenant, environment, and workload instead of handing it a provider credential.",
+  },
+  {
+    number: "02",
+    title: "Decide before dispatch",
+    copy: "Check scope, budget, rate limits, and kill state before a request can leave your boundary.",
+  },
+  {
+    number: "03",
+    title: "Keep the evidence",
+    copy: "Emit a signed receipt for every allowed or denied call so operators can reconstruct what happened.",
+  },
 ];
 
-export default function LandingPage() {
+const requirements = [
+  ["Docker Desktop", "Runs the local Supabase and Redis services."],
+  ["Supabase CLI", "Boots the local database, Auth, and Vault stack."],
+  ["Node 18+", "Runs the control plane and PassControl CLI."],
+] as const;
+
+export default function SelfHostHome() {
   return (
-    <div className={styles.site} id="top">
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
-      />
-      <a className={styles.skipLink} href="#main-content">
+    <div className={styles.site}>
+      <a className={styles.skipLink} href="#main">
         Skip to content
       </a>
 
       <header className={styles.header}>
         <nav className={`${styles.container} ${styles.nav}`} aria-label="Primary navigation">
           <a className={styles.brandLink} href="#top" aria-label="PassControl home">
-            <Brand />
+            <span className={styles.brand}>
+              <ShieldCheck size={22} aria-hidden="true" />
+              <span className={styles.wordmark}>PassControl</span>
+              <span className={styles.productName}>Self-host</span>
+            </span>
           </a>
           <div className={styles.navLinks}>
             <a href="#how-it-works">How it works</a>
-            <a href="#live-demo">Live demo</a>
-            <a href={REPO_URL} target="_blank" rel="noreferrer">Source</a>
-            <a href="/login">Sign in</a>
+            <a href="#quickstart">Quickstart</a>
+            <a href="#trust">Trust model</a>
           </div>
-          <a className={styles.navCta} href={INVITE_URL}>
-            Request beta access
+          <a className={styles.navCta} href="#quickstart">
+            Install and run <ArrowDown aria-hidden="true" />
           </a>
         </nav>
       </header>
 
-      <main id="main-content">
-        <section className={styles.hero} aria-labelledby="hero-title">
+      <main id="main">
+        <section className={styles.hero} id="top">
           <div className={`${styles.container} ${styles.heroGrid}`}>
             <div className={styles.heroCopy}>
-              <p className={styles.eyebrow}>Private beta <span>·</span> Source available</p>
-              <h1 id="hero-title">Agents get access. <em>You keep control.</em></h1>
+              <p className={styles.eyebrow}>Self-hosted agent control plane</p>
+              <h1>
+                Run the boundary. <em>Keep the keys.</em>
+              </h1>
               <p className={styles.heroLead}>
-                PassControl gives every AI agent its own identity, scope and budget. Each
-                model call is checked before PassControl uses your provider key server-side.
+                PassControl puts identity, scope, budget, and kill controls between AI agents and
+                the services they call. Provider keys stay server-side, inside infrastructure you
+                operate.
               </p>
               <div className={styles.heroActions}>
-                <a className={styles.primaryButton} href={INVITE_URL}>Request beta access</a>
-                <a className={styles.secondaryButton} href="#live-demo">
-                  Run the live demo <ArrowDown aria-hidden="true" />
+                <a className={styles.primaryButton} href="#quickstart">
+                  Start the local stack <ArrowRight aria-hidden="true" />
                 </a>
-                <a className={styles.textLink} href={REPO_URL} target="_blank" rel="noreferrer">
-                  Inspect the source <ArrowUpRight aria-hidden="true" />
+                <a className={styles.textLink} href="#how-it-works">
+                  Inspect the control path <ArrowDown aria-hidden="true" />
                 </a>
               </div>
               <p className={styles.availability}>
-                Cloud access is invite-only. Self-hosting is available now.
+                Source-available · Business Source License 1.1 · Runs on your machine
               </p>
             </div>
 
-            <div className={styles.callPanel} aria-label="Governed model call">
+            <aside className={styles.callPanel} aria-label="Example PassControl request">
               <div className={styles.callPanelHeader}>
                 <div>
                   <span className={styles.statusDot} aria-hidden="true" />
-                  <span>governed call</span>
+                  control path
                 </div>
-                <strong>allowed</strong>
+                <strong>local</strong>
               </div>
               <div className={styles.callIdentity}>
-                <span>Agent</span>
-                <strong>research-assistant</strong>
-                <code>openai / gpt-5</code>
+                <span>Agent passport</span>
+                <strong>deploy-reviewer</strong>
+                <code>environment: staging · tenant: acme</code>
               </div>
               <ol className={styles.callSteps}>
-                {CALL_STEPS.map((step, index) => (
-                  <li key={step}>
-                    <span>{String(index + 1).padStart(2, "0")}</span>
-                    <strong>{step}</strong>
-                    <Check aria-hidden="true" />
-                  </li>
-                ))}
+                <li>
+                  <span>01</span><strong>Identity verified</strong><Check aria-hidden="true" />
+                </li>
+                <li>
+                  <span>02</span><strong>Scope allows provider call</strong><Check aria-hidden="true" />
+                </li>
+                <li>
+                  <span>03</span><strong>Budget reserved</strong><Check aria-hidden="true" />
+                </li>
+                <li>
+                  <span>04</span><strong>Kill state clear</strong><Check aria-hidden="true" />
+                </li>
               </ol>
               <div className={styles.callPanelFooter}>
-                <span>provider key</span>
-                <strong>server-side only</strong>
+                <span>Signed receipt</span>
+                <strong>issued</strong>
               </div>
-            </div>
+            </aside>
           </div>
 
-          <div className={`${styles.container} ${styles.proofBar}`} aria-label="PassControl guarantees">
-            <p><ShieldCheck aria-hidden="true" /> Provider keys stay out of agent environments.</p>
-            <p><ShieldCheck aria-hidden="true" /> Suspend one agent without rotating shared keys.</p>
-            <p><ShieldCheck aria-hidden="true" /> Allowed calls return a verifiable receipt.</p>
+          <div className={`${styles.container} ${styles.proofBar}`} aria-label="Core properties">
+            <p><KeyRound aria-hidden="true" /> Provider credentials never enter agent environments.</p>
+            <p><Server aria-hidden="true" /> The gateway, database, Vault, and Redis run locally.</p>
+            <p><ShieldCheck aria-hidden="true" /> Every decision produces an auditable receipt.</p>
           </div>
         </section>
 
-        <section className={`${styles.section} ${styles.demoSection}`} id="live-demo" aria-labelledby="demo-title">
+        <section className={styles.section} id="how-it-works">
           <div className={styles.container}>
             <div className={styles.sectionIntro}>
-              <p className={styles.eyebrow}>Live control-path demo</p>
-              <h2 id="demo-title">Test the boundary.</h2>
+              <p className={styles.eyebrow}>The control path</p>
+              <h2>One boundary before every provider call.</h2>
               <p>
-                Send a call through PassControl&apos;s real identity, scope, budget and
-                kill-switch path. Then block the agent and try again.
+                Agents carry identity, not long-lived secrets. PassControl evaluates the request,
+                retrieves the provider credential only after approval, and records the outcome.
               </p>
             </div>
-            <DemoConsole />
-            <p className={styles.demoDisclosure}>
-              This demo does not contact a paid model or access a provider key. The control
-              decisions are real; the model response is simulated.
-            </p>
-          </div>
-        </section>
-
-        <section className={styles.section} id="how-it-works" aria-labelledby="how-title">
-          <div className={styles.container}>
-            <div className={styles.sectionIntro}>
-              <p className={styles.eyebrow}>One boundary per agent</p>
-              <h2 id="how-title">What happens before the provider sees a call.</h2>
-            </div>
-
             <div className={styles.decisionGrid}>
-              <article>
-                <span>01</span>
-                <h3>Identify</h3>
-                <p>PassControl resolves the individual agent instead of trusting a shared provider key.</p>
-              </article>
-              <article>
-                <span>02</span>
-                <h3>Decide</h3>
-                <p>Kill state, suspension, provider and model scope, live policy, rate limit and budget are checked.</p>
-              </article>
-              <article>
-                <span>03</span>
-                <h3>Dispatch</h3>
-                <p>If allowed, PassControl uses the provider credential server-side and returns the result with a signed receipt.</p>
-              </article>
+              {controls.map((control) => (
+                <article key={control.number}>
+                  <span>{control.number}</span>
+                  <h3>{control.title}</h3>
+                  <p>{control.copy}</p>
+                </article>
+              ))}
             </div>
-
             <div className={styles.consequence}>
               <ShieldCheck aria-hidden="true" />
-              <strong>A blocked call never reaches the provider.</strong>
-            </div>
-
-            <div className={styles.audienceGrid}>
-              <p><strong>For builders</strong> Change the model API base URL and give the agent a scoped PassControl credential.</p>
-              <p><strong>For operators</strong> Limit, suspend or investigate one agent without disrupting the rest of the fleet.</p>
+              <strong>The agent receives a result, never the provider key that produced it.</strong>
             </div>
           </div>
         </section>
 
-        <section className={`${styles.section} ${styles.launchSection}`} id="start" aria-labelledby="start-title">
+        <section className={`${styles.section} ${styles.launchSection}`} id="quickstart">
           <div className={styles.container}>
             <div className={styles.sectionIntro}>
-              <p className={styles.eyebrow}>Choose the operating model</p>
-              <h2 id="start-title">Use our Cloud. Or run the same core yourself.</h2>
+              <p className={styles.eyebrow}>Self-host quickstart</p>
+              <h2>From checkout to a running Control Tower.</h2>
+              <p>
+                Install the CLI, let it verify the local prerequisites, and start the complete
+                Supabase and Redis-backed stack.
+              </p>
             </div>
 
             <div className={styles.pathGrid}>
-              <article className={styles.pathCard}>
-                <Cloud aria-hidden="true" />
-                <span>Hosted</span>
-                <h3>PassControl Cloud</h3>
-                <p>Start without operating the gateway. PassControl Cloud stores provider credentials server-side and gives each agent its own controlled access.</p>
-                <a className={styles.primaryButton} href={INVITE_URL}>Request beta access</a>
+              <article className={`${styles.pathCard} ${styles.selfHostCard}`}>
+                <Terminal aria-hidden="true" />
+                <span>01 · Run</span>
+                <h3>Two commands.</h3>
+                <p>
+                  The setup command checks prerequisites, fetches the self-host stack, starts its
+                  services, applies migrations, seeds local data, and opens the dashboard.
+                </p>
+                <div className={styles.commandBlock} aria-label="PassControl installation commands">
+                  <pre><code><span>npm install -g passcontrol</span>{"\n"}<span>passcontrol setup</span></code></pre>
+                </div>
               </article>
 
-              <article className={`${styles.pathCard} ${styles.selfHostCard}`}>
+              <article className={styles.pathCard}>
                 <Server aria-hidden="true" />
-                <span>Your infrastructure</span>
-                <h3>Run it yourself</h3>
-                <p>Inspect the source and run PassControl in infrastructure you control.</p>
-                <SelfHostCommands />
+                <span>02 · Prerequisites</span>
+                <h3>Bring a local container stack.</h3>
+                <p>
+                  Setup checks these dependencies before it changes anything, then reports the
+                  exact repair command if one is missing.
+                </p>
                 <div className={styles.cardLinks}>
-                  <a href={REPO_URL} target="_blank" rel="noreferrer">View source <ArrowUpRight aria-hidden="true" /></a>
-                  <a href={`${REPO_URL}#quickstart-self-host`} target="_blank" rel="noreferrer">Read self-hosting guide <ArrowUpRight aria-hidden="true" /></a>
+                  {requirements.map(([name, description]) => (
+                    <p key={name}>
+                      <strong>{name}</strong><br />{description}
+                    </p>
+                  ))}
                 </div>
               </article>
             </div>
 
-            <div className={styles.faqBlock} id="faq">
-              <div>
-                <p className={styles.eyebrow}>Straight answers</p>
-                <h2>Before you put it in the path.</h2>
-              </div>
-              <div className={styles.faqList}>
-                {FAQ_ITEMS.map((item) => (
-                  <details key={item.q}>
-                    <summary>{item.q}<span aria-hidden="true">+</span></summary>
-                    <p>{item.a}</p>
-                  </details>
-                ))}
-              </div>
+            <div className={styles.audienceGrid}>
+              <p>
+                <strong>Ports already occupied?</strong>
+                Run <code>passcontrol setup --port-offset 100</code> to move the local stack as a unit.
+              </p>
+              <p>
+                <strong>Working from a checkout?</strong>
+                Run <code>npm run cli -- setup</code> to use the repository CLI without a global install.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section className={styles.section} id="trust">
+          <div className={styles.container}>
+            <div className={styles.sectionIntro}>
+              <p className={styles.eyebrow}>Trust model</p>
+              <h2>Own the system that owns the credentials.</h2>
+              <p>
+                Self-hosting keeps the control plane, encrypted provider credentials, policy state,
+                and audit trail inside your operational boundary.
+              </p>
+            </div>
+            <div className={styles.decisionGrid}>
+              <article>
+                <span>Keys</span>
+                <h3>Server-side by construction</h3>
+                <p>Provider secrets are retrieved only inside the gateway after policy approval.</p>
+              </article>
+              <article>
+                <span>Control</span>
+                <h3>Immediate suspension</h3>
+                <p>Tenant and agent kill controls stop new work before another provider call is made.</p>
+              </article>
+              <article>
+                <span>Evidence</span>
+                <h3>Receipts over guesswork</h3>
+                <p>Signed receipts preserve the identity, decision, timing, and outcome of each call.</p>
+              </article>
             </div>
 
             <div className={styles.finalCta}>
-              <p className={styles.eyebrow}>Start with one agent</p>
-              <h2>Put one real agent behind PassControl.</h2>
+              <p className={styles.eyebrow}>Ready to inspect it locally?</p>
+              <h2>Install PassControl and run the stack you control.</h2>
               <div>
-                <a className={styles.primaryButton} href={INVITE_URL}>Request beta access</a>
-                <a className={styles.secondaryButton} href="#live-demo">Run the live demo <ArrowDown aria-hidden="true" /></a>
+                <a className={styles.primaryButton} href="#quickstart">
+                  Open the quickstart <ArrowRight aria-hidden="true" />
+                </a>
+                <a className={styles.secondaryButton} href="#how-it-works">
+                  Review the boundary
+                </a>
               </div>
-              <p className={styles.auditNote}>
-                Early and not yet independently audited. Start with a non-critical provider key.
-              </p>
+              <p className={styles.auditNote}>No account required. No hosted control plane in the path.</p>
             </div>
           </div>
         </section>
@@ -346,20 +264,24 @@ export default function LandingPage() {
       <footer className={styles.footer}>
         <div className={`${styles.container} ${styles.footerGrid}`}>
           <div>
-            <Brand compact />
-            <p className={styles.signature}>Identity crosses the boundary. Secrets do not.</p>
+            <span className={styles.brand}>
+              <ShieldCheck size={20} aria-hidden="true" />
+              <span className={styles.wordmark}>PassControl</span>
+            </span>
+            <p className={styles.signature}>Agent access with an operator in the loop.</p>
           </div>
           <div className={styles.footerLinks}>
-            <a href="/updates">Updates</a>
-            <a href="/verify">Verify a receipt</a>
-            <a href="/legal/privacy">Privacy</a>
-            <a href="/legal/terms">Beta terms</a>
-            <a href={REPO_URL} target="_blank" rel="noreferrer">Source</a>
-            <a href={`${REPO_URL}/blob/main/SECURITY.md`} target="_blank" rel="noreferrer">Security</a>
-            <a href={PASSCONTROL_CONTACT_MAILTO}>Contact</a>
+            <a href="#how-it-works">How it works</a>
+            <a href="#quickstart">Quickstart</a>
+            <a href="#trust">Trust model</a>
           </div>
           <p className={styles.legal}>
-            Source-available under BSL 1.1 · © <CurrentYear /> Kristiyan Ivanov · Vertias project · Sofia, Bulgaria
+            Source-available under the Business Source License 1.1. Review the repository license
+            before production use.
+          </p>
+          <p className={styles.cloudAlternative}>
+            Prefer not to operate Postgres, Redis, or migrations? <a href="https://passcontrol.vertias.eu/beta">PassControl Cloud</a>
+            {" "}runs them and signs receipts under a permanent public issuer. Access is invite-only.
           </p>
         </div>
       </footer>

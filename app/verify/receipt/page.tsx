@@ -9,14 +9,18 @@
 // asks nothing of us at all: verification happens in the visitor's browser
 // against keys fetched from whichever issuer the receipt names. That is what
 // makes it work for a self-hosted deployment we have never heard of, and it is
-// why the page can honestly say the receipt is never sent to Vertias.
+// why the page can honestly say the receipt never leaves the visitor's browser.
 //
 // A static segment, so Next resolves it ahead of [passportId]. Safe: a passport
 // id is a 43-character base64url public key and can never be "receipt".
 import type { Metadata } from "next";
 import Link from "next/link";
-import { VertiasLogo } from "@/components/VertiasLogo";
+import { SiteLogo, SITE_BRAND_LABEL } from "@/components/SiteBrand";
 import { ReceiptVerifier } from "@/components/ReceiptVerifier";
+
+function receiptFooterCopy(): string {
+  return "The receipt never leaves this browser.";
+}
 
 // Reads no database, but must stay dynamic so it carries a per-request nonce —
 // it is the one public page in the app that ships JavaScript, and adding it to
@@ -36,10 +40,10 @@ export default function VerifyReceiptPage() {
   return (
     <main className="mx-auto grid min-h-screen w-full max-w-2xl content-start gap-8 px-4 py-12 sm:px-6 sm:py-16">
       <header className="flex items-center gap-3">
-        <VertiasLogo size={36} />
+        <SiteLogo size={36} />
         <div>
           <p className="m-0 text-xs font-semibold uppercase tracking-[0.18em] text-primary">
-            Vertias · PassControl
+            {SITE_BRAND_LABEL}
           </p>
           <h1 className="m-0 text-lg font-bold text-foreground">Receipt verification</h1>
         </div>
@@ -78,7 +82,7 @@ export default function VerifyReceiptPage() {
       <footer className="grid gap-3 border-t border-border pt-6 text-sm text-muted-foreground">
         <p className="m-0">
           Checking is done entirely in your browser, using the same open verification code
-          anyone can run themselves. Vertias never receives the receipt.
+          anyone can run themselves. {receiptFooterCopy()}
         </p>
         <div className="flex flex-wrap gap-x-6 gap-y-2">
           <Link

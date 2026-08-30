@@ -42,7 +42,7 @@ import {
 } from "@/lib/control-graph";
 import { CallDetailDrawer, type CallContext } from "@/components/dashboard/CallDetailDrawer";
 import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
-import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
+import { DashboardBrand } from "@/components/dashboard/DashboardBrand";
 
 const WIDTH = 960;
 const HEIGHT = 620;
@@ -437,8 +437,7 @@ export function ControlGraph({
       <div className="pc-control-graph__toolbar">
         {presentation ? (
           <div className="pc-control-graph__brand" aria-label="PassControl presentation">
-            <VertiasLogo size={22} />
-            <span><VertiasWordmark size={15} /><small>PassControl · Control Graph</small></span>
+            <DashboardBrand markSize={22} wordmarkSize={15} detail="Control Graph" />
           </div>
         ) : null}
         <div className="pc-control-graph__status">

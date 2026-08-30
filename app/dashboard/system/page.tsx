@@ -6,7 +6,7 @@ import { SystemHealthSnapshotView } from "@/components/dashboard/SystemHealthSna
 import { getSystemHealthSnapshot } from "@/lib/system-health";
 import { getCachedSystemHealthSnapshot } from "@/lib/system-health/cache";
 import { systemOperatorGate } from "@/lib/system-health/operator";
-import { betaOperatorEmails } from "@/lib/beta-launch";
+import { operatorEmails } from "@/lib/operator-allowlist";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "System health" };
@@ -31,7 +31,7 @@ export default async function SystemHealthPage({
       <DashboardShell
         userId={gate.user.id}
         active="system"
-        showBetaOperator={betaOperatorEmails().has(gate.user.email?.trim().toLowerCase() ?? "")}
+        showBetaOperator={operatorEmails().has(gate.user.email?.trim().toLowerCase() ?? "")}
         eyebrow="Restricted instance diagnostic"
         title="System health"
         description="This surface is limited to the operators a deployment names."
@@ -51,7 +51,7 @@ export default async function SystemHealthPage({
     <DashboardShell
       userId={gate.user.id}
       active="system"
-      showBetaOperator={betaOperatorEmails().has(gate.user.email?.trim().toLowerCase() ?? "")}
+      showBetaOperator={operatorEmails().has(gate.user.email?.trim().toLowerCase() ?? "")}
       eyebrow="Restricted instance diagnostic"
       title="System health"
       description="A safe, point-in-time view of local application wiring and dependencies."

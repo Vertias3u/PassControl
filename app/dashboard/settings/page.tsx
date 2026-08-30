@@ -23,7 +23,7 @@ import { serviceClient } from "@/lib/supabase";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { Fingerprint, KeyRound, ShieldCheck, UserRound, Vault } from "lucide-react";
-import { betaOperatorEmails } from "@/lib/beta-launch";
+import { operatorEmails } from "@/lib/operator-allowlist";
 
 export const dynamic = "force-dynamic";
 
@@ -107,7 +107,7 @@ export default async function SettingsPage() {
   return (
     <DashboardShell
       userId={user.id}
-      showBetaOperator={betaOperatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
+      showBetaOperator={operatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
       active="settings"
       eyebrow="Administration"
       title="Settings"

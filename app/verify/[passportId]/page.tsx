@@ -14,7 +14,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
-import { VertiasLogo } from "@/components/VertiasLogo";
+import { SiteLogo, SITE_BRAND_LABEL } from "@/components/SiteBrand";
+import { instanceIssuer } from "@/lib/crypto/instanceKey";
 import { createPassportSigil } from "@/lib/passport-art";
 import { serviceClient } from "@/lib/supabase";
 import {
@@ -25,10 +26,32 @@ import {
 
 export const dynamic = "force-dynamic";
 
+function verifierMetadataDescription(): string {
+  return "Check whether an AI agent passport was issued by this PassControl instance and whether it is still valid.";
+}
+
+function activePassportDetail(): string {
+  return "This PassControl instance issued the passport and it has not been suspended or revoked. The holder can present it to mint short-lived work visas.";
+}
+
+function suspendedPassportDetail(): string {
+  return "This PassControl instance issued the passport, but its operator has paused it. It cannot mint work visas until it is resumed.";
+}
+
+function revokedPassportDetail(): string {
+  return "This PassControl instance issued the passport and its operator has permanently withdrawn it. It can no longer mint work visas. Treat anything presenting it as untrusted.";
+}
+
+function passportIssuerPresentation() {
+  return {
+    label: instanceIssuer() ?? "Issuer not configured",
+    className: "mt-1 mb-0 break-all font-mono text-[0.8rem] font-semibold text-foreground",
+  };
+}
+
 export const metadata: Metadata = {
   title: "Verify an agent passport",
-  description:
-    "Check whether an AI agent passport was issued by Vertias and whether it is still valid.",
+  description: verifierMetadataDescription(),
   // Shareable is not the same as indexable. A crawlable index of every passport
   // id anyone has ever linked to is not a feature.
   robots: { index: false, follow: false },
@@ -46,24 +69,21 @@ const STATUS: Record<PublicPassportStatus, StatusPresentation> = {
   active: {
     label: "Valid",
     headline: "This passport is valid.",
-    detail:
-      "Vertias issued this passport and it has not been suspended or revoked. The holder can present it to mint short-lived work visas.",
+    detail: activePassportDetail(),
     badge: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600",
     rail: "bg-emerald-500",
   },
   suspended: {
     label: "Suspended",
     headline: "This passport is suspended.",
-    detail:
-      "Vertias issued this passport, but its operator has paused it. It cannot mint work visas until it is resumed.",
+    detail: suspendedPassportDetail(),
     badge: "border-amber-500/40 bg-amber-500/10 text-amber-600",
     rail: "bg-amber-500",
   },
   revoked: {
     label: "Revoked",
     headline: "This passport has been revoked.",
-    detail:
-      "Vertias issued this passport and its operator has permanently withdrawn it. It can no longer mint work visas. Treat anything presenting it as untrusted.",
+    detail: revokedPassportDetail(),
     badge: "border-destructive/40 bg-destructive/10 text-destructive",
     rail: "bg-destructive",
   },
@@ -102,10 +122,10 @@ function Shell({ children }: { children: React.ReactNode }) {
   return (
     <main className="mx-auto grid min-h-screen w-full max-w-2xl content-start gap-8 px-4 py-12 sm:px-6 sm:py-16">
       <header className="flex items-center gap-3">
-        <VertiasLogo size={36} />
+        <SiteLogo size={36} />
         <div>
           <p className="m-0 text-xs font-semibold uppercase tracking-[0.18em] text-primary">
-            Vertias · PassControl
+            {SITE_BRAND_LABEL}
           </p>
           <h1 className="m-0 text-lg font-bold text-foreground">Agent passport verification</h1>
         </div>
@@ -205,6 +225,7 @@ function OwnerValue({ owner }: { owner: PublicPassportView["owner"] }) {
 
 function PassportCard({ passport }: { passport: PublicPassportView }) {
   const presentation = STATUS[passport.status];
+  const issuer = passportIssuerPresentation();
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
@@ -240,7 +261,7 @@ function PassportCard({ passport }: { passport: PublicPassportView }) {
             <dt className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
               Issuer
             </dt>
-            <dd className="mt-1 mb-0 font-semibold text-foreground">Vertias · PassControl</dd>
+            <dd className={issuer.className}>{issuer.label}</dd>
           </div>
           <div>
             <dt className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">

@@ -16,7 +16,6 @@ const {
   mirrorSpendMock,
   rateLimitMock,
   rateLimitFailClosedMock,
-  consumeCloudBetaQuotaMock,
   captureSecurityEventMock,
   signReceiptMock,
   touchLastSeenMock,
@@ -37,7 +36,6 @@ const {
   mirrorSpendMock: vi.fn(),
   rateLimitMock: vi.fn(),
   rateLimitFailClosedMock: vi.fn(),
-  consumeCloudBetaQuotaMock: vi.fn(),
   captureSecurityEventMock: vi.fn(),
   signReceiptMock: vi.fn(),
   touchLastSeenMock: vi.fn(),
@@ -77,9 +75,6 @@ vi.mock("@/lib/log", () => ({
 vi.mock("@/lib/ratelimit", () => ({
   rateLimit: (...args: unknown[]) => rateLimitMock(...args),
   rateLimitFailClosed: (...args: unknown[]) => rateLimitFailClosedMock(...args),
-}));
-vi.mock("@/lib/cloud-beta-quota", () => ({
-  consumeCloudBetaQuota: (...args: unknown[]) => consumeCloudBetaQuotaMock(...args),
 }));
 vi.mock("@/lib/observability", () => ({
   captureError: vi.fn(async () => undefined),
@@ -141,7 +136,6 @@ beforeEach(() => {
   });
   rateLimitFailClosedMock.mockResolvedValue({ success: true, remaining: 9 });
   rateLimitMock.mockResolvedValue({ success: true, remaining: 599 });
-  consumeCloudBetaQuotaMock.mockResolvedValue({ ok: true, disabled: true });
   captureSecurityEventMock.mockResolvedValue(undefined);
   readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
@@ -203,10 +197,9 @@ describe("Direct Agent Key gateway authentication", () => {
     );
   });
 
-  it("does not consume shared beta quota for killed, suspended, or rate-limited agents", async () => {
+  it("refuses killed, suspended, or rate-limited agents before later admission work", async () => {
     rateLimitMock.mockResolvedValueOnce({ success: false, remaining: 0 });
     expect((await call()).status).toBe(429);
-    expect(consumeCloudBetaQuotaMock).not.toHaveBeenCalled();
 
     vi.clearAllMocks();
     rateLimitFailClosedMock.mockResolvedValue({ success: true, remaining: 9 });
@@ -215,7 +208,6 @@ describe("Direct Agent Key gateway authentication", () => {
     readKillStateMock.mockResolvedValue({ platformKill: true, userKill: false, denylist: [] });
     isSuspendedMock.mockResolvedValue(false);
     expect((await call()).status).toBe(403);
-    expect(consumeCloudBetaQuotaMock).not.toHaveBeenCalled();
 
     vi.clearAllMocks();
     rateLimitFailClosedMock.mockResolvedValue({ success: true, remaining: 9 });
@@ -224,57 +216,8 @@ describe("Direct Agent Key gateway authentication", () => {
     readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
     isSuspendedMock.mockResolvedValue(true);
     expect((await call()).status).toBe(403);
-    expect(consumeCloudBetaQuotaMock).not.toHaveBeenCalled();
   });
 
-  it("consumes beta quota only after the rate, kill, and suspension reads pass", async () => {
-    await call();
-    expect(consumeCloudBetaQuotaMock).toHaveBeenCalledWith(directPrincipal.userId);
-    expect(rateLimitMock.mock.invocationCallOrder[0]).toBeLessThan(
-      consumeCloudBetaQuotaMock.mock.invocationCallOrder[0]!
-    );
-    expect(readKillStateMock.mock.invocationCallOrder[0]).toBeLessThan(
-      consumeCloudBetaQuotaMock.mock.invocationCallOrder[0]!
-    );
-    expect(isSuspendedMock.mock.invocationCallOrder[0]).toBeLessThan(
-      consumeCloudBetaQuotaMock.mock.invocationCallOrder[0]!
-    );
-  });
-
-  it("reports a beta-quota infrastructure outage before returning 503", async () => {
-    consumeCloudBetaQuotaMock.mockResolvedValueOnce({ ok: false, reason: "unavailable" });
-
-    const response = await call();
-
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: "quota_unavailable" });
-    expect(captureSecurityEventMock).toHaveBeenCalledWith(
-      "proxy.cloud_beta_quota_unavailable",
-      expect.objectContaining({
-        route: "api.proxy",
-        method: "POST",
-        status: 503,
-        provider: "openai",
-        agentId: directPrincipal.agentId,
-        code: "quota_unavailable",
-      })
-    );
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("does not report ordinary beta-cap exhaustion as an infrastructure outage", async () => {
-    consumeCloudBetaQuotaMock.mockResolvedValueOnce({ ok: false, reason: "workspace" });
-
-    const response = await call();
-
-    expect(response.status).toBe(429);
-    expect(await response.json()).toEqual({ error: "beta_quota_exceeded" });
-    expect(captureSecurityEventMock).not.toHaveBeenCalledWith(
-      "proxy.cloud_beta_quota_unavailable",
-      expect.anything()
-    );
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
 
   it("accepts x-api-key, bypasses visa verification, and records direct identity", async () => {
     const res = await call();

@@ -3520,6 +3520,17 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .pc-operations-quota [data-capacity-state="near-limit"] { color: var(--warning); }
 .pc-operations-quota [data-capacity-state="exhausted"] { color: var(--danger); }
 .pc-operations-quota [data-capacity-state="unavailable"] { color: var(--warning); }
+.pc-operations-cloud-link {
+  display: inline-flex;
+  margin-top: .8rem;
+  color: var(--pc-signal);
+  font-family: var(--font-pc-mono), monospace;
+  font-size: .58rem;
+  font-weight: 650;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+.pc-operations-cloud-link:hover { text-decoration: underline; }
 .pc-operations-support__guard { color: var(--pc-copy) !important; }
 .pc-operations-download {
   min-height: 2.2rem;

@@ -1,5 +1,9 @@
 import Link from "next/link";
-import { VertiasLogo } from "@/components/VertiasLogo";
+import { SiteLogo, SITE_BRAND_LABEL } from "@/components/SiteBrand";
+
+function passportNotFoundHeadline(): string {
+  return "This PassControl instance did not issue this passport.";
+}
 
 // An unknown id and a malformed id land here identically. Whether a passport
 // exists is exactly what a stranger is entitled to learn, so this page is
@@ -9,10 +13,10 @@ export default function VerifyPassportNotFound() {
   return (
     <main className="mx-auto grid min-h-screen w-full max-w-2xl content-start gap-8 px-4 py-12 sm:px-6 sm:py-16">
       <header className="flex items-center gap-3">
-        <VertiasLogo size={36} />
+        <SiteLogo size={36} />
         <div>
           <p className="m-0 text-xs font-semibold uppercase tracking-[0.18em] text-primary">
-            Vertias · PassControl
+            {SITE_BRAND_LABEL}
           </p>
           <h1 className="m-0 text-lg font-bold text-foreground">Agent passport verification</h1>
         </div>
@@ -25,7 +29,7 @@ export default function VerifyPassportNotFound() {
             No record
           </span>
           <h2 className="m-0 text-xl font-bold text-foreground">
-            Vertias did not issue this passport.
+            {passportNotFoundHeadline()}
           </h2>
           <p className="m-0 text-sm leading-6 text-muted-foreground">
             No passport with that identifier exists in our registry. Check the identifier for a

@@ -7,16 +7,25 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { VertiasLogo } from "@/components/VertiasLogo";
+import { SiteLogo, SITE_BRAND_LABEL } from "@/components/SiteBrand";
 import { demoPassportId } from "@/lib/demo/identity";
 import { isPassportIdShape } from "@/lib/verify/passport";
+
+function verifierCopy() {
+  return {
+    description: "Check whether an AI agent passport was issued by this PassControl instance and whether it is still valid.",
+    question: "Was this agent’s passport issued by this PassControl instance?",
+    issuer: "this instance",
+  };
+}
+
+const VERIFIER_COPY = verifierCopy();
 
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Verify an agent passport",
-  description:
-    "Check whether an AI agent passport was issued by Vertias and whether it is still valid.",
+  description: VERIFIER_COPY.description,
   robots: { index: true, follow: true },
 };
 
@@ -37,10 +46,10 @@ export default async function VerifyIndexPage({
   return (
     <main className="mx-auto grid min-h-screen w-full max-w-2xl content-start gap-8 px-4 py-12 sm:px-6 sm:py-16">
       <header className="flex items-center gap-3">
-        <VertiasLogo size={36} />
+        <SiteLogo size={36} />
         <div>
           <p className="m-0 text-xs font-semibold uppercase tracking-[0.18em] text-primary">
-            Vertias · PassControl
+            {SITE_BRAND_LABEL}
           </p>
           <h1 className="m-0 text-lg font-bold text-foreground">Agent passport verification</h1>
         </div>
@@ -48,7 +57,7 @@ export default async function VerifyIndexPage({
 
       <section className="rounded-xl border border-border bg-card p-6 shadow-sm sm:p-8">
         <h2 className="m-0 text-xl font-bold text-foreground">
-          Was this agent&rsquo;s passport issued by Vertias?
+          {VERIFIER_COPY.question}
         </h2>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           An AI agent that runs through PassControl carries an Ed25519 passport. Paste its public
@@ -109,7 +118,7 @@ export default async function VerifyIndexPage({
         <h2 className="m-0 text-base font-bold text-foreground">What this page does and does not say</h2>
         <ul className="mt-3 mb-0 grid list-disc gap-2 pl-5">
           <li>
-            <strong className="text-foreground">It says</strong> whether Vertias issued a passport
+            <strong className="text-foreground">It says</strong> whether {VERIFIER_COPY.issuer} issued a passport
             with this identifier, when, and whether it is active, suspended, or revoked.
           </li>
           <li>

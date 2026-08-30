@@ -15,7 +15,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  readCloudBetaQuotaSnapshot: vi.fn(),
   readKillState: vi.fn(),
   loadInstanceSigner: vi.fn(),
   instanceIssuer: vi.fn(),
@@ -23,7 +22,6 @@ const mocks = vi.hoisted(() => ({
   getCachedMigrationHealth: vi.fn(),
 }));
 
-vi.mock("@/lib/cloud-beta-quota", () => ({ readCloudBetaQuotaSnapshot: mocks.readCloudBetaQuotaSnapshot }));
 vi.mock("@/lib/state/killswitch", () => ({ readKillState: mocks.readKillState }));
 vi.mock("@/lib/crypto/instanceKey", () => ({
   loadInstanceSigner: mocks.loadInstanceSigner,
@@ -99,7 +97,6 @@ const NOW = new Date("2026-08-24T12:00:00.000Z");
 
 beforeEach(() => {
   for (const fn of Object.values(mocks)) fn.mockReset();
-  mocks.readCloudBetaQuotaSnapshot.mockResolvedValue({ state: "ok", used: 1, limit: 100 });
   mocks.readKillState.mockResolvedValue({ userKill: false, platformKill: false });
   mocks.loadInstanceSigner.mockReturnValue({});
   mocks.instanceIssuer.mockReturnValue("https://passcontrol.vertias.eu");
@@ -198,6 +195,17 @@ describe("buildProblemDiagnostics", () => {
     const artifact = await buildProblemDiagnostics(client as never, USER, NOW);
     expect(Object.keys(artifact)).toEqual(["artifact_version", "source", "scan", "bundle"]);
   });
+
+  it("builds useful diagnostics when no Cloud contributor is present", async () => {
+    const client = db([AGENT_ROW], [LOG_ROW]);
+    const artifact = await buildProblemDiagnostics(client as never, USER, NOW, null);
+
+    expect(artifact.bundle).not.toHaveProperty("quota");
+    expect(artifact.bundle.service_health).not.toHaveProperty("quota_counter");
+    expect(artifact.bundle.agents[0]!.name).toBe("research-agent");
+    expect(artifact.bundle.recent_failures[0]!.code).toBe("blocked_budget");
+  });
+
 });
 
 describe("readInstanceStamp", () => {

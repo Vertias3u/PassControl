@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { DM_Mono, IBM_Plex_Mono, Manrope, Newsreader } from "next/font/google";
+import { instanceIssuer } from "@/lib/crypto/instanceKey";
 
 const plexMono = IBM_Plex_Mono({
   subsets: ["latin"],
@@ -32,7 +33,7 @@ const dmMono = DM_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://passcontrol.vertias.eu"),
+  metadataBase: instanceIssuer() ? new URL(instanceIssuer()!) : undefined,
   title: {
     default: "PassControl — API key control for AI agents",
     template: "%s · PassControl",
@@ -40,9 +41,9 @@ export const metadata: Metadata = {
   description:
     "Give every AI agent its own identity, scope and budget. PassControl checks each model call while keeping provider keys out of agent environments.",
   applicationName: "PassControl",
-  authors: [{ name: "Vertias", url: "https://vertias.eu" }],
-  creator: "Vertias",
-  publisher: "Vertias",
+  authors: [{ name: "PassControl contributors" }],
+  creator: "PassControl",
+  publisher: "PassControl",
   category: "technology",
   keywords: [
     "AI agent security",
@@ -68,7 +69,8 @@ export const metadata: Metadata = {
     description:
       "Identity, scope and budgets for every model call, without putting provider keys in agent environments.",
     type: "website",
-    url: "https://passcontrol.vertias.eu",
+    url: instanceIssuer() ?? undefined,
+    images: [],
     siteName: "PassControl",
   },
   twitter: {
@@ -76,6 +78,7 @@ export const metadata: Metadata = {
     title: "PassControl — Agents get access. You keep control.",
     description:
       "Check identity, scope and budget before each model call while provider keys stay server-side.",
+    images: [],
   },
 };
 

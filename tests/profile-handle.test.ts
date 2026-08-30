@@ -27,6 +27,15 @@ import {
   validateHandle,
 } from "@/lib/profile/handle";
 
+function containsActiveRoute(directory: string): boolean {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory() && containsActiveRoute(path)) return true;
+    if (entry.isFile() && /^(?:page|route)\.(?:[jt]sx?)$/u.test(entry.name)) return true;
+  }
+  return false;
+}
+
 describe("the handle pattern", () => {
   // The one assertion that keeps TypeScript and Postgres describing the same
   // set of strings. Extracted from the constraint rather than restated, so
@@ -124,6 +133,11 @@ describe("the reserved list", () => {
   it("covers every top-level route directory in app/", () => {
     const routes = readdirSync(join(process.cwd(), "app"), { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
+      // A `.selfhost` source directory is deliberately inert in the private
+      // Cloud tree. Reserve only directories Next actually registers as routes;
+      // curation renames those files to page.tsx/route.ts and this same guard
+      // then sees them in Core.
+      .filter((entry) => containsActiveRoute(join(process.cwd(), "app", entry.name)))
       .map((entry) => entry.name)
       // Dynamic and grouped segments are not claimable names.
       .filter((name) => HANDLE_PATTERN.test(name));

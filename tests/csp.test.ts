@@ -96,6 +96,9 @@ describe("content security policy", () => {
     it("is limited to anonymous, read-only public pages", () => {
       expect(PRERENDERED_PUBLIC_PATHS).toEqual([
         "/",
+        "/notices",
+        "/notices/data",
+        "/notices/recovery",
         "/learn",
         "/learn/ai-agent-security",
         "/learn/ai-agent-identity",
@@ -165,7 +168,7 @@ describe("middleware matcher", () => {
 
 // The public receipt page verifies in the BROWSER: it fetches the issuer's
 // /.well-known/jwks.json and checks the signature locally. That is the whole
-// point — the receipt never reaches Vertias, and the page runs the same
+// point — the receipt never leaves the browser, and the page runs the same
 // sdk/verify.ts a third party would run on their own machine.
 //
 // It needs connect-src to reach an issuer we cannot know in advance, so this one

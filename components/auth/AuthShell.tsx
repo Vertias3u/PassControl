@@ -1,8 +1,17 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { ArrowLeft, KeyRound, Route, ShieldCheck } from "lucide-react";
-import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
+import { SiteLogo, SiteWordmark } from "@/components/SiteBrand";
 import { instanceLabel } from "@/lib/instance-label";
+
+function accountTermsNotice(): ReactNode {
+  return (
+    <p className="pc-auth__privacy">
+      By creating an account, you acknowledge this instance&rsquo;s <Link href="/notices/data">data
+      notice</Link>. The operator of this instance is responsible for the terms that apply to you.
+    </p>
+  );
+}
 
 export function AuthShell({
   eyebrow,
@@ -25,9 +34,9 @@ export function AuthShell({
       </a>
       <section className="pc-auth__brand" aria-label="About PassControl">
         <Link href="/" className="pc-auth__wordmark" aria-label="Back to PassControl home">
-          <VertiasLogo size={27} />
+          <SiteLogo size={27} />
           <span>
-            <VertiasWordmark size={17} />
+            <SiteWordmark size={17} />
             <small>PassControl</small>
           </span>
         </Link>
@@ -75,14 +84,7 @@ export function AuthShell({
           <p className="pc-kicker">{eyebrow}</p>
           <h1>{title}</h1>
           <p className="pc-auth__description">{description}</p>
-          {showAccountTerms && (
-            <p className="pc-auth__privacy">
-              By creating an account, you agree to the <Link href="/legal/terms">beta
-              terms</Link> and <Link href="/legal/acceptable-use">acceptable use
-              policy</Link>, and acknowledge the <Link href="/legal/privacy">privacy
-              notice</Link>.
-            </p>
-          )}
+          {showAccountTerms ? accountTermsNotice() : null}
           {children}
           <p className="pc-auth__privacy">
             Your operator session controls privileged actions. Agent private keys remain

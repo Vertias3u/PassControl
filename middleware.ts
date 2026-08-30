@@ -23,7 +23,10 @@ import {
 // canonical path has to be public in its own right as well: a crawler following
 // the canonical link, or anyone who copies the address out of a rewritten URL
 // bar, arrives at /u/<handle> directly and would otherwise be sent to /login.
-const PUBLIC_PATHS = ["/", "/beta", "/login", "/signup", "/auth/callback", "/verify", "/updates", "/learn", "/legal", "/u"];
+const PUBLIC_PATHS = [
+  "/", "/login", "/signup", "/auth/callback", "/verify", "/notices",
+  "/u",
+];
 const CSP_HEADER = "Content-Security-Policy";
 
 /**

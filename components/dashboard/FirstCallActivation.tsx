@@ -50,6 +50,15 @@ type StepName = "provider" | "agent" | "call" | "verify";
 // position, not a label: drop it and indexOf returns -1 at that stage, so every
 // earlier step fails both the `<` and `===` branches below and silently regresses
 // from complete to grey. The special case underneath only rescues `call`.
+// Where the provider call actually goes. Hosted and self-hosted give different
+// true answers, so the sentence is a function rather than a literal in the JSX:
+// a marked region inside a JSX expression cannot carry its own closing brace.
+function callDestinationHint(identityKind: string | undefined): string {
+  return identityKind === "passport"
+    ? "Use the Passport SDK configuration saved during issuance. The private key signs locally and the provider call goes through this PassControl gateway."
+    : "Use the Direct Agent Key configuration saved when the credential was revealed. The provider call goes through this PassControl gateway.";
+}
+
 const STEP_ORDER = ["provider", "agent", "call", "diagnose", "verify", "complete"];
 
 function stepState(current: string, step: StepName) {
@@ -287,9 +296,9 @@ export function FirstCallActivation({
                 </p>
               ) : (
                 <p>
-                  {agents.find((agent) => agent.id === state.agentId)?.identityKind === "passport"
-                    ? "Use the Passport SDK configuration saved during issuance. The private key signs locally and the provider call goes through PassControl Cloud."
-                    : "Use the Direct Agent Key configuration saved when the credential was revealed. The provider call goes through PassControl Cloud."}
+                  {callDestinationHint(
+                    agents.find((agent) => agent.id === state.agentId)?.identityKind
+                  )}
                 </p>
               )}
               <small>

@@ -1,20 +1,29 @@
 import { RELEASE_SERIES } from "@/lib/version";
-import { PASSCONTROL_CONTACT_EMAIL } from "@/lib/contact";
 
 export const runtime = "edge";
 
 // Served at /llms.txt — a concise, factual description for AI answer engines
 // (AEO). Honest by design: source-available (not OSI), solo-built, early, not
 // audited. Keep claims in sync with SHOW_HN.md / the landing page.
+// The Links section. Defined out here, not inline in the document below, because a
+// curate marker inside a template literal is not a comment — it would be served as a
+// line of the actual llms.txt.
+// Core keeps the two links that are about the software and drops the four that are
+// about our deployment. The contact address goes with them: an assistant reading a
+// self-hosted instance's llms.txt should not be told to email us about it.
+const LINKS = `- Source code: https://github.com/Vertias3u/PassControl
+- Security policy: https://github.com/Vertias3u/PassControl/blob/main/SECURITY.md`;
+
+const BUILD_CONTEXT = `Early (${RELEASE_SERIES}), self-hostable, and not yet independently audited.`;
+const STATUS_CONTEXT = `${RELEASE_SERIES}, not independently audited — run it against a non-critical key first.`;
+
 const BODY = `# PassControl
 
 > Source-available identity and credential gateway for AI agents. Each agent holds
 > a sign-only Ed25519 "passport" and mints short-lived, scoped "work-visas"; the
 > gateway verifies the request, enforces per-agent budgets and a kill switch,
 > injects the real provider key from a vault, and proxies the call — so the agent
-> never holds your API key. Built by Kristiyan Ivanov under the Vertias name in Sofia,
-> Bulgaria. Early (${RELEASE_SERIES}),
-> solo-built, self-hostable, and not yet independently audited.
+> never holds your API key. ${BUILD_CONTEXT}
 
 ## What it is
 PassControl removes the "one shared API key inside every agent" problem. Instead of
@@ -38,8 +47,7 @@ budget-scoped token. Revocation is instant and per-agent; every call is audited.
   working core is free to self-host.
 - Providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek.
 - Stack: Next.js, Supabase (Postgres/Vault/Auth), Redis.
-- Status: ${RELEASE_SERIES}, built solo, not independently audited — run it against a non-critical key
-  first. PassControl Cloud is a free, invite-only beta; self-hosting is available now.
+- Status: ${STATUS_CONTEXT}
 - By design the gateway sees plaintext provider traffic (it must, to inject the key), so the
   boundary is "the agent doesn't hold the key," not "nobody does." Self-hosted, the vault and
   gateway are your own infrastructure.
@@ -54,17 +62,7 @@ budget-scoped token. Revocation is instant and per-agent; every call is audited.
   alongside them — point your existing SDK at the gateway URL.
 
 ## Links
-- Live keyless demo (no signup, no key): https://passcontrol.vertias.eu
-- AI agent security guides: https://passcontrol.vertias.eu/learn
-- What is AI agent security?: https://passcontrol.vertias.eu/learn/ai-agent-security
-- AI agent identity: https://passcontrol.vertias.eu/learn/ai-agent-identity
-- AI agent credential gateways: https://passcontrol.vertias.eu/learn/ai-agent-credential-gateway
-- Verifiable AI agent audit trails: https://passcontrol.vertias.eu/learn/verifiable-ai-agent-audit-trails
-- Source code: https://github.com/Vertias3u/PassControl
-- Security policy: https://github.com/Vertias3u/PassControl/blob/main/SECURITY.md
-- Builder: https://vertias.eu
-- Legal notices: https://passcontrol.vertias.eu/legal
-- Contact: ${PASSCONTROL_CONTACT_EMAIL}
+${LINKS}
 `;
 
 export function GET(): Response {

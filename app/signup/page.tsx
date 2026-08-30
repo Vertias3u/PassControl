@@ -1,12 +1,12 @@
 import { SignupForm } from "@/components/auth/SignupForm";
 import { AuthShell } from "@/components/auth/AuthShell";
-import { inviteSource, signupMode } from "@/lib/invite-code";
+import { signupMode } from "@/lib/invite-code";
 
 export const metadata = { title: "Create account" };
 
 export default function SignupPage() {
   const mode = signupMode();
-  const source = inviteSource();
+  const source = "shared" as const;
   if (mode === "closed") {
     return (
       <AuthShell
@@ -25,9 +25,7 @@ export default function SignupPage() {
       title="Create your control plane"
       description={
         mode === "invite"
-          ? source === "database"
-            ? "Open your personal invitation link, then create the operator account bound to that invitation."
-            : "Use the invite issued for this deployment to create an operator account."
+          ? "Use the invite issued for this deployment to create an operator account."
           : "Create an operator account. You may need to confirm your email before signing in."
       }
       showAccountTerms

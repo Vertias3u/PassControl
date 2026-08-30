@@ -62,6 +62,7 @@ export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
   "dashboard",
   "legal",
   "learn",
+  "notices",
   "login",
   "logout",
   "signin",

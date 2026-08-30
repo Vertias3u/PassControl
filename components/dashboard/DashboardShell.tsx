@@ -14,7 +14,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { signOut } from "@/app/actions/auth";
-import { VertiasLogo, VertiasWordmark } from "@/components/VertiasLogo";
+import { DashboardBrand } from "@/components/dashboard/DashboardBrand";
 import { cn } from "@/lib/utils";
 import { DashboardCommandPalette } from "@/components/dashboard/DashboardCommandPalette";
 import { userClient } from "@/lib/supabase/server";
@@ -160,9 +160,7 @@ export async function DashboardShell({
 
       <header className="pc-mobile-bar">
         <Link href="/dashboard" className="pc-brand" aria-label="PassControl overview">
-          <VertiasLogo size={21} />
-          <VertiasWordmark size={15} />
-          <span>/ PassControl</span>
+          <DashboardBrand markSize={21} wordmarkSize={15} layout="inline" />
         </Link>
         <details className="pc-mobile-nav">
           <summary aria-label="Open navigation">Menu</summary>
@@ -185,11 +183,7 @@ export async function DashboardShell({
       <div className="pc-shell-grid">
         <aside className="pc-sidebar">
           <Link href="/dashboard" className="pc-sidebar__brand" aria-label="PassControl overview">
-            <VertiasLogo size={27} />
-            <span>
-              <VertiasWordmark size={17} />
-              <small>PassControl</small>
-            </span>
+            <DashboardBrand markSize={27} wordmarkSize={17} />
           </Link>
 
           {/* Who is signed in, then WHICH deployment. The order is the change:

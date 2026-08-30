@@ -26,7 +26,6 @@ const {
   demoPassportSecretMock,
   getCachedAgentPolicyMock,
   setCachedAgentPolicyMock,
-  consumeCloudBetaQuotaMock,
   captureSecurityEventMock,
 } = vi.hoisted(() => ({
   serviceClientMock: vi.fn(),
@@ -50,7 +49,6 @@ const {
   demoPassportSecretMock: vi.fn(),
   getCachedAgentPolicyMock: vi.fn(),
   setCachedAgentPolicyMock: vi.fn(),
-  consumeCloudBetaQuotaMock: vi.fn(),
   captureSecurityEventMock: vi.fn(),
 }));
 
@@ -88,9 +86,6 @@ vi.mock("@/lib/log", () => ({
 vi.mock("@/lib/observability", () => ({
   captureError: vi.fn(async () => undefined),
   captureSecurityEvent: (...args: unknown[]) => captureSecurityEventMock(...args),
-}));
-vi.mock("@/lib/cloud-beta-quota", () => ({
-  consumeCloudBetaQuota: (...args: unknown[]) => consumeCloudBetaQuotaMock(...args),
 }));
 vi.mock("@/lib/demo/identity", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/demo/identity")>();
@@ -162,7 +157,6 @@ beforeEach(() => {
   demoPassportSecretMock.mockReset();
   getCachedAgentPolicyMock.mockReset();
   setCachedAgentPolicyMock.mockReset();
-  consumeCloudBetaQuotaMock.mockReset();
   captureSecurityEventMock.mockReset();
 
   fromMock.mockImplementation((table: string) => {
@@ -191,7 +185,6 @@ beforeEach(() => {
   mirrorSpendMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   setCachedAgentPolicyMock.mockResolvedValue(undefined);
-  consumeCloudBetaQuotaMock.mockResolvedValue({ ok: true, disabled: true });
   captureSecurityEventMock.mockResolvedValue(undefined);
 
   vi.stubGlobal("fetch", fetchMock);
@@ -288,30 +281,6 @@ describe("POST /api/demo/run", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("reports a beta-quota infrastructure outage before returning 503", async () => {
-    consumeCloudBetaQuotaMock.mockResolvedValueOnce({ ok: false, reason: "unavailable" });
-
-    const response = await runDemo(jsonRequest("/api/demo/run", { prompt: "Same call" }));
-
-    expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({
-      ok: false,
-      blocked: false,
-      response: "demo temporarily unavailable",
-    });
-    expect(captureSecurityEventMock).toHaveBeenCalledWith(
-      "proxy.cloud_beta_quota_unavailable",
-      expect.objectContaining({
-        route: "api.proxy.demo",
-        method: "POST",
-        status: 503,
-        provider: "demo",
-        agentId: DEMO_AGENT.id,
-        code: "quota_unavailable",
-      })
-    );
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
-  });
 
   it("is hard rate-limited before signing a challenge", async () => {
     rateLimitMock.mockImplementation(async (key: string) => ({

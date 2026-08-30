@@ -17,7 +17,7 @@ import { browserClient } from "@/lib/supabase/client";
 type CopyKind = "env" | "install" | "client" | "smoke" | "sidecar";
 
 function gatewayOrigin(): string {
-  return typeof window === "undefined" ? "https://passcontrol.vertias.eu" : window.location.origin;
+  return typeof window === "undefined" ? "" : window.location.origin;
 }
 
 export function PassportStoreAndConnect({

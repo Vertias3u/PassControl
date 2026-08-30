@@ -3,7 +3,7 @@
 //
 // ── Everything here runs in the browser, and that is the product ─────────────
 //
-// The pasted receipt never reaches Vertias. The only network call this makes is
+// The pasted receipt never leaves this browser. The only network call this makes is
 // to the issuer's own /.well-known/jwks.json for its public keys. That is not a
 // privacy nicety bolted on afterwards; it is the claim the page is making. A
 // verifier you have to trust is not a verifier, so this page runs the *same*
@@ -47,6 +47,10 @@ import {
   type StepRow,
 } from "@/lib/verify/receipt-view";
 import { verifyReceipt, type ReceiptClaims, type VerifyStep, type VerifyStepName } from "@/sdk/verify";
+
+function receiptVerifierIntro(): string {
+  return "Paste a signed receipt. It is checked here and never leaves this browser. The only request made is to the issuer’s own address, for the public keys they publish.";
+}
 
 const REVEAL_FLOOR_MS = 180;
 
@@ -258,7 +262,7 @@ export function ReceiptVerifier() {
 
   // A receipt in the URL fragment verifies on arrival. Fragments are never sent
   // to the server, so a shared link carries the receipt to its reader without it
-  // ever passing through Vertias — the page's privacy claim, made usable.
+  // ever passing through this deployment — the page's privacy claim, made usable.
   useEffect(() => {
     const fragment = window.location.hash.replace(/^#/, "");
     if (!fragment) return;
@@ -288,9 +292,7 @@ export function ReceiptVerifier() {
       <section className="rounded-xl border border-border bg-card p-6 shadow-sm sm:p-8">
         <h2 className="m-0 text-xl font-bold text-foreground">Was this call really made?</h2>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          Paste a signed receipt. It is checked here, in your browser — the receipt is never
-          sent to Vertias. The only request made is to the issuer&rsquo;s own address, for the
-          public keys they publish.
+          {receiptVerifierIntro()}
         </p>
 
         <form
@@ -490,7 +492,7 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
             </h2>
             {/* Two claims, never one badge. We can vouch for the mathematics; we
                 cannot vouch for the party, and pretending otherwise would launder
-                an unknown issuer's word through the Vertias domain. */}
+                an unknown issuer's word through the verifier's own domain. */}
             <p className="mt-2 mb-0 text-sm leading-6 text-muted-foreground">
               This receipt was signed by{" "}
               <strong className="break-all font-semibold text-foreground">{claims.iss}</strong>{" "}

@@ -692,7 +692,7 @@ export interface OwnerPresentation {
  * Worded off `tier`, never off `kind` — the same rule as OwnerValue on the
  * passport page. `kind` records the method attempted; `tier` records what was
  * actually proven. Reading "domain" from `kind` would let anyone type a domain
- * into a form and have this page vouch for it on the Vertias domain.
+ * into a form and have this page vouch for it on the verifier's own domain.
  *
  * An unrecognised tier resolves DOWNWARD to unproven, so a future tier this page
  * has not learned about can never be shown as verified by accident.

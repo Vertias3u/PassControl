@@ -18,7 +18,7 @@ import { AgentPublicListing } from "@/components/AgentPublicListing";
 import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
-import { betaOperatorEmails } from "@/lib/beta-launch";
+import { operatorEmails } from "@/lib/operator-allowlist";
 
 export const dynamic = "force-dynamic";
 
@@ -124,7 +124,7 @@ export default async function AgentPassportPage({
   return (
     <DashboardShell
       userId={user.id}
-      showBetaOperator={betaOperatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
+      showBetaOperator={operatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
       active="fleet"
       eyebrow="Agent workspace"
       title={passport.agent.name || "Unnamed agent"}

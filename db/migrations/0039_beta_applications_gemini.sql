@@ -10,7 +10,7 @@
 -- list from 0025.
 --
 -- The failure this fixes is quiet in the worst direction: `BETA_PROVIDERS` in
--- lib/beta-launch.ts validates the submission FIRST, so while the two lists
+-- The application action validates the submission FIRST, so while the two lists
 -- disagreed the applicant simply had no Gemini option. Add it to the app list
 -- alone and the order reverses — the validator accepts, Postgres rejects the
 -- insert, and someone who filled the form in correctly gets a 500. That is why

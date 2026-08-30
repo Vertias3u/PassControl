@@ -19,15 +19,14 @@ import { FleetAttentionQueue } from "@/components/dashboard/FleetAttentionQueue"
 import { buildFleetAttention, withLastSeenFromLogs } from "@/lib/dashboard-attention";
 import { partitionByClass } from "@/lib/call-class";
 import { shadowRevision } from "@/lib/policy-shadow";
-import { CloudBetaOperations } from "@/components/dashboard/CloudBetaOperations";
+import { OperationsPanel } from "@/components/dashboard/OperationsPanel";
 import { FirstCallActivation } from "@/components/dashboard/FirstCallActivation";
 import { latestControlExerciseAt, onboardingStateHidden } from "@/lib/first-call-activation";
-import { readCloudBetaQuotaSnapshot } from "@/lib/cloud-beta-quota";
 import { buildCloudSupportBundle, type CloudOperationsSignals } from "@/lib/cloud-operations";
 import { loadInstanceSigner, instanceIssuer } from "@/lib/crypto/instanceKey";
 import { isSentryConfigured } from "@/lib/observability";
 import { isProvider } from "@/lib/providers";
-import { betaOperatorEmails } from "@/lib/beta-launch";
+import { operatorEmails } from "@/lib/operator-allowlist";
 // The shipped CLI is plain ESM and intentionally has no TypeScript declaration.
 // @ts-expect-error Import the preset source of truth on the server only.
 import { SIDECAR_PRESETS } from "@/cli/presets.mjs";
@@ -93,7 +92,7 @@ export default async function ControlTowerPage() {
       .select("provider", { count: "exact" })
       .order("created_at", { ascending: false })
       .limit(6),
-    readCloudBetaQuotaSnapshot(user.id, renderedAt),
+    Promise.resolve(null),
     db
       .from("onboarding_state")
       .select("dismissed_at, completed_at")
@@ -161,7 +160,7 @@ export default async function ControlTowerPage() {
   return (
     <DashboardShell
       userId={user.id}
-      showBetaOperator={betaOperatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
+      showBetaOperator={operatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
       active="overview"
       title="Fleet overview"
       description="Identity, capability, spend, and every governed call in one operational view."
@@ -259,7 +258,7 @@ export default async function ControlTowerPage() {
           </div>
         </section>
 
-        <CloudBetaOperations quota={quota} signals={operationsSignals} supportBundle={supportBundle} />
+        <OperationsPanel quota={quota} signals={operationsSignals} supportBundle={supportBundle} />
     </DashboardShell>
   );
 }

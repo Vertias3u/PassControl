@@ -7,10 +7,7 @@ import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { cookies } from "next/headers";
 import { userClient } from "@/lib/supabase/server";
-import { inviteSource, signupMode, validateSignupAccess } from "@/lib/invite-code";
-import { hashBetaInviteToken } from "@/lib/beta-launch";
-import { serviceClient } from "@/lib/supabase";
-import { captureError } from "@/lib/observability";
+import { signupMode, validateSignupAccess } from "@/lib/invite-code";
 import { validatePassword } from "@/lib/password";
 import { authEmailRedirect } from "@/lib/auth/emailRedirect";
 import {
@@ -105,7 +102,6 @@ export async function signup(_prev: FormState, formData: FormData): Promise<Form
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
   const inviteCode = String(formData.get("invite_code") ?? "");
-  const inviteToken = String(formData.get("invite_token") ?? "");
 
   // Throttle signup by IP (invite-gated already, but stops automated probing of
   // the invite code and email-send abuse).
@@ -121,68 +117,18 @@ export async function signup(_prev: FormState, formData: FormData): Promise<Form
   if (pwError) return { error: pwError };
 
   const mode = signupMode();
-  const source = inviteSource();
-  let claimedInviteId: string | null = null;
-  if (mode === "invite" && source === "database") {
-    if (!/^[A-Za-z0-9_-]{43}$/u.test(inviteToken)) {
-      return { error: "This invitation is invalid, expired, or already used." };
-    }
-    const { data, error } = await serviceClient().rpc("claim_beta_invite", {
-      p_token_hash: hashBetaInviteToken(inviteToken),
-      p_email: email,
-    });
-    const claimed = Array.isArray(data) ? data[0] : null;
-    if (error || !claimed?.invite_id) {
-      return { error: "This invitation is invalid, expired, or already used." };
-    }
-    claimedInviteId = String(claimed.invite_id);
-  } else {
-    const codeError = validateSignupAccess(mode, inviteCode, process.env.INVITE_CODE ?? "");
-    if (codeError) return { error: codeError };
-  }
+  const codeError = validateSignupAccess(mode, inviteCode, process.env.INVITE_CODE ?? "");
+  if (codeError) return { error: codeError };
 
   const supabase = await userClient();
   const emailRedirectTo = authEmailRedirect();
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    ...((emailRedirectTo || claimedInviteId) ? {
-      options: {
-        ...(emailRedirectTo ? { emailRedirectTo } : {}),
-        ...(claimedInviteId ? {
-          data: { passcontrol_beta_invite_id: claimedInviteId },
-        } : {}),
-      },
-    } : {}),
+    ...(emailRedirectTo ? { options: { emailRedirectTo } } : {}),
   });
   if (error) return { error: "Could not create the account. Please try again." };
 
-  if (claimedInviteId) {
-    const isNewIdentity = Boolean(data.user?.id && (data.user.identities?.length ?? 0) > 0);
-    if (!isNewIdentity) {
-      return { error: "Could not create the account. Ask for a new invitation and try again." };
-    }
-    const { data: redeemed, error: redeemError } = await serviceClient().rpc(
-      "redeem_beta_invite",
-      { p_invite_id: claimedInviteId, p_user_id: data.user!.id }
-    );
-    if (redeemError || redeemed !== true) {
-      // The database Auth hook is the authoritative admission control. Cleanup
-      // is still mandatory: it prevents a misconfigured deployment (hook not
-      // enabled) or a later linking failure from leaving a confusing, usable
-      // Auth identity behind.
-      const { error: deleteError } = await serviceClient().auth.admin.deleteUser(data.user!.id);
-      const { error: signOutError } = await supabase.auth.signOut({ scope: "global" });
-      await captureError(new Error("beta invite redemption failed after Auth signup"), {
-        route: "/signup",
-        method: "POST",
-        code: deleteError || signOutError ? "invite_redeem_cleanup_failed" : "invite_redeem_failed",
-      });
-      return {
-        error: "Invitation setup did not finish. Ask for a new invitation before retrying.",
-      };
-    }
-  }
 
   logSecurityEvent("auth.signup.success", { email: maskEmail(email), ip });
 

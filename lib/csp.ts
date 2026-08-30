@@ -55,7 +55,7 @@ function connectSources(
  * Routes allowed to fetch a JWK Set from an issuer we cannot know in advance.
  *
  * Exactly one: the public receipt-verification page, which verifies in the
- * BROWSER. That is the point of it — the pasted receipt never reaches Vertias,
+ * BROWSER. That is the point of it — the pasted receipt never reaches the host,
  * and the page runs the same sdk/verify.ts a third party runs on their own
  * machine. To check a signature it must fetch the issuer's published keys, and
  * the issuer is whatever the receipt names, including a self-hosted deployment.
@@ -95,6 +95,9 @@ export function needsExternalJwks(pathname: string): boolean {
  */
 export const PRERENDERED_PUBLIC_PATHS: readonly string[] = [
   "/",
+  "/notices",
+  "/notices/data",
+  "/notices/recovery",
   "/learn",
   "/learn/ai-agent-security",
   "/learn/ai-agent-identity",

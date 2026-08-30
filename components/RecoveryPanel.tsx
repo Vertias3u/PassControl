@@ -1,5 +1,9 @@
 import { Download, BookOpen } from "lucide-react";
 
+function recoveryNoticeHref(): string {
+  return "/notices/recovery";
+}
+
 // A server component on purpose. Three rows of prose and one download link —
 // there is no state, no transition and nothing to hydrate, so shipping this to
 // the browser would buy nothing. It also lets the "last export" label render
@@ -67,7 +71,7 @@ export function RecoveryPanel({ lastExportAt }: { lastExportAt: string | null })
         </div>
         {/* In the right-hand slot rather than in the prose: .pc-account-lifecycle__row a
             is styled as a button, so an inline link would render as one mid-paragraph. */}
-        <a href="/legal/recovery">
+        <a href={recoveryNoticeHref()}>
           <BookOpen aria-hidden="true" /> What survives a restore
         </a>
       </div>

@@ -39,6 +39,16 @@ import {
 import type { ProfileRecord } from "@/lib/profile/manage";
 import { AvatarUploader } from "@/components/AvatarUploader";
 
+function profilePlaceholders() {
+  return {
+    displayName: "Example Ops",
+    company: "Example Company",
+    website: "example.com",
+  };
+}
+
+const PROFILE_PLACEHOLDERS = profilePlaceholders();
+
 export function ProfileSettings({
   profile,
   publishedAgentCount,
@@ -178,7 +188,7 @@ export function ProfileSettings({
             <input
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
-              placeholder="Vertias Ops"
+              placeholder={PROFILE_PLACEHOLDERS.displayName}
               maxLength={60}
               autoComplete="off"
             />
@@ -188,7 +198,7 @@ export function ProfileSettings({
             <input
               value={company}
               onChange={(event) => setCompany(event.target.value)}
-              placeholder="Vertias"
+              placeholder={PROFILE_PLACEHOLDERS.company}
               maxLength={80}
               autoComplete="off"
             />
@@ -200,7 +210,7 @@ export function ProfileSettings({
           <input
             value={website}
             onChange={(event) => setWebsite(event.target.value)}
-            placeholder="vertias.eu"
+            placeholder={PROFILE_PLACEHOLDERS.website}
             maxLength={200}
             autoComplete="off"
             spellCheck={false}

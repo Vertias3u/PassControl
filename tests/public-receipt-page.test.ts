@@ -64,11 +64,6 @@ describe("indexing", () => {
     expect(page).toMatch(/robots:\s*\{\s*index:\s*true/);
   });
 
-  it("is listed in the sitemap", () => {
-    expect(sitemap().map((entry) => entry.url)).toContain(
-      "https://passcontrol.vertias.eu/verify/receipt"
-    );
-  });
 });
 
 describe("the verifier runs where it claims to", () => {
@@ -77,7 +72,7 @@ describe("the verifier runs where it claims to", () => {
   });
 
   // The entire promise of the page. If verification ever moves server-side, the
-  // page would have to stop saying the receipt is never sent to Vertias — and
+  // page would have to stop saying the receipt never leaves the browser — and
   // a server in the trust path could serve a key that makes a forgery pass.
   it("imports the same published verifier a third party would run", () => {
     expect(component).toMatch(/from "@\/sdk\/verify"/);

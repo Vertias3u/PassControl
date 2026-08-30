@@ -29,7 +29,7 @@ import Link from "next/link";
 import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 
-import { VertiasLogo } from "@/components/VertiasLogo";
+import { SiteLogo, SITE_BRAND_LABEL } from "@/components/SiteBrand";
 import { VerifiedProfileBadge } from "@/components/VerifiedProfileBadge";
 import { createPassportSigil } from "@/lib/passport-art";
 import {
@@ -39,10 +39,11 @@ import {
   type PublicProfileView,
 } from "@/lib/profile/public";
 import { serviceClient } from "@/lib/supabase";
+import { instanceIssuer } from "@/lib/crypto/instanceKey";
 
 export const dynamic = "force-dynamic";
 
-const BASE = "https://passcontrol.vertias.eu";
+const BASE = instanceIssuer() ?? "";
 
 /**
  * The first forwarded hop. Behind Vercel this is the client; behind nothing it
@@ -92,7 +93,7 @@ export async function generateMetadata({
     // /u/<handle> and /@<handle> are the same page; /@ is the address people
     // are given, so it is the one search engines are pointed at. robots.ts
     // disallows /u/ for the same reason.
-    alternates: { canonical: `${BASE}/@${result.profile.handle}` },
+    alternates: BASE ? { canonical: `${BASE}/@${result.profile.handle}` } : undefined,
   };
 }
 
@@ -109,10 +110,10 @@ function Shell({ children }: { children: React.ReactNode }) {
   return (
     <main className="mx-auto grid min-h-screen w-full max-w-2xl content-start gap-8 px-4 py-12 sm:px-6 sm:py-16">
       <header className="flex items-center gap-3">
-        <VertiasLogo size={36} />
+        <SiteLogo size={36} />
         <div>
           <p className="m-0 text-xs font-semibold uppercase tracking-[0.18em] text-primary">
-            Vertias · PassControl
+            {SITE_BRAND_LABEL}
           </p>
           <h1 className="m-0 text-lg font-bold text-foreground">Operator profile</h1>
         </div>

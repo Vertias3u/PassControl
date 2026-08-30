@@ -33,7 +33,6 @@
 import { revalidatePath } from "next/cache";
 
 import { recordAdminAction } from "@/lib/audit";
-import { PASSCONTROL_CONTACT_EMAIL } from "@/lib/contact";
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import { AVATAR_MAX_BYTES, sniffAvatar, stripAvatarMetadata } from "@/lib/profile/image";
 import {
@@ -63,6 +62,10 @@ const AVATAR_WINDOW_S = 600;
 
 /** The bucket created by 0033. Private: every byte moves through our own server. */
 const AVATAR_BUCKET = "avatars";
+
+function avatarCleanupNotice(): string {
+  return "Your avatar was removed and its link no longer works. The stored file could not be deleted — contact the operator of this instance.";
+}
 
 export interface ProfileActionState {
   profile?: ProfileRecord | null;
@@ -358,7 +361,7 @@ export async function removeAvatar(): Promise<ProfileActionState> {
   return {
     profile: result.data,
     notice: orphaned
-      ? `Your avatar was removed and its link no longer works. The stored file could not be deleted — contact ${PASSCONTROL_CONTACT_EMAIL}.`
+      ? avatarCleanupNotice()
       : "Avatar removed.",
   };
 }

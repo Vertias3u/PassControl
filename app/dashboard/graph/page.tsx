@@ -3,7 +3,7 @@ import { userClient } from "@/lib/supabase/server";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { readKillState } from "@/lib/state/killswitch";
 import { shadowRevision } from "@/lib/policy-shadow";
-import { betaOperatorEmails } from "@/lib/beta-launch";
+import { operatorEmails } from "@/lib/operator-allowlist";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { ControlGraph } from "@/components/dashboard/ControlGraph";
 import {
@@ -80,7 +80,7 @@ export default async function ControlGraphPage() {
   return (
     <DashboardShell
       userId={user.id}
-      showBetaOperator={betaOperatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
+      showBetaOperator={operatorEmails().has(user.email?.trim().toLowerCase() ?? "")}
       active="graph"
       eyebrow="Live capability topology"
       title="Control graph"

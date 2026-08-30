@@ -1,6 +1,9 @@
 import type { MetadataRoute } from "next";
 
-const BASE = "https://passcontrol.vertias.eu";
+import { instanceIssuer } from "@/lib/crypto/instanceKey";
+
+// Same reasoning as app/sitemap.ts: the instance's own issuer, or nothing.
+const BASE = instanceIssuer() ?? "";
 
 // Emitted at /robots.txt. Allow crawling of the public marketing surface; keep
 // the authenticated app + API out of the index. Points crawlers at the sitemap.
@@ -29,7 +32,9 @@ export default function robots(): MetadataRoute.Robots {
         disallow: ["/dashboard", "/login/verify", "/api/", "/verify/", "/u/"],
       },
     ],
-    sitemap: `${BASE}/sitemap.xml`,
-    host: BASE,
+    // Both are absolute-URL fields; with no configured issuer there is no honest
+    // value, and Next omits an undefined field rather than emitting an empty one.
+    sitemap: BASE ? `${BASE}/sitemap.xml` : undefined,
+    host: BASE || undefined,
   };
 }

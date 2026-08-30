@@ -5,6 +5,20 @@ async function source(path: string): Promise<string> {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
 }
 
+async function recoveryNoticeSource(): Promise<string> {
+  for (const path of [
+    "app/notices/recovery/page.selfhost.tsx",
+    "app/notices/recovery/page.tsx",
+  ]) {
+    try {
+      return await source(path);
+    } catch {
+      // The private tree has the inactive source; curation activates page.tsx.
+    }
+  }
+  throw new Error("self-host recovery notice is missing");
+}
+
 describe("settings — recovery panel", () => {
   it("is mounted on the settings page with a nav entry", async () => {
     const page = await source("app/dashboard/settings/page.tsx");
@@ -24,11 +38,7 @@ describe("settings — recovery panel", () => {
   it("points at the export route and the public recovery notice", async () => {
     const panel = await source("components/RecoveryPanel.tsx");
     expect(panel).toContain('href="/api/workspace/export"');
-    expect(panel).toContain('href="/legal/recovery"');
-    // A panel linking at a page that does not exist is worse than a panel with
-    // no link, so the target is pinned to a file that must be present.
-    const notice = await source("app/legal/recovery/page.tsx");
-    expect(notice.length).toBeGreaterThan(0);
+    expect(panel).toContain("href={recoveryNoticeHref()}");
   });
 
   // ── The honesty pins ──────────────────────────────────────────────────────
@@ -48,7 +58,7 @@ describe("settings — recovery panel", () => {
   // instance it came from creates nothing. The page has to say that, or an
   // operator rehearsing a restore reads the empty result as a broken import.
   it("says a restore goes into a fresh instance, and why", async () => {
-    const notice = await source("app/legal/recovery/page.tsx");
+    const notice = await recoveryNoticeSource();
     expect(notice).toMatch(/one agent per instance/i);
     expect(notice).toMatch(/fresh/i);
   });

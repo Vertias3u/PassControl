@@ -7,7 +7,6 @@ import { armTenantKill } from "@/lib/state/killswitch";
 import { redis } from "@/lib/state/redis";
 import { purgeAccountRuntimeState } from "@/lib/account-lifecycle";
 import { captureError } from "@/lib/observability";
-import { PASSCONTROL_CONTACT_EMAIL } from "@/lib/contact";
 
 export type DeleteAccountResult =
   | { ok: true; cleanupPending: boolean }
@@ -16,6 +15,10 @@ export type DeleteAccountResult =
 interface DeletionInventory {
   agentIds: string[];
   controlApiKeyIds: string[];
+}
+
+function authCleanupError(): string {
+  return "Your data was erased, but sign-in cleanup needs attention from the operator of this instance.";
 }
 
 function parseDeletionInventory(value: unknown): DeletionInventory | null {
@@ -129,7 +132,7 @@ export async function deleteAccount(confirmation: string): Promise<DeleteAccount
     // re-admit a still-valid visa through a stale encrypted provider-key cache.
     return {
       ok: false,
-      error: `Your data was erased, but sign-in cleanup needs operator attention. Contact ${PASSCONTROL_CONTACT_EMAIL}.`,
+      error: authCleanupError(),
     };
   }
 
