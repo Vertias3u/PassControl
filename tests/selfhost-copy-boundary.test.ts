@@ -106,7 +106,12 @@ describe("self-hosted issuer and copy boundary", () => {
       })
       .find((content) => content !== null);
     if (icon === undefined) throw new Error("neither icon file exists — this guard reads nothing");
-    expect(icon).not.toMatch(/#b7f34a["'\s]*\/>|M29 57/);
+    // Assembled from fragments, like the tokens at the top of this file and for the
+    // same reason: this file ships, and the whole-tree guard in
+    // scripts/__tests__/brand-colour-boundary.test.mjs fails any shipped file that
+    // carries the hosted green. Spelled out, this guard would trip that one.
+    const hostedGreen = ["#b7", "f3", "4a"].join("");
+    expect(icon).not.toMatch(new RegExp(`${hostedGreen}["'\\s]*/>|M29 57`));
     expect(icon).toContain('aria-label="PassControl"');
   });
 

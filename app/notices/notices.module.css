@@ -25,7 +25,7 @@
 .nav a,
 .main a,
 .footer a {
-  color: #b7f34a;
+  color: var(--pc-brand);
   text-decoration: none;
 }
 
@@ -86,9 +86,9 @@
 
 .notice {
   padding: 20px;
-  border: 1px solid rgba(183, 243, 74, 0.22);
+  border: 1px solid rgba(var(--pc-brand-rgb), 0.22);
   border-radius: 10px;
-  background: rgba(183, 243, 74, 0.04);
+  background: rgba(var(--pc-brand-rgb), 0.04);
 }
 
 .footer {

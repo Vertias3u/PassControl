@@ -7,8 +7,8 @@
   --home-quiet: #7e897c;
   --home-line: rgba(220, 236, 215, 0.11);
   --home-line-strong: rgba(220, 236, 215, 0.18);
-  --home-signal: #b7f34a;
-  --home-signal-soft: rgba(183, 243, 74, 0.09);
+  --home-signal: var(--pc-brand);
+  --home-signal-soft: rgba(var(--pc-brand-rgb), 0.09);
   --home-orange: #e97840;
   --home-display: var(--font-pc-display), "Newsreader", Georgia, serif;
   --home-sans: var(--font-pc-sans), "Manrope", system-ui, sans-serif;
@@ -21,7 +21,7 @@
   min-height: 100vh;
   overflow: clip;
   background:
-    radial-gradient(circle at 82% -8%, rgba(183, 243, 74, 0.06), transparent 31rem),
+    radial-gradient(circle at 82% -8%, rgba(var(--pc-brand-rgb), 0.06), transparent 31rem),
     var(--home-ink);
   color: var(--home-paper);
   font-family: var(--home-sans);
@@ -210,7 +210,7 @@
 }
 
 .secondaryButton:hover {
-  border-color: rgba(183, 243, 74, 0.42);
+  border-color: rgba(var(--pc-brand-rgb), 0.42);
   background: var(--home-signal-soft);
 }
 
@@ -363,7 +363,7 @@
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--home-signal);
-  box-shadow: 0 0 9px rgba(183, 243, 74, 0.38);
+  box-shadow: 0 0 9px rgba(var(--pc-brand-rgb), 0.38);
 }
 
 .callIdentity {
@@ -565,8 +565,8 @@
 }
 
 .demoControls textarea:focus {
-  border-color: rgba(183, 243, 74, 0.45);
-  box-shadow: 0 0 0 3px rgba(183, 243, 74, 0.07);
+  border-color: rgba(var(--pc-brand-rgb), 0.45);
+  box-shadow: 0 0 0 3px rgba(var(--pc-brand-rgb), 0.07);
 }
 
 .demoControls form > button {
@@ -745,17 +745,17 @@
 .demoGraphCopy > small { color: var(--home-quiet); font-size: .56rem; text-align: right; }
 .demoGraph svg { width: 100%; height: auto; display: block; overflow: visible; }
 .demoGraphLine { stroke: rgba(145,158,147,.18); stroke-width: 1.5; transition: stroke 180ms ease, opacity 180ms ease; }
-.demoGraphLine[data-active="true"] { stroke: rgba(183,243,74,.45); }
+.demoGraphLine[data-active="true"] { stroke: rgba(var(--pc-brand-rgb),.45); }
 .demoGraphNode circle { fill: #111512; stroke: rgba(145,158,147,.3); stroke-width: 1.5; transition: fill 180ms ease, stroke 180ms ease; }
 .demoGraphNode text { fill: var(--home-quiet); font-family: var(--home-mono); font-size: .58rem; }
-.demoGraphNode[data-active="true"] circle { fill: rgba(183,243,74,.07); stroke: rgba(183,243,74,.75); }
+.demoGraphNode[data-active="true"] circle { fill: rgba(var(--pc-brand-rgb),.07); stroke: rgba(var(--pc-brand-rgb),.75); }
 .demoGraphNode[data-active="true"] text { fill: var(--home-copy); }
 .demoGraphNode[data-blocked="true"] circle { fill: rgba(233,120,64,.08); stroke: var(--home-orange); }
 .demoGraphNode[data-blocked="true"] text { fill: var(--home-orange); }
-.demoGraphPulse { fill: var(--home-signal); filter: drop-shadow(0 0 5px rgba(183,243,74,.7)); }
+.demoGraphPulse { fill: var(--home-signal); filter: drop-shadow(0 0 5px rgba(var(--pc-brand-rgb),.7)); }
 .demoGraphVerdict { display: flex; flex-wrap: wrap; gap: 6px; }
 .demoGraphVerdict span { padding: 5px 7px; border: 1px solid var(--home-line); border-radius: 4px; color: var(--home-quiet); font-family: var(--home-mono); font-size: .51rem; text-transform: uppercase; transition: border-color 160ms ease, color 160ms ease, background 160ms ease; }
-.demoGraphVerdict span[data-active="true"] { border-color: rgba(183,243,74,.25); background: var(--home-signal-soft); color: var(--home-signal); }
+.demoGraphVerdict span[data-active="true"] { border-color: rgba(var(--pc-brand-rgb),.25); background: var(--home-signal-soft); color: var(--home-signal); }
 .demoGraphVerdict span[data-blocked="true"] { border-color: rgba(233,120,64,.35); background: rgba(233,120,64,.07); color: var(--home-orange); }
 
 .demoDisclosure {
@@ -818,7 +818,7 @@
   gap: 12px;
   min-height: 92px;
   margin-top: 18px;
-  border: 1px solid rgba(183, 243, 74, 0.21);
+  border: 1px solid rgba(var(--pc-brand-rgb), 0.21);
   border-radius: 8px;
   background: var(--home-signal-soft);
   color: var(--home-paper);
@@ -1035,7 +1035,7 @@
   border: 1px solid var(--home-line-strong);
   border-radius: 10px;
   background:
-    linear-gradient(180deg, rgba(183, 243, 74, 0.05), transparent 70%),
+    linear-gradient(180deg, rgba(var(--pc-brand-rgb), 0.05), transparent 70%),
     var(--home-panel);
   text-align: center;
 }
