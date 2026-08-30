@@ -87,7 +87,12 @@ export const viewport: Viewport = {
   colorScheme: "dark",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // The accent is resolved here, on the server, and emitted in the first byte of
+  // HTML. Setting it from a client effect instead would paint the default colour
+  // and then repaint — a visible flash on every navigation, worst on exactly the
+  // slow first load a new user gets. `style` (not a <style> tag) is what keeps
+  // this inside `style-src 'self' 'unsafe-inline'`; see lib/csp.ts.
   return (
     <html
       lang="en"

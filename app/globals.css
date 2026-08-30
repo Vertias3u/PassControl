@@ -4010,3 +4010,4 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
   .pc-control-graph__edge, .pc-control-graph__node, .pc-control-graph__actions button { transition: none; }
   .pc-control-graph__node[data-event-stage="stopped"] .pc-control-graph__node-ring { animation: none; }
 }
+

@@ -113,6 +113,26 @@ describe("Core dashboard boundary", () => {
   });
 
 
+  it("gives a self-hoster one accent and no control over it", () => {
+    // The accent theme is a Cloud differentiator by decision
+    // (plans/cloud-accent-theme.md). Core renders --pc-brand straight from
+    // globals.css, so nothing here may reach for a cookie or a picker.
+    const settings = curated("app/dashboard/settings/page.tsx");
+    const layout = curated("app/layout.tsx");
+
+    for (const token of ["AccentThemePicker", "cloud-theme", "ACCENT_COOKIE", "readAccent"]) {
+      expect(settings, token).not.toContain(token);
+      expect(layout, token).not.toContain(token);
+    }
+    expect(settings).not.toContain('id="appearance"');
+    // The strip must not take the surrounding element with it: the layout still
+    // has to render an <html> with the font classes on it, or the mirror ships a
+    // page that cannot mount. A colour guard would not catch that; this does.
+    expect(layout).toContain("<html");
+    expect(layout).toContain("plexMono.variable");
+    expect(settings).toContain('id="provider-credentials"');
+  });
+
   it("documents only refusals a self-hosted gateway can actually emit", () => {
     const operations = curated("lib/cloud-operations.ts");
 

@@ -113,6 +113,8 @@ export default async function AgentPassportPage({
   if (await needsMfaStepUp(db)) redirect("/login/verify");
 
   const passport = await requireAgentPassport(db, user.id, id);
+  // The exported card carries real colour values, so the accent has to reach it as
+  // data — it cannot read var(--pc-brand) through an image serialisation.
   const firstVisa = passport.visas[0];
   // The listing panel has to name whichever of the two opt-ins is still
   // missing, so it needs the operator's own profile state. Tolerates null: a
@@ -159,7 +161,10 @@ export default async function AgentPassportPage({
 
         <section id="agent-overview" className="scroll-mt-40">
         <div id="agent-identity" className="scroll-mt-40">
-        <AgentPassport passport={passport} visaTtlSeconds={visaTtlSeconds()} />
+        <AgentPassport
+          passport={passport}
+          visaTtlSeconds={visaTtlSeconds()}
+        />
         </div>
         </section>
         {/* Directly under the passport itself: expiry and rotation are facts
