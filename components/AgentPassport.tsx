@@ -25,7 +25,7 @@ const PALETTE = {
   // This palette paints an SVG that is exported as an image, so it needs a real
   // value — a CSS custom property would not survive the export. Hence a marker
   // swap here rather than the var(--pc-brand) the stylesheets use.
-  signal: "#a48af3",
+  signal: "#4ab7f3",
   warning: "#f59e0b",
   danger: "#ef4444",
   info: "#22d3ee",

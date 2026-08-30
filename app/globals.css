@@ -14,8 +14,8 @@
      neither tree carrying a value it has to ignore. The private values are
      byte-identical to what shipped before, so the hosted site cannot shift.
      A guard in scripts/__tests__/ fails if the green survives into the mirror. */
-  --pc-brand: #a48af3;
-  --pc-brand-rgb: 164, 138, 243;
+  --pc-brand: #4ab7f3;
+  --pc-brand-rgb: 74, 183, 243;
 
   /* shadcn token surface (dark-first; defined once, used everywhere) */
   --background: #0f0f0f;
