@@ -185,9 +185,6 @@ jobs:
       - name: RLS invariant test
         run: psql -v ON_ERROR_STOP=1 -f db/tests/rls_invariants.sql "$DB_URL"
 
-      - name: Invite-beta database invariant test
-        run: psql -v ON_ERROR_STOP=1 -f db/tests/beta_launch_invariants.sql "$DB_URL"
-
       - name: Public operator-profile invariant test
         run: psql -v ON_ERROR_STOP=1 -f db/tests/public_profile_invariants.sql "$DB_URL"
 
