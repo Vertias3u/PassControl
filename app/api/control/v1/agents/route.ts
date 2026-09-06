@@ -46,7 +46,11 @@ const postHandler = control("write", async ({ req, userId, db, keyId, requestId 
     targetId: r.value.id,
     metadata: { name: r.value.name, via: "api", key_id: keyId },
   });
-  return jsonResponse({ data: { id: r.value.id, name: r.value.name } }, requestId, 201);
+  return jsonResponse(
+    { data: { id: r.value.id, name: r.value.name, expires_at: r.value.expiresAt } },
+    requestId,
+    201
+  );
 });
 
 export function POST(req: Request): Promise<Response> {

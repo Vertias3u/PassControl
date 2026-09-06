@@ -1,5 +1,6 @@
 import { MetricCard } from "./MetricCard";
 import { Users, DollarSign, ShieldAlert, Activity } from "lucide-react";
+import type { FleetAttentionSummary } from "@/lib/dashboard-attention";
 
 export function FleetOverviewCards(props: {
   activeAgents: number;
@@ -11,7 +12,14 @@ export function FleetOverviewCards(props: {
   recentCalls: number;
   /** Preserved and disclosed, never folded into the denominator. */
   housekeepingCalls?: number;
-  attentionAgents: number;
+  /**
+   * The queue, already summarised. A count alone cannot colour this card: the
+   * queue now holds a housekeeping tier ("Set a passport expiry") alongside
+   * real faults, and a card that goes red for any non-zero count is a card
+   * operators learn to ignore. Both the tone and the subtitle are derived from
+   * the reasons actually present — see summariseFleetAttention.
+   */
+  attention: FleetAttentionSummary;
 }) {
   const probes = props.housekeepingCalls ?? 0;
   const scanNote =
@@ -45,11 +53,11 @@ export function FleetOverviewCards(props: {
       />
       <MetricCard
         label="Needs attention"
-        value={props.attentionAgents}
+        value={props.attention.count}
         icon={<Activity className="h-5 w-5" />}
-        note={props.attentionAgents ? "Suspended, revoked, or near budget" : "No agent alerts"}
+        note={props.attention.note}
         href="#fleet"
-        tone={props.attentionAgents ? "danger" : "neutral"}
+        tone={props.attention.tone}
       />
     </div>
   );

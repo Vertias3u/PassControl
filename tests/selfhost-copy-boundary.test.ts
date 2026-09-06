@@ -48,7 +48,7 @@ describe("self-hosted issuer and copy boundary", () => {
   });
 
   it("names the configured instance as the passport issuer", () => {
-    const detail = curated("app/verify/[passportId]/page.tsx");
+    const detail = curated("app/verify/[passportId]/PassportCard.tsx");
 
     expect(detail).toContain('import { instanceIssuer } from "@/lib/crypto/instanceKey"');
     expect(detail).toContain("instanceIssuer() ??");
@@ -59,6 +59,10 @@ describe("self-hosted issuer and copy boundary", () => {
     for (const path of [
       "app/verify/page.tsx",
       "app/verify/[passportId]/page.tsx",
+      // The card carries the issuer wording; the page keeps the route. Both are
+      // swept, because the sweep is the check and a moved file it does not name
+      // is a file nobody is checking.
+      "app/verify/[passportId]/PassportCard.tsx",
       "app/verify/[passportId]/not-found.tsx",
       "app/verify/receipt/page.tsx",
       "components/ReceiptVerifier.tsx",

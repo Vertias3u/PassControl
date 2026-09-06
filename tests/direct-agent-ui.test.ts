@@ -45,6 +45,14 @@ describe("Direct Agent browser on-ramp", () => {
 });
 
 describe("Provider-key import reveal-once handoff", () => {
+  it("accepts both passport assurance levels as passport setup traffic", () => {
+    const store = read("components/PassportStoreAndConnect.tsx");
+    expect(store).toMatch(
+      /auth_method[\s\S]*passport[\s\S]*passport_proof_per_request/
+    );
+    expect(store).not.toMatch(/isPassportAuthMethod[\s\S]*direct_key/);
+  });
+
   it("refreshes the fleet only after the private passport is acknowledged", () => {
     const ui = read("components/KeyImportOnramp.tsx");
     const store = read("components/PassportStoreAndConnect.tsx");

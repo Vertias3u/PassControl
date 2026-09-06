@@ -178,6 +178,7 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "agent.revoke",
         "killswitch.master",
         "provider_key.add",
+        "provider_key.endpoint",
         "provider_key.rotate",
         // Migration 0027. Switching decides which stored credential the gateway
         // injects, and therefore which upstream account is billed from then on;
@@ -186,6 +187,15 @@ describe("buildAuditRecord — admin-action audit row", () => {
         // find in the trail when an unexpected provider bill turns up.
         "provider_key.activate",
         "provider_key.delete",
+        "workspace.key_custody_expectation",
+        // Migration 0055. Both move money by hand. `budget.hold_resolve` decides
+        // what an attempt that never finished actually cost — the only place a
+        // human, rather than the gateway, says what was spent. `budget.rebuild`
+        // is the ONLY sanctioned lowering of a spend counter anywhere in the
+        // product; an unaudited one would be indistinguishable from the
+        // accounting defect that subsystem exists to prevent.
+        "budget.hold_resolve",
+        "budget.rebuild",
         "apikey.create",
         "apikey.revoke",
         "mfa.enroll",
@@ -194,6 +204,8 @@ describe("buildAuditRecord — admin-action audit row", () => {
         // the public /verify page, and running the domain check are all
         // privileged: each one changes what a stranger reads about this tenant.
         "owner.set",
+        "owner.company.clear",
+        "owner.company.set",
         "owner.publish",
         "owner.verify",
         "profile.update",

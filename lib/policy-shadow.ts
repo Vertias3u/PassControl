@@ -167,6 +167,26 @@ export function shadowRevision(draft: unknown): string | null {
   }
 }
 
+/**
+ * Which effective LIVE rule set the gateway evaluated for one call.
+ *
+ * This deliberately shares `shadowRevision`'s canonicaliser and hash rather
+ * than introducing a second revision scheme. The caller hands it the complete
+ * evaluated snapshot: current policy value, effective scopes, effective token
+ * and cost caps, and the unreadable-policy posture. A scope or budget edit must
+ * therefore move the revision even when the JSON `agents.policy` column did
+ * not, because all three are live authorization rules.
+ *
+ * Unlike a shadow draft, a live snapshot always exists. The fallback is the
+ * stable revision of an explicit unavailable sentinel; it keeps this helper
+ * total on the credential path without claiming two uncanonicalisable values
+ * are distinguishable. Database and visa values are JSON-shaped, so that path
+ * is defensive rather than expected.
+ */
+export function livePolicyRevision(snapshot: unknown): string {
+  return shadowRevision(snapshot) ?? shadowRevision({ revision: "unavailable" })!;
+}
+
 /** Bind a verdict to the draft that produced it, for the one text column. */
 export function stampShadowVerdict(verdict: string, revision: string | null): string {
   return revision ? `${verdict}${REVISION_MARK}${revision}` : verdict;

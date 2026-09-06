@@ -541,6 +541,7 @@ export async function loginCommand(opts = {}, deps = {}) {
     PASSCONTROL_GATEWAY: origin,
     PASSPORT_ID: passportId,
     PASSPORT_SECRET: passportSecret,
+    PASSPORT_KEY_STORAGE: "",
     PASSCONTROL_API_KEY: grant.api_key,
   });
   ok(`wrote ${target}`);
@@ -553,6 +554,10 @@ export async function loginCommand(opts = {}, deps = {}) {
     passportSecret,
     apiKey: grant.api_key,
     fetchImpl,
+    // The receipt read waits out the gateway's background write. Injected from
+    // the same seam the poll loop uses, so a test drives the retry without
+    // burning wall time.
+    wait,
   });
 
   step("");

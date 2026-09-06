@@ -9,7 +9,13 @@
 export const runtime = "edge";
 
 import { waitUntil } from "@vercel/functions";
-import { verifyVisa, extractVisaToken } from "@/lib/auth/visa";
+import {
+  verifyVisa,
+  verifySenderProof,
+  extractVisaToken,
+  SENDER_PROOF_HEADER,
+  SENDER_PROOF_WINDOW_SECONDS,
+} from "@/lib/auth/visa";
 import {
   authenticateDirectAgentKey,
   classifyGatewayCredential,
@@ -18,17 +24,32 @@ import {
 import { readKillState } from "@/lib/state/killswitch";
 import {
   isSuspended,
-  reserveBudget,
-  reconcileBudget,
+  getCachedEndpoint,
   getCachedKey,
+  setCachedEndpoint,
   setCachedKey,
-  seedSpent,
   touchLastSeen,
+  claimNonce,
+  purgeAgentPolicy,
 } from "@/lib/state/redis";
+import {
+  openHold,
+  settleKnown,
+  settleUnknown,
+  releaseUndispatched,
+  consumeDispatchPermission,
+  establishBudgetState,
+  type SettleResult,
+  type DispatchPermissionResult,
+} from "@/lib/state/holds";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
-import { canonicalEndpointPath, isModelListingIndex } from "@/lib/scope";
+import {
+  canonicalEndpointPath,
+  isModelListingIndex,
+  isOpenAiResponsesEndpoint,
+} from "@/lib/scope";
 import { filterModelListingToScope } from "@/lib/providers/model-listing";
 import {
   POLICY_UNREADABLE,
@@ -40,12 +61,14 @@ import {
 import {
   costMicrocents,
   costMicrocentsForUsage,
+  demoCostMicrocents,
   estimateTokenUsage,
+  isPricedEndpoint,
   MICROCENTS_PER_CENT,
 } from "@/lib/pricing";
 import { createUsageTransform, usageFromJson, NO_USAGE, type Usage } from "@/lib/usage/parseStream";
-import { writeLog, mirrorSpend } from "@/lib/log";
-import { shadowRevision, stampShadowVerdict } from "@/lib/policy-shadow";
+import { writeLog, mirrorSpend, type AuthMethod } from "@/lib/log";
+import { livePolicyRevision, shadowRevision, stampShadowVerdict } from "@/lib/policy-shadow";
 import { signReceipt, type OwnerClaim } from "@/lib/receipt";
 import { readCurrentOwner } from "@/lib/owner/current";
 import { isProvider, upstreamBaseUrl, authHeaders, usesOpenAiUsageShape, type ProviderId } from "@/lib/providers";
@@ -55,10 +78,17 @@ import { readProvidersWithKeys } from "@/lib/providers/available";
 import {
   MAX_FALLBACKS,
   failoverReasonFor,
+  mayHaveBeenBilled,
   type FailoverReason,
   type FallbackEntry,
 } from "@/lib/providers/fallbacks";
 import { readCurrentAgentFallbacks } from "@/lib/state/fallbacks";
+import type { SenderProofObservation } from "@/lib/sender-constraint";
+import {
+  endpointPolicy,
+  isEndpointAllowed,
+  joinUpstream,
+} from "@/lib/providers/endpoint";
 import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 
@@ -75,7 +105,13 @@ const DIRECT_KEY_IP_WINDOW_S = Number(process.env.DIRECT_KEY_IP_WINDOW_S ?? "60"
 
 const KEY_CACHE_TTL_S = 60;
 const POLICY_RATE_WINDOW_S = 60 * 60;
-const RESERVE_MARKER_TTL_S = 960; // > max visa TTL (900s) + buffer
+// RESERVE_MARKER_TTL_S is deliberately GONE, not merely unused. It existed so a
+// crashed reconcile would "self-heal" when its marker expired — and that
+// mechanism was the bug: it released real money on a timer, for calls that had
+// genuinely been billed. A hold now never expires while it is open. If you find
+// yourself wanting a TTL back on the hot path, read lib/state/holds.ts first;
+// tests/holds.redis.test.ts asserts `TTL == -1` on an open hold precisely so
+// this cannot come back as hygiene.
 // Generous cap for an LLM request body (large prompts are legitimate) while still
 // bounding memory/CPU against an oversized payload DoS.
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -91,6 +127,13 @@ const MAX_ATTEMPTS = 1 + MAX_FALLBACKS;
 
 function err(status: number, code: string) {
   return new Response(JSON.stringify({ error: code }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function errMessage(status: number, code: string, message: string) {
+  return new Response(JSON.stringify({ error: code, message }), {
     status,
     headers: { "content-type": "application/json" },
   });
@@ -126,8 +169,217 @@ type GatewayPrincipal = PassportPrincipal | DirectKeyPrincipal;
 type VisaScope = { provider: string; models: string[] };
 
 type GatewayAuthentication =
-  | { ok: true; principal: GatewayPrincipal; db: ServiceDatabase }
+  | { ok: true; principal: GatewayPrincipal; db: ServiceDatabase; credentialToken: string }
   | { ok: false; response: Response };
+
+type PassportAuthMethod = Exclude<AuthMethod, "direct_key">;
+
+type SenderConstraintResult =
+  | { ok: true; authMethod: PassportAuthMethod; would?: SenderProofObservation }
+  | { ok: false; response: Response };
+
+/**
+ * Evaluate the proof once, and let the caller decide what it costs.
+ *
+ * ── Why this is one function and not two ────────────────────────────────────
+ *
+ * `observe` only predicts `required` if it runs the identical check in the
+ * identical order — the same verification, the same replay claim, the same key
+ * and TTL. Two functions that happen to agree today are two functions that can
+ * disagree after one edit, and then the mode an operator used to decide is not
+ * the mode they switched on. The challenge route had exactly this shape: two
+ * inline copies of one Ed25519 verification, folded into a single helper because
+ * "two verifications of the same signature that can disagree" is the failure.
+ *
+ * So the verdict is computed here and nothing else. Whether a verdict blocks the
+ * request is the caller's business, which is the only thing the two modes
+ * actually differ on.
+ *
+ * `unavailable` is separate from every other verdict because it is not a
+ * statement about the proof at all — the replay store could not answer. Under
+ * enforcement that fails closed; under observation it is simply not recorded.
+ */
+type SenderProofEvaluation =
+  | { verdict: SenderProofObservation }
+  | { verdict: "unavailable" };
+
+async function evaluateSenderProof(
+  req: Request,
+  credentialToken: string,
+  principal: PassportPrincipal
+): Promise<SenderProofEvaluation> {
+  const proof = verifySenderProof({
+    proof: req.headers.get(SENDER_PROOF_HEADER),
+    method: req.method,
+    url: req.url,
+    visa: credentialToken,
+    passportId: principal.passportId,
+  });
+  if (!proof.ok) {
+    if (proof.reason === "missing") return { verdict: "missing" };
+    if (proof.reason === "clock_skew") return { verdict: "clock_skew" };
+    return { verdict: "invalid" };
+  }
+
+  try {
+    // A future-dated proof accepted at one edge of the skew window remains
+    // time-valid until the opposite edge, hence 2x window plus one second.
+    const claimed = await claimNonce(
+      `sender-proof:${proof.jti}`,
+      SENDER_PROOF_WINDOW_SECONDS * 2 + 1
+    );
+    return { verdict: claimed ? "pass" : "replayed" };
+  } catch {
+    return { verdict: "unavailable" };
+  }
+}
+
+async function enforceSenderConstraint(
+  req: Request,
+  credentialToken: string,
+  principal: PassportPrincipal,
+  policy: Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>>
+): Promise<SenderConstraintResult> {
+  const mode = policy.senderConstraintMode;
+  if (mode === null) {
+    return { ok: false, response: err(503, "sender_constraint_state_unavailable") };
+  }
+  // Anything that is not one of the two proof modes takes the bearer path, and
+  // the test is written that way round on purpose: drift resolves DOWN here, as
+  // it does in toSenderConstraintMode. A value this build does not recognise
+  // must not become enforcement, because enforcement refuses every call for an
+  // agent whose operator configured something we have not shipped yet.
+  if (mode !== "observe" && mode !== "required") {
+    // An unsolicited proof is not inspected on this path. Recording the
+    // configured mode (or mere header presence) as enforcement would turn a
+    // receipt into a false assurance claim.
+    return { ok: true, authMethod: "passport" };
+  }
+
+  const { verdict } = await evaluateSenderProof(req, credentialToken, principal);
+
+  if (mode === "observe") {
+    // Admitted whatever the verdict, and `authMethod` stays `passport`: the
+    // credential that actually authenticated this call was a bearer visa, and a
+    // receipt goes to third parties. `unavailable` records nothing rather than
+    // guessing — there is no authentication to fail here, so a replay-store blip
+    // must not become a diagnostic that looks like a real failure.
+    return verdict === "unavailable"
+      ? { ok: true, authMethod: "passport" }
+      : { ok: true, authMethod: "passport", would: verdict };
+  }
+
+  switch (verdict) {
+    case "pass":
+      return { ok: true, authMethod: "passport_proof_per_request" };
+    case "missing":
+      return { ok: false, response: err(401, "missing_sender_proof") };
+    case "clock_skew":
+      return {
+        ok: false,
+        response: errMessage(
+          401,
+          "sender_proof_clock_skew",
+          `The sender proof is outside the ${SENDER_PROOF_WINDOW_SECONDS}-second window. Check the agent clock and NTP synchronization.`
+        ),
+      };
+    case "replayed":
+      return { ok: false, response: err(401, "sender_proof_replayed") };
+    case "unavailable":
+      // Replay protection is part of authentication, unlike the fail-open kill
+      // switch. An unreadable nonce store cannot admit a proof as single-use.
+      return { ok: false, response: err(503, "sender_proof_replay_check_unavailable") };
+    default:
+      return { ok: false, response: err(401, "invalid_sender_proof") };
+  }
+}
+
+/**
+ * The custom endpoint for this (agent, provider), or null for the built-in host.
+ *
+ * Three properties worth stating, because each is a decision.
+ *
+ * IT IS RE-VALIDATED, NOT TRUSTED. A row written while `PROVIDER_ENDPOINT_MODE`
+ * allowed something must not be reached after the operator narrowed it, and a
+ * value stored under an older rule must not be honoured by a newer one. Validate
+ * on write AND on read, and let them agree.
+ *
+ * IT SHORT-CIRCUITS WHEN THE GATE IS OFF. That is the default, so on a
+ * deployment that has not opted in this costs no Redis read and no database read
+ * at all — the feature is absent rather than merely disabled.
+ *
+ * ITS CACHE IS UNSEALED. An endpoint is an address, not secret material, so it
+ * does not go through lib/crypto/aesgcm.ts, and the empty string is a real
+ * cached value meaning "this credential has none" — caching that absence is what
+ * keeps the common case off the database.
+ */
+type EndpointResolution =
+  /** A real answer: the endpoint to use, or null meaning the provider's own host. */
+  | { known: true; endpoint: string | null }
+  /** No answer at all. NOT the same thing as "no endpoint", and must not become it. */
+  | { known: false };
+
+async function resolveEndpoint(
+  db: ServiceDatabase,
+  agentId: string,
+  provider: string
+): Promise<EndpointResolution> {
+  const policy = endpointPolicy();
+  if (policy.kind === "off") return { known: true, endpoint: null };
+
+  const admit = (value: string | null): EndpointResolution => ({
+    known: true,
+    endpoint: value && isEndpointAllowed(value, policy) ? value : null,
+  });
+
+  try {
+    const cached = await getCachedEndpoint(agentId, provider);
+    if (cached !== null) return admit(cached);
+  } catch {
+    // A cache read failure falls through to the source of truth.
+  }
+
+  let stored: string | null = null;
+  try {
+    // `error` is read, and that is the whole point of this block.
+    //
+    // supabase-js reports a query failure by RETURNING `{ data: null, error }`,
+    // not by throwing — so the catch below never sees one, and destructuring
+    // only `data` made a failed read indistinguishable from a credential that
+    // has no endpoint. The consequence of that guess was to send a real provider
+    // credential to the built-in provider host: for a key provisioned for
+    // someone else's server (LiteLLM, vLLM, an internal gateway) that is the
+    // wrong destination, not a safe default. It also CACHED the guess, so one
+    // transient blip pinned the wrong host for the whole TTL.
+    const { data, error } = await db
+      .from("provider_credentials")
+      .select("endpoint_base_url, agents!inner(id)")
+      .eq("agents.id", agentId)
+      .eq("provider", provider)
+      .eq("is_active", true)
+      .maybeSingle();
+    if (error) throw error;
+    stored =
+      typeof (data as { endpoint_base_url?: unknown } | null)?.endpoint_base_url === "string"
+        ? ((data as { endpoint_base_url: string }).endpoint_base_url)
+        : null;
+  } catch {
+    // Not knowing where a credential goes is a reason to refuse the call, and
+    // the caller does exactly that. Deliberately NOT cached: caching an unknown
+    // as an absence is how one blip outlives itself by a minute.
+    //
+    // This is the same direction as the direct-key rule in CLAUDE.md invariant
+    // 3 — an unreadable credential was not authenticated — and the opposite of
+    // the kill switch, which fails open because Redis suspend is its backstop.
+    // There is no backstop for a destination.
+    return { known: false };
+  }
+
+  // An empty result with no error IS an answer: this credential has no endpoint.
+  // Caching that absence is what keeps the common case off the database.
+  waitUntil(setCachedEndpoint(agentId, provider, stored ?? "", KEY_CACHE_TTL_S));
+  return admit(stored);
+}
 
 function clientIp(req: Request): string {
   // Cloudflare overwrites this header at its edge, but other hosts may pass a
@@ -237,7 +489,7 @@ async function authenticateGatewayRequest(
       // suspended or over-budget agent presenting a valid key was still seen,
       // and that is precisely when an operator wants to know it is still live.
       stampLastSeen(principal.agentId);
-      return { ok: true, principal, db };
+      return { ok: true, principal, db, credentialToken: credential.token };
     } catch {
       waitUntil(
         captureError(new Error("direct key authentication unavailable"), {
@@ -268,6 +520,7 @@ async function authenticateGatewayRequest(
   return {
     ok: true,
     db,
+    credentialToken: credential.token,
     principal: {
       kind: "passport",
       agentId: claims.agid,
@@ -368,7 +621,10 @@ async function evaluateCurrentPolicyGate(
   db: ServiceDatabase,
   userId: string,
   agentId: string,
-  base: GateBaseInput
+  base: GateBaseInput,
+  budget: { tokens: number | null; microcents: number | null },
+  current?: Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>>,
+  policyFailClosed = process.env.POLICY_FAIL_CLOSED === "true"
 ): Promise<{
   gate: ReturnType<typeof evaluateGate>;
   policy: GatePolicyInput;
@@ -377,19 +633,31 @@ async function evaluateCurrentPolicyGate(
   shadow: unknown;
   /** Which candidate it is. Stamped onto every verdict; see lib/policy-shadow.ts. */
   shadowRev: string | null;
+  /** Which complete live rule set this call evaluated. Signed into its receipt. */
+  liveRev: string;
   /** The live counter question and its answer, for shadowVerdict's rule 3. */
   hourly: HourlyObservation;
   shadowWould?: string;
+  /**
+   * What Postgres knows about this agent's budget counters, carried out of the
+   * read that already happened. Rides to the open script as an argument so the
+   * loss check costs no extra round trip and is evaluated inside the same
+   * atomic script that moves the money.
+   */
+  budgetState: { epoch: string | null; established: boolean };
 }> {
-  const { policy: currentPolicy, shadow } = await readCurrentAgentPolicyAndShadow(
-    db,
-    userId,
-    agentId
-  );
+  const { policy: currentPolicy, shadow, budgetState } =
+    current ?? (await readCurrentAgentPolicyAndShadow(db, userId, agentId));
   const policy: GatePolicyInput =
     currentPolicy === POLICY_UNREADABLE
       ? { kind: POLICY_UNREADABLE }
       : { kind: "value", value: currentPolicy };
+  const liveRev = effectiveLivePolicyRevision(
+    currentPolicy,
+    base.scopes ?? [],
+    budget,
+    policyFailClosed
+  );
 
   if (currentPolicy === POLICY_UNREADABLE) {
     logFailOpen("policy_read");
@@ -398,7 +666,7 @@ async function evaluateCurrentPolicyGate(
   let gate = evaluateGate({
     ...base,
     policy,
-    policyFailClosed: process.env.POLICY_FAIL_CLOSED === "true",
+    policyFailClosed,
   });
   let policyRateLimit: GateRateLimitInput | undefined;
   // The cap the LIVE policy required, which is the question the counter was
@@ -414,7 +682,7 @@ async function evaluateCurrentPolicyGate(
     gate = evaluateGate({
       ...base,
       policy,
-      policyFailClosed: process.env.POLICY_FAIL_CLOSED === "true",
+      policyFailClosed,
       policyRateLimit,
     });
   }
@@ -435,9 +703,28 @@ async function evaluateCurrentPolicyGate(
     ...(policyRateLimit ? { policyRateLimit } : {}),
     shadow,
     shadowRev,
+    liveRev,
     hourly,
+    budgetState,
     ...(shadowWould ? { shadowWould } : {}),
   };
+}
+
+function effectiveLivePolicyRevision(
+  policy: unknown,
+  scopes: readonly VisaScope[],
+  budget: { tokens: number | null; microcents: number | null },
+  policyFailClosed: boolean
+): string {
+  return livePolicyRevision({
+    policy:
+      policy === POLICY_UNREADABLE
+        ? { state: "unreadable" }
+        : { state: "value", value: policy },
+    scopes,
+    budget,
+    policyFailClosed,
+  });
 }
 
 function policyBlockDetails(gate: ReturnType<typeof evaluateGate>): {
@@ -514,7 +801,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // ── 1. Authenticate passport visa or Direct Agent Key ─────────────────────
   const authentication = await authenticateGatewayRequest(req, provider);
   if (!authentication.ok) return authentication.response;
-  const { principal, db } = authentication;
+  const { principal, db, credentialToken } = authentication;
   const agentId = principal.agentId;
   const userId = principal.userId;
   const scopes = principal.scopes;
@@ -522,23 +809,6 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // the per-call credential-use id, never a fabricated visa id.
   const credentialUseId = crypto.randomUUID();
   const jti = principal.kind === "passport" ? principal.visaJti : credentialUseId;
-  const receiptIdentity =
-    principal.kind === "passport"
-      ? ({ passportId: principal.passportId, visaJti: principal.visaJti } as const)
-      : ({
-          authMethod: "direct_key",
-          agentAccessKeyId: principal.keyId,
-          credentialUseId,
-        } as const);
-  const logIdentity =
-    principal.kind === "passport"
-      ? ({ passportId: principal.passportId, jti: principal.visaJti } as const)
-      : ({
-          authMethod: "direct_key",
-          agentAccessKeyId: principal.keyId,
-          credentialUseId,
-        } as const);
-  const reserveId = crypto.randomUUID();
   // Named here so the id can travel in a response header before the log row —
   // and the signed receipt inside it — exists. The proof is built and signed
   // later, in waitUntil; the hot path costs one uuid and one header.
@@ -548,8 +818,64 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     principal.budgetCents == null
       ? null
       : Math.round(Number(principal.budgetCents) * MICROCENTS_PER_CENT);
-  const spentSnapshot: number = principal.spentTokens;
-  const spentMicrocentsSnapshot: number = principal.spentMicrocents;
+  // `principal.spentTokens` / `.spentMicrocents` — the visa's `st`/`sc` claims —
+  // are deliberately READ BY NOTHING NOW. They used to seed the hot-path spend
+  // counters, and that seed was a way to create capacity: the claims are minted
+  // from `agents.spent_*`, a best-effort mirror lib/log.ts drops silently on RPC
+  // failure, so a cold instance re-seeded from an older, lower number.
+  //
+  // The claims stay IN the visa — removing them is a visa-shape change and out
+  // of scope here — they simply stop deciding anything. Authoritative spend now
+  // comes from Redis, which is rebuilt from `agent_logs` when it has to be.
+
+  // A proof is authentication, so validate it before a stolen bearer can spend
+  // the legitimate agent's request-rate allowance. Direct keys keep their old
+  // ordering and remain bearer credentials.
+  let currentPolicySnapshot:
+    | Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>>
+    | null = null;
+  let passportAuthMethod: PassportAuthMethod = "passport";
+  // Only ever set by observe mode. Rides to the audit row and stops there.
+  let senderProofWould: SenderProofObservation | undefined;
+  if (principal.kind === "passport") {
+    currentPolicySnapshot = await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+    const senderConstraint = await enforceSenderConstraint(
+      req,
+      credentialToken,
+      principal,
+      currentPolicySnapshot
+    );
+    if (!senderConstraint.ok) return senderConstraint.response;
+    passportAuthMethod = senderConstraint.authMethod;
+    senderProofWould = senderConstraint.would;
+  }
+
+  // Built from the result of the authentication path, never from the flag.
+  // This value is carried unchanged into both the signed receipt and audit row.
+  const receiptIdentity =
+    principal.kind === "passport"
+      ? ({
+          authMethod: passportAuthMethod,
+          passportId: principal.passportId,
+          visaJti: principal.visaJti,
+        } as const)
+      : ({
+          authMethod: "direct_key",
+          agentAccessKeyId: principal.keyId,
+          credentialUseId,
+        } as const);
+  const logIdentity =
+    principal.kind === "passport"
+      ? ({
+          authMethod: passportAuthMethod,
+          passportId: principal.passportId,
+          jti: principal.visaJti,
+        } as const)
+      : ({
+          authMethod: "direct_key",
+          agentAccessKeyId: principal.keyId,
+          credentialUseId,
+        } as const);
 
   // ── Per-agent request-rate limit (call-volume DoS / abuse guard) ─────────────
   const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
@@ -612,6 +938,17 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   const currentOwner = () =>
     (ownerRead ??= readCurrentOwner(db, userId).catch(() => null));
 
+  // The passport path began this snapshot before the rate limiter because the
+  // sender proof is authentication. Direct keys retain the previous ordering.
+  const policyFailClosed = process.env.POLICY_FAIL_CLOSED === "true";
+  currentPolicySnapshot ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+  const policyRevision = effectiveLivePolicyRevision(
+    currentPolicySnapshot.policy,
+    scopes,
+    { tokens: capTokens, microcents: capMicrocents },
+    policyFailClosed
+  );
+
   // Set once the policy gate has run, and read by the log helpers below —
   // which are defined first, so this is a `let` rather than a parameter on every
   // one of them. Stays undefined when the agent has no shadow policy, and the
@@ -643,6 +980,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
             httpStatus,
             startedAt: started,
             latencyMs: Date.now() - started,
+            policyRevision,
             owner: await currentOwner(),
           }),
           agentId,
@@ -653,6 +991,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           status,
           latencyMs: Date.now() - started,
           ...(shadowWould ? { policyShadowWould: shadowWould } : {}),
+          ...(senderProofWould ? { senderProofWould } : {}),
         }))()
     );
 
@@ -755,7 +1094,15 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // ── 4. Current per-agent policy ────────────────────────────────────────────
   // Policy is deliberately not a visa claim: an owner's change takes effect on
   // the next cache refresh rather than waiting for the visa TTL.
-  const currentPolicyGate = await evaluateCurrentPolicyGate(db, userId, agentId, gateBase);
+  const currentPolicyGate = await evaluateCurrentPolicyGate(
+    db,
+    userId,
+    agentId,
+    gateBase,
+    { tokens: capTokens, microcents: capMicrocents },
+    currentPolicySnapshot,
+    policyFailClosed
+  );
   shadowWould = currentPolicyGate.shadowWould;
   if (currentPolicyGate.gate.deniedBy === "policy") {
     const policy = policyBlockDetails(currentPolicyGate.gate);
@@ -780,11 +1127,22 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // early-refusal path above exactly as it was.
   const estimatedUsage = estimateTokenUsage(bodyObj);
   const estimate = estimatedUsage.totalTokens;
-  // NX, and the snapshot does not change between attempts, so this stays outside
-  // the loop.
-  if (capTokens != null || capMicrocents != null) {
-    await seedSpent(agentId, spentSnapshot, spentMicrocentsSnapshot);
-  }
+  // `seedSpent` USED TO BE HERE, and its deletion is the point.
+  //
+  // It NX-seeded `spent:` from the visa's `st` claim, which is minted from
+  // `agents.spent_tokens` — a best-effort mirror that lib/log.ts drops silently
+  // on RPC failure. So after a Redis flush it re-initialised the counter from an
+  // older, LOWER number and handed the difference back as spendable capacity,
+  // on a schedule nobody could see.
+  //
+  // Nothing seeds from a mirror any more. Either Postgres has never recorded
+  // budget state for this agent — in which case enforcement starts at zero,
+  // deliberately, because enforcement begins when the budget does — or it has,
+  // and a disagreeing epoch means loss, which is refused rather than guessed at.
+  // The check rides into the open script as an argument, so it costs no extra
+  // round trip and cannot race a concurrent flush.
+  const budgeted = capTokens != null || capMicrocents != null;
+  const budgetState = budgeted ? currentPolicyGate.budgetState : undefined;
 
   interface Settlement {
     /** The budget release alone. The loop AWAITS this before the next reserve. */
@@ -820,14 +1178,82 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         settle: Settlement;
       };
 
+    /**
+     * What the failure net needs to know about an attempt in flight.
+     *
+     * Between opening a hold and settling it there are roughly eight places that
+     * can throw — a receipt helper, a JSON parse, an unexpected null. Every one
+     * of them used to leave the reservation open, and before this work that
+     * merely meant waiting 960s for a marker to expire. Now an open hold NEVER
+     * expires, so a leak here would consume the agent's budget until a human
+     * resolved it by hand. The net has to be structural.
+     */
+  interface AttemptGuard {
+    attemptId: string;
+    /** Set the moment a settlement is started, so the net never double-settles. */
+    settled: boolean;
+    /**
+     * Set IMMEDIATELY before the `fetch` call and nowhere else.
+     *
+     * The boundary is the opposite way round from the obvious reading: `fetch`
+     * THROWING is `usage_unknown`, not `not_dispatched`, because the request may
+     * have arrived and been served before the connection died. So this flips
+     * before the call, not after it, and the ordinary network-failure catch
+     * below keeps owning that case explicitly.
+     */
+    dispatched: boolean;
+  }
+
   const runAttempt = async (
     target: AttemptTarget,
-    { primary }: { primary: boolean }
+    opts: { primary: boolean }
+  ): Promise<AttemptOutcome> => {
+    // Per ATTEMPT, not per request. A failover makes two attempts under one
+    // visa and they are two separate holds against the same budget, so an id
+    // shared between them would make the second settle read as a replay of the
+    // first and silently skip a real charge.
+    const guard: AttemptGuard = {
+      attemptId: crypto.randomUUID(),
+      settled: false,
+      dispatched: false,
+    };
+    try {
+      return await attemptWithHold(target, opts, guard);
+    } catch (error) {
+      // THE HOLD CLOSES EVEN WHEN NOTHING ELSE WORKED. Deliberately not routed
+      // through `reconcile`: that also writes an audit row and signs a receipt,
+      // and this is the path where something in exactly that machinery just
+      // threw. Settling directly keeps the money correct without depending on
+      // the code that failed.
+      //
+      // Settling an attempt whose hold was never opened is a no-op that moves
+      // nothing (the script refuses to guess), so this is safe to run
+      // unconditionally on the un-settled path.
+      if (!guard.settled) {
+        waitUntil(
+          guard.dispatched
+            ? // It may have been sent and billed. Charge the estimate; the
+              // script keeps the greater of that and the zero passed here.
+              settleUnknown({ agentId, attemptId: guard.attemptId, tokens: 0, microcents: 0 })
+            : releaseUndispatched({ agentId, attemptId: guard.attemptId })
+        );
+      }
+      throw error;
+    }
+  };
+
+  const attemptWithHold = async (
+    target: AttemptTarget,
+    { primary }: { primary: boolean },
+    guard: AttemptGuard
   ): Promise<AttemptOutcome> => {
     const attemptProvider = target.provider;
     const attemptModel = target.model;
     const attemptReceiptId = target.receiptId;
-    const reserveId = crypto.randomUUID();
+    const attemptId = guard.attemptId;
+    const usageProtocol = isOpenAiResponsesEndpoint(attemptProvider, target.upstreamPath)
+      ? "responses"
+      : "provider";
 
     // S5: ensure OpenAI-compatible streams report usage. Re-derived per attempt —
     // the flag is provider-shaped and the model in the body changes. A copy, not
@@ -837,7 +1263,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const attemptBody: Record<string, unknown> = model
       ? { ...bodyObj, model: attemptModel }
       : { ...bodyObj };
-    if (usesOpenAiUsageShape(attemptProvider) && wantsStream) {
+    if (usesOpenAiUsageShape(attemptProvider) && wantsStream && usageProtocol !== "responses") {
       attemptBody.stream_options = {
         ...((bodyObj.stream_options as Record<string, unknown> | undefined) ?? {}),
         include_usage: true,
@@ -852,16 +1278,111 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       attemptProvider
     );
 
-    // ── 5. Budget reserve (atomic) ─────────────────────────────────────────────
-    const reserve = await reserveBudget({
+    // ── 5. Open the attempt's hold (atomic) ────────────────────────────────────
+    const reserve = await openHold({
       agentId,
-      reserveId,
+      attemptId,
       estimate,
       estimateMicrocents,
       capTokens,
       capMicrocents,
-      markerTtlSeconds: RESERVE_MARKER_TTL_S,
+      // Recorded ON THE HOLD, read by nothing that moves money. It is the only
+      // thing that identifies an abandoned attempt to the operator who has to
+      // decide it: that attempt wrote no agent_logs row, so there is no receipt
+      // and no other place the attempt id appears. Provider + model + started-at
+      // is what makes the line findable on the provider's own billing page.
+      provider: attemptProvider,
+      ...(attemptModel ? { model: attemptModel } : {}),
+      ...(budgetState ? { budgetState } : {}),
     });
+
+    // First budgeted call of this agent's life: Redis minted an epoch and
+    // Postgres has to learn it, or the loss check can never fire. Purging the
+    // policy cache alongside is NOT optional — it is what bounds the window in
+    // which a flush would go undetected to this one call rather than to a full
+    // cache TTL, because every read until then would keep reporting
+    // `established: false` and skip the check entirely.
+    if (reserve.epochToPersist) {
+      const epoch = reserve.epochToPersist;
+      // AWAITED, NOT SCHEDULED. This used to run inside `waitUntil`, which calls
+      // it before the send but does not wait for it — so a call could be
+      // forwarded and billed with the marker still unwritten.
+      //
+      // That window is not a small one. `open` refuses a lost epoch only for an
+      // agent Postgres says was established; until this row lands it says the
+      // opposite. A Redis flush inside the window is therefore undetectable
+      // FOREVER: the next call mints a fresh epoch, seeds both counters at zero,
+      // and the agent's entire spend history is gone with its budget restored.
+      // One database write on the first budgeted call of an agent's life is a
+      // small price for the loss check being able to fire at all.
+      //
+      // Writing the SAME value again is the intended behaviour on a lost reply —
+      // `epochToPersist` is the epoch Redis already holds, never a fresh mint —
+      // so a retry converges rather than bricking the agent on a mismatch.
+      try {
+        await establishBudgetState(agentId, epoch);
+      } catch (error) {
+        // Cannot confirm the generation ⇒ nothing is forwarded. The contract is
+        // two-sided: a matching durable generation, or no upstream call.
+        //
+        // The hold this attempt just opened is released FIRST, and before the
+        // failover branch so both exits release exactly once. Nothing has been
+        // dispatched — this returns above the send — so the one full release in
+        // the system is the honest ending, and without it every transient
+        // database error would strand a reservation that only an operator can
+        // clear. Scheduled, not awaited: a failed release leaves an open hold,
+        // which is recoverable, while a slower 503 is not better than a fast one.
+        waitUntil(releaseUndispatched({ agentId, attemptId }));
+        if (!primary) return { kind: "skipped" };
+        waitUntil(
+          captureError(error, {
+            route: "api.proxy",
+            method: req.method,
+            status: 503,
+            provider: attemptProvider,
+            agentId,
+            jti,
+            code: "blocked_budget_state",
+          })
+        );
+        logBlocked("blocked_budget_state", attemptModel, 503);
+        captureBlocked("blocked_budget_state", 503);
+        return { kind: "response", response: errR(503, "blocked_budget_state") };
+      }
+      // The purge stays scheduled: it bounds how long a stale `established:
+      // false` can be read from cache, but the request does not depend on it
+      // and a failed purge must not refuse a call whose epoch is durable.
+      waitUntil(purgeAgentPolicy(userId, agentId));
+    }
+
+    // A LOST-STATE REFUSAL IS NOT A CAP DENIAL, and it returns before the gate
+    // so that it cannot become one. `evaluateGate` answers `deniedBy: "budget"`
+    // with 402 `blocked_budget`, which an agent reads as "I am out of money" and
+    // stops retrying for. This is an operator-recoverable infrastructure fault:
+    // 503, retryable, fixed by a rebuild and not by raising a cap. Keeping it
+    // out of the gate also keeps the gate's budget contract exactly "a cap
+    // denied this" rather than widening it to a third meaning — so only
+    // `tokens` / `cost` are ever passed in below.
+    if (!reserve.ok && reserve.reason === "state") {
+      // A fallback cannot rescue this: the counters are lost for the AGENT, not
+      // for one provider, so every attempt would be refused identically.
+      if (!primary) return { kind: "skipped" };
+      waitUntil(
+        captureError(new Error("budget state unavailable"), {
+          route: "api.proxy",
+          method: req.method,
+          status: 503,
+          provider: attemptProvider,
+          agentId,
+          jti,
+          code: "blocked_budget_state",
+        })
+      );
+      logBlocked("blocked_budget_state", attemptModel, 503);
+      captureBlocked("blocked_budget_state", 503);
+      return { kind: "response", response: errR(503, "blocked_budget_state") };
+    }
+
     const finalGate = evaluateGate({
       ...gateBase,
       provider: attemptProvider,
@@ -873,7 +1394,14 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         : {}),
       budget: {
         ok: reserve.ok,
-        reason: reserve.reason,
+        // ONLY CAP REASONS REACH THE GATE. `state` was answered above with a
+        // 503 and returned; narrowing here rather than widening the gate's
+        // budget contract is deliberate, so `deniedBy === "budget"` keeps
+        // meaning exactly "a cap denied this". If this union grows again,
+        // narrow it here too rather than teaching lib/gate.ts a third meaning.
+        ...(reserve.reason === "tokens" || reserve.reason === "cost"
+          ? { reason: reserve.reason }
+          : {}),
         estimateTokens: estimate,
         estimateMicrocents,
         reservedTokens: reserve.reserved,
@@ -891,12 +1419,57 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     }
 
     // From here a reservation is held; it MUST be reconciled on every exit path.
+    // Where this attempt's credential goes, resolved BEFORE `reconcile` because
+    // that closure prices the call and a custom endpoint is unpriced. Declaring
+    // it at the injection point instead put it in the temporal dead zone of a
+    // closure TypeScript cannot order-prove, which the failover suite caught as
+    // a 500 where a 402 belonged.
+    //
+    // `resolveEndpoint` returns null for every deployment that has not opted in,
+    // which is the default — so on Cloud today this is one short-circuit and no
+    // reads at all. It re-validates rather than trusting the row: a value stored
+    // while the gate was wider must not be reached after an operator narrowed it.
+    const resolvedEndpoint = await resolveEndpoint(db, agentId, attemptProvider);
+    // Null both when there is genuinely no endpoint and when the read failed —
+    // the failure is refused below, and pricing an unsent call is moot either way.
+    const custom = resolvedEndpoint.known ? resolvedEndpoint.endpoint : null;
+
+    /**
+     * Close this attempt's hold and write its audit row.
+     *
+     * `outcome` IS REQUIRED AND HAS NO DEFAULT. That is the entire point of the
+     * argument: TypeScript then forces an explicit decision at every one of the
+     * call sites below, and a new exit path cannot inherit a settlement policy
+     * by accident. It is deliberately the THIRD parameter, ahead of the optional
+     * `httpStatus`, so every existing call fails to compile rather than
+     * silently keeping its old behaviour.
+     *
+     *   complete       — the provider gave a definitive answer. Charge what was
+     *                    observed; that may be nothing.
+     *   usage_unknown  — it was dispatched and may have been billed, and nobody
+     *                    can say for how much. Charges max(observed, estimate).
+     *   not_dispatched — provably never sent. The only full release.
+     */
     const reconcile = (
       usage: Usage,
       status: Parameters<typeof writeLog>[0]["status"],
+      outcome: "complete" | "usage_unknown" | "not_dispatched",
       httpStatus = 200
     ): Settlement => {
-      const cost = costMicrocentsForUsage(usage, attemptModel, attemptProvider);
+      // Before anything that could throw. The net above must never fire for an
+      // attempt whose settlement has already been decided here.
+      guard.settled = true;
+      // Unpriced when it did not go to the provider's own host: a proxy may mark
+      // up, re-route or alias, so a matching model name is not a matching price.
+      //
+      // `cost` is 0 in that case, and 0 IS NOT THE ANSWER — it is the absence of
+      // one. Carry the distinction rather than letting the zero travel alone:
+      // the audit row records null (unknown), the receipt carries `unp`, and the
+      // spend mirror takes the 0 because unknown money cannot be added to a
+      // total. Every one of those three used to receive a bare zero and present
+      // it as "this call was free".
+      const cost = costMicrocentsForUsage(usage, attemptModel, attemptProvider, custom);
+      const priced = isPricedEndpoint(custom);
 
       // Every token the provider processed for this call, which is what a token
       // budget is a limit on. Anthropic reports a cached prompt across three
@@ -908,26 +1481,74 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       const billedTokens =
         usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
 
-      // Release the reservation FIRST and hold its promise. Everything after this
-      // line — receipt signing included — is then structurally unable to prevent
-      // it. Built inline in the tasks array instead, a throw while assembling the
-      // writeLog argument would destroy the array before reconcileBudget was ever
-      // called, leaking the reservation until its marker expires 960s later and
-      // silently shrinking the agent's budget in the meantime.
-      const released = reconcileBudget({
-        agentId,
-        reserveId,
-        estimate,
-        estimateMicrocents,
-        actualTokens: billedTokens,
-        actualMicrocents: cost,
-      });
+      // WHAT THE COST DIMENSION IS CHARGED, which is not always the price.
+      //
+      // For an unpriced endpoint `cost` is 0 — not because the call was free but
+      // because nobody could price it. Settling the cost dimension at that zero
+      // released the whole cost reservation, so a cost cap NEVER ADVANCED on an
+      // agent using a custom endpoint: it could run forever against a limit that
+      // could not move. The reservation stands instead. The audit row still
+      // records `cost_microcents: null` + `unpriced: true`, because what was
+      // enforced and what was priced are different questions.
+      const chargeMicrocents = priced ? cost : estimateMicrocents;
+      // What the ROW will say was observed, in the terms the spend view reads it
+      // in: `coalesce(enforced_microcents, coalesce(cost_microcents, 0))`. An
+      // unpriced row contributes 0 there, so this is 0 for one.
+      const observedMicrocentsForRow = priced ? cost : 0;
+
+      // Close the hold FIRST and hold its promise. Everything after this line —
+      // receipt signing included — is then structurally unable to prevent it.
+      // Built inline in the tasks array instead, a throw while assembling the
+      // writeLog argument would destroy the array before the hold was ever
+      // settled, leaving the reservation open and silently shrinking the
+      // agent's budget until an operator resolved it by hand.
+      //
+      // The caller passes only OBSERVED figures. The script computes the release
+      // from the estimate IT stored, so settlement can no longer be handed an
+      // estimate that disagrees with what was actually reserved — and a replay
+      // of any of these is a no-op that returns the first call's answer.
+      const settlement: Promise<SettleResult> =
+        outcome === "not_dispatched"
+          ? releaseUndispatched({ agentId, attemptId })
+          : outcome === "usage_unknown"
+            ? settleUnknown({
+                agentId,
+                attemptId,
+                tokens: billedTokens,
+                microcents: chargeMicrocents,
+              })
+            : settleKnown({
+                agentId,
+                attemptId,
+                tokens: billedTokens,
+                microcents: chargeMicrocents,
+              });
+      const released: Promise<unknown> = settlement;
 
       const done = (async () => {
-        // Signed here, inside waitUntil, so the hot path pays nothing for it.
-        // signReceipt never throws — it returns null on any failure, including an
-        // unconfigured deployment.
-        const receipt = safeReceipt({
+        // What the hold ACTUALLY applied, read back from the script rather than
+        // recomputed here. Recomputing would reintroduce the whole defect class:
+        // two places deciding what an attempt cost, disagreeing, and the
+        // disagreement showing up as an agent refused at a cap the dashboard
+        // says it is nowhere near.
+        //
+        // Resolved ALONGSIDE the receipt rather than before it. Serialising the
+        // two would put a Redis round trip in front of the audit row for no
+        // reason — the receipt does not depend on the settlement — and it is the
+        // audit row that has to survive.
+        //
+        // `.catch(() => null)` because a settle that FAILED must not also cost
+        // the audit row. We then simply do not know what was applied, so the
+        // enforced columns are omitted (absence already means "the observed
+        // figure was what was enforced", which is the least-wrong reading) and
+        // the spend mirror is skipped rather than fed a guess.
+        const [applied, receipt] = await Promise.all([
+          settlement.catch(() => null),
+          // Signed here, inside waitUntil, so the hot path pays nothing for it.
+          // signReceipt never throws — it returns null on any failure, including
+          // an unconfigured deployment.
+          (async () =>
+            safeReceipt({
           receiptId: attemptReceiptId,
           ...receiptIdentity,
           agentId,
@@ -959,14 +1580,17 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           ...(usage.cacheReadTokens ? { cacheReadTokens: usage.cacheReadTokens } : {}),
           ...(usage.cacheWriteTokens ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
           costMicrocents: cost,
+          ...(priced ? {} : { unpriced: true }),
           status,
           httpStatus,
           startedAt: started,
           latencyMs: Date.now() - started,
+          policyRevision: currentPolicyGate.liveRev,
           owner: await currentOwner(),
           previousReceiptId: target.prev,
           failoverReason: target.why,
-        });
+            }))(),
+        ]);
 
         const tasks: Promise<unknown>[] = [
           released,
@@ -975,6 +1599,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
             receipt,
             agentId,
             userId,
+            // The link that makes this row and an operator's later recovery of
+            // the same attempt mutually exclusive. See migration 0056: without
+            // it, an attempt the proxy already recorded could be charged a
+            // second time by the hold-resolve route.
+            attemptId,
             ...logIdentity,
             provider: attemptProvider,
             model: attemptModel,
@@ -986,17 +1615,70 @@ async function handle(req: Request, params: { provider: string; path: string[] }
             inputTokens:
               usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens,
             outputTokens: usage.outputTokens,
-            costMicrocents: cost,
+            costMicrocents: priced ? cost : null,
+            // Says WHY the cost above is null, which the null alone cannot: a
+            // blocked call has no recorded cost either and was not unpriceable.
+            // Written only when true — see the note on LogEntryBase.unpriced,
+            // and db/migrations/0053 for why the negative is never sent.
+            ...(priced ? {} : { unpriced: true }),
             status,
+            // WHAT WAS ENFORCED, when that differs from what was observed above.
+            // Not a correction of the observed figures — both are true and they
+            // answer different questions. Omitted when they agree, which keeps
+            // an ordinary row byte-identical to what this wrote before 0055 and
+            // keeps a pre-0055 deployment writing audit rows at all.
+            //
+            // A REFUSED OR MISSING SETTLE CANNOT CERTIFY A FREE CALL. `conflict`
+            // and `anomaly` both return zeros while moving nothing, and this
+            // condition used to be "differs from observed" alone — so an
+            // attempt whose settle was refused wrote `enforced_tokens: 0`, and
+            // `agent_log_spend_rows` reads COALESCE(enforced, observed), which
+            // made a provider call that really happened count as free. Those
+            // two outcomes leave the cost UNDECIDED and the hold open; absence
+            // is the honest answer, and it falls back to what was observed.
+            // A replay is not in that set: its figures are the first
+            // resolution's, and they really were enforced.
+            ...(applied && !applied.conflict && !applied.anomaly
+              ? {
+                  ...(applied.appliedTokens !== billedTokens
+                    ? { enforcedTokens: applied.appliedTokens }
+                    : {}),
+                  ...(applied.appliedMicrocents !== observedMicrocentsForRow
+                    ? { enforcedMicrocents: applied.appliedMicrocents }
+                    : {}),
+                }
+              : {}),
             latencyMs: Date.now() - started,
             // The TARGET's verdict, not the request's. See AttemptTarget.
             ...(target.shadowWould ? { policyShadowWould: target.shadowWould } : {}),
+            // And here the two diverge. A shadow verdict is per ATTEMPT — the
+            // draft is re-evaluated against each provider, and two attempts can
+            // legitimately disagree. A sender proof is per REQUEST: it is
+            // checked once, at authentication, before any provider is chosen.
+            // So it rides the primary attempt's row and no other, which keeps a
+            // failed-over call from contributing two identical observations and
+            // silently doubling every count built on them.
+            ...(primary && senderProofWould ? { senderProofWould } : {}),
           }),
         ];
-        if (status === "ok") {
-          // Same folded figure as the row, so the dashboard mirror and the
-          // authoritative checkpoint cannot disagree about one call.
-          tasks.push(mirrorSpend(agentId, billedTokens, cost));
+        // Mirrored for `usage_unknown` TOO, not only `ok`, and with the ENFORCED
+        // figures rather than the observed ones.
+        //
+        // Both halves matter. The checkpoint now folds
+        // `coalesce(enforced_*, observed)` over both statuses (0055), so a
+        // mirror that skipped `usage_unknown`, or that passed the observed
+        // figures, would under-count what the checkpoint counts — and this
+        // mirror is what lib/dashboard-attention.ts, lib/control-graph.ts,
+        // the passport page and the decision trace all read. The visible
+        // symptom is an operator seeing "40 tokens" on an agent that is being
+        // refused at its cap.
+        //
+        // NOT mirrored on a replay. `increment_agent_spend` is an INCREMENT, so
+        // mirroring a settle that applied nothing would add the delta a second
+        // time — the same replay-creates-a-delta bug this work exists to remove,
+        // just pointed at the mirror instead of the counter.
+        if (applied?.applied && (status === "ok" || status === "usage_unknown")) {
+          tasks.push(mirrorSpend(agentId, applied.appliedTokens, applied.appliedMicrocents));
         }
         return Promise.all(tasks);
       })();
@@ -1009,7 +1691,40 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       return { kind: "response", response };
     };
 
+    // The endpoint read gave no answer. Refuse HERE — before step 6 fetches the
+    // credential — because if we do not know where a key is going there is no
+    // reason to go and get it, and `get_provider_key` is the only decrypt path
+    // in the product (trust boundary 5). The reservation taken above is released
+    // by `reconcile` on this path like every other exit.
+    //
+    // Terminal, not retryable: failing over would hand the same call to the next
+    // credential while the same database is still not answering.
+    if (!resolvedEndpoint.known) {
+      waitUntil(
+        captureError(new Error("endpoint resolution failed"), {
+          route: "api.proxy",
+          method: req.method,
+          status: 502,
+          provider: attemptProvider,
+          agentId,
+          jti,
+          code: "endpoint_unavailable",
+        })
+      );
+      return terminal(
+        errR(502, "endpoint_unavailable"),
+        // Refused before step 6 even fetches the credential, so nothing was
+        // sent and nothing can have been billed. A full release.
+        reconcile(NO_USAGE, "endpoint_unavailable", "not_dispatched", 502)
+      );
+    }
+
     // ── 6. Resolve provider key (encrypted cache, else Vault RPC) ──────────────
+    //
+    // The endpoint is resolved alongside it and cached separately: it is an
+    // address, not a secret, so it never goes through lib/crypto/aesgcm.ts and
+    // is deliberately NOT returned by get_provider_key — leaving the only
+    // decrypt path in the product byte-unchanged (trust boundary #5).
     let providerKey: string | null = null;
     const cached = await getCachedKey(agentId, attemptProvider);
     if (cached) providerKey = await open(cached);
@@ -1029,7 +1744,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     if (!providerKey) {
       // No usage; release the reservation by reconciling with the estimate as spend
       // would over-count, so release exactly the reserve and log zero usage.
-      const settle = reconcile(NO_USAGE, "no_provider_key", 409);
+      // There was no credential to inject, so the request never left the
+       // building.
+      const settle = reconcile(NO_USAGE, "no_provider_key", "not_dispatched", 409);
       // A fallback with no stored key is a fallback that cannot run. Release what
       // it took and move on rather than answering the client with its problem.
       if (!primary) {
@@ -1041,7 +1758,24 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     }
 
     // ── 7. Inject + forward ────────────────────────────────────────────────────
-    const targetUrl = `${upstreamBaseUrl(attemptProvider)}/${target.upstreamPath.join("/")}${new URL(req.url).search}`;
+    //
+    const upstreamBase = custom ?? upstreamBaseUrl(attemptProvider);
+    let targetUrl: string;
+    try {
+      // One canonical join. `new URL` silently discards part of an operator's
+      // base path — see lib/providers/endpoint.ts — and a gateway that drops
+      // `/openai/v1` sends a real credential to a path nobody named.
+      targetUrl = `${joinUpstream(upstreamBase, target.upstreamPath)}${new URL(req.url).search}`;
+    } catch {
+      // The upstream URL could not even be constructed. Nothing was sent.
+      const settle = reconcile(NO_USAGE, "blocked_endpoint", "not_dispatched", 400);
+      if (!primary) {
+        await settle.released;
+        waitUntil(settle.done);
+        return { kind: "skipped" };
+      }
+      return terminal(errR(400, "blocked_endpoint"), settle);
+    }
     const fwdHeaders = new Headers();
     fwdHeaders.set("content-type", "application/json");
     // Forward only a sanitized Accept (strip CR/LF/control chars to prevent header
@@ -1055,6 +1789,63 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       fwdHeaders.set(h, v);
     }
 
+    // ── THE DISPATCH BOUNDARY ────────────────────────────────────────────────
+    //
+    // ONE ATTEMPT, ONE SEND. `openHold` wrote this attempt at `pre_dispatch`;
+    // this is the only transition to `dispatch_may_have_happened`, and it is
+    // the last thing that happens before the credential goes anywhere.
+    //
+    // It buys almost nothing on THIS path — a freshly minted attempt id is
+    // always granted — and that is exactly why it went unwired for so long.
+    // What it buys is truthful state for the RECOVERY path. Once this has run,
+    // SETTLE_LUA's `not_dispatched` guard refuses to release this hold, so an
+    // operator resolving an abandoned hold cannot record a request that really
+    // was sent as one that never happened. Until this call existed here the
+    // phase never moved, that guard could not fire, and `not_spent` on
+    // POST /holds/{attemptId}/resolve was a full refund of spent money.
+    //
+    // A refusal is NEVER a licence to send anyway: whoever won the permission
+    // may be inside `fetch` right now with its answer already lost.
+    let permitted: DispatchPermissionResult;
+    try {
+      permitted = await consumeDispatchPermission({ agentId, attemptId });
+    } catch (error) {
+      // UNREADABLE PERMISSION IS NOT GRANTED PERMISSION. Deliberately the
+      // opposite posture to the kill switch, which fails open because Redis
+      // suspend is its backstop. There is no backstop here: an unreachable
+      // Redis between the reserve and the send means a concurrent dispatch
+      // cannot be ruled out, so this one does not happen.
+      waitUntil(
+        captureError(error, {
+          route: "api.proxy",
+          method: req.method,
+          status: 503,
+          provider: attemptProvider,
+          agentId,
+          jti,
+          code: "dispatch_unavailable",
+        })
+      );
+      permitted = { granted: false, reason: "missing" };
+    }
+    if (!permitted.granted) {
+      // A fallback cannot rescue this, for the same reason a lost-state refusal
+      // cannot: what is ambiguous is our own accounting for this attempt, not
+      // the health of one provider.
+      //
+      // NOTHING IS SETTLED HERE. The hold stays exactly as it is — open, its
+      // reserve intact, visible to the operator through the holds list. If
+      // another handler won the permission, that handler owns the settlement;
+      // releasing here would hand back capacity for a call that may be in
+      // flight. If the hold was already terminal or missing, a settle would
+      // move nothing anyway.
+      if (!primary) return { kind: "skipped" };
+      logBlocked("dispatch_unavailable", attemptModel, 503);
+      captureBlocked("dispatch_unavailable", 503);
+      return { kind: "response", response: errR(503, "dispatch_unavailable") };
+    }
+    guard.dispatched = true;
+
     let upstream: Response;
     try {
       upstream = await fetch(targetUrl, {
@@ -1062,6 +1853,25 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         headers: fwdHeaders,
         body: req.method === "GET" ? undefined : forwardBody,
         signal: req.signal,
+        // THE CREDENTIAL DOES NOT FOLLOW REDIRECTS. Left at the `follow`
+        // default, the destination stops being ours: the Fetch algorithm
+        // deletes only `Authorization`, `Cookie` and `Proxy-Authorization`
+        // across a cross-origin hop, and Anthropic's credential rides
+        // `x-api-key` (lib/providers.ts) — so it survives, and the real Vault
+        // key reaches a host no operator listed. Measured in both undici and
+        // the Next-compiled Edge runtime, 2026-09-01.
+        //
+        // `isEndpointAllowed` decides where this request is AIMED; without
+        // this line the runtime decides where it LANDS, and the allowlist in
+        // `endpointPolicy()` stops being a control after one 302. Every other
+        // provider was protected only by the accident of using a bearer token.
+        //
+        // A 307/308 replays the body too, so this also stops the agent's
+        // prompt being forwarded onward.
+        //
+        // lib/owner/{domain,github,company}.ts already do this, on fetches
+        // that carry no credential at all.
+        redirect: "manual",
       });
     } catch (error) {
       waitUntil(
@@ -1075,7 +1885,14 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           code: "upstream_unreachable",
         })
       );
-      const settle = reconcile(NO_USAGE, "upstream_error", 502);
+      // DISPATCHED, NO ANSWER — and this is the case the plan's table is most
+      // easily read backwards. `fetch` THROWING is not "never sent": the
+      // request may have reached the provider and been served in full before
+      // the connection died. We cannot tell, so the estimate is charged and the
+      // hold is closed rather than released. The comment below already said the
+      // next provider may be the second to bill this request; the accounting
+      // now says so too.
+      const settle = reconcile(NO_USAGE, "usage_unknown", "usage_unknown", 502);
       return {
         kind: "retryable",
         // Cannot distinguish "never sent" from "sent, no answer came back", so
@@ -1085,6 +1902,37 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         response: errR(502, "upstream_unreachable"),
         settle,
       };
+    }
+
+    // With `redirect: "manual"` a 3xx arrives here as an ordinary response
+    // instead of being followed. It is refused, not passed through: a bare 3xx
+    // with its `Location` stripped is a confusing answer, and one WITH the
+    // Location would hand the caller an address — possibly an internal one —
+    // that the gateway reached on its behalf.
+    //
+    // Terminal rather than retryable. Unreachable-upstream fails over because
+    // it is an availability problem; a redirect is a deliberate answer from a
+    // provider that is up, and the next credential aimed at the same endpoint
+    // would be told the same thing.
+    if (upstream.status >= 300 && upstream.status < 400) {
+      waitUntil(
+        captureError(new Error("upstream answered with a redirect"), {
+          route: "api.proxy",
+          method: req.method,
+          status: 502,
+          provider: attemptProvider,
+          agentId,
+          jti,
+          // Deliberately not the Location: the point is that it does not travel.
+          code: "upstream_redirect",
+        })
+      );
+      return terminal(
+        errR(502, "upstream_redirect"),
+        // The provider gave a definitive answer — a 3xx — and did no work for
+        // it. Nothing to charge.
+        reconcile(NO_USAGE, "upstream_error", "complete", 502)
+      );
     }
 
     const contentType = upstream.headers.get("content-type") ?? "";
@@ -1143,12 +1991,16 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       if (!why) {
         return terminal(
           passthrough(),
-          reconcile(NO_USAGE, "upstream_error", upstream.status)
+          // A 400/401/403/404 is the provider declining the request, definitively
+          // and without doing the work. Complete, at zero.
+          reconcile(NO_USAGE, "upstream_error", "complete", upstream.status)
         );
       }
 
       if (why === "credit_exhausted") {
-        const settle = reconcile(NO_USAGE, "provider_exhausted", 402);
+        // The provider refused for credit BEFORE doing any work — mayHaveBeenBilled
+        // says exactly this about `credit_exhausted`. Nothing to charge.
+        const settle = reconcile(NO_USAGE, "provider_exhausted", "complete", 402);
         // Redis-cached and only reached on a call that has already failed, so it
         // costs an approved call nothing. Degrades to an empty list rather than
         // failing the response — see lib/providers/available.ts.
@@ -1185,7 +2037,14 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         why,
         receiptId: attemptReceiptId,
         response: passthrough(),
-        settle: reconcile(NO_USAGE, "upstream_error", upstream.status),
+        // SPLIT ON THE EXISTING mayHaveBeenBilled, which already draws exactly
+        // this line and is the reason it is reused rather than re-derived:
+        // `upstream_5xx` may have been served and billed before it failed, so
+        // the estimate stands; `rate_limited` and `credit_exhausted` are the
+        // provider declining before doing work, so there is nothing to charge.
+        settle: mayHaveBeenBilled(why)
+          ? reconcile(NO_USAGE, "usage_unknown", "usage_unknown", upstream.status)
+          : reconcile(NO_USAGE, "upstream_error", "complete", upstream.status),
       };
     }
 
@@ -1195,37 +2054,46 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // left to fail over from — the failover trigger is a response, before the
     // first byte of a body reaches the client.
     if (isStream && upstream.body) {
-      const { stream, settled } = createUsageTransform(attemptProvider);
+      const { stream, settled } = createUsageTransform(attemptProvider, usageProtocol);
       // The monitored transform settles exactly once on every ending — normal
       // close, client cancel, and a break in the provider's own stream.
       //
-      // The ending decides the status, and it has to: a stream that broke
-      // mid-answer delivered a truncated answer, and logging that as `ok` would
-      // put a row in the audit trail asserting a call succeeded when the client
-      // got half of one. A client cancel stays `ok` — the gateway and the
-      // provider both did their job, and the partial usage is real spend.
+      // THE CLASSIFICATION KEYS ON AUTHORITATIVE TERMINAL USAGE, not merely a
+      // usage-shaped event or clean EOF. Partial usage remains useful evidence,
+      // but never turns a dispatched inference into a confirmed debit.
       //
-      // The tokens are recorded either way. The provider billed for what it
-      // produced before the break, so reconciling with the partial tally is what
-      // keeps the reservation and the agent's live spend honest. (Note the
-      // authoritative spend checkpoint counts only `ok` rows, so a broken
-      // stream's tokens drop out of the cap at the next reconcile cron — see
-      // TEAMSHARE for why that is left as its own decision rather than widened
-      // here.)
+      // What that fixes. This used to settle a broken stream with the partial
+      // tally and log it `upstream_error` — and the authoritative checkpoint
+      // counted only `ok` rows, so those tokens dropped straight back out of the
+      // cap at the next cron. A stream that broke after delivering real content
+      // was, in the end, free. Worse, a stream that closed PERFECTLY CLEANLY and
+      // never reported usage at all — an OpenAI-shaped response whose client body
+      // lacked `stream: true`, so `include_usage` was never injected, while the
+      // streaming branch is chosen from the RESPONSE content-type — settled at
+      // zero and logged `ok`. Neither is a measurement; both are absence of one.
       //
-      // `req.signal.aborted` is what separates the two, and without it the status
-      // would be a RACE. One client disconnect — a stop button, a closed tab —
-      // fires two endings from the same event: the platform cancels the response
-      // body we returned (→ `cancel`), and req.signal aborts the upstream fetch,
-      // whose body then errors under the transform's reader (→ `error`). First
-      // one to settle wins, so the same disconnect would log `ok` or
-      // `upstream_error` depending on timing. An aborted request means the client
-      // left; the provider did not fail. Checked here rather than in the
-      // transform, which has no business knowing about requests.
+      // The zeros are the trap: a call that genuinely consumed nothing and a call
+      // whose usage never reached us produce identical numbers. `sawUsage` is the
+      // only thing that separates them, which is why it is carried out of the
+      // parser rather than inferred here.
+      //
+      // AND THIS RETIRES A RACE. The status used to depend on `req.signal.aborted`
+      // because one client disconnect fires two endings from the same event — the
+      // platform cancels the body we returned (→ `cancel`) while req.signal aborts
+      // the upstream fetch, whose body then errors under the reader (→ `error`) —
+      // and first-to-settle won, so the same disconnect logged `ok` or
+      // `upstream_error` depending on timing. Both endings now classify
+      // identically, so there is no longer a race to lose: neither is a clean
+      // close, so neither is a confirmed accounting, whichever arrives first.
       waitUntil(
-        settled.then(({ usage, end }) =>
-          reconcile(usage, end === "error" && !req.signal.aborted ? "upstream_error" : "ok").done
-        )
+        settled.then(({ usage, complete }) => {
+          const confirmed = complete;
+          return reconcile(
+            usage,
+            confirmed ? "ok" : "usage_unknown",
+            confirmed ? "complete" : "usage_unknown"
+          ).done;
+        })
       );
       return {
         kind: "response",
@@ -1245,8 +2113,27 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     }
 
     // Non-streaming JSON: read, tally, forward.
-    const json = await upstream.json().catch(() => ({}));
-    const usage = usageFromJson(attemptProvider, json);
+    // WHETHER THE BODY WAS READ AT ALL is the question here — NOT whether it
+    // contained usage. The two look similar and behave very differently.
+    //
+    // Buffered inference JSON is not complete merely because it parsed: absent
+    // or malformed usage is unknown. `GET /v1/models` is the explicit zero-use
+    // discovery exception, not a blanket JSON-zero rule.
+    //
+    // A stream is the opposite case, and that is why it classifies on
+    // `sawUsage`: there, absence is confounded with truncation, and a stream cut
+    // off before its usage event looks exactly like one that never had any.
+    //
+    // What IS uncertain here is a body we could not read. `upstream.json()`
+    // falls back to `{}`, which then parses as zero usage and would settle at
+    // nothing — for a 200 the provider has already done the work behind.
+    let bodyReadable = true;
+    const json = await upstream.json().catch(() => {
+      bodyReadable = false;
+      return {};
+    });
+    const usage = usageFromJson(attemptProvider, json, usageProtocol);
+    const discovery = req.method === "GET" && isModelListingIndex(path);
     // Discovery is bounded by the visa. `GET /v1/models` otherwise answers with
     // every model the PROVIDER KEY can reach — the tenant's whole account —
     // rather than the models THIS agent may call, so an SDK's model picker
@@ -1267,7 +2154,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           "x-passcontrol-receipt-id": attemptReceiptId,
         },
       }),
-      reconcile(usage, "ok")
+      reconcile(
+        usage,
+        bodyReadable && (discovery || usage.complete) ? "ok" : "usage_unknown",
+        bodyReadable && (discovery || usage.complete) ? "complete" : "usage_unknown"
+      )
     );
   };
 
@@ -1365,10 +2256,20 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   let held = primaryOutcome;
   let heldSettled = false;
   // Settles the attempt whose response we are currently holding. Called before
-  // the next reserve, never after — reconcileBudget DECRBYs `reserved` while the
-  // reserve script INCRBYs it and compares the total against the cap, so a
-  // deferred release lets the next attempt see a doubled reservation and get
-  // refused for money it is not spending.
+  // the next reserve, never after — settling DECRBYs `reserved` while the open
+  // script INCRBYs it and compares the total against the cap, so a deferred
+  // release lets the next attempt see a doubled reservation and get refused for
+  // money it is not spending.
+  //
+  // THE ORDERING INVARIANT IS UNCHANGED BY THE OUTCOME SPLIT, and both branches
+  // still depend on it. Say that plainly, because the split makes a NEW and
+  // legitimate refusal look exactly like the old bug: after an `upstream_5xx` or
+  // an `unreachable`, the failed attempt's estimate is now CHARGED rather than
+  // released, so a tight budget can correctly refuse the fallback. That is the
+  // system working — the first attempt may really have been billed — and the fix
+  // is not to defer the settle or to delete this ordering. The test that pins
+  // the ordering was mutation-tested precisely because asserting invocation
+  // order alone still passes with the bug live (tests/proxy-failover.test.ts).
   const settleHeld = async () => {
     if (heldSettled) return;
     heldSettled = true;
@@ -1425,7 +2326,7 @@ function demoEnabled(): boolean {
 }
 
 // Synthetic per-token price so budget/spend demos show real (small) numbers.
-const DEMO_MICROCENTS_PER_TOKEN = 1;
+
 
 function lastUserMessage(body: any): string {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
@@ -1456,28 +2357,12 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   // 1. Authenticate through the same two doors as the real provider path.
   const authentication = await authenticateGatewayRequest(req, "demo");
   if (!authentication.ok) return authentication.response;
-  const { principal, db } = authentication;
+  const { principal, db, credentialToken } = authentication;
   const agentId = principal.agentId;
   const userId = principal.userId;
   const scopes = principal.scopes;
   const credentialUseId = crypto.randomUUID();
   const jti = principal.kind === "passport" ? principal.visaJti : credentialUseId;
-  const receiptIdentity =
-    principal.kind === "passport"
-      ? ({ passportId: principal.passportId, visaJti: principal.visaJti } as const)
-      : ({
-          authMethod: "direct_key",
-          agentAccessKeyId: principal.keyId,
-          credentialUseId,
-        } as const);
-  const logIdentity =
-    principal.kind === "passport"
-      ? ({ passportId: principal.passportId, jti: principal.visaJti } as const)
-      : ({
-          authMethod: "direct_key",
-          agentAccessKeyId: principal.keyId,
-          credentialUseId,
-        } as const);
   const reserveId = crypto.randomUUID();
   // The demo signs receipts on the same terms as the real path. The synthesized
   // reply is the ONLY fake thing here: which agent called, which gate answered,
@@ -1491,8 +2376,59 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     principal.budgetCents == null
       ? null
       : Math.round(Number(principal.budgetCents) * MICROCENTS_PER_CENT);
-  const spentSnapshot: number = principal.spentTokens;
-  const spentMicrocentsSnapshot: number = principal.spentMicrocents;
+  // `principal.spentTokens` / `.spentMicrocents` — the visa's `st`/`sc` claims —
+  // are deliberately READ BY NOTHING NOW. They used to seed the hot-path spend
+  // counters, and that seed was a way to create capacity: the claims are minted
+  // from `agents.spent_*`, a best-effort mirror lib/log.ts drops silently on RPC
+  // failure, so a cold instance re-seeded from an older, lower number.
+  //
+  // The claims stay IN the visa — removing them is a visa-shape change and out
+  // of scope here — they simply stop deciding anything. Authoritative spend now
+  // comes from Redis, which is rebuilt from `agent_logs` when it has to be.
+
+  let currentPolicySnapshot:
+    | Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>>
+    | null = null;
+  let passportAuthMethod: PassportAuthMethod = "passport";
+  // Only ever set by observe mode. Rides to the audit row and stops there.
+  let senderProofWould: SenderProofObservation | undefined;
+  if (principal.kind === "passport") {
+    currentPolicySnapshot = await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+    const senderConstraint = await enforceSenderConstraint(
+      req,
+      credentialToken,
+      principal,
+      currentPolicySnapshot
+    );
+    if (!senderConstraint.ok) return senderConstraint.response;
+    passportAuthMethod = senderConstraint.authMethod;
+    senderProofWould = senderConstraint.would;
+  }
+
+  const receiptIdentity =
+    principal.kind === "passport"
+      ? ({
+          authMethod: passportAuthMethod,
+          passportId: principal.passportId,
+          visaJti: principal.visaJti,
+        } as const)
+      : ({
+          authMethod: "direct_key",
+          agentAccessKeyId: principal.keyId,
+          credentialUseId,
+        } as const);
+  const logIdentity =
+    principal.kind === "passport"
+      ? ({
+          authMethod: passportAuthMethod,
+          passportId: principal.passportId,
+          jti: principal.visaJti,
+        } as const)
+      : ({
+          authMethod: "direct_key",
+          agentAccessKeyId: principal.keyId,
+          credentialUseId,
+        } as const);
 
   // Created up here rather than at the policy step below, because the owner read
   // needs it and the first receipt can be written before policy is ever reached.
@@ -1513,6 +2449,8 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   let ownerRead: Promise<OwnerClaim | null> | null = null;
   const currentOwner = () => (ownerRead ??= readCurrentOwner(db, userId).catch(() => null));
 
+  const policyFailClosed = process.env.POLICY_FAIL_CLOSED === "true";
+
   // Wrapped for the same reason as in handle(): this call sits inside the
   // argument list of writeLog, and a throw there destroys the surrounding tasks
   // array before the budget reconcile is ever awaited.
@@ -1529,6 +2467,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   // one of them. Stays undefined when the agent has no shadow policy, and the
   // key is then omitted from the insert entirely (see lib/log.ts).
   let shadowWould: string | undefined;
+  let policyRevision: string | undefined;
 
   const logBlocked = (
     status: Parameters<typeof writeLog>[0]["status"],
@@ -1555,6 +2494,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
             httpStatus,
             startedAt: started,
             latencyMs: Date.now() - started,
+            policyRevision,
             owner: await currentOwner(),
           }),
           agentId,
@@ -1565,6 +2505,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
           status,
           latencyMs: Date.now() - started,
           ...(shadowWould ? { policyShadowWould: shadowWould } : {}),
+          ...(senderProofWould ? { senderProofWould } : {}),
         }))()
     );
 
@@ -1590,6 +2531,14 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       headers: { "content-type": "application/json", "retry-after": String(PROXY_RATE_WINDOW_S) },
     });
   }
+  // Direct keys reach the policy read only after their unchanged rate limiter.
+  currentPolicySnapshot ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+  policyRevision = effectiveLivePolicyRevision(
+    currentPolicySnapshot.policy,
+    scopes,
+    { tokens: capTokens, microcents: capMicrocents },
+    policyFailClosed
+  );
 
   // 3. Kill switch (platform + tenant + denylist; per-agent suspend).
   const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
@@ -1653,7 +2602,15 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   }
 
   // 5. Current policy — real, because the demo promises the governance path.
-  const currentPolicyGate = await evaluateCurrentPolicyGate(db, userId, agentId, gateBase);
+  const currentPolicyGate = await evaluateCurrentPolicyGate(
+    db,
+    userId,
+    agentId,
+    gateBase,
+    { tokens: capTokens, microcents: capMicrocents },
+    currentPolicySnapshot,
+    policyFailClosed
+  );
   shadowWould = currentPolicyGate.shadowWould;
   if (currentPolicyGate.gate.deniedBy === "policy") {
     const policy = policyBlockDetails(currentPolicyGate.gate);
@@ -1665,19 +2622,78 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   // 6. Budget reserve (atomic) — real, so the budget/kill demos are honest.
   const estimatedUsage = estimateTokenUsage(bodyObj);
   const estimate = estimatedUsage.totalTokens;
-  const estimateMicrocents = estimate * DEMO_MICROCENTS_PER_TOKEN;
-  if (capTokens != null || capMicrocents != null) {
-    await seedSpent(agentId, spentSnapshot, spentMicrocentsSnapshot);
-  }
-  const reserve = await reserveBudget({
+  const estimateMicrocents = demoCostMicrocents(estimate);
+  // The demo goes through the SAME primitives as the real path — that is what
+  // makes the budget and kill demos honest — so it opens a real hold and settles
+  // it, rather than keeping a second, simpler accounting that could drift from
+  // the one under test.
+  const attemptId = crypto.randomUUID();
+  const demoBudgetState =
+    capTokens != null || capMicrocents != null ? currentPolicyGate.budgetState : undefined;
+  const reserve = await openHold({
     agentId,
-    reserveId,
+    attemptId,
     estimate,
     estimateMicrocents,
     capTokens,
     capMicrocents,
-    markerTtlSeconds: RESERVE_MARKER_TTL_S,
+    provider: "demo",
+    ...(model ? { model } : {}),
+    ...(demoBudgetState ? { budgetState: demoBudgetState } : {}),
   });
+  if (reserve.epochToPersist) {
+    const epoch = reserve.epochToPersist;
+    // THE SAME TWO-SIDED CONTRACT AS THE BILLED PATH: a matching durable
+    // generation, or no answer. This used to capture-and-continue, on the
+    // argument that the demo forwards to no provider and spends no money — true
+    // of the provider bill, and beside the point. The demo opens and settles a
+    // REAL hold against the SAME counters, deliberately, because that is what
+    // makes the budget and kill demos honest. Those counters are fenced by this
+    // generation: answer without it, lose Redis later, and Postgres still says
+    // "never established", so the next call seeds at zero and the agent's whole
+    // spend is gone with its budget restored.
+    //
+    // It was survivable only while a demo-scoped agent could not also hold a
+    // real provider scope — and that was true only because the control plane
+    // rejected the pair outright, which is the bug that broke `passcontrol
+    // login` for nine days. Now that it accepts them, one `budget_epoch` fences
+    // demo calls and billed calls alike, and the laxer path would be the one an
+    // attacker picks: it is the call that costs them nothing to make.
+    //
+    // The availability objection is weaker than it looks. This path already
+    // returns 503 `blocked_budget_state` on the sibling condition below, and it
+    // already blocks on database reads for the policy gate — a gateway that
+    // cannot write cannot honestly demo governance either. One write, on the
+    // first budgeted call of an agent's life.
+    try {
+      await establishBudgetState(agentId, epoch);
+    } catch (error) {
+      // Nothing was synthesized — this returns above the response — so the one
+      // full release is the honest ending. Scheduled, not awaited: a failed
+      // release leaves an open hold, which an operator can resolve, while a
+      // slower 503 is not better than a fast one.
+      waitUntil(releaseUndispatched({ agentId, attemptId }));
+      waitUntil(
+        captureError(error, {
+          route: "api.demo",
+          method: req.method,
+          status: 503,
+          agentId,
+          code: "blocked_budget_state",
+        })
+      );
+      logBlocked("blocked_budget_state", model, 503);
+      return errR(503, "blocked_budget_state");
+    }
+    // Stays scheduled: it bounds how long a stale `established: false` can be
+    // read from cache, but the answer does not depend on it and a failed purge
+    // must not refuse a call whose epoch is already durable.
+    waitUntil(purgeAgentPolicy(userId, agentId));
+  }
+  if (!reserve.ok && reserve.reason === "state") {
+    logBlocked("blocked_budget_state", model, 503);
+    return errR(503, "blocked_budget_state");
+  }
   const finalGate = evaluateGate({
     ...gateBase,
     policy: currentPolicyGate.policy,
@@ -1687,7 +2703,11 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       : {}),
     budget: {
       ok: reserve.ok,
-      reason: reserve.reason,
+      // Cap reasons only; `state` was answered above. Same narrowing as the real
+      // path, for the same reason.
+      ...(reserve.reason === "tokens" || reserve.reason === "cost"
+        ? { reason: reserve.reason }
+        : {}),
       estimateTokens: estimate,
       estimateMicrocents,
       reservedTokens: reserve.reserved,
@@ -1705,22 +2725,25 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   const outputTokens = Math.max(1, Math.ceil(text.length / 4));
   const usage = { inputTokens: estimatedUsage.inputTokens, outputTokens };
   const totalTokens = usage.inputTokens + usage.outputTokens;
-  const cost = totalTokens * DEMO_MICROCENTS_PER_TOKEN;
+  const cost = demoCostMicrocents(totalTokens);
 
   waitUntil(
     (async () => {
-      // Release the reservation FIRST and hold its promise — the same ordering
-      // rule as reconcile() on the real path. Built inline in the array below,
-      // a throw while assembling the writeLog argument would destroy the array
-      // before reconcileBudget was ever called, leaking the reservation until
-      // its marker expires ~960s later and quietly shrinking the agent's budget.
-      const budget = reconcileBudget({
+      // Settle the hold FIRST and keep its promise — the same ordering rule as
+      // reconcile() on the real path. Built inline in the array below, a throw
+      // while assembling the writeLog argument would destroy the array before
+      // the hold was ever settled, leaving the reservation open indefinitely and
+      // quietly shrinking the agent's budget until someone resolved it by hand.
+      //
+      // `settleKnown`, because the demo response is synthesised HERE: its usage
+      // is not a report from anywhere that could have gone missing. This is the
+      // one place in the product where a complete accounting is certain by
+      // construction.
+      const budget = settleKnown({
         agentId,
-        reserveId,
-        estimate,
-        estimateMicrocents,
-        actualTokens: totalTokens,
-        actualMicrocents: cost,
+        attemptId,
+        tokens: totalTokens,
+        microcents: cost,
       });
 
       const receipt = safeReceipt({
@@ -1739,6 +2762,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
         httpStatus: 200,
         startedAt: started,
         latencyMs: Date.now() - started,
+        policyRevision: currentPolicyGate.liveRev,
         owner: await currentOwner(),
       });
 
@@ -1749,6 +2773,10 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
           receipt,
           agentId,
           userId,
+          // Carried for the same reason as the real path, even though a demo
+          // attempt is settled synchronously here and does not leave open holds
+          // today. An unlinked row is one the dedup cannot see.
+          attemptId,
           ...logIdentity,
           provider: "demo",
           model,
@@ -1758,6 +2786,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
           status: "ok",
           latencyMs: Date.now() - started,
           ...(shadowWould ? { policyShadowWould: shadowWould } : {}),
+          ...(senderProofWould ? { senderProofWould } : {}),
         }),
         mirrorSpend(agentId, totalTokens, cost),
       ]);

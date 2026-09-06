@@ -40,7 +40,7 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
     };
   }, [userId]);
 
-  const { totalTokens, totalCost, bars, providers, callCount } = useMemo(() => {
+  const { totalTokens, totalCost, uncostedCalls, bars, providers, callCount } = useMemo(() => {
     // A spend view has nothing to say about SDK housekeeping: a model-listing
     // probe carries no tokens and no cost, so it contributed only a zero-height
     // bar and inflated the per-provider call count. Filtered here rather than in
@@ -61,6 +61,14 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
     return {
       totalTokens: logs.reduce((s, l) => s + (l.input_tokens ?? 0) + (l.output_tokens ?? 0), 0),
       totalCost: logs.reduce((s, l) => s + (l.cost_microcents ?? 0), 0),
+      // A null cost is UNKNOWN, not zero, so it cannot be added to a total —
+      // but a total that silently drops rows is its own kind of wrong. Count
+      // them and say so under the figure.
+      //
+      // Worded as "no recorded cost" rather than "unpriced" on purpose: rows
+      // predating the unpriced distinction are also null, and this must not
+      // retroactively relabel them as something they were never recorded as.
+      uncostedCalls: logs.reduce((n, l) => n + (l.cost_microcents == null ? 1 : 0), 0),
       bars: recent.map((log) => ({
         log,
         height: ((log.input_tokens ?? 0) + (log.output_tokens ?? 0)) / max,
@@ -85,7 +93,11 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
         <div className="pc-spend-stat">
           <div>Cost in loaded window</div>
           <strong>${(totalCost / 1e8).toFixed(4)}</strong>
-          <span>Not an all-time total</span>
+          <span>
+            {uncostedCalls
+              ? `Not an all-time total · excludes ${uncostedCalls} call${uncostedCalls === 1 ? "" : "s"} with no recorded cost`
+              : "Not an all-time total"}
+          </span>
         </div>
         <div className="pc-spend-stat">
           <div>Data state</div>
@@ -105,7 +117,13 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
             <div className="pc-spend-chart__plot">
               {bars.map(({ log, height }) => {
                 const tokens = (log.input_tokens ?? 0) + (log.output_tokens ?? 0);
-                const label = `${time(log.created_at)} · ${log.provider ?? "unknown"}/${log.model ?? "unknown"} · ${tokens.toLocaleString()} tokens · $${((log.cost_microcents ?? 0) / 1e8).toFixed(6)}`;
+                // No recorded cost reads as a dash, never as $0.000000 — the
+                // same choice `fare()` already makes on the departures board.
+                const money =
+                  log.cost_microcents == null
+                    ? "no recorded cost"
+                    : `$${(log.cost_microcents / 1e8).toFixed(6)}`;
+                const label = `${time(log.created_at)} · ${log.provider ?? "unknown"}/${log.model ?? "unknown"} · ${tokens.toLocaleString()} tokens · ${money}`;
                 return (
                   <div
                     key={log.id}

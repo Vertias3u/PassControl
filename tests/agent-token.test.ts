@@ -281,7 +281,11 @@ describe("the existing challenge contract is untouched", () => {
       fs.readFileSync("app/api/auth/challenge/route.ts", "utf8")
     );
     expect(source).toMatch(
-      /NextResponse\.json\(\{\s*visa: token,\s*token_type: "Bearer",\s*expires_in: expSeconds,\s*jti\s*\}\)/
+      /NextResponse\.json\(\{\s*visa: token,\s*token_type: "Bearer",\s*expires_in: expSeconds,\s*jti,/
     );
+    // Expiry diagnostics are an additive, warning-window-only field. Outside
+    // that window the object still serializes to the original four-field
+    // contract asserted above.
+    expect(source).toMatch(/\.\.\.\(passportExpiry \? \{ passport_expiry: passportExpiry \} : \{\}\)/);
   });
 });

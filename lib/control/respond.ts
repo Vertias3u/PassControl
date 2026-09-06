@@ -13,6 +13,10 @@ const MESSAGES: Record<string, string> = {
   rate_limited: "Too many requests. Slow down and retry after the indicated delay.",
   invalid_id: "The resource id is malformed.",
   invalid_request: "The request body is invalid.",
+  // Used by every control route that parses a body. It had no entry here, so
+  // a malformed body answered the generic "Request failed." — which reads as a
+  // server fault for what is entirely a caller-side mistake.
+  invalid_json: "Request body could not be parsed as JSON.",
   empty_update: "No updatable fields were provided.",
   invalid_idempotency_key: "The Idempotency-Key header is missing or malformed.",
   request_in_progress: "A request with this Idempotency-Key is still being processed.",
@@ -28,10 +32,20 @@ const MESSAGES: Record<string, string> = {
   query_failed: "The request could not be completed. Please try again.",
   export_unavailable: "The workspace export could not be built. Please try again.",
   auth_lookup_failed: "The request could not be completed. Please try again.",
+  account_unavailable: "The account could not be read. Please try again.",
   system_forbidden: "This API key is not authorized to read system health.",
   system_totp_required: "The account owning this API key must verify an authenticator app before reading system health.",
   system_not_configured: "This instance names no system-health operators, so it authorizes no API key.",
   system_allowlist_invalid: "This instance's system-health operator list is malformed and authorizes no API key.",
+  invalid_seq: "The statement sequence number must be a positive integer.",
+  receipt_not_in_statement: "That call is not covered by this statement.",
+  // The two below are the finding this product exists to surface, so they say
+  // what happened rather than "request failed". `agent_logs` is append-only by
+  // trigger including for service_role, so reaching either state took action.
+  statement_receipts_missing:
+    "The record no longer contains every call this statement committed to. The statement itself is still valid and still signed — it is the underlying calls that have changed, so no inclusion proof can be produced against it.",
+  statement_receipts_altered:
+    "A call this statement committed to no longer matches what was signed. The statement itself is still valid and still signed — it is the underlying call that has changed, so no inclusion proof can be produced against it.",
   internal_error: "Something went wrong. Please try again.",
 };
 

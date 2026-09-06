@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { AlertTriangle, ArrowUpRight, CheckCircle2 } from "lucide-react";
-import type { FleetAttentionItem } from "@/lib/dashboard-attention";
+import { attentionItemTone, type FleetAttentionItem } from "@/lib/dashboard-attention";
 import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
 
 export function FleetAttentionQueue({ items }: { items: FleetAttentionItem[] }) {
@@ -22,8 +22,13 @@ export function FleetAttentionQueue({ items }: { items: FleetAttentionItem[] }) 
         </div>
       ) : (
         <ol className="pc-attention-list">
+          {/* Three tiers, not two. The row tone read "danger, otherwise
+              warning", which labelled a row whose only entry was "Set a
+              passport expiry" a warning — nothing is wrong with that agent.
+              The severity rule lives in lib/dashboard-attention.ts so a row
+              and the headline card cannot disagree about what the queue holds. */}
           {items.map((item, index) => (
-            <li key={item.agentId} data-tone={item.reasons.some((reason) => reason.tone === "danger") ? "danger" : "warning"}>
+            <li key={item.agentId} data-tone={attentionItemTone(item)}>
               <span className="pc-attention-rank">{String(index + 1).padStart(2, "0")}</span>
               <div className="pc-attention-main">
                 <div className="pc-attention-agent">

@@ -4,11 +4,21 @@
 // VISA_SECRET_PREV enables zero-downtime rotation: we sign with the current
 // secret and accept either current or previous on verify.
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
-import { utf8ToBytes } from "../encoding";
+import { sha256 } from "@noble/hashes/sha256";
+import {
+  base64urlToBytes,
+  bytesToBase64url,
+  bytesToUtf8,
+  utf8ToBytes,
+} from "../encoding";
+import { jwkThumbprint, passportIdToPublicKey, verifySignature } from "../crypto/ed25519";
 
 export const VISA_ISS = "passport.gateway";
 export const VISA_AUD = "llm-proxy";
-export const VISA_VER = 1;
+export const VISA_VER = 2;
+export const VISA_PREVIOUS_VER = 1;
+export const SENDER_PROOF_HEADER = "x-passcontrol-proof";
+export const SENDER_PROOF_WINDOW_SECONDS = 30;
 
 export interface ScopeEntry {
   provider: string;
@@ -26,6 +36,71 @@ export interface VisaClaims extends JWTPayload {
   st: number; // spent_tokens snapshot at mint (seeds the Redis counter NX)
   sc: number; // spent_microcents snapshot at mint (seeds the Redis cost counter NX)
   ver: number;
+  cnf?: { jkt: string }; // v2+: RFC 7638 thumbprint of the passport public key
+}
+
+export type SenderProofResult =
+  | { ok: true; jti: string }
+  | { ok: false; reason: "missing" | "invalid" | "clock_skew" };
+
+/** Verify the request-bound Ed25519 proof without mutating replay state.
+ *  The caller burns the returned jti only after every signed field passes. */
+export function verifySenderProof(input: {
+  proof: string | null;
+  method: string;
+  url: string;
+  visa: string;
+  passportId: string;
+  nowSeconds?: number;
+}): SenderProofResult {
+  if (!input.proof) return { ok: false, reason: "missing" };
+  if (input.proof.length > 4096) return { ok: false, reason: "invalid" };
+  const parts = input.proof.split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return { ok: false, reason: "invalid" };
+
+  try {
+    const payloadBytes = base64urlToBytes(parts[0]);
+    const signature = base64urlToBytes(parts[1]);
+    if (signature.length !== 64) return { ok: false, reason: "invalid" };
+    const payload: unknown = JSON.parse(bytesToUtf8(payloadBytes));
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+      return { ok: false, reason: "invalid" };
+    }
+    const proof = payload as Record<string, unknown>;
+    if (
+      typeof proof.htm !== "string" ||
+      typeof proof.htu !== "string" ||
+      typeof proof.iat !== "number" ||
+      !Number.isInteger(proof.iat) ||
+      typeof proof.jti !== "string" ||
+      proof.jti.length < 1 ||
+      proof.jti.length > 128 ||
+      typeof proof.vh !== "string"
+    ) {
+      return { ok: false, reason: "invalid" };
+    }
+
+    const requestUrl = new URL(input.url);
+    const expectedHtu = `${requestUrl.origin}${requestUrl.pathname}`;
+    if (proof.htm !== input.method.toUpperCase() || proof.htu !== expectedHtu) {
+      return { ok: false, reason: "invalid" };
+    }
+
+    const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSeconds - proof.iat) > SENDER_PROOF_WINDOW_SECONDS) {
+      return { ok: false, reason: "clock_skew" };
+    }
+    const expectedVisaHash = bytesToBase64url(sha256(utf8ToBytes(input.visa)));
+    if (proof.vh !== expectedVisaHash) return { ok: false, reason: "invalid" };
+
+    const publicKey = passportIdToPublicKey(input.passportId);
+    if (!publicKey || !verifySignature(signature, payloadBytes, publicKey)) {
+      return { ok: false, reason: "invalid" };
+    }
+    return { ok: true, jti: proof.jti };
+  } catch {
+    return { ok: false, reason: "invalid" };
+  }
 }
 
 /** Pull the visa out of whichever header the caller's native SDK uses, so the
@@ -160,6 +235,7 @@ export async function mintVisa(input: MintVisaInput): Promise<{ token: string; e
     st: input.spentTokens,
     sc: input.spentMicrocents,
     ver: VISA_VER,
+    cnf: { jkt: jwkThumbprint(input.passportId) },
   })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuer(VISA_ISS)
@@ -197,7 +273,14 @@ export async function verifyVisa(token: string): Promise<VisaClaims | null> {
         return null;
       if (!(claims.bc == null || (typeof claims.bc === "number" && Number.isFinite(claims.bc))))
         return null;
-      if (claims.ver !== VISA_VER) return null;
+      if (claims.ver !== VISA_VER && claims.ver !== VISA_PREVIOUS_VER) return null;
+      if (
+        claims.ver === VISA_VER &&
+        (typeof claims.cnf !== "object" ||
+          claims.cnf === null ||
+          claims.cnf.jkt !== jwkThumbprint(claims.sub))
+      )
+        return null;
       return claims;
     } catch {
       // try next secret

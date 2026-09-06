@@ -43,6 +43,14 @@ function describe(row: AdminAuditRow): { label: string; Icon: typeof UserPlus; t
       return { label: "Provider key switched", Icon: RefreshCw, tone: "warning" };
     case "provider_key.delete":
       return { label: "Provider key deleted", Icon: KeyRound, tone: "warning" };
+    // A policy STATEMENT, and the trail must not let it be read as an
+    // enforcement change: nothing was gated, refused, or put on a receipt by
+    // this row. `info` tone for the same reason — a warning colour on a line
+    // that blocked nothing would be the overclaim the feature exists to avoid.
+    case "workspace.key_custody_expectation":
+      return m.to === "none" || !m.to
+        ? { label: "Key custody expectation cleared", Icon: ShieldCheck, tone: "info" }
+        : { label: `Key custody expectation stated: ${String(m.to)}`, Icon: ShieldCheck, tone: "info" };
     case "killswitch.master":
       return m.on === true
         ? { label: "Master kill ARMED", Icon: ShieldAlert, tone: "danger" }
@@ -58,6 +66,7 @@ function details(row: AdminAuditRow): string {
   const m = { ...(row.metadata ?? {}) } as Record<string, unknown>;
   if (row.action === "agent.suspend") delete m.suspended;
   if (row.action === "killswitch.master") delete m.on;
+  if (row.action === "workspace.key_custody_expectation") delete m.to;
   const parts = Object.entries(m).map(([k, v]) => `${k}: ${String(v)}`);
   if (row.target_id) parts.unshift(`${row.target_type ?? "target"} ${row.target_id.slice(0, 12)}…`);
   return parts.join(" · ") || "—";

@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 
 // The keyless demo provider forks out of `handle` before the real proxy's receipt
 // machinery starts, and re-implements the governance pipeline on its own. That
@@ -14,8 +15,8 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   verifyVisaMock,
   serviceClientMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   getCachedAgentPolicyMock,
   readKillStateMock,
   isSuspendedMock,
@@ -27,8 +28,8 @@ const {
 } = vi.hoisted(() => ({
   verifyVisaMock: vi.fn(),
   serviceClientMock: vi.fn(),
-  reserveBudgetMock: vi.fn(),
-  reconcileBudgetMock: vi.fn(),
+  openHoldMock: vi.fn(),
+  settleHoldMock: vi.fn(),
   getCachedAgentPolicyMock: vi.fn(),
   readKillStateMock: vi.fn(),
   isSuspendedMock: vi.fn(),
@@ -41,6 +42,11 @@ const {
 
 // waitUntil must actually run the work here: every receipt on this path is
 // written inside it, so a no-op stub would make all of these pass vacuously.
+// The proxy now reaches lib/demo/identity.ts to tell the seeded PUBLIC demo
+// passport apart from a tenant that holds a demo scope. That module is
+// `server-only`, which Next enforces at build time and vitest cannot resolve
+// at all — same stub tests/site-demo-routes.test.ts already uses.
+vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (p: unknown) => p }));
 vi.mock("@/lib/auth/visa", () => ({
   extractVisaToken: (headers: Headers) =>
@@ -52,15 +58,51 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
   return { ...actual, readKillState: (...args: unknown[]) => readKillStateMock(...args) };
 });
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
-  reserveBudget: (...args: unknown[]) => reserveBudgetMock(...args),
-  reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
   getCachedKey: vi.fn(),
   setCachedKey: vi.fn(),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: vi.fn(),
-  seedSpent: vi.fn(),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    openHold: (...args: unknown[]) => openHoldMock(...args),
+    // Always granted here: these suites assert what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself (tests/proxy-dispatch-permission.test.ts).
+    consumeDispatchPermission: async () => ({ granted: true }),
+    settleKnown: (p: Record<string, unknown>) => settle("complete", p),
+    settleUnknown: (p: Record<string, unknown>) => settle("usage_unknown", p),
+    releaseUndispatched: (p: Record<string, unknown>) => settle("not_dispatched", p),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/log", () => ({
   writeLog: (...args: unknown[]) => writeLogMock(...args),
@@ -114,8 +156,8 @@ function demoCall(body: Record<string, unknown> = DEMO, allowedModel = "demo-1")
 beforeEach(() => {
   vi.clearAllMocks();
   serviceClientMock.mockReturnValue({ rpc: vi.fn(async () => ({ data: null, error: null })) });
-  reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 1 });
-  reconcileBudgetMock.mockResolvedValue(undefined);
+  openHoldMock.mockResolvedValue({ ok: true, reserved: 1 });
+  settleHoldMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
@@ -189,7 +231,7 @@ describe("a demo refusal is signed too", () => {
   });
 
   it("receipts a budget block", async () => {
-    reserveBudgetMock.mockResolvedValue({ ok: false, reason: "over_budget", reserved: 0 });
+    openHoldMock.mockResolvedValue({ ok: false, reason: "over_budget", reserved: 0 });
     const res = await demoCall();
     expect(res.status).toBe(402);
     expect(res.headers.get(RECEIPT_HEADER)).toMatch(UUID_RE);
@@ -236,7 +278,7 @@ describe("signing can never cost the caller their budget", () => {
     expect(res.status).toBe(200);
     // A leaked reservation silently shrinks the agent's budget until the marker
     // expires ~960s later — a signing bug must not be able to cause that.
-    expect(reconcileBudgetMock).toHaveBeenCalledTimes(1);
+    expect(settleHoldMock).toHaveBeenCalledTimes(1);
     expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ receipt: null }));
     expect(mirrorSpendMock).toHaveBeenCalledTimes(1);
   });

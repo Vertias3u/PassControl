@@ -280,3 +280,97 @@ describe("logout reads the revoke route's own answers", () => {
     expect(result.warnings.join(" ")).not.toMatch(/STILL LIVE/u);
   });
 });
+
+// ── Tier 1: the key is in the OS credential store, not in the file ──────────
+//
+// Migrating to tier 1 empties PASSPORT_SECRET and leaves a PASSPORT_KEY_STORAGE
+// marker behind. Three separate places matched on the secret alone, so a
+// migrated machine — the one holding the key that is hardest to replace — was
+// the one logout handled worst: it could not find the machine, did not warn
+// before destroying it, and left the private key in the Keychain forever.
+describe("logout on a tier 1 machine", () => {
+  function writeTier1Config(port: number) {
+    fs.writeFileSync(
+      configFile,
+      `PASSCONTROL_GATEWAY=http://127.0.0.1:${port}\n` +
+        `PASSPORT_ID=${PASSPORT}\n` +
+        `PASSPORT_SECRET=\n` +
+        `PASSPORT_KEY_STORAGE=os\n` +
+        `PASSCONTROL_API_KEY=${KEY}\n` +
+        `PROVIDER=groq\nMODEL=llama-3.3-70b\n`
+    );
+  }
+
+  function fakeStore(ok = true) {
+    const deleted: string[] = [];
+    return {
+      deleted,
+      store: {
+        name: "test credential store",
+        write: () => ({ ok: true }),
+        read: () => ({ ok: false }),
+        delete: (id: string) => {
+          deleted.push(id);
+          return ok ? { ok: true } : { ok: false, reason: "still there" };
+        },
+      },
+    };
+  }
+
+  it("finds the machine even though the file holds no secret", async () => {
+    const { credentialFile } = await importLogout();
+    const sources = [
+      { path: "/global/.passcontrol", values: { PASSPORT_KEY_STORAGE: "os" } },
+    ];
+    expect(credentialFile({}, { sources, cwd: "/nowhere" })).toBe("/global/.passcontrol");
+  });
+
+  it("removes the key from the credential store, addressing it before the id is blanked", async () => {
+    const fake = fakeStore();
+    const stub = stubGateway({});
+    const after = await withGateway(stub, async (port) => {
+      writeTier1Config(port);
+      const mod = await importLogout();
+      await mod.logoutCommand({ yes: true }, { credentialStore: fake.store });
+      return fs.readFileSync(configFile, "utf8");
+    });
+
+    expect(fake.deleted).toEqual([PASSPORT]);
+    expect(after).toContain("PASSPORT_ID=\n");
+    // writeConfigFile omits an unset PASSPORT_KEY_STORAGE rather than emitting a
+    // blank one, so a cleared marker means the line is GONE, not empty.
+    expect(after).not.toContain("PASSPORT_KEY_STORAGE");
+  });
+
+  it("says the key is STILL there rather than claiming a clean logout", async () => {
+    const fake = fakeStore(false);
+    const stub = stubGateway({});
+    const result = await withGateway(stub, async (port) => {
+      writeTier1Config(port);
+      const mod = await importLogout();
+      return mod.logoutCommand({ yes: true }, { credentialStore: fake.store });
+    });
+
+    expect(result.osKeyCleared).toMatchObject({ ok: false });
+    expect(result.warnings.join(" ")).toMatch(/STILL in the test credential store/u);
+  });
+
+  it("still asks before destroying a passport it cannot give back", async () => {
+    const asked: string[] = [];
+    const stub = stubGateway({});
+    const result = await withGateway(stub, async (port) => {
+      writeTier1Config(port);
+      const mod = await importLogout();
+      return mod.logoutCommand({}, {
+        credentialStore: fakeStore().store,
+        confirmYes: async (q: string, o: { default?: boolean } = {}) => {
+          asked.push(q);
+          return o.default !== false;
+        },
+      });
+    });
+
+    expect(asked.join(" ")).toMatch(/Log out of this machine\?/u);
+    expect(result.cancelled).toBe(true);
+  });
+});

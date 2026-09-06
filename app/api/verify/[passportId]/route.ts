@@ -55,5 +55,11 @@ export async function GET(
   if (result.reason === "unavailable") {
     return json({ error: { code: "verification_unavailable" } }, 503);
   }
+  // Two different agents answer to this key, and naming one would publish an
+  // identity claim the gateway itself refuses to make. 409, not 404: the
+  // passport exists, and "no such passport" would be its own false statement.
+  if (result.reason === "ambiguous") {
+    return json({ error: { code: "passport_ambiguous" } }, 409);
+  }
   return json({ error: { code: "not_found" } }, 404);
 }

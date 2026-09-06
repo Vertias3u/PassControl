@@ -7,10 +7,14 @@
 // Nothing here needs a PassControl account, an API key, or a passport. You need
 // the artifact and the issuer's origin. That is the whole point.
 import { ed25519 } from "@noble/curves/ed25519";
-import { RECEIPT_PROTOCOL } from "./protocols.mjs";
+import { sha256 } from "@noble/hashes/sha256";
+import { RECEIPT_PROTOCOL, STATEMENT_PROTOCOL } from "./protocols.mjs";
 
 export const RECEIPT_TYP = "passcontrol-receipt+jwt";
 export const AGENT_TOKEN_TYP = "passcontrol-agent+jwt";
+export const STATEMENT_TYP = "passcontrol-statement+jws";
+// Its own version line, separate from the receipt's — see protocols.mjs.
+export const STATEMENT_SUPPORTED_VER = STATEMENT_PROTOCOL.maximum;
 // Receipts v2 add Direct Agent identity claims. This is a maximum, not an
 // equality check: v1 receipts remain independently verifiable forever.
 export const SUPPORTED_VER = RECEIPT_PROTOCOL.maximum;
@@ -41,7 +45,23 @@ async function loadJwks(issuer, fetchImpl) {
   }
 }
 
-async function verifySigned(token, typ, { issuer, fetch: fetchImpl = fetch }) {
+/**
+ * `version` names which claim carries the artifact's version and the newest
+ * value understood. Receipts version with `ver`; statements have their own line
+ * and use `v`. Without this a statement would flow through the receipt gate,
+ * find no `ver`, read as 0 and be accepted whatever it claimed — so a future
+ * statement v2 would pass this v1 verifier silently. The default reproduces the
+ * receipt behaviour exactly, so the verifyReceipt call site is unchanged.
+ *
+ * Kept deliberately identical in shape to sdk/verify.ts. These two are twins and
+ * the tests below pin them to agree.
+ */
+async function verifySigned(
+  token,
+  typ,
+  { issuer, fetch: fetchImpl = fetch },
+  version = { claim: "ver", max: SUPPORTED_VER }
+) {
   const parts = String(token).split(".");
   if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
     return { ok: false, reason: "malformed" };
@@ -64,7 +84,9 @@ async function verifySigned(token, typ, { issuer, fetch: fetchImpl = fetch }) {
   if (!claims?.iss || !matchesIssuer(claims.iss, [issuer])) {
     return { ok: false, reason: "untrusted_issuer" };
   }
-  if (Number(claims.ver ?? 0) > SUPPORTED_VER) return { ok: false, reason: "unsupported_version" };
+  if (Number(claims?.[version.claim] ?? 0) > version.max) {
+    return { ok: false, reason: "unsupported_version" };
+  }
 
   const keys = await loadJwks(claims.iss, fetchImpl);
   if (!keys) return { ok: false, reason: "jwks_unreachable" };
@@ -92,6 +114,59 @@ async function verifySigned(token, typ, { issuer, fetch: fetchImpl = fetch }) {
 
 export function verifyReceipt(jws, options) {
   return verifySigned(jws, RECEIPT_TYP, options);
+}
+
+/**
+ * Verify a signed spend statement.
+ *
+ * A valid statement proves the issuer committed to a fixed set of receipts for
+ * that window at signing time, and that it follows a specific earlier statement.
+ * It is NOT an independent audit of the totals: recomputing `root` needs every
+ * receipt in the window, which the holder of a statement does not have.
+ */
+export function verifyStatement(jws, options) {
+  return verifySigned(jws, STATEMENT_TYP, options, {
+    claim: "v",
+    max: STATEMENT_SUPPORTED_VER,
+  });
+}
+
+/**
+ * Fold a receipt and an inclusion path back to a root.
+ *
+ * `false` means "not in THIS root" — not "not attested". Pairing a receipt with
+ * the wrong day's statement returns a truthful `false` that reads like an
+ * accusation, and nothing here can tell the difference.
+ */
+export function verifyInclusion(receiptJws, proof, root) {
+  const bytes = (v) => (typeof v === "string" ? fromB64url(v) : v);
+  // Same domain separation as lib/merkle.ts: 0x00 for a leaf, 0x01 for a node,
+  // so a leaf can never be passed off as an internal node.
+  const hash = (prefix, ...parts) => {
+    const total = parts.reduce((sum, p) => sum + p.length, 1);
+    const buf = new Uint8Array(total);
+    buf[0] = prefix;
+    let at = 1;
+    for (const p of parts) {
+      buf.set(p, at);
+      at += p.length;
+    }
+    return sha256(buf);
+  };
+
+  try {
+    let node = hash(0x00, new TextEncoder().encode(String(receiptJws)));
+    for (const step of proof ?? []) {
+      const sibling = bytes(step.hash);
+      node = step.right ? hash(0x01, node, sibling) : hash(0x01, sibling, node);
+    }
+    const target = bytes(root);
+    if (node.length !== target.length) return false;
+    for (let i = 0; i < node.length; i++) if (node[i] !== target[i]) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function verifyAgentToken(token, options) {

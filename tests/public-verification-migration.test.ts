@@ -38,15 +38,47 @@ describe("the public verification function", () => {
       .map((line) => line.trim().split(/\s+/)[0])
       .filter(Boolean);
 
+    // Hand-written and exact, on purpose. This is the public surface of a
+    // security product, so widening it should cost a deliberate edit in two
+    // places rather than being absorbed by a pattern. 0048 added the company
+    // line: an identifier the owner ASSERTS and we looked up in a public
+    // register, never proven to be theirs — which is why no address, no
+    // jurisdiction of a person, and nothing that is not already public record
+    // in that register is here.
+    // 0052 added four: the two deadlines a reader needs to judge validity for
+    // themselves, the flag saying which key column was matched, and a COUNT of
+    // how many agents answer to the key. That last one is deliberately a count
+    // and not the identities — the caller must be able to refuse a cross-tenant
+    // collision without learning whose it is.
     expect(columns.sort()).toEqual([
       "created_at",
+      "expires_at",
+      "matched_current",
+      "matched_rows",
+      "owner_company_active",
+      "owner_company_at",
+      "owner_company_id",
+      "owner_company_name",
+      "owner_company_source",
       "owner_kind",
       "owner_subject",
       "owner_tier",
       "owner_verified_at",
       "passport_pubkey",
+      "previous_valid_until",
       "status",
     ]);
+  });
+
+  // The narrower claim that survives 0052: no internal identifier is returned,
+  // whatever else is. An agent uuid on an unauthenticated RPC would be a new
+  // disclosure, and an earlier draft of 0052 had one before this test pushed
+  // the ambiguity signal down to a count.
+  it("returns no internal identifier", () => {
+    const returns = migration.match(/returns table \(([\s\S]*?)\n\)/i)?.[1] ?? "";
+    expect(returns).not.toMatch(/\bagent_id\b/);
+    expect(returns).not.toMatch(/\buser_id\b/);
+    expect(returns).not.toMatch(/\bid\s+uuid\b/);
   });
 
   // The returns clause is the surface; the body is allowed to touch a private
@@ -55,8 +87,18 @@ describe("the public verification function", () => {
   // `on o.user_id = a.user_id`, so the blunt check would fail on a correct
   // function. Assert the narrower true thing: nothing private is RETURNED, and
   // user_id appears only where it joins.
+  // Whole names, not substrings. The blunt `toContain` version failed on
+  // `owner_company_name` the moment a legitimately public column happened to end
+  // in "name" — the same false positive the `user_id` note above describes, and
+  // a guard that cries wolf on a correct function is a guard that gets relaxed.
   it("never returns a private column", () => {
     const returns = migration.match(/returns table \(([\s\S]*?)\n\)/i)?.[1] ?? "";
+    const columns = new Set(
+      returns
+        .split("\n")
+        .map((line) => line.trim().split(/\s+/)[0])
+        .filter(Boolean)
+    );
     for (const column of [
       "user_id",
       "name",
@@ -67,8 +109,11 @@ describe("the public verification function", () => {
       "spent_tokens",
       "spent_microcents",
       "agent_logs",
+      // 0048 reads a postal address out of the registers and deliberately never
+      // stores it. If a column for one ever appears, it must not be here.
+      "owner_company_address",
     ]) {
-      expect(returns).not.toContain(column);
+      expect(columns.has(column)).toBe(false);
     }
   });
 

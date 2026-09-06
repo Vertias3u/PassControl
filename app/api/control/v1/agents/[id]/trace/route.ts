@@ -5,7 +5,7 @@ import { control } from "@/lib/control/handler";
 import { readJsonBody } from "@/lib/control/body";
 import { errorResponse, jsonResponse } from "@/lib/control/respond";
 import { rateLimit } from "@/lib/ratelimit";
-import { isProvider } from "@/lib/providers";
+import { isScopeProvider } from "@/lib/providers";
 import { evaluateDecisionTrace } from "./decision-trace";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -17,6 +17,10 @@ function noStore(response: Response): Response {
   response.headers.set("cache-control", "no-store");
   return response;
 }
+
+// Generous, because it bounds a projection rather than a real call: the point
+// is to refuse nonsense, not to have an opinion about a model's output limit.
+const MAX_TRACE_OUTPUT_TOKENS = 10_000_000;
 
 const handler = control("read", async ({ req, userId, db, params, requestId }) => {
   const agentId = params.id ?? "";
@@ -41,8 +45,20 @@ const handler = control("read", async ({ req, userId, db, params, requestId }) =
   if (!parsed.ok) return noStore(errorResponse(parsed.status, parsed.code, requestId));
   const provider = typeof parsed.body?.provider === "string" ? parsed.body.provider : "";
   const model = typeof parsed.body?.model === "string" ? parsed.body.model.trim() : "";
-  if (!isProvider(provider) || !model || model.length > MAX_MODEL_LENGTH) {
+  if (!isScopeProvider(provider) || !model || model.length > MAX_MODEL_LENGTH) {
     return noStore(errorResponse(400, "invalid_request", requestId));
+  }
+
+  // Optional, and validated like every other body field: a size the operator
+  // knows their agent sends. Absent means "project the gateway's own default",
+  // which is what the panel has always done.
+  let maxOutputTokens: number | null = null;
+  if (parsed.body?.max_tokens !== undefined && parsed.body.max_tokens !== null) {
+    const raw = parsed.body.max_tokens;
+    if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 1 || raw > MAX_TRACE_OUTPUT_TOKENS) {
+      return noStore(errorResponse(400, "invalid_request", requestId));
+    }
+    maxOutputTokens = Math.floor(raw);
   }
 
   const evaluatedAt = new Date();
@@ -66,6 +82,7 @@ const handler = control("read", async ({ req, userId, db, params, requestId }) =
     agentId,
     provider,
     model,
+    maxOutputTokens,
     evaluatedAt,
     policyAt,
   });

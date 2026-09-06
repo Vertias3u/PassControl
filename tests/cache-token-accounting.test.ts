@@ -60,6 +60,8 @@ describe("reading prompt-cache tokens off a provider response", () => {
       outputTokens: 200,
       cacheReadTokens: 18_000,
       cacheWriteTokens: 1_200,
+      sawUsage: true,
+      complete: true,
     });
   });
 
@@ -81,7 +83,17 @@ describe("reading prompt-cache tokens off a provider response", () => {
   it("reports zero cache tokens for an uncached Anthropic call", async () => {
     expect(
       usageFromJson("anthropic", { usage: { input_tokens: 900, output_tokens: 100 } })
-    ).toEqual({ inputTokens: 900, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    ).toEqual({
+      inputTokens: 900,
+      outputTokens: 100,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      // Zero CACHE tokens, reported by a provider that did report usage. Not to
+      // be confused with the absent-usage case, which carries the same zeros and
+      // is charged as uncertain instead.
+      sawUsage: true,
+      complete: true,
+    });
 
     expect(
       await tally("anthropic", [
@@ -89,6 +101,25 @@ describe("reading prompt-cache tokens off a provider response", () => {
         'data: {"type":"message_delta","usage":{"output_tokens":100}}\n\n',
       ])
     ).toEqual({ inputTokens: 900, outputTokens: 100, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  });
+
+  it("preserves valid partial Anthropic usage while rejecting malformed cache evidence as complete", () => {
+    expect(
+      usageFromJson("anthropic", {
+        usage: {
+          input_tokens: 10_000,
+          output_tokens: 5,
+          cache_read_input_tokens: -1,
+        },
+      })
+    ).toEqual({
+      inputTokens: 10_000,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      sawUsage: true,
+      complete: false,
+    });
   });
 
   // The asymmetry. `prompt_tokens` already contains the cached tokens, so the
@@ -107,6 +138,8 @@ describe("reading prompt-cache tokens off a provider response", () => {
       outputTokens: 200,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      sawUsage: true,
+      complete: true,
     });
   });
 

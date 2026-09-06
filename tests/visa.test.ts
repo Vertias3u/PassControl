@@ -1,11 +1,15 @@
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { mintVisa, verifyVisa } from "../lib/auth/visa";
+import { ed25519 } from "@noble/curves/ed25519";
+import { SignJWT } from "jose";
+import { bytesToBase64url, utf8ToBytes } from "../lib/encoding";
+import { jwkThumbprint } from "../lib/crypto/instanceKey";
+import { mintVisa, verifyVisa, VISA_AUD, VISA_ISS, VISA_VER } from "../lib/auth/visa";
 
 const STRONG_SECRET = "test-secret-test-secret-test-secret-32";
 
 describe("work visa", () => {
   const base = {
-    passportId: "pid",
+    passportId: bytesToBase64url(ed25519.getPublicKey(new Uint8Array(32).fill(7))),
     agentId: "aid",
     userId: "uid",
     jti: "j1",
@@ -40,7 +44,7 @@ describe("work visa", () => {
     expect(expSeconds).toBe(300);
     const claims = await verifyVisa(token);
     expect(claims).not.toBeNull();
-    expect(claims!.sub).toBe("pid");
+    expect(claims!.sub).toBe(base.passportId);
     expect(claims!.agid).toBe("aid");
     expect(claims!.uid).toBe("uid");
     expect(claims!.jti).toBe("j1");
@@ -49,6 +53,34 @@ describe("work visa", () => {
     expect(claims!.bc).toBe(5);
     expect(claims!.st).toBe(42);
     expect(claims!.sc).toBe(12_345);
+    expect(claims!.ver).toBe(VISA_VER);
+    expect(claims!.cnf).toEqual({ jkt: jwkThumbprint(base.passportId) });
+  });
+
+  it("accepts the previous visa version for one deploy cycle", async () => {
+    const legacy = await new SignJWT({
+      agid: base.agentId,
+      uid: base.userId,
+      scope: base.scope,
+      bt: base.budgetTokens,
+      bc: base.budgetCents,
+      st: base.spentTokens,
+      sc: base.spentMicrocents,
+      ver: VISA_VER - 1,
+    })
+      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+      .setIssuer(VISA_ISS)
+      .setAudience(VISA_AUD)
+      .setSubject(base.passportId)
+      .setJti("legacy-jti")
+      .setIssuedAt()
+      .setExpirationTime("300s")
+      .sign(utf8ToBytes(STRONG_SECRET));
+
+    await expect(verifyVisa(legacy)).resolves.toMatchObject({
+      sub: base.passportId,
+      ver: VISA_VER - 1,
+    });
   });
 
   it("rejects a visa missing the owner claim", async () => {
@@ -85,7 +117,7 @@ describe("work visa", () => {
 
     const { token } = await mintVisa(base);
     await expect(verifyVisa(token)).resolves.toMatchObject({
-      sub: "pid",
+      sub: base.passportId,
       agid: "aid",
       uid: "uid",
     });

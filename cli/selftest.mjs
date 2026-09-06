@@ -16,16 +16,52 @@ import { ok, step, warn } from "./config.mjs";
 import { createVisaClient } from "./visa-client.mjs";
 import { verifyReceipt } from "./verify.mjs";
 
-async function control(origin, apiKey, method, path, fetchImpl) {
-  const res = await fetchImpl(`${origin}/api/control/v1${path}`, {
-    method,
-    headers: { authorization: `Bearer ${apiKey}` },
-  });
-  const parsed = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(`Control plane refused ${method} ${path} (${res.status}).`);
-  // `{ data: ... }` — see lib/control/respond.ts. Unwrapped here so callers read
-  // the payload, never the envelope.
-  return parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The proxy answers BEFORE its receipt row exists.
+ *
+ * Signing and storing the audit row happen after the response, deliberately, so
+ * a governed call is never slowed by its own paperwork. The receipt id in the
+ * response header is therefore a promise that the row WILL exist, not a claim
+ * that it does — and a single immediate read loses that race. Codex reproduced
+ * it deterministically by holding the background write until the first read
+ * finished.
+ *
+ * What made it worth fixing rather than tolerating is how it fails: that 404 is
+ * the same answer a gateway gives when it stores no receipts at all, so the
+ * operator is told the deployment signs nothing, on the one screen they read as
+ * proof that it does.
+ *
+ * Bounded to five attempts inside ~1.75s, and ONLY on 404. A 401 is the wrong
+ * key, a 429 is a limiter that retrying would only anger, and a 5xx is not
+ * something a login should sit through. Exhausting the attempts falls through
+ * to the caller's existing "no receipt was stored" branch, which by then is a
+ * fair description.
+ *
+ * Exported because the policy IS the contract: the number of attempts, and the
+ * fact that only a 404 earns one, are what separate a row still being written
+ * from a wrong key or a limiter that retrying would only anger.
+ */
+const RECEIPT_RETRY_DELAYS_MS = [120, 240, 480, 900];
+
+export async function fetchReceiptRow(origin, apiKey, receiptId, fetchImpl, wait) {
+  const url = `${origin}/api/control/v1/receipts/${encodeURIComponent(receiptId)}`;
+  for (let attempt = 0; ; attempt += 1) {
+    const res = await fetchImpl(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+    if (res.ok) {
+      const parsed = await res.json().catch(() => null);
+      return parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed;
+    }
+    if (res.status !== 404) {
+      throw new Error(`Control plane refused GET /receipts/${receiptId} (${res.status}).`);
+    }
+    if (attempt >= RECEIPT_RETRY_DELAYS_MS.length) return null;
+    await wait(RECEIPT_RETRY_DELAYS_MS[attempt]);
+  }
 }
 
 /**
@@ -55,10 +91,24 @@ async function control(origin, apiKey, method, path, fetchImpl) {
  * a quieter message and returns, and it wraps ITSELF rather than trusting each
  * caller to remember.
  */
-export async function proveItWorks({ origin, passportId, passportSecret, apiKey, fetchImpl }) {
+export async function proveItWorks({
+  origin,
+  passportId,
+  passportSecret,
+  keyStorage = null,
+  apiKey,
+  fetchImpl,
+  wait = sleep,
+}) {
   const proof = { visa: false, call: false, receipt: null };
   try {
-    const visas = createVisaClient({ gateway: origin, passportId, passportSecret, fetch: fetchImpl });
+    const visas = createVisaClient({
+      gateway: origin,
+      passportId,
+      passportSecret,
+      keyStorage,
+      fetch: fetchImpl,
+    });
     const visa = await visas.getVisa();
     proof.visa = true;
     ok("minted a visa with the passport this machine just created");
@@ -102,7 +152,7 @@ export async function proveItWorks({ origin, passportId, passportSecret, apiKey,
     }
     proof.receiptId = receiptId;
 
-    const row = await control(origin, apiKey, "GET", `/receipts/${receiptId}`, fetchImpl);
+    const row = await fetchReceiptRow(origin, apiKey, receiptId, fetchImpl, wait);
     const jws = row?.receipt;
     if (!jws) {
       // The route says why itself: no INSTANCE_SIGNING_KEY is a configuration

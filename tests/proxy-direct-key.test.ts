@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 
 const {
   verifyVisaMock,
   authenticateDirectAgentKeyMock,
   serviceClientMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   getCachedKeyMock,
   setCachedKeyMock,
   getCachedAgentPolicyMock,
@@ -24,8 +25,8 @@ const {
   verifyVisaMock: vi.fn(),
   authenticateDirectAgentKeyMock: vi.fn(),
   serviceClientMock: vi.fn(),
-  reserveBudgetMock: vi.fn(),
-  reconcileBudgetMock: vi.fn(),
+  openHoldMock: vi.fn(),
+  settleHoldMock: vi.fn(),
   getCachedKeyMock: vi.fn(),
   setCachedKeyMock: vi.fn(),
   getCachedAgentPolicyMock: vi.fn(),
@@ -42,6 +43,11 @@ const {
   fetchMock: vi.fn(),
 }));
 
+// The proxy now reaches lib/demo/identity.ts to tell the seeded PUBLIC demo
+// passport apart from a tenant that holds a demo scope. That module is
+// `server-only`, which Next enforces at build time and vitest cannot resolve
+// at all — same stub tests/site-demo-routes.test.ts already uses.
+vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (promise: unknown) => promise }));
 vi.mock("@/lib/auth/visa", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/auth/visa")>()),
@@ -56,16 +62,52 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => ({
   readKillState: (...args: unknown[]) => readKillStateMock(...args),
 }));
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
-  reserveBudget: (...args: unknown[]) => reserveBudgetMock(...args),
-  reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
   touchLastSeen: (...args: unknown[]) => touchLastSeenMock(...args),
-  seedSpent: vi.fn(),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    openHold: (...args: unknown[]) => openHoldMock(...args),
+    // Always granted here: these suites assert what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself (tests/proxy-dispatch-permission.test.ts).
+    consumeDispatchPermission: async () => ({ granted: true }),
+    settleKnown: (p: Record<string, unknown>) => settle("complete", p),
+    settleUnknown: (p: Record<string, unknown>) => settle("usage_unknown", p),
+    releaseUndispatched: (p: Record<string, unknown>) => settle("not_dispatched", p),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
@@ -139,8 +181,8 @@ beforeEach(() => {
   captureSecurityEventMock.mockResolvedValue(undefined);
   readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
-  reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 1 });
-  reconcileBudgetMock.mockResolvedValue(undefined);
+  openHoldMock.mockResolvedValue({ ok: true, reserved: 1 });
+  settleHoldMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
@@ -158,6 +200,17 @@ beforeEach(() => {
 });
 
 describe("Direct Agent Key gateway authentication", () => {
+  it("stays bearer even when its shared agent row requires passport sender proofs", async () => {
+    getCachedAgentPolicyMock.mockResolvedValueOnce(
+      JSON.stringify({ p: {}, s: null, r: true })
+    );
+
+    const res = await call();
+
+    expect(res.status).toBe(200);
+    expect(verifyVisaMock).not.toHaveBeenCalled();
+  });
+
   it("rate-limits the client IP before the database lookup", async () => {
     await call();
     expect(rateLimitFailClosedMock).toHaveBeenCalledWith(

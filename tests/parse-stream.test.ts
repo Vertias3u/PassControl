@@ -64,13 +64,16 @@ describe("stream usage settlement", () => {
     expect(await settleWithin(settled)).toEqual({
       usage: { ...NO_USAGE, inputTokens: 12, outputTokens: 3 },
       end: "cancel",
+      sawUsage: true,
+      complete: false,
     });
   });
 
-  it("reports a normally closed stream as closed", async () => {
+  it("accepts a complete OpenAI chat usage event, including genuine zero", async () => {
     const source = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(enc('data: {"usage":{"prompt_tokens":7,"completion_tokens":2}}\n\n'));
+        controller.enqueue(enc('data: {"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}\n\n'));
+        controller.enqueue(enc("data: [DONE]\n\n"));
         controller.close();
       },
     });
@@ -78,8 +81,10 @@ describe("stream usage settlement", () => {
     expect(await drain(source.pipeThrough(stream))).toBe("closed");
 
     expect(await settleWithin(settled)).toEqual({
-      usage: { ...NO_USAGE, inputTokens: 7, outputTokens: 2 },
+      usage: { ...NO_USAGE, inputTokens: 0, outputTokens: 0 },
       end: "close",
+      sawUsage: true,
+      complete: true,
     });
   });
 
@@ -103,6 +108,12 @@ describe("stream usage settlement", () => {
     expect(await settleWithin(settled)).toEqual({
       usage: { ...NO_USAGE, inputTokens: 900, outputTokens: 42 },
       end: "error",
+      // A usage event DID arrive — message_start carried 900 input tokens — and
+      // the stream still broke. Both facts travel, because the proxy needs both:
+      // this call is charged, and it is charged as uncertain rather than as a
+      // confirmed 942.
+      sawUsage: true,
+      complete: false,
     });
   });
 
@@ -115,6 +126,13 @@ describe("stream usage settlement", () => {
     expect(await settleWithin(settled)).toEqual({
       usage: { ...NO_USAGE, inputTokens: 0, outputTokens: 0 },
       end: "error",
+      // THE DISCRIMINATION THE WHOLE CHANGE RESTS ON. These zeros are not a
+      // measurement of a free call — Anthropic had already processed the entire
+      // prompt before it would have sent message_start, so real input tokens
+      // were billed that this tally never saw. Identical numbers to a genuine
+      // zero-token call; only this flag separates them.
+      sawUsage: false,
+      complete: false,
     });
   });
 
@@ -128,6 +146,64 @@ describe("stream usage settlement", () => {
     expect(await settleWithin(settled)).toEqual({
       usage: { ...NO_USAGE, inputTokens: 5, outputTokens: 1 },
       end: "error",
+      sawUsage: true,
+      complete: false,
+    });
+  });
+
+  it("keeps an Anthropic message_start and message_delta unconfirmed until message_stop", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc('data: {"type":"message_start","message":{"usage":{"input_tokens":7,"output_tokens":0}}}\n\n'));
+        controller.enqueue(enc('data: {"type":"message_delta","usage":{"output_tokens":2}}\n\n'));
+        controller.close();
+      },
+    });
+    const { stream, settled } = createUsageTransform("anthropic");
+    expect(await drain(source.pipeThrough(stream))).toBe("closed");
+
+    expect(await settleWithin(settled)).toEqual({
+      usage: { ...NO_USAGE, inputTokens: 7, outputTokens: 2 },
+      end: "close",
+      sawUsage: true,
+      complete: false,
+    });
+  });
+
+  it("retains authoritative completion after an OpenAI Responses terminal event even if delivery then breaks", async () => {
+    const source = breaksAfter([
+      'event: response.completed\n' +
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":7,"output_tokens":2}}}\n\n',
+    ]);
+    const { stream, settled } = createUsageTransform("openai", "responses");
+    expect(await drain(source.pipeThrough(stream))).toBe("errored");
+
+    // The transport error remains visible to the client. It does not erase the
+    // provider's already-delivered terminal accounting evidence.
+    expect(await settleWithin(settled)).toEqual({
+      usage: { ...NO_USAGE, inputTokens: 7, outputTokens: 2 },
+      end: "error",
+      sawUsage: true,
+      complete: true,
+    });
+  });
+
+  it("preserves a valid partial token field without accepting malformed usage as complete", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc('data: {"choices":[],"usage":{"prompt_tokens":10000,"completion_tokens":-1}}\n\n'));
+        controller.enqueue(enc("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    const { stream, settled } = createUsageTransform("openai");
+    expect(await drain(source.pipeThrough(stream))).toBe("closed");
+
+    expect(await settleWithin(settled)).toEqual({
+      usage: { ...NO_USAGE, inputTokens: 10_000 },
+      end: "close",
+      sawUsage: true,
+      complete: false,
     });
   });
 });

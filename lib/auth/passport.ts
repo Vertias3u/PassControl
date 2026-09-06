@@ -46,7 +46,14 @@ export type PassportRow = Record<string, unknown> & {
 
 export type PassportLookup =
   | { ok: true; agent: PassportRow; usedRetiredKey: boolean }
-  | { ok: false; status: number; code: string; agentId?: string };
+  | {
+      ok: false;
+      status: number;
+      code: string;
+      agentId?: string;
+      expiresAt?: string;
+      expiryKind?: "passport" | "retired_key";
+    };
 
 type LookupDatabase = Pick<SupabaseClient, "from">;
 
@@ -177,7 +184,14 @@ export async function findAuthenticatablePassport(
   // null = never expires. Every row holds null the moment 0021 applies, so this
   // is what keeps expiry opt-in and leaves existing passports untouched.
   if (agent.expires_at != null && isPast(agent.expires_at, now)) {
-    return { ok: false, status: 403, code: "passport_expired", agentId: agent.id };
+    return {
+      ok: false,
+      status: 403,
+      code: "passport_expired",
+      agentId: agent.id,
+      expiresAt: String(agent.expires_at),
+      expiryKind: "passport",
+    };
   }
 
   // A retired key with NO deadline is refused rather than admitted. Rotation
@@ -186,7 +200,14 @@ export async function findAuthenticatablePassport(
   // writes to this column by hand. isPast() returns true for a null or
   // unparseable value for the same reason.
   if (usedRetiredKey && isPast(agent.previous_valid_until, now)) {
-    return { ok: false, status: 403, code: "passport_expired", agentId: agent.id };
+    return {
+      ok: false,
+      status: 403,
+      code: "passport_expired",
+      agentId: agent.id,
+      expiresAt: typeof agent.previous_valid_until === "string" ? agent.previous_valid_until : undefined,
+      expiryKind: "retired_key",
+    };
   }
 
   return { ok: true, agent, usedRetiredKey };

@@ -8,6 +8,11 @@
 // discriminated result — no throwing for expected outcomes — so each caller maps
 // it to its own response (HTTP status / dashboard error).
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  SENDER_CONSTRAINT_MODES,
+  type SenderConstraintMode,
+} from "./sender-constraint";
+import { purgeAgentPolicy } from "./state/redis";
 import { armTenantKill } from "@/lib/state/killswitch";
 import { suspendAgent, unsuspendAgent, purgeAgentCaches } from "@/lib/state/redis";
 // The scope bounds an elevation is checked against now live with the union that
@@ -15,7 +20,10 @@ import { suspendAgent, unsuspendAgent, purgeAgentCaches } from "@/lib/state/redi
 import { validateAgentInput, validateAgentProfileInput, validateAgentUpdate, validateScopes } from "@/lib/validate";
 import { PROVIDERS } from "@/lib/providers";
 import { passportIdToPublicKey } from "@/lib/crypto/ed25519";
-import { MAX_ROTATION_GRACE_S } from "@/lib/passport-limits";
+import {
+  DEFAULT_PASSPORT_LIFETIME_DAYS,
+  MAX_ROTATION_GRACE_S,
+} from "@/lib/passport-limits";
 import {
   MAX_BREAK_GLASS_TTL_S,
   MIN_BREAK_GLASS_TTL_S,
@@ -45,15 +53,33 @@ export type FleetResult<T> =
   | { ok: true; value: T }
   | { ok: false; status: number; code: string; message?: string };
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Resolve the expiry requested for a new passport key. Undefined means the
+ * safe product default; only an explicit null means never. */
+function passportExpiry(value: unknown, now: number = Date.now()): string | null {
+  if (value === undefined) {
+    return new Date(now + DEFAULT_PASSPORT_LIFETIME_DAYS * DAY_MS).toISOString();
+  }
+  if (value === null) return null;
+  const at = Date.parse(String(value));
+  if (!Number.isFinite(at)) throw new Error("Invalid expiry date.");
+  if (at <= now) throw new Error("Passport expiry must be in the future.");
+  return new Date(at).toISOString();
+}
+
 /** Create an agent for a tenant (validates input; passport_pubkey must be unique). */
 export async function createAgent(
   db: SupabaseClient,
   userId: string,
   input: unknown
-): Promise<FleetResult<{ id: string; name: string; createdAt: string }>> {
+): Promise<FleetResult<{ id: string; name: string; createdAt: string; expiresAt: string | null }>> {
   let clean;
+  let expiresAt: string | null;
   try {
     clean = validateAgentInput(input as any);
+    const candidate = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    expiresAt = passportExpiry(candidate.expiresAt);
   } catch (e) {
     return { ok: false, status: 422, code: "invalid_request", message: (e as Error).message };
   }
@@ -66,6 +92,7 @@ export async function createAgent(
       allowed_scopes: clean.scopes,
       budget_tokens: clean.budget_tokens,
       budget_cents: clean.budget_cents,
+      expires_at: expiresAt,
     })
     // created_at comes back so onboarding can prove the new passport against calls
     // stored AFTER it existed. It has to be the database's clock — the same one that
@@ -89,7 +116,7 @@ export async function createAgent(
   if (typeof createdAt !== "string" || createdAt.length === 0) {
     return { ok: false, status: 500, code: "query_failed" };
   }
-  return { ok: true, value: { id: data.id as string, name: clean.name, createdAt } };
+  return { ok: true, value: { id: data.id as string, name: clean.name, createdAt, expiresAt } };
 }
 
 type DirectKeyDatabase = Pick<SupabaseClient, "rpc">;
@@ -347,7 +374,17 @@ export async function setAgentSuspended(
   return { ok: true, value: { id: agentId } };
 }
 
-/** Revoke an agent (terminal): status=revoked + suspend + purge. Keeps history. */
+/**
+ * Revoke an agent (terminal): status=revoked + suspend + purge. Keeps history.
+ *
+ * THE CALLER MUST WRITE THE `agent.revoke` AUDIT ROW. That row is not only the
+ * trail: it is the timestamp the public revocation list publishes
+ * (lib/revocation-list.ts), because nothing on the agent row records WHEN the
+ * revocation happened. A revoke path that skips the audit write silently drops
+ * the passport out of that list, which is the one thing the list is designed
+ * never to do — an entry may be added and must never go missing. Today the only
+ * caller is the control-plane DELETE route, and it writes the row.
+ */
 export async function revokeAgent(
   db: SupabaseClient,
   userId: string,
@@ -387,7 +424,7 @@ export async function revokeAgent(
 // in "long enough to redeploy", not in weeks. Defined in a leaf module and
 // re-exported here so the rotation UI can read the same number without pulling
 // this module — and Redis with it — into the browser bundle.
-export { MAX_ROTATION_GRACE_S } from "@/lib/passport-limits";
+export { DEFAULT_PASSPORT_LIFETIME_DAYS, MAX_ROTATION_GRACE_S } from "@/lib/passport-limits";
 
 /**
  * Retire this agent's passport key and install a new one, keeping the agent.
@@ -423,8 +460,17 @@ export async function rotatePassport(
   userId: string,
   agentId: string,
   newPassportPubkey: string,
-  graceSeconds: number
-): Promise<FleetResult<{ id: string; passportPubkey: string; previousValidUntil: string }>> {
+  graceSeconds: number,
+  expiresAtInput?: string | null
+): Promise<
+  FleetResult<{
+    id: string;
+    passportPubkey: string;
+    previousPassportPubkey: string | null;
+    previousValidUntil: string;
+    expiresAt: string | null;
+  }>
+> {
   if (!passportIdToPublicKey(String(newPassportPubkey ?? "").trim())) {
     return {
       ok: false,
@@ -447,6 +493,13 @@ export async function rotatePassport(
       code: "invalid_request",
       message: `Grace period must be between 0 and ${MAX_ROTATION_GRACE_S} seconds.`,
     };
+  }
+
+  let expiresAt: string | null;
+  try {
+    expiresAt = passportExpiry(expiresAtInput);
+  } catch (error) {
+    return { ok: false, status: 422, code: "invalid_request", message: (error as Error).message };
   }
 
   const { data: agent, error: lookupError } = await db
@@ -497,6 +550,7 @@ export async function rotatePassport(
       passport_pubkey: newKey,
       previous_passport_pubkey: agent.passport_pubkey,
       previous_valid_until: previousValidUntil,
+      expires_at: expiresAt,
     })
     .eq("user_id", userId)
     .eq("id", agentId)
@@ -521,7 +575,22 @@ export async function rotatePassport(
   }
   if (!data) return { ok: false, status: 409, code: "rotation_conflict" };
 
-  return { ok: true, value: { id: agentId, passportPubkey: newKey, previousValidUntil } };
+  // The retired key is returned because the audit row is the only place it
+  // survives: lib/reconcile.ts clears previous_passport_pubkey once the grace
+  // window closes, and after that nothing in the database can name the key that
+  // was retired. The public revocation list is built from that audit row, so a
+  // rotation that does not record it is a key no verifier can ever be told
+  // about. Taken from the row we read, never from the argument.
+  return {
+    ok: true,
+    value: {
+      id: agentId,
+      passportPubkey: newKey,
+      previousPassportPubkey: agent.passport_pubkey,
+      previousValidUntil,
+      expiresAt,
+    },
+  };
 }
 
 /**
@@ -567,6 +636,93 @@ export async function setPassportExpiry(
   if (error) return { ok: false, status: 500, code: "query_failed" };
   if (!data) return { ok: false, status: 404, code: "not_found" };
   return { ok: true, value: { id: agentId, expiresAt: value } };
+}
+
+/**
+ * Choose whether this agent's work-visas require a per-request passport proof.
+ *
+ * Two refusals, and the asymmetry between them is the design.
+ *
+ * A DIRECT AGENT KEY CANNOT BE ASKED FOR A PROOF. Trust boundary #1 says
+ * passport identity and direct-key identity are different assurances and must
+ * not be homogenised; a Direct Agent Key is a bearer credential by construction,
+ * with no keypair to sign with. Setting `observe` or `required` on an agent that
+ * has no passport is a configuration that can never be satisfied, so it is
+ * refused here rather than turning into calls that fail forever with nothing on
+ * screen explaining why.
+ *
+ * TURNING IT OFF ALWAYS WORKS, whatever the credential is. Making it harder to
+ * stop enforcing than to start would be the wrong way round — the same rule the
+ * MFA gate follows for revoking a leaking credential.
+ *
+ * Service-role, so the `user_id` filter below IS the tenant boundary rather than
+ * a second layer over RLS. 0049 adds no `authenticated` column grant, exactly as
+ * 0046 added none, so this function is the only way the value can change.
+ */
+export async function setSenderConstraintMode(
+  db: SupabaseClient,
+  userId: string,
+  agentId: string,
+  mode: string
+): Promise<FleetResult<{ id: string; mode: SenderConstraintMode }>> {
+  if (!SENDER_CONSTRAINT_MODES.includes(mode as SenderConstraintMode)) {
+    return {
+      ok: false,
+      status: 422,
+      code: "invalid_request",
+      message: "Choose off, observe, or required.",
+    };
+  }
+  const value = mode as SenderConstraintMode;
+
+  const { data: agent, error: readError } = await db
+    .from("agents")
+    .select("passport_pubkey")
+    .eq("user_id", userId) // tenant boundary — service_role bypasses RLS
+    .eq("id", agentId)
+    .maybeSingle();
+  if (readError) return { ok: false, status: 500, code: "query_failed" };
+  if (!agent) return { ok: false, status: 404, code: "not_found" };
+
+  if (value !== "off" && !(agent as { passport_pubkey?: string | null }).passport_pubkey) {
+    return {
+      ok: false,
+      status: 422,
+      code: "invalid_request",
+      message:
+        "This agent authenticates with a Direct Agent Key, which is a bearer credential and has no passport key to prove possession of. Issue it a passport first.",
+    };
+  }
+
+  const { data, error } = await db
+    .from("agents")
+    .update({ sender_constraint_mode: value })
+    .eq("user_id", userId) // tenant boundary — service_role bypasses RLS
+    .eq("id", agentId)
+    .select("id")
+    .maybeSingle();
+  if (error) return { ok: false, status: 500, code: "query_failed" };
+  if (!data) return { ok: false, status: 404, code: "not_found" };
+
+  // The mode is read from the POLICY CACHE on the hot path, so a write that does
+  // not purge leaves the old value deciding for up to its TTL: switching to
+  // `required` keeps admitting unproven calls for a minute, and switching to
+  // `off` keeps refusing them. shadow-actions.ts does this for the two other
+  // columns in that cache; this is the same invariant one column over.
+  //
+  // It lives here rather than in the server action, following lib/owner/manage.ts
+  // rather than shadow-actions.ts, because a second caller — the control API is
+  // the obvious one — would otherwise have to remember. Best-effort, and for the
+  // same reason the owner cache is: the database write is the durable thing, and
+  // returning failure for a change that was applied would have the caller retry
+  // a write that already succeeded. The only real cost of a missed purge is a
+  // stale mode until the TTL.
+  try {
+    await purgeAgentPolicy(userId, agentId);
+  } catch {
+    // Falls back to the TTL.
+  }
+  return { ok: true, value: { id: agentId, mode: value } };
 }
 
 /**

@@ -455,7 +455,7 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
   const verdict = describeVerdict(claims.res.status, claims.res.http);
   const authentication = describeReceiptAuthentication(claims);
   const owner = describeOwner(claims.own ?? null);
-  const cost = formatCost(claims.cost);
+  const cost = formatCost(claims.cost, claims.unp);
   const failover = describeFailover(claims.why);
   const tone =
     verdict.tone === "clear"

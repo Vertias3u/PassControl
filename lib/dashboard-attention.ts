@@ -15,6 +15,7 @@ export interface AttentionAgent {
   budget_cents: number | null;
   spent_tokens: number | null;
   spent_microcents: number | null;
+  passport_pubkey?: string | null;
   expires_at?: string | null;
   /**
    * The reconcile/challenge stamp. Optional because most callers care only
@@ -36,6 +37,7 @@ export interface AttentionLog {
 export type AttentionKind =
   | "suspended"
   | "passport"
+  | "no_expiry"
   | "budget"
   | "refusals"
   | "inactive";
@@ -253,6 +255,20 @@ export function buildFleetAttention(
       score = Math.max(score, expired ? 96 : 74);
     }
 
+    if (
+      agent.status === "active" &&
+      agent.passport_pubkey &&
+      agent.expires_at === null
+    ) {
+      reasons.push({
+        kind: "no_expiry",
+        label: "Set a passport expiry",
+        detail: "Choose an expiry on the agent page to give this passport a rotation deadline.",
+        tone: "neutral",
+      });
+      score = Math.max(score, 50);
+    }
+
     const projectedSoon = projectionMs !== null && projectionMs <= nowMs + NEAR_PROJECTION_MS;
     if (ratio >= BUDGET_ATTENTION_RATIO || projectedSoon) {
       reasons.push({
@@ -305,4 +321,110 @@ export function buildFleetAttention(
   }
 
   return items.sort((a, b) => b.score - a.score || a.agentName.localeCompare(b.agentName));
+}
+
+// ── The queue has three tiers, and its readers have to say which ────────────
+//
+// It was built as a fault list: everything in it was, by construction, wrong —
+// suspended, expired, over budget, refused, gone quiet. The surfaces above it
+// generalised from that, and each of them was right until `no_expiry` arrived.
+// An agent with no passport expiry is not faulty, it is unconfigured, and a
+// headline card that turns red for it teaches an operator to ignore the card.
+//
+// So severity is derived here, once, from the reasons themselves. A renderer
+// that asks "is any reason danger, otherwise warning" is re-deciding policy in
+// a component, which is how the warning tier came to include housekeeping.
+
+export type AttentionTone = AttentionReason["tone"];
+
+const TONE_RANK: Record<AttentionTone, number> = { neutral: 0, warning: 1, danger: 2 };
+
+/**
+ * The worst reason an item carries.
+ *
+ * Worst, not first and not "not danger": an agent can be suspended AND missing
+ * an expiry, and the row has to read as the suspension.
+ */
+export function attentionItemTone(item: { reasons: readonly AttentionReason[] }): AttentionTone {
+  let tone: AttentionTone = "neutral";
+  for (const reason of item.reasons) {
+    if (TONE_RANK[reason.tone] > TONE_RANK[tone]) tone = reason.tone;
+  }
+  return tone;
+}
+
+/**
+ * What each kind is called when the card has to name it in two words.
+ *
+ * Typed as an exhaustive Record so a new AttentionKind cannot ship without a
+ * noun — the card's subtitle is generated from what the queue actually holds,
+ * never hand-typed. It was hand-typed, and it drifted the way hand-typed lists
+ * do: it read "Suspended, revoked, or near budget" while buildFleetAttention
+ * skips revoked agents outright, so it advertised a state that could never
+ * appear underneath it, and omitted three that could. Same failure the CLI's
+ * integration list hit, same fix.
+ */
+const ATTENTION_KIND_NOUN: Record<AttentionKind, string> = {
+  suspended: "suspensions",
+  passport: "passport deadlines",
+  no_expiry: "missing expiries",
+  budget: "budgets",
+  refusals: "refusals",
+  inactive: "inactivity",
+};
+
+/** Tie-break order for kinds that share a tone. Exhaustive by construction. */
+const ATTENTION_KIND_ORDER = Object.keys(ATTENTION_KIND_NOUN) as AttentionKind[];
+
+/**
+ * Two, and the number was measured rather than chosen.
+ *
+ * The note renders into `.pc-metric-card__footer > span`, 258px wide beside the
+ * arrow on a 1512px viewport. Three nouns plus a `+N more` tail is 56 characters
+ * and wraps to a second line, which makes the one card in the rail taller than
+ * its three neighbours. The longest two-noun line — "Passport deadlines, missing
+ * expiries +4 more" — measures 224px and stays on one. (Both checked in the
+ * browser; the suite cannot see a wrap.)
+ */
+const SUMMARY_NOUN_LIMIT = 2;
+
+export interface FleetAttentionSummary {
+  count: number;
+  /** The worst tone anywhere in the queue — neutral when it is all housekeeping. */
+  tone: AttentionTone;
+  /** Generated from the kinds present. Never a fixed list of states. */
+  note: string;
+}
+
+export function summariseFleetAttention(
+  items: readonly FleetAttentionItem[]
+): FleetAttentionSummary {
+  if (!items.length) return { count: 0, tone: "neutral", note: "No agent alerts" };
+
+  let tone: AttentionTone = "neutral";
+  // A kind can appear at two tones across a fleet — one passport expired, another
+  // expiring — and the summary orders it by the worst it was seen at.
+  const worstByKind = new Map<AttentionKind, AttentionTone>();
+  for (const item of items) {
+    for (const reason of item.reasons) {
+      if (TONE_RANK[reason.tone] > TONE_RANK[tone]) tone = reason.tone;
+      const seen = worstByKind.get(reason.kind);
+      if (seen === undefined || TONE_RANK[reason.tone] > TONE_RANK[seen]) {
+        worstByKind.set(reason.kind, reason.tone);
+      }
+    }
+  }
+
+  const nouns = [...worstByKind.entries()]
+    .sort(
+      (a, b) =>
+        TONE_RANK[b[1]] - TONE_RANK[a[1]] ||
+        ATTENTION_KIND_ORDER.indexOf(a[0]) - ATTENTION_KIND_ORDER.indexOf(b[0])
+    )
+    .map(([kind]) => ATTENTION_KIND_NOUN[kind]);
+
+  const shown = nouns.slice(0, SUMMARY_NOUN_LIMIT);
+  const rest = nouns.length - shown.length;
+  const line = shown.join(", ") + (rest ? ` +${rest} more` : "");
+  return { count: items.length, tone, note: line.charAt(0).toUpperCase() + line.slice(1) };
 }

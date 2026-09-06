@@ -249,3 +249,42 @@ describe("validateAgentUpdate — fallbacks", () => {
     expect(() => validateAgentUpdate({ fallbacks: [{ provider: "evil", model: "x" }] })).toThrow();
   });
 });
+
+// ── The keyless demo provider is legal in ONE place ──────────────────────────
+//
+// It has to be legal in scopes: a brand-new tenant has no key in Vault, so a
+// demo call is the only one its first agent can lawfully make, and `passcontrol
+// login` proves itself with exactly that. It must stay illegal everywhere a
+// credential or a failover target is chosen, because there is no demo key to
+// store and no demo endpoint to fail over to.
+//
+// The asymmetry is the whole point, so it is pinned from both sides. Collapsing
+// `isScopeProvider` back into `isProvider` breaks the first test; widening
+// `isProvider` to include demo breaks the other three.
+describe("the demo provider's one legal home", () => {
+  it("is accepted in an agent's scopes, intact", () => {
+    expect(validateScopes([{ provider: "demo", models: ["*"] }])).toEqual([
+      { provider: "demo", models: ["*"] },
+    ]);
+  });
+
+  it("is accepted alongside a real provider, in the order given", () => {
+    const scopes = validateScopes([
+      { provider: "demo", models: ["*"] },
+      { provider: "anthropic", models: ["claude-*"] },
+    ]);
+    expect(scopes.map((s) => s.provider)).toEqual(["demo", "anthropic"]);
+  });
+
+  it("is refused as a provider key, because there is no demo credential", () => {
+    expect(() =>
+      validateProviderKeyInput({ provider: "demo", label: "demo", key: "sk-x" })
+    ).toThrow("Unknown provider.");
+  });
+
+  it("is refused as a failover target, because nothing forwards there", () => {
+    expect(() => validateFallbacks([{ provider: "demo", model: "demo-1" }])).toThrow(
+      "Unknown provider in fallbacks."
+    );
+  });
+});

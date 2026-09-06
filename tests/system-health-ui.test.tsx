@@ -26,7 +26,7 @@ const snapshot: SystemHealthSnapshot = {
     extra_count: 0,
     action: "Apply the expected migration.",
   },
-  protocols: { control_api: { minimum: 1, maximum: 1 }, gateway_api: { minimum: 1, maximum: 1 }, receipt: { minimum: 1, maximum: 2 }, agent_token: { minimum: 1, maximum: 1 }, workspace_export: { minimum: 1, maximum: 1 } },
+  protocols: { control_api: { minimum: 1, maximum: 1 }, gateway_api: { minimum: 1, maximum: 1 }, receipt: { minimum: 1, maximum: 2 }, agent_token: { minimum: 1, maximum: 1 }, workspace_export: { minimum: 1, maximum: 1 }, statement: { minimum: 1, maximum: 1 } },
   checks: [
     { id: "build_identity", category: "application", label: "Release identity", state: "ready", summary: "Available.", action: null },
     { id: "database", category: "database", label: "Migration ledger", state: "attention", summary: "Migration ledger needs attention.", action: "Apply the expected migration." },

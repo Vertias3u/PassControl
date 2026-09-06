@@ -147,6 +147,12 @@ export default async function VerifyIndexPage({
             Verify a call receipt →
           </Link>
           <Link
+            href="/verify/statement"
+            className="font-semibold text-primary no-underline hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            Verify a spend statement →
+          </Link>
+          <Link
             href="/"
             className="font-semibold text-primary no-underline hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >

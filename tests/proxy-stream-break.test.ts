@@ -11,12 +11,13 @@
 // status. A transform-level test passes just as happily against a route that logs
 // a broken stream as `ok`, which would trade a missing audit row for a lying one.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 
 const {
   verifyVisaMock,
   serviceClientMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   getCachedKeyMock,
   setCachedKeyMock,
   getCachedAgentPolicyMock,
@@ -32,8 +33,8 @@ const {
 } = vi.hoisted(() => ({
   verifyVisaMock: vi.fn(),
   serviceClientMock: vi.fn(),
-  reserveBudgetMock: vi.fn(),
-  reconcileBudgetMock: vi.fn(),
+  openHoldMock: vi.fn(),
+  settleHoldMock: vi.fn(),
   getCachedKeyMock: vi.fn(),
   setCachedKeyMock: vi.fn(),
   getCachedAgentPolicyMock: vi.fn(),
@@ -53,6 +54,11 @@ const {
 // inside a waitUntil after the response headers are already committed, so a
 // no-op mock would make every assertion here vacuously unreachable.
 const deferred: Promise<unknown>[] = [];
+// The proxy now reaches lib/demo/identity.ts to tell the seeded PUBLIC demo
+// passport apart from a tenant that holds a demo scope. That module is
+// `server-only`, which Next enforces at build time and vitest cannot resolve
+// at all — same stub tests/site-demo-routes.test.ts already uses.
+vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({
   waitUntil: (p: Promise<unknown>) => {
     deferred.push(Promise.resolve(p));
@@ -69,15 +75,51 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
   return { ...actual, readKillState: (...args: unknown[]) => readKillStateMock(...args) };
 });
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
-  reserveBudget: (...args: unknown[]) => reserveBudgetMock(...args),
-  reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
-  seedSpent: vi.fn(),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    openHold: (...args: unknown[]) => openHoldMock(...args),
+    // Always granted here: these suites assert what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself (tests/proxy-dispatch-permission.test.ts).
+    consumeDispatchPermission: async () => ({ granted: true }),
+    settleKnown: (p: Record<string, unknown>) => settle("complete", p),
+    settleUnknown: (p: Record<string, unknown>) => settle("usage_unknown", p),
+    releaseUndispatched: (p: Record<string, unknown>) => settle("not_dispatched", p),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({
   seal: async () => "sealed",
@@ -176,8 +218,8 @@ beforeEach(() => {
   for (const m of [
     verifyVisaMock,
     serviceClientMock,
-    reserveBudgetMock,
-    reconcileBudgetMock,
+    openHoldMock,
+    settleHoldMock,
     getCachedKeyMock,
     setCachedKeyMock,
     getCachedAgentPolicyMock,
@@ -198,8 +240,8 @@ beforeEach(() => {
   serviceClientMock.mockReturnValue({
     rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
   });
-  reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 60 });
-  reconcileBudgetMock.mockResolvedValue(undefined);
+  openHoldMock.mockResolvedValue({ ok: true, reserved: 60 });
+  settleHoldMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
@@ -230,36 +272,80 @@ describe("a streamed call whose upstream breaks mid-answer", () => {
     expect(writeLogMock).toHaveBeenCalledTimes(1);
   });
 
-  it("records it as a provider error, not as a successful call", async () => {
+  it("records it as usage_unknown — sent, and the accounting never came back", async () => {
     fetchMock.mockResolvedValue(sseResponse(sseThatBreaks(PARTIAL_STREAM)));
 
     await drain(await callProxy());
     await flushDeferred();
 
+    // NOT `upstream_error`. That status means a call we know produced nothing,
+    // and it is exactly what made this bug invisible: the spend checkpoint
+    // counted only `ok` rows, so a broken stream's real tokens dropped straight
+    // back out of the cap at the next cron run. `usage_unknown` is counted
+    // (db/migrations/0055) precisely because this call may have been billed.
     expect(writeLogMock).toHaveBeenCalledWith(
-      expect.objectContaining({ jti: "jti-1", status: "upstream_error" })
+      expect.objectContaining({ jti: "jti-1", status: "usage_unknown" })
     );
   });
 
-  it("bills the partial tokens the provider produced before the break", async () => {
+  it("settles as unknown with the observed tokens, and the row keeps what was OBSERVED", async () => {
     fetchMock.mockResolvedValue(sseResponse(sseThatBreaks(PARTIAL_STREAM)));
 
     await drain(await callProxy());
     await flushDeferred();
 
-    // The usage chunk arrived before the break, so it is real spend and the
-    // reservation must be reconciled against it — not released as if nothing
-    // had been consumed.
-    expect(reconcileBudgetMock).toHaveBeenCalledWith(
+    // The route hands the settle only what it OBSERVED. The greater of that and
+    // the stored estimate is chosen inside the Lua, which is where the estimate
+    // actually lives — see tests/holds.redis.test.ts for that arithmetic. This
+    // file's job is which transition was chosen and with what arguments; it must
+    // not re-implement the script, which is how tests/reserve-id.test.ts drifted.
+    expect(settleHoldMock).toHaveBeenCalledWith(
       expect.objectContaining({
         agentId: "agent-id",
-        reserveId: reserveBudgetMock.mock.calls[0]?.[0]?.reserveId,
-        actualTokens: 40,
+        attemptId: openHoldMock.mock.calls[0]?.[0]?.attemptId,
+        outcome: "usage_unknown",
+        tokens: 40,
       })
     );
+    // And the audit row still records what the provider actually reported. The
+    // enforced figure is a separate column precisely so this one stays true.
     expect(writeLogMock).toHaveBeenCalledWith(
       expect.objectContaining({ inputTokens: 31, outputTokens: 9 })
     );
+  });
+
+  // Step 13's headline: the enforced figure reaches the row and the mirror.
+  it("records the ENFORCED figure alongside the observed one, and mirrors the enforced", async () => {
+    fetchMock.mockResolvedValue(sseResponse(sseThatBreaks(PARTIAL_STREAM)));
+    // What the real script would apply: max(observed 40, estimate 1200).
+    settleHoldMock.mockResolvedValue({
+      applied: true,
+      appliedTokens: 1_200,
+      appliedMicrocents: 8_000,
+    });
+
+    await drain(await callProxy());
+    await flushDeferred();
+
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "usage_unknown",
+        // Observed stays observed…
+        inputTokens: 31,
+        outputTokens: 9,
+        // …while the columns that say what the budget was charged carry the
+        // enforced figures. A checkpoint reading only the observed pair would
+        // disagree with Redis about this call.
+        enforcedTokens: 1_200,
+        enforcedMicrocents: 8_000,
+      })
+    );
+    // THE MIRROR IS CALLED, and with the ENFORCED figures. This file used to
+    // assert it was NOT called at all. That left agents.spent_* under-counting
+    // the checkpoint, and the mirror is what the dashboard, the control graph,
+    // the passport page and the decision trace all read — so an operator saw
+    // "40 tokens" on an agent being refused at its cap.
+    expect(mirrorSpendMock).toHaveBeenCalledWith("agent-id", 1_200, 8_000);
   });
 
   it("hands the client a broken stream rather than a clean truncated one", async () => {
@@ -278,38 +364,74 @@ describe("a streamed call whose upstream breaks mid-answer", () => {
     await drain(await callProxy());
     await flushDeferred();
 
+    // Zeros on the row, because zero is what was observed — and `usage_unknown`
+    // is what stops those zeros being read as a measurement. Anthropic and
+    // OpenAI both process the entire prompt before their first usage event, so a
+    // break here means real input tokens were billed that nothing here can see.
     expect(writeLogMock).toHaveBeenCalledWith(
-      expect.objectContaining({ status: "upstream_error", inputTokens: 0, outputTokens: 0 })
+      expect.objectContaining({ status: "usage_unknown", inputTokens: 0, outputTokens: 0 })
     );
-    expect(reconcileBudgetMock).toHaveBeenCalledWith(
-      expect.objectContaining({ actualTokens: 0 })
+    expect(settleHoldMock).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "usage_unknown", tokens: 0 })
     );
   });
 
-  it("does not mirror a broken stream into the dashboard spend", async () => {
+  it("mirrors a broken stream into the dashboard spend, at the enforced figure", async () => {
     fetchMock.mockResolvedValue(sseResponse(sseThatBreaks(PARTIAL_STREAM)));
+    settleHoldMock.mockResolvedValue({
+      applied: true,
+      appliedTokens: 1_200,
+      appliedMicrocents: 8_000,
+    });
 
     await drain(await callProxy());
     await flushDeferred();
 
-    // mirrorSpend is the `ok`-only best-effort mirror. A broken stream is not ok.
+    // The reversal, stated as its own case. The mirror used to be `ok`-only, so
+    // a broken stream never reached the dashboard at all — while Redis charged
+    // for it. The two disagreed about the same call, visibly.
+    expect(mirrorSpendMock).toHaveBeenCalledWith("agent-id", 1_200, 8_000);
+  });
+
+  // A settle whose Redis write FAILED must not also cost the audit row. We then
+  // do not know what was applied, so the enforced columns are omitted — absence
+  // means "the observed figure was what was enforced", which is the least-wrong
+  // reading — and the mirror is skipped rather than fed a guess.
+  it("still writes the audit row when the settle itself fails", async () => {
+    fetchMock.mockResolvedValue(sseResponse(sseThatBreaks(PARTIAL_STREAM)));
+    settleHoldMock.mockRejectedValue(new Error("redis down"));
+
+    await drain(await callProxy());
+    await flushDeferred();
+
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "usage_unknown", inputTokens: 31 })
+    );
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ enforcedTokens: expect.anything() })
+    );
     expect(mirrorSpendMock).not.toHaveBeenCalled();
   });
 });
 
+// THE RACE THAT USED TO DECIDE THE STATUS IS GONE, and these cases now pin its
+// absence.
+//
 // One client disconnect fires BOTH endings from the same event: the platform
 // cancels the response body the route returned, and `req.signal` aborts the
 // upstream fetch, whose body then errors under the transform's reader. Whichever
-// settles first wins, so without discriminating on the signal the status for an
-// ordinary stop-button press would be a coin flip between `ok` and
-// `upstream_error` — and on the `upstream_error` side the call's real tokens
-// would drop out of both mirrorSpend and the `ok`-only spend checkpoint.
+// settled first decided the status, so the route discriminated on
+// `req.signal.aborted` to keep an ordinary stop-button press out of
+// `upstream_error` — where its real tokens would have dropped out of both
+// mirrorSpend and the `ok`-only spend checkpoint.
 //
-// These cases pin the classification, not the race: they drive the ending that
-// would be misread and assert the status is decided by the signal, so they hold
-// whichever racer happens to win on a given host.
+// The classification no longer keys on how the stream ended, but on whether a
+// usage event arrived AND the stream closed cleanly. Neither racer is a clean
+// close, so both now land on `usage_unknown` — and the outcome is the same
+// whichever wins. That is a stronger property than the old discrimination: there
+// is no longer a coin to flip, on any host.
 describe("a streamed call the client disconnects from", () => {
-  it("is recorded as ok even when the ending arrives as a stream error", async () => {
+  it("lands on usage_unknown whichever ending wins the race", async () => {
     const controller = new AbortController();
     fetchMock.mockResolvedValue(sseResponse(sseThatBreaks(PARTIAL_STREAM)));
 
@@ -318,23 +440,27 @@ describe("a streamed call the client disconnects from", () => {
     await drain(res);
     await flushDeferred();
 
+    // Not `ok`: a cancelled stream never reported a complete accounting, and the
+    // provider had already generated — and billed for — what it sent.
     expect(writeLogMock).toHaveBeenCalledWith(
-      expect.objectContaining({ status: "ok", inputTokens: 31, outputTokens: 9 })
+      expect.objectContaining({ status: "usage_unknown", inputTokens: 31, outputTokens: 9 })
     );
     expect(writeLogMock).not.toHaveBeenCalledWith(
-      expect.objectContaining({ status: "upstream_error" })
+      expect.objectContaining({ status: "ok" })
     );
   });
 
-  it("still calls a genuine provider break an upstream error when nobody aborted", async () => {
+  it("classifies a genuine provider break identically, with nobody aborting", async () => {
     const controller = new AbortController();
     fetchMock.mockResolvedValue(sseResponse(sseThatBreaks(PARTIAL_STREAM)));
 
     await drain(await callProxy(controller.signal));
     await flushDeferred();
 
+    // The same answer as the aborted case above. That the two agree is the
+    // point: the status can no longer depend on which racer settled first.
     expect(writeLogMock).toHaveBeenCalledWith(
-      expect.objectContaining({ status: "upstream_error" })
+      expect.objectContaining({ status: "usage_unknown" })
     );
   });
 });

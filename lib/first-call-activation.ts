@@ -1,4 +1,5 @@
 import { partitionByClass } from "./call-class";
+import type { AuthMethod } from "./log";
 
 export type FirstCallStatus =
   | "ok"
@@ -19,7 +20,7 @@ export interface FirstCallRow {
   model: string | null;
   status: FirstCallStatus | string;
   receipt: string | null;
-  auth_method?: "passport" | "direct_key" | null;
+  auth_method?: AuthMethod | null;
   created_at: string;
 }
 
@@ -33,21 +34,16 @@ export interface FirstCallAgent {
 /**
  * What the stored row proves about how the call authenticated — and nothing more.
  *
- * The passport branch says **visa**, not signature, and the distinction is the
- * whole point. A passport-mode provider call carries no fresh Ed25519 signature:
- * it presents a reusable, short-lived HS256 bearer visa and `verifyVisa` is the
- * entire check (`app/api/v1/[provider]/[...path]/route.ts`). The private key
- * signed a *challenge* earlier, at mint time, in `app/api/auth/challenge/route.ts`
- * — so the row proves the call used a passport-derived visa, which in turn proves
- * an Ed25519 challenge signature was verified at some point before it. It does
- * NOT prove the private key signed this particular provider request. A reused or
- * stolen still-valid visa is exactly the case where "signature accepted" would be
- * false, and this label is read as onboarding's proof of identity.
+ * The two passport values say different things. `passport` means the request
+ * presented a reusable, short-lived HS256 bearer visa; the private key signed a
+ * challenge earlier, at mint time, but did not prove possession on this request.
+ * `passport_proof_per_request` means the gateway additionally verified a fresh
+ * Ed25519 proof bound to this exact visa, method and path and burned its proof
+ * jti. A reused or stolen still-valid visa is exactly the case that separates
+ * those values, so neither may borrow the other's words.
  *
- * `Passport visa accepted` is the canonical call-level phrase; `ControlGraph.tsx`
- * says "Passport visa" about the same row and the two must not disagree about how
- * strong the evidence is. Reserve "signature" for a surface that is actually about
- * the challenge/mint exchange.
+ * `Passport visa accepted` remains the canonical bearer phrase. The proofed
+ * phrase is deliberately stronger and explicitly per-request.
  *
  * The direct branch is deliberately byte-identical to before: a Direct Agent Key
  * is lower-assurance bearer possession and borrows neither passport nor visa
@@ -56,6 +52,9 @@ export interface FirstCallAgent {
  */
 export function authenticationProofLabel(authMethod: FirstCallRow["auth_method"]): string {
   if (authMethod === "passport") return "Passport visa accepted";
+  if (authMethod === "passport_proof_per_request") {
+    return "Passport proof verified per request";
+  }
   if (authMethod === "direct_key") return "Direct Agent Key accepted";
   return "Authentication method was not recorded on this older call";
 }

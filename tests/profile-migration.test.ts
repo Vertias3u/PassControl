@@ -161,8 +161,13 @@ describe("public_operator_agents", () => {
   const sql = liveDefinitionOf(AGENTS);
 
   it("returns only the columns the public list is allowed to render", () => {
+    // 0052 added expires_at, and only that: the listing needs the deadline to
+    // avoid calling an aged-out passport active, but does not RENDER it — each
+    // row links to /verify/<key>, which publishes the date itself. A second
+    // copy of the same fact on a second page is a second thing to keep in step.
     expect(returnedColumns(sql, AGENTS).sort()).toEqual([
       "created_at",
+      "expires_at",
       "label",
       "passport_pubkey",
       "status",

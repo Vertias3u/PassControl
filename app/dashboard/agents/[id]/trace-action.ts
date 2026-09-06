@@ -1,7 +1,7 @@
 "use server";
 
 import { needsMfaStepUp } from "@/lib/mfa";
-import { isProvider } from "@/lib/providers";
+import { isScopeProvider } from "@/lib/providers";
 import { rateLimit } from "@/lib/ratelimit";
 import { userClient } from "@/lib/supabase/server";
 import {
@@ -34,7 +34,7 @@ export async function runDecisionTrace(
   if (!UUID_RE.test(agentId)) return { error: "This agent is unavailable." };
   const providerRaw = String(formData.get("provider") ?? "");
   const model = String(formData.get("model") ?? "").trim();
-  if (!isProvider(providerRaw) || !model || model.length > 200) {
+  if (!isScopeProvider(providerRaw) || !model || model.length > 200) {
     return { error: "Choose a provider and enter a model name." };
   }
 
@@ -46,6 +46,18 @@ export async function runDecisionTrace(
     TRACE_RATE_WINDOW_S
   );
   if (!limited.success) return { error: "Too many traces. Wait a minute and try again." };
+
+  // Optional. Blank means "project the gateway's own default", which is what
+  // this panel has always done — and is exact for a call that names no maximum.
+  let maxOutputTokens: number | null = null;
+  const maxRaw = String(formData.get("max_tokens") ?? "").trim();
+  if (maxRaw) {
+    const parsedMax = Number(maxRaw);
+    if (!Number.isFinite(parsedMax) || parsedMax < 1 || parsedMax > 10_000_000) {
+      return { error: "Enter a max output size between 1 and 10,000,000, or leave it blank." };
+    }
+    maxOutputTokens = Math.floor(parsedMax);
+  }
 
   const evaluatedAt = new Date();
   let policyAt = evaluatedAt;
@@ -64,6 +76,7 @@ export async function runDecisionTrace(
     agentId,
     provider: providerRaw,
     model,
+    maxOutputTokens,
     evaluatedAt,
     policyAt,
   });

@@ -2318,6 +2318,21 @@ input, select, textarea {
   border-radius: 8px; padding: 8px 10px; width: 100%; font-family: inherit;
 }
 
+/* The rule above is written for TEXT fields, and it was also hitting radios and
+   checkboxes: a `width: 100%` radio stretches to fill its line, so its glyph
+   floats in the middle of an invisible box and whatever label follows it is
+   shoved to the far right. It reads as a broken layout rather than a styled
+   one, and it is why the passport card's "include the full public ID" checkbox
+   renders as a large grey slab.
+   `:where()` keeps specificity at zero, so anything that already overrides the
+   line above still wins. */
+input:where([type="radio"], [type="checkbox"]) {
+  width: auto;
+  padding: 0;
+  border-radius: 0;
+  accent-color: var(--pc-brand);
+}
+
 code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .mono { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; font-size: 12px; }
 .muted { color: var(--muted-foreground); }

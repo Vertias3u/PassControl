@@ -436,6 +436,15 @@ const VERDICTS: Record<string, VerdictPresentation> = {
       "The gateway had no stored credential for this provider, so it refused the call before forwarding it. The provider never received this request.",
     tone: "held",
   },
+  // Also never forwarded, and deliberately worded so a reader cannot mistake it
+  // for the line below: that one is a permission answer, this one is the gateway
+  // admitting it did not know where the call was supposed to go.
+  endpoint_unavailable: {
+    label: "Refused — the destination could not be read",
+    detail:
+      "The gateway could not look up which endpoint this credential is meant to reach, so it refused the call rather than sending it somewhere on a guess. The provider never received this request.",
+    tone: "held",
+  },
   blocked_endpoint: {
     label: "Refused — endpoint not allowed",
     detail: "The agent may use this provider, but not this particular endpoint.",
@@ -455,6 +464,34 @@ const VERDICTS: Record<string, VerdictPresentation> = {
     label: "Refused — kill switch active",
     detail: "The operator had stopped all calls when this one was attempted.",
     tone: "denied",
+  },
+  // A stranger checking this receipt is entitled to know that the numbers on it
+  // are a floor rather than a measurement. Saying so plainly is the whole point
+  // of publishing receipts: the alternative is a page that shows a token count
+  // and lets the reader assume it was confirmed.
+  usage_unknown: {
+    label: "Allowed and sent — usage never confirmed",
+    detail:
+      "The gateway permitted this call and forwarded it, but no usage report ever came back from the provider — the connection ended, or it closed without one. The provider may have done and billed for work that nobody could measure. The tokens and cost shown here are what was actually observed, which may be less than what was really consumed; the gateway charged the agent's budget the greater of that and what it had set aside.",
+    tone: "held",
+  },
+  // Must not read as "over budget". It is the gateway admitting a fault of its
+  // own, and a reader who mistakes it for a spending limit draws exactly the
+  // wrong conclusion about the operator who set that limit.
+  // Reads to a stranger as an infrastructure refusal, which is what it is. It
+  // must NOT read as "the request failed at the provider": the provider never
+  // heard of it.
+  dispatch_unavailable: {
+    label: "Refused — the gateway could not confirm this was the only send",
+    detail:
+      "Every attempt gets exactly one permission to reach the provider, claimed immediately before the request goes out. This attempt could not claim its own — either the record of it was unreadable, or something else had already claimed it. Rather than risk sending the same request twice and being billed twice, the gateway sent nothing at all. The provider never received this request, and the budget the attempt had set aside is still set aside.",
+    tone: "held",
+  },
+  blocked_budget_state: {
+    label: "Refused — the gateway could not verify its own spend records",
+    detail:
+      "The gateway's running record of what this agent had already spent was unavailable, so it refused the call rather than assume a starting balance. This is not a spending limit and the agent was not out of budget: guessing here would have let the call through on money that may already have been spent. The provider never received this request.",
+    tone: "held",
   },
 };
 
@@ -575,7 +612,10 @@ export function describeCall(
 }
 
 export interface ReceiptAuthenticationPresentation {
-  label: "Passport verified" | "Direct Agent Key accepted";
+  label:
+    | "Passport verified"
+    | "Passport proof verified per request"
+    | "Direct Agent Key accepted";
   detail: string;
   subjectLabel: "Agent passport" | "Agent identity";
   subject: string;
@@ -590,6 +630,16 @@ export interface ReceiptAuthenticationPresentation {
 export function describeReceiptAuthentication(
   claims: Pick<ReceiptClaims, "sub" | "agid" | "auth">
 ): ReceiptAuthenticationPresentation {
+  if (claims.auth?.kind === "passport_proof_per_request") {
+    return {
+      label: "Passport proof verified per request",
+      detail:
+        "The gateway verified possession of this passport's private key for this request, bound to the exact visa, method, and path.",
+      subjectLabel: "Agent passport",
+      subject: claims.sub,
+      keyId: null,
+    };
+  }
   if (claims.auth?.kind === "direct_key") {
     return {
       label: "Direct Agent Key accepted",
@@ -630,9 +680,20 @@ export interface CostPresentation {
  * the exact recorded figure underneath, because an auditor reading a receipt is
  * entitled to the number that was actually signed.
  */
-export function formatCost(microcents: number): CostPresentation {
+export function formatCost(microcents: number, unpriced?: boolean): CostPresentation {
   if (!Number.isFinite(microcents) || microcents < 0) {
     return { primary: "Not recorded", exact: null };
+  }
+  // Checked before the zero below, because the two are different statements and
+  // this page exists to keep statements straight. A receipt carrying `unp` went
+  // to an endpoint the gateway does not price — it may mark up, re-route, alias
+  // onto a local model, or be free — so its `cost: 0` is a placeholder the claim
+  // shape requires, not a finding. "No charge recorded" would report the
+  // placeholder as the answer.
+  //
+  // A recorded charge wins over the flag: the number was actually signed.
+  if (unpriced && microcents === 0) {
+    return { primary: "Not priced", exact: null };
   }
   if (microcents === 0) return { primary: "No charge recorded", exact: null };
 

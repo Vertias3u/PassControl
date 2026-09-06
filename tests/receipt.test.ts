@@ -113,6 +113,28 @@ describe("receipt claims", () => {
     expect(claims.auth).toBeUndefined();
   });
 
+  it("adds a distinct signed method only when passport proof was enforced for this request", () => {
+    const proofed = buildReceiptClaims({
+      ...INPUT,
+      authMethod: "passport_proof_per_request",
+    }) as Record<string, any>;
+    const bearer = buildReceiptClaims({ ...INPUT, authMethod: "passport" }) as Record<string, any>;
+    const direct = buildReceiptClaims({
+      ...INPUT,
+      authMethod: "direct_key",
+      agentAccessKeyId: "key-1",
+      credentialUseId: "use-1",
+      passportId: undefined,
+      visaJti: undefined,
+    }) as Record<string, any>;
+
+    expect(proofed.auth).toEqual({ kind: "passport_proof_per_request" });
+    expect(proofed.ver).toBe(1);
+    expect(bearer.auth).toBeUndefined();
+    expect(direct.auth.kind).toBe("direct_key");
+    expect(new Set([proofed.auth.kind, "passport", direct.auth.kind]).size).toBe(3);
+  });
+
   it("uses version 2 for a direct call without claiming a passport or visa", () => {
     const claims = buildReceiptClaims({
       ...INPUT,
@@ -195,13 +217,73 @@ describe("signing a receipt", () => {
 });
 
 describe("receipt versioning", () => {
-  // verifyVisa uses strict `ver !== VISA_VER` because the same gateway mints and
-  // verifies. A receipt is verified by third parties running code we do not
-  // control and cannot upgrade, so adding a claim (owner, in Phase 2) must not
-  // break every deployed verifier. Additive-only, forward-compatible.
+  // verifyVisa accepts only its current version plus one named migration
+  // predecessor. A receipt is verified by third parties running code we do not
+  // control and cannot upgrade, so adding a claim must not break every deployed
+  // verifier. Additive-only, forward-compatible.
   it("declares a numeric version a verifier can range-check", () => {
     expect(typeof RECEIPT_VER).toBe("number");
     expect(RECEIPT_VER).toBe(2);
     expect((buildReceiptClaims(INPUT) as Record<string, unknown>).ver).toBe(1);
+  });
+});
+
+/**
+ * A receipt that says `cost: 0` for a call nobody could price is a signed false
+ * statement, and it sits on the one artifact this product asks strangers to
+ * trust. `lib/pricing.ts` already refuses to guess a price for a custom endpoint
+ * — `isPricedEndpoint` exists for exactly this — but the zero it returns reached
+ * the claims unlabelled.
+ *
+ * The fix follows the `cr` / `cw` precedent documented in buildReceiptClaims:
+ * an OPTIONAL claim, present only in the case it describes, so every receipt for
+ * a priced call stays byte-identical and every verifier already in the field
+ * keeps working. `ver` deliberately does not move.
+ */
+describe("an unpriced call says so", () => {
+  it("adds no claim at all when the call was priced", () => {
+    const claims = buildReceiptClaims(INPUT) as Record<string, unknown>;
+
+    expect("unp" in claims).toBe(false);
+    expect(claims.cost).toBe(3300);
+  });
+
+  it("marks the cost as unknown rather than zero", () => {
+    const claims = buildReceiptClaims({
+      ...INPUT,
+      costMicrocents: 0,
+      unpriced: true,
+    }) as Record<string, unknown>;
+
+    expect(claims.unp).toBe(true);
+    // `cost` stays a number. Omitting it would break every verifier already
+    // published, which types it as required — the claim is that the number is
+    // not meaningful, and `unp` is what says so.
+    expect(claims.cost).toBe(0);
+  });
+
+  it("does not move the receipt version for an added optional claim", () => {
+    const priced = buildReceiptClaims(INPUT) as Record<string, unknown>;
+    const unpriced = buildReceiptClaims({ ...INPUT, costMicrocents: 0, unpriced: true }) as Record<
+      string,
+      unknown
+    >;
+
+    expect(unpriced.ver).toBe(priced.ver);
+  });
+
+  it("signs and verifies with the extra claim present, and the claim is covered", () => {
+    const jws = signReceipt({ ...INPUT, costMicrocents: 0, unpriced: true })!;
+    const signer = loadInstanceSigner()!;
+    const verified = verifyCompactJws(jws, signer.publicKey, { typ: RECEIPT_TYP });
+
+    expect(verified).not.toBeNull();
+    expect(verified!.claims.unp).toBe(true);
+
+    // And it is inside the signature, not decoration: stripping it invalidates.
+    const [header, , signature] = jws.split(".");
+    const stripped = buildReceiptClaims({ ...INPUT, costMicrocents: 0 });
+    const forged = bytesToBase64url(utf8ToBytes(JSON.stringify(stripped)));
+    expect(verifyCompactJws(`${header}.${forged}.${signature}`, signer.publicKey)).toBeNull();
   });
 });

@@ -35,6 +35,10 @@ const allowed = new Set([
   "package.json",
   "bin/passcontrol.mjs",
   "cli/config.mjs",
+  // Tier 1 passport custody is part of the executable's startup graph. It uses
+  // only OS-shipped commands and Node built-ins; omitting it makes every
+  // installed CLI fail before dispatch rather than merely disabling migration.
+  "cli/passport-key-store.mjs",
   // Imported by the workspace recovery commands. Keeping it explicit here
   // makes the package gate cover the same helper the executable loads.
   "cli/workspace-import-report.mjs",
@@ -54,7 +58,15 @@ const allowed = new Set([
   // clipboard is a `spawn` of pbcopy/clip/wl-copy, deliberately not a package.
   "cli/login.mjs",
   "cli/logout.mjs",
+  // The terminal browser and its dependency-free session/status helpers are in
+  // the executable's unconditional import graph.
+  "cli/menu.mjs",
+  "cli/menu-session.mjs",
   "cli/selftest.mjs",
+  // The readiness budget for `passcontrol setup`/`start`. bin/passcontrol.mjs
+  // imports it at load, so a missing file is a CLI that cannot start — and the
+  // command it serves is the first one a new self-hoster ever runs.
+  "cli/gateway-wait.mjs",
   "cli/mcp/gateway.mjs",
   "cli/mcp/integration.mjs",
   "cli/mcp/README.md",

@@ -185,6 +185,9 @@ describe("first-call activation state", () => {
 describe("first-call failure language", () => {
   it("distinguishes Passport, Direct Agent Key and legacy authentication evidence", () => {
     expect(authenticationProofLabel("passport")).toBe("Passport visa accepted");
+    expect(authenticationProofLabel("passport_proof_per_request")).toBe(
+      "Passport proof verified per request"
+    );
     expect(authenticationProofLabel("direct_key")).toBe("Direct Agent Key accepted");
     expect(authenticationProofLabel(null)).toContain("not recorded");
   });
@@ -229,10 +232,18 @@ describe("first-call failure language", () => {
     expect(challenge).toContain("verifySignature(");
     expect(challenge).toContain("mintVisa(");
 
-    // The provider path authenticates a passport principal with verifyVisa and
-    // performs no signature verification of its own.
+    // The provider path authenticates a passport principal with verifyVisa, and
+    // never re-checks the passport signature that minted it.
     expect(proxy).toContain("const claims = await verifyVisa(credential.token);");
-    expect(proxy).not.toMatch(/verifySignature|ed25519/i);
+    expect(proxy).not.toMatch(/verifySignature\(/);
+
+    // Narrowed from a bare /ed25519/i ban, which had been passing for the wrong
+    // reason since sender-constrained visas shipped: the proxy DOES verify an
+    // Ed25519 signature now — the per-request sender proof — and the old guard
+    // stayed green only because that code never wrote the word. Two different
+    // signatures at two different boundaries. What this must keep catching is
+    // the PASSPORT signature moving here, which is `verifySignature(` above.
+    expect(proxy).toContain("verifySenderProof({");
   });
 
   // One canonical phrase, one implementation. The completion panel used to repeat

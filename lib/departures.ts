@@ -4,6 +4,7 @@
 // the verdict vocabulary lives next to the other places that translate an audit
 // status for a human — same reasoning that put the gate evaluator in lib/gate.ts.
 import type { LogEntry } from "@/lib/log";
+import type { AuthMethod } from "@/lib/log";
 import { classifyCall, housekeepingLabel, isHousekeeping } from "@/lib/call-class";
 import { readRecordedUpstreamStatus } from "@/lib/verify/receipt-view";
 
@@ -14,7 +15,7 @@ export interface DepartureRow {
   created_at: string | null;
   passport_id: string | null;
   jti: string | null;
-  auth_method?: "passport" | "direct_key" | null;
+  auth_method?: AuthMethod | null;
   agent_access_key_id?: string | null;
   credential_use_id?: string | null;
   provider: string | null;
@@ -22,6 +23,15 @@ export interface DepartureRow {
   input_tokens: number | null;
   output_tokens: number | null;
   cost_microcents: number | null;
+  /**
+   * What the BUDGET was charged, when that differs from what was observed.
+   * Present only on a `usage_unknown` row: the observed figures there are not
+   * an observation of zero, they are the absence of one, and the enforced pair
+   * is the only number on the row that actually moved money. Optional because a
+   * row written before migration 0055 has neither.
+   */
+  enforced_tokens?: number | null;
+  enforced_microcents?: number | null;
   status: string | null;
   latency_ms?: number | null;
   receipt?: string | null;
@@ -42,6 +52,18 @@ export const DEPARTURE_VERDICT: Record<
 > = {
   ok: { word: "CLEARED", tone: "clear" },
   upstream_error: { word: "DIVERTED", tone: "held" },
+  // The call went out and may well have been billed; what nobody can say is for
+  // how much. NOT a variant of DIVERTED, which means the call failed — this one
+  // arrived somewhere and left the accounting open.
+  usage_unknown: { word: "UNCONFIRMED", tone: "held" },
+  // PassControl's own spend counters for this agent were lost, so it refused
+  // rather than guess a starting balance. Not NO FUNDS: the agent's money is
+  // fine, the gateway's memory of it is not.
+  blocked_budget_state: { word: "NO RECKONING", tone: "held" },
+  // The attempt's single send could not be claimed, so nothing went out. Held
+  // rather than failed: the reservation stays, because somewhere another
+  // handler may be holding this attempt's permission.
+  dispatch_unavailable: { word: "NOT CLEARED", tone: "held" },
   blocked_budget: { word: "NO FUNDS", tone: "held" },
   // Deliberately not a variant of NO FUNDS. That word means PassControl's own
   // budget stopped the call; this one means the call went out and the PROVIDER
@@ -51,6 +73,10 @@ export const DEPARTURE_VERDICT: Record<
   // Not DIVERTED: nothing was ever forwarded. The gateway holds the call at the
   // gate because it has no credential to travel on.
   no_provider_key: { word: "NO KEY", tone: "held" },
+  // Not NO KEY: the key is there. Not DIVERTED: nothing was forwarded. And not
+  // NO ROUTE, which is blocked_endpoint below and means the requested path was
+  // not permitted. Here the ADDRESS is what could not be read.
+  endpoint_unavailable: { word: "NO ADDRESS", tone: "held" },
   blocked_scope: { word: "NO VISA", tone: "held" },
   blocked_endpoint: { word: "NO ROUTE", tone: "held" },
   blocked_policy: { word: "POLICY", tone: "held" },

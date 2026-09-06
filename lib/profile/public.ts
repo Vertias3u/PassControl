@@ -26,6 +26,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { rateLimit } from "@/lib/ratelimit";
 import { HANDLE_PATTERN, normalizeHandle } from "./handle";
+import { effectivePassportStatus, type PassportValidity } from "@/lib/passport-validity";
 
 /**
  * The complete public profile field set. Widening the page means editing this
@@ -76,7 +77,13 @@ export const PUBLIC_PROFILE_AGENT_CAP = 24;
 /** Characters kept at each end when abbreviating a passport id, as PAVP does. */
 const DISPLAY_EDGE = 8;
 
-export type PublicAgentStatus = "active" | "suspended" | "revoked" | "unknown";
+/**
+ * The same vocabulary /verify uses, from the same module — deliberately not a
+ * second union. This listing and PAVP describe the same agents, and when they
+ * each owned a copy this one silently kept saying `active` about a passport
+ * the other had started calling expired.
+ */
+export type PublicAgentStatus = PassportValidity;
 export type PublicOwnerTier = "unverified" | "domain" | "idv";
 
 export interface PublicProfileOwnerView {
@@ -141,17 +148,10 @@ function normalizeTier(value: unknown): PublicOwnerTier {
   return value === "domain" || value === "idv" ? value : "unverified";
 }
 
-/** Drift resolves to "unknown", never to "active". Same rule, same reason. */
-function normalizeStatus(value: unknown): PublicAgentStatus {
-  switch (value) {
-    case "active":
-    case "suspended":
-    case "revoked":
-      return value;
-    default:
-      return "unknown";
-  }
-}
+// normalizeStatus is gone. The enum value alone was never the whole answer:
+// an `active` row past its expires_at is refused by the gateway, and this
+// listing called it active. effectivePassportStatus applies the gateway's own
+// gate order, and drift still resolves to "unknown", never to "active".
 
 function abbreviate(passportId: string): string {
   if (passportId.length <= DISPLAY_EDGE * 2 + 1) return passportId;
@@ -229,7 +229,10 @@ export function buildPublicProfileAgentView(row: unknown): PublicProfileAgentVie
     passportId,
     displayId: abbreviate(passportId),
     label,
-    status: normalizeStatus(row.status),
+    // The deadline is read but deliberately NOT published here: this listing
+    // exists to point at /verify/<key>, which publishes it. A second copy of
+    // the same date on a second page is a second thing to keep in step.
+    status: effectivePassportStatus({ status: row.status, expiresAt: date(row.expires_at) }),
     issuedAt: date(row.created_at),
   };
 }

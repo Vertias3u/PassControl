@@ -25,6 +25,62 @@ beforeEach(() => {
   captureErrorMock.mockResolvedValue(undefined);
 });
 
+describe("recording whether a call could be priced", () => {
+  // agent_logs records cost_microcents = 0 for a call nobody could price, and
+  // until 0053 nothing said that 0 was meaningless. A spend statement summing
+  // that column would reintroduce, on the artifact handed to an auditor, exactly
+  // the defect "an unknown cost stops reading as zero" fixed on receipts.
+  beforeEach(() => {
+    insert.mockResolvedValue({ error: null });
+  });
+
+  const base = {
+    agentId: "agent-1",
+    userId: "user-1",
+    passportId: "passport-1",
+    jti: "visa-1",
+    provider: "openai",
+    status: "ok" as const,
+  };
+
+  it("marks a row the gateway could not price", async () => {
+    await writeLog({ ...base, costMicrocents: 0, unpriced: true });
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ unpriced: true }));
+  });
+
+  it("OMITS the column entirely when the call was priced, rather than sending false", async () => {
+    // The same conditional-spread this function already uses for `receipt`,
+    // `policy_shadow_would` and `sender_proof_would`, and for the same reason:
+    // PostgREST rejects the WHOLE insert on an unknown column, so a deployment
+    // running this code against pre-0053 schema would write NO audit rows at
+    // all — silently, on every call, because these writes are best-effort.
+    await writeLog({ ...base, costMicrocents: 4200 });
+    const row = insert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row).not.toHaveProperty("unpriced");
+  });
+
+  it("omits it for an explicit false too, so a priced call is byte-identical to before", async () => {
+    await writeLog({ ...base, costMicrocents: 4200, unpriced: false });
+    const row = insert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row).not.toHaveProperty("unpriced");
+  });
+
+  it("leaves every other column untouched by the new one", async () => {
+    await writeLog({ ...base, costMicrocents: 7, unpriced: true });
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent_id: "agent-1",
+        user_id: "user-1",
+        passport_id: "passport-1",
+        jti: "visa-1",
+        cost_microcents: 7,
+        status: "ok",
+        unpriced: true,
+      })
+    );
+  });
+});
+
 describe("gateway accounting writes", () => {
   it("reports an authoritative agent_logs insert error instead of dropping it", async () => {
     insert.mockResolvedValue({ error: { message: "database unavailable" } });
@@ -170,6 +226,29 @@ describe("gateway accounting writes", () => {
         jti: null,
       })
     );
+  });
+
+  it("persists proof-per-request only for the passport path that enforced it", async () => {
+    insert.mockResolvedValue({ error: null });
+
+    await writeLog({
+      authMethod: "passport_proof_per_request",
+      agentId: "agent-1",
+      userId: "user-1",
+      passportId: "passport-1",
+      jti: "visa-1",
+      status: "ok",
+    });
+
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        auth_method: "passport_proof_per_request",
+        passport_id: "passport-1",
+        jti: "visa-1",
+      })
+    );
+    expect(insert.mock.calls[0]![0]).not.toHaveProperty("agent_access_key_id");
+    expect(insert.mock.calls[0]![0]).not.toHaveProperty("credential_use_id");
   });
 
   it("reports a failed spend mirror RPC instead of dropping it", async () => {

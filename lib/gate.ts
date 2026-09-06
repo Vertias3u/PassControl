@@ -44,6 +44,20 @@ export interface GateBudgetInput {
   reservedTokens?: number;
   reservedMicrocents?: number;
   source: "atomic_reserve" | "snapshot";
+  /**
+   * What the cap still has room for, independent of this call's size.
+   *
+   * Supplied by the snapshot projection only. The proxy's atomic reserve does
+   * not compute it and must not: its answer is authoritative about THIS call
+   * and says nothing it would have to keep true for the next one.
+   *
+   * It exists because a projection's verdict is only as good as the size it
+   * assumed, and a reader who cannot see the remaining room cannot tell how
+   * much of "allowed" was the assumption. Omitted where there is no cap in
+   * that dimension — unlimited has no headroom to state.
+   */
+  headroomTokens?: number;
+  headroomMicrocents?: number;
 }
 
 export interface GateInput {
@@ -94,6 +108,23 @@ function endpointIsAllowed(input: GateInput): boolean {
 
 function skipped(name: GateStepName, reason: string): GateStepResult {
   return { name, status: "skipped", reason };
+}
+
+/**
+ * State the room left, when the caller knows it.
+ *
+ * A projection reads as a verdict, and a verdict hides its assumption. "Projects
+ * 1025 tokens" beside "1500 available" lets a reader see that a bigger request
+ * would not fit — which is exactly the gap between what this panel is asked and
+ * what the gateway is later asked.
+ */
+function headroomSuffix(budget: GateBudgetInput): string {
+  const parts: string[] = [];
+  if (budget.headroomTokens !== undefined) parts.push(`${budget.headroomTokens} tokens`);
+  if (budget.headroomMicrocents !== undefined) {
+    parts.push(`${budget.headroomMicrocents} micro-cents`);
+  }
+  return parts.length > 0 ? `, against ${parts.join(" and ")} of remaining budget` : "";
 }
 
 /**
@@ -329,7 +360,8 @@ export function evaluateGate(input: GateInput): GateEvaluation {
     const dimension = input.budget.reason === "cost" ? "cost" : "token";
     fail(
       "budget",
-      `The ${dimension} budget cannot reserve ${input.budget.estimateTokens} estimated tokens (${input.budget.estimateMicrocents} micro-cents).`,
+      `The ${dimension} budget cannot reserve ${input.budget.estimateTokens} estimated tokens ` +
+        `(${input.budget.estimateMicrocents} micro-cents)${headroomSuffix(input.budget)}.`,
       `budget:${input.budget.reason ?? "tokens"}`,
       402
     );
@@ -337,7 +369,10 @@ export function evaluateGate(input: GateInput): GateEvaluation {
     steps.push({
       name: "budget",
       status: "pass",
-      reason: `A ${input.budget.source === "snapshot" ? "snapshot projects" : "live atomic reserve confirmed"} ${input.budget.estimateTokens} tokens (${input.budget.estimateMicrocents} micro-cents).`,
+      reason:
+        `A ${input.budget.source === "snapshot" ? "snapshot projects" : "live atomic reserve confirmed"} ` +
+        `${input.budget.estimateTokens} tokens (${input.budget.estimateMicrocents} micro-cents)` +
+        headroomSuffix(input.budget) + ".",
       rule: `budget:${input.budget.source}`,
       presentation: "normal",
     });

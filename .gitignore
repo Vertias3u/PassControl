@@ -23,6 +23,13 @@ coverage/
 .DS_Store
 **/.DS_Store
 
+# Serena (MCP code-intelligence tool) local project state: a language-server cache
+# plus agent-written project memories under .serena/memories/. Developer tooling,
+# not an app input and not documentation. NOTE: ignoring it here does NOT keep it
+# out of a Vercel deployment — .vercelignore is consulted instead of .gitignore
+# when it exists, so it is listed there too.
+/.serena/
+
 # Private scratch / internal docs — AI reviews, logs, drafts, design notes, the scrapped
 # landing-page shell. Internal-only. DO NOT move these to .git/info/exclude — that is
 # LOCAL-ONLY and does not travel, so on a fresh clone `git add -A` would sweep them in.

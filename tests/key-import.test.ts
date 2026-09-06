@@ -404,7 +404,39 @@ describe("key import secret and tenant boundaries", () => {
     expect(mocks.createAgent.mock.calls[0]?.[1]).toBe("tenant-a");
   });
 
-  it("binds the encrypted handoff to the authenticated tenant before any mutation", async () => {
+  it("checks the decrypted tenant even when a handoff is found in the caller's namespace", async () => {
+    // This isolates the payload check from the separate Redis namespace check.
+    // An absent handoff would reject before decrypting and cannot guard this.
+    const handoffId = "payload-tenant-mismatch";
+    mocks.stash.set(`tenant-a:${handoffId}`, "sealed-foreign-payload");
+    mocks.open.mockResolvedValueOnce(JSON.stringify({
+      version: 1,
+      userId: "tenant-b",
+      provider: "anthropic",
+      key: RAW_KEY,
+      expiresAt: NOW + 60_000,
+    }));
+    const pending = completeKeyImport({
+      handoff: handoffId,
+      provider: "anthropic",
+      label: "foreign",
+      name: "Imported agent",
+      passportPubkey: PASSPORT_ID,
+      models: ["claude-a"],
+    });
+    await expect(pending).rejects.toThrow("This key import has expired. Start again.");
+    expect(mocks.open).toHaveBeenCalledWith("sealed-foreign-payload");
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    expect(mocks.createAgent).not.toHaveBeenCalled();
+  });
+
+  // Names the gate it actually exercises. It used to claim the DECRYPTED payload's
+  // tenant binding, and it never reached it: nothing is stashed under this id, so
+  // `takeKeyImport` returns null and the rejection is for absence. The queued
+  // `open` value below was never consumed. Deleting `handoff.userId !== user.id`
+  // from the action left this test green — the false gate the assertion on `open`
+  // now closes. The payload check has its own test above.
+  it("rejects a handoff id absent from the caller's namespace, without decrypting anything", async () => {
     mocks.open.mockResolvedValueOnce(
       JSON.stringify({
         version: 1,
@@ -426,6 +458,10 @@ describe("key import secret and tenant boundaries", () => {
       })
     ).rejects.toThrow("This key import has expired. Start again.");
 
+    // The line that distinguishes the two gates: an unknown id must be refused
+    // before any ciphertext is opened, so this rejection cannot be evidence
+    // about the payload check.
+    expect(mocks.open).not.toHaveBeenCalled();
     expect(mocks.rpc).not.toHaveBeenCalled();
     expect(mocks.createAgent).not.toHaveBeenCalled();
   });
@@ -522,5 +558,29 @@ describe("key import secret and tenant boundaries", () => {
     ]);
     expect(actualOutput).not.toContain(RAW_KEY);
     expect(mocks.createAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("the import probe's outbound leg", () => {
+  it("refuses to follow a redirect while carrying the pasted key", async () => {
+    // This fetch carries the user's key BEFORE it reaches Vault, with the same
+    // `authHeaders()` shape the proxy uses — so it has the same `x-api-key`
+    // exposure on a cross-origin hop, and needs the same guard.
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(null, { status: 302, headers: { location: "https://attacker.test/collect" } })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await probeProviderKey({ provider: "anthropic", key: RAW_KEY });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ redirect: "manual" })
+    );
+    // A 3xx is neither a working key nor a model list: degrade to manual, which
+    // is what every other unhelpful upstream answer already does.
+    expect(result).toMatchObject({ ok: true, mode: "manual", models: [] });
+    expect(JSON.stringify(result)).not.toContain(RAW_KEY);
   });
 });

@@ -489,6 +489,7 @@ function isSafeParamSegment(segment: string | undefined): segment is string {
 }
 
 const OPENAI_CHAT_PATH = ["v1", "chat", "completions"] as const;
+const OPENAI_RESPONSES_PATH = ["v1", "responses"] as const;
 const OPENAI_MODELS_PATH = ["v1", "models"] as const;
 const ANTHROPIC_MESSAGES_PATH = ["v1", "messages"] as const;
 // The versionless spellings, for providers whose base URL already carries its
@@ -500,6 +501,8 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
   openai: [
     { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: ["responses"], upstreamPath: OPENAI_RESPONSES_PATH },
+    { method: "POST", path: OPENAI_RESPONSES_PATH, upstreamPath: OPENAI_RESPONSES_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
@@ -635,6 +638,14 @@ export function canonicalEndpointPath(
   return [...match.rule.upstreamPath, encodeURIComponent(match.param)];
 }
 
+/** Whether a canonical attempt is using OpenAI's endpoint-specific Responses wire shape. */
+export function isOpenAiResponsesEndpoint(
+  provider: ProviderId,
+  upstreamPath: readonly string[]
+): boolean {
+  return provider === "openai" && pathEquals(upstreamPath, OPENAI_RESPONSES_PATH);
+}
+
 /** The model-listing endpoints (GET /models or /v1/models) carry no model, so the
  *  per-model scope check does not apply to it — it is gated by the endpoint
  *  allowlist (GET-only) instead. */
@@ -682,7 +693,12 @@ export function advertisedClientPath(
   const candidates = ENDPOINT_ALLOWLIST[provider].filter(
     // Parameterised rules are excluded: what is advertised is a BASE path an SDK
     // is pointed at, and `/v1/models/{id}` is not one.
-    (rule) => !rule.param && isModelListing(rule.path) === wantModels
+    // Responses is also an inference endpoint, but it is not the Chat
+    // Completions base this two-operation helper promises to advertise.
+    (rule) =>
+      !rule.param &&
+      !isOpenAiResponsesEndpoint(provider, rule.upstreamPath) &&
+      isModelListing(rule.path) === wantModels
   );
   if (candidates.length === 0) return null;
   return candidates.reduce((shortest, rule) =>

@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { SignJWT, jwtVerify } from "jose";
-import { mintVisa, verifyVisa, VISA_ISS, VISA_AUD, VISA_VER } from "../lib/auth/visa";
+import {
+  mintVisa,
+  verifyVisa,
+  VISA_ISS,
+  VISA_AUD,
+  VISA_PREVIOUS_VER,
+} from "../lib/auth/visa";
 import {
   issuePasswordRecoveryTicket,
   verifyPasswordRecoveryTicket,
@@ -74,7 +80,7 @@ async function mintWithExactKey(secret: string): Promise<string> {
     bc: null,
     st: 0,
     sc: 0,
-    ver: VISA_VER,
+    ver: VISA_PREVIOUS_VER,
   })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuer(VISA_ISS)

@@ -30,7 +30,7 @@ import { MigrationBanner } from "@/components/dashboard/MigrationBanner";
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import type { SystemHealthSnapshot } from "@/lib/system-health";
 
-export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "settings" | "beta" | "system" | "report";
+export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "statements" | "settings" | "beta" | "system" | "report";
 
 const NAV: Array<{
   id: DashboardArea;

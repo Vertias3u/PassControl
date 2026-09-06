@@ -13,6 +13,7 @@ import { jsonResponse, errorResponse } from "@/lib/control/respond";
 import { readJsonBody } from "@/lib/control/body";
 import { readOwner, setOwner, setOwnerPublished } from "@/lib/owner/manage";
 import { OWNER_WELL_KNOWN_PATH } from "@/lib/owner/domain";
+import { GITHUB_OWNER_FILE, GITHUB_OWNER_REPO, githubProofUrl } from "@/lib/owner/github";
 import { recordAdminAction } from "@/lib/audit";
 
 const getHandler = control("read", async ({ userId, db, requestId }) => {
@@ -42,10 +43,24 @@ const putHandler = control("write", async ({ req, userId, db, keyId, requestId }
     {
       data: result.data,
       // Tell them exactly what to do next rather than making them read docs.
+      // Both URLs are DERIVED from the modules that fetch them: a hand-written
+      // instruction can drift from the path actually checked, and the caller
+      // would then publish a proof at a URL nobody reads.
       ...(result.data.kind === "domain"
         ? {
             instructions: {
               publish_at: `https://${result.data.subject}${OWNER_WELL_KNOWN_PATH}`,
+              publish_line: result.data.verification_token,
+              then: "POST /api/control/v1/owner/verify",
+            },
+          }
+        : {}),
+      ...(result.data.kind === "github"
+        ? {
+            instructions: {
+              create_public_repo: GITHUB_OWNER_REPO,
+              containing_file: GITHUB_OWNER_FILE,
+              publish_at: githubProofUrl(result.data.subject),
               publish_line: result.data.verification_token,
               then: "POST /api/control/v1/owner/verify",
             },

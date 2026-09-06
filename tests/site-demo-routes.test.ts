@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 
 // The public site demo is intentionally an adapter around the existing gateway
 // handlers. These tests exercise that adapter with the real challenge signing,
@@ -17,8 +18,8 @@ const {
   claimNonceMock,
   touchLastSeenMock,
   isSuspendedMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   seedSpentMock,
   writeLogMock,
   mirrorSpendMock,
@@ -40,8 +41,8 @@ const {
   claimNonceMock: vi.fn(),
   touchLastSeenMock: vi.fn(),
   isSuspendedMock: vi.fn(),
-  reserveBudgetMock: vi.fn(),
-  reconcileBudgetMock: vi.fn(),
+  openHoldMock: vi.fn(),
+  settleHoldMock: vi.fn(),
   seedSpentMock: vi.fn(),
   writeLogMock: vi.fn(),
   mirrorSpendMock: vi.fn(),
@@ -67,17 +68,54 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   claimNonce: (...args: unknown[]) => claimNonceMock(...args),
+  redis: () => ({}),
   touchLastSeen: (...args: unknown[]) => touchLastSeenMock(...args),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
-  reserveBudget: (...args: unknown[]) => reserveBudgetMock(...args),
-  reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
-  seedSpent: (...args: unknown[]) => seedSpentMock(...args),
   getCachedKey: vi.fn(),
   setCachedKey: vi.fn(),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    openHold: (...args: unknown[]) => openHoldMock(...args),
+    // Always granted here: these suites assert what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself (tests/proxy-dispatch-permission.test.ts).
+    consumeDispatchPermission: async () => ({ granted: true }),
+    settleKnown: (p: Record<string, unknown>) => settle("complete", p),
+    settleUnknown: (p: Record<string, unknown>) => settle("usage_unknown", p),
+    releaseUndispatched: (p: Record<string, unknown>) => settle("not_dispatched", p),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
   writeLog: (...args: unknown[]) => writeLogMock(...args),
@@ -86,6 +124,11 @@ vi.mock("@/lib/log", () => ({
 vi.mock("@/lib/observability", () => ({
   captureError: vi.fn(async () => undefined),
   captureSecurityEvent: (...args: unknown[]) => captureSecurityEventMock(...args),
+  logFailOpen: vi.fn(),
+}));
+vi.mock("@/lib/passport-source-observation", () => ({
+  observePassportSource: vi.fn(async () => null),
+  passportSourceFingerprint: async (_scope: string, ip: string) => `hashed-${ip.length}`,
 }));
 vi.mock("@/lib/demo/identity", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/demo/identity")>();
@@ -148,8 +191,8 @@ beforeEach(() => {
   claimNonceMock.mockReset();
   touchLastSeenMock.mockReset();
   isSuspendedMock.mockReset();
-  reserveBudgetMock.mockReset();
-  reconcileBudgetMock.mockReset();
+  openHoldMock.mockReset();
+  settleHoldMock.mockReset();
   seedSpentMock.mockReset();
   writeLogMock.mockReset();
   mirrorSpendMock.mockReset();
@@ -178,8 +221,8 @@ beforeEach(() => {
   claimNonceMock.mockResolvedValue(true);
   touchLastSeenMock.mockResolvedValue(undefined);
   isSuspendedMock.mockResolvedValue(false);
-  reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 1 });
-  reconcileBudgetMock.mockResolvedValue(undefined);
+  openHoldMock.mockResolvedValue({ ok: true, reserved: 1 });
+  settleHoldMock.mockResolvedValue(undefined);
   seedSpentMock.mockResolvedValue(undefined);
   writeLogMock.mockResolvedValue(undefined);
   mirrorSpendMock.mockResolvedValue(undefined);
@@ -214,7 +257,7 @@ describe("public demo safety gates", () => {
     expect(killResponse.status).toBe(404);
     expect(fromMock).not.toHaveBeenCalled();
     expect(mintVisaMock).not.toHaveBeenCalled();
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
     expect(armTenantKillMock).not.toHaveBeenCalled();
   });
 });
@@ -232,8 +275,8 @@ describe("POST /api/demo/run", () => {
       response: expect.stringMatching(/^\[demo\]/),
     });
     expect(eqMock).toHaveBeenCalledWith("passport_pubkey", SEEDED_DEMO_PASSPORT_ID);
-    expect(reserveBudgetMock).toHaveBeenCalled();
-    expect(reconcileBudgetMock).toHaveBeenCalled();
+    expect(openHoldMock).toHaveBeenCalled();
+    expect(settleHoldMock).toHaveBeenCalled();
     expect(rpcMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -262,7 +305,7 @@ describe("POST /api/demo/run", () => {
     });
     expect(demoPassportSecretMock).not.toHaveBeenCalled();
     expect(mintVisaMock).not.toHaveBeenCalled();
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
   });
 
   it("returns blocked (403) when the demo tenant kill switch is armed", async () => {
@@ -276,7 +319,7 @@ describe("POST /api/demo/run", () => {
       blocked: true,
       response: "blocked (403)",
     });
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
     expect(rpcMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });

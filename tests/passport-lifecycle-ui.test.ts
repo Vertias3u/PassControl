@@ -17,7 +17,11 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { MAX_ROTATION_GRACE_S } from "@/lib/passport-limits";
+import {
+  DEFAULT_PASSPORT_LIFETIME_DAYS,
+  MAX_ROTATION_GRACE_S,
+  PASSPORT_EXPIRY_WARNING_DAYS,
+} from "@/lib/passport-limits";
 
 const read = (p: string) => readFileSync(resolve(process.cwd(), p), "utf8");
 const actions = read("app/dashboard/agents/[id]/passport-actions.ts");
@@ -181,6 +185,33 @@ describe("the panel", () => {
     expect(ui).toMatch(/expired \? "lapsed" : expiresAt \? "dated" : "never"/);
     expect(ui).toMatch(/works until it is revoked/);
     expect(ui).toMatch(/can no longer mint a visa/);
+  });
+
+  it("nudges an immortal passport toward the product default with one renewal action", () => {
+    expect(DEFAULT_PASSPORT_LIFETIME_DAYS).toBe(365);
+    expect(ui).toMatch(/data-state="expiry-missing"/);
+    expect(ui).toMatch(/This passport never expires/);
+    expect(ui).toMatch(/Set a \$\{DEFAULT_PASSPORT_LIFETIME_DAYS\}-day expiry/);
+    expect(ui).toMatch(/setAgentPassportExpiry\(agentId, defaultRenewalExpiry\(\)\)/);
+  });
+
+  it("warns inside 30 days with a countdown and offers renewal rather than rotation", () => {
+    expect(PASSPORT_EXPIRY_WARNING_DAYS).toBe(30);
+    expect(ui).toMatch(/PASSPORT_EXPIRY_WARNING_DAYS/);
+    expect(ui).toMatch(/data-state="expiry-warning"/);
+    expect(ui).toMatch(/<Countdown until=\{expiresAt\}/);
+    expect(ui).toMatch(/Renew for \$\{DEFAULT_PASSPORT_LIFETIME_DAYS\} days/);
+    expect(ui).toMatch(/setAgentPassportExpiry\(agentId, defaultRenewalExpiry\(\)\)/);
+  });
+
+  it("keeps renewal independent from keypair generation and redeployment", () => {
+    const renewalStart = ui.indexOf("const renewPassport");
+    const renewalEnd = ui.indexOf("\n\n", renewalStart);
+    const renewal = ui.slice(renewalStart, renewalEnd);
+    expect(renewal).toMatch(/setAgentPassportExpiry/);
+    expect(renewal).not.toMatch(/rotateAgentPassport|randomPrivateKey|getPublicKey/);
+    expect(ui).toMatch(/Renewal keeps the current keypair/);
+    expect(ui).toMatch(/no agent redeploy/i);
   });
 
   /**

@@ -33,6 +33,7 @@ const h = vi.hoisted(() => ({
   rateLimitMock: vi.fn(),
   claimNonceMock: vi.fn(),
   touchLastSeenMock: vi.fn(),
+  observePassportSourceMock: vi.fn(),
   readCurrentOwnerMock: vi.fn(),
   // Every agents row the fake database holds, plus a record of the filters each
   // query applied — which is how the sequential-lookup behaviour is observed.
@@ -44,7 +45,12 @@ vi.mock("@vercel/functions", () => ({ waitUntil: vi.fn() }));
 vi.mock("@/lib/ratelimit", () => ({ rateLimit: (...a: unknown[]) => h.rateLimitMock(...a) }));
 vi.mock("@/lib/state/redis", () => ({
   claimNonce: (...a: unknown[]) => h.claimNonceMock(...a),
+  redis: () => ({ detector: true }),
   touchLastSeen: (...a: unknown[]) => h.touchLastSeenMock(...a),
+}));
+vi.mock("@/lib/passport-source-observation", () => ({
+  observePassportSource: (...a: unknown[]) => h.observePassportSourceMock(...a),
+  passportSourceFingerprint: async (_scope: string, ip: string) => `hashed-${ip.length}`,
 }));
 vi.mock("@/lib/owner/current", () => ({
   readCurrentOwner: (...a: unknown[]) => h.readCurrentOwnerMock(...a),
@@ -123,10 +129,10 @@ function signed(seed: Uint8Array, passportId: string, extra: Record<string, unkn
   };
 }
 
-const request = (path: string, body: unknown) =>
+const request = (path: string, body: unknown, extraHeaders: Record<string, string> = {}) =>
   new Request(`https://gw.example.com${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...extraHeaders },
     body: JSON.stringify(body),
   });
 
@@ -162,10 +168,11 @@ beforeEach(() => {
   h.rateLimitMock.mockResolvedValue({ success: true, remaining: 10 });
   h.claimNonceMock.mockResolvedValue(true);
   h.touchLastSeenMock.mockResolvedValue(undefined);
+  h.observePassportSourceMock.mockResolvedValue(null);
   h.readCurrentOwnerMock.mockResolvedValue(null);
 });
 
-describe.each(DOORS)("$name", ({ call }) => {
+describe.each(DOORS)("$name", ({ name, call }) => {
   it("admits the current key when nothing has been rotated or expired", async () => {
     expect((await call(CURRENT_SEED, CURRENT_ID)).status).toBe(200);
   });
@@ -228,7 +235,16 @@ describe.each(DOORS)("$name", ({ call }) => {
     h.rows = [rotated(-MINUTE)];
     const res = await call(RETIRED_SEED, RETIRED_ID);
     expect(res.status).toBe(403);
-    expect((await res.json()).error).toBe("passport_expired");
+    const body = await res.json();
+    expect(body.error).toBe("passport_expired");
+    if (name === "challenge") {
+      expect(body).toMatchObject({
+        expiry_kind: "retired_key",
+        recovery: "deploy_current_passport",
+        recovery_path: `/dashboard/agents/${AGENT_ID}#agent-lifecycle`,
+      });
+      expect(body).not.toHaveProperty("renewal_path");
+    }
   });
 
   it("still admits the new key after the grace window has passed", async () => {
@@ -325,6 +341,96 @@ describe.each(DOORS)("$name", ({ call }) => {
     // satisfied by an unrelated gate refusing for an unrelated reason, and the
     // whole point of this test is which decision was made.
     expect((await res.json()).error).toBe("passport_ambiguous");
+  });
+});
+
+describe("challenge expiry diagnostics", () => {
+  it("keeps expiry detail private until the presented key verifies", async () => {
+    const expiresAt = iso(-MINUTE);
+    h.rows = [agentRow({ expires_at: expiresAt })];
+
+    const bad = await challenge(
+      request("/api/auth/challenge", signed(RETIRED_SEED, CURRENT_ID))
+    );
+    expect(bad.status).toBe(403);
+    expect(await bad.json()).toEqual({ error: "passport_expired" });
+
+    const good = await challenge(
+      request("/api/auth/challenge", signed(CURRENT_SEED, CURRENT_ID))
+    );
+    expect(await good.json()).toEqual({
+      error: "passport_expired",
+      expires_at: expiresAt,
+      renewal_path: `/dashboard/agents/${AGENT_ID}#agent-lifecycle`,
+    });
+  });
+
+  it("returns the passport deadline and renewal path when an expired passport is refused", async () => {
+    const expiresAt = iso(-MINUTE);
+    h.rows = [agentRow({ expires_at: expiresAt })];
+
+    const res = await challenge(request("/api/auth/challenge", signed(CURRENT_SEED, CURRENT_ID)));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({
+      error: "passport_expired",
+      expires_at: expiresAt,
+      renewal_path: `/dashboard/agents/${AGENT_ID}#agent-lifecycle`,
+    });
+  });
+
+  it("warns a headless caller during the 30-day window and points to renewal", async () => {
+    const expiresAt = iso(20 * 24 * 60 * MINUTE);
+    h.rows = [agentRow({ expires_at: expiresAt })];
+
+    const body = await (
+      await challenge(request("/api/auth/challenge", signed(CURRENT_SEED, CURRENT_ID)))
+    ).json();
+    expect(body.passport_expiry).toMatchObject({
+      expires_at: expiresAt,
+      warning: true,
+      renewal_path: `/dashboard/agents/${AGENT_ID}#agent-lifecycle`,
+    });
+    expect(body.passport_expiry.expires_in_seconds).toBeGreaterThan(0);
+    expect(body.passport_expiry.expires_in_seconds).toBeLessThanOrEqual(20 * 24 * 60 * 60);
+  });
+
+  it("does not raise the warning before the 30-day window", async () => {
+    h.rows = [agentRow({ expires_at: iso(31 * 24 * 60 * MINUTE) })];
+
+    const body = await (
+      await challenge(request("/api/auth/challenge", signed(CURRENT_SEED, CURRENT_ID)))
+    ).json();
+    expect(body).not.toHaveProperty("passport_expiry");
+  });
+});
+
+describe("challenge source observation posture", () => {
+  it("does not hand the raw source address to the Redis-backed rate limiter", async () => {
+    const rawIp = "198.51.100.42";
+    const res = await challenge(
+      request("/api/auth/challenge", signed(CURRENT_SEED, CURRENT_ID), {
+        "x-real-ip": rawIp,
+        "x-vercel-ip-country": "DE",
+      })
+    );
+
+    expect(res.status).toBe(200);
+    const limiterKey = String(h.rateLimitMock.mock.calls.at(-1)?.[0]);
+    expect(limiterKey).not.toContain(rawIp);
+  });
+
+  it("still mints when Redis-backed source observation fails", async () => {
+    h.observePassportSourceMock.mockRejectedValueOnce(new Error("redis unavailable"));
+
+    const res = await challenge(
+      request("/api/auth/challenge", signed(CURRENT_SEED, CURRENT_ID), {
+        "x-real-ip": "198.51.100.42",
+        "x-vercel-ip-country": "DE",
+      })
+    );
+
+    expect(res.status).toBe(200);
+    expect(h.observePassportSourceMock).toHaveBeenCalled();
   });
 });
 

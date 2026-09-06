@@ -29,7 +29,21 @@ const CONFIG: Record<StatusType, { label: string; Icon: typeof CheckCircle2; ton
   provider_exhausted: { label: "Provider out of credit", Icon: AlertCircle, tone: "warning" },
   // A setup gap here, not a fault out there — the call never left.
   no_provider_key: { label: "No provider key stored", Icon: AlertCircle, tone: "warning" },
+  // Not "Endpoint blocked" below: that one means the requested path was outside
+  // the allowed route set. This means we could not read WHERE this credential
+  // goes, so the call was refused rather than aimed at a guess.
+  endpoint_unavailable: { label: "Endpoint lookup failed", Icon: AlertCircle, tone: "warning" },
   upstream_error: { label: "Provider error", Icon: HelpCircle, tone: "warning" },
+  // The call reached a provider and the accounting did not come back. Warning
+  // rather than danger: nothing was refused and nothing necessarily failed.
+  usage_unknown: { label: "Usage unconfirmed", Icon: HelpCircle, tone: "warning" },
+  // Deliberately NOT the same tone or wording as a budget denial. The agent is
+  // not out of money; PassControl cannot currently vouch for how much it has
+  // spent, and refuses instead of inventing a figure.
+  blocked_budget_state: { label: "Budget state unavailable", Icon: AlertCircle, tone: "warning" },
+  // Same warning tone as its sibling above, and for the same reason: nothing was
+  // spent and nothing is broken about the agent, but an operator should look.
+  dispatch_unavailable: { label: "Dispatch unconfirmed", Icon: AlertCircle, tone: "warning" },
   blocked_endpoint: { label: "Endpoint blocked", Icon: AlertCircle, tone: "warning" },
   revoked: { label: "Revoked", Icon: XCircle, tone: "danger" },
   blocked_suspended: { label: "Agent suspended", Icon: XCircle, tone: "danger" },

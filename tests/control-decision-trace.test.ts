@@ -51,6 +51,17 @@ beforeEach(() => {
 });
 
 describe("POST /api/control/v1/agents/{id}/trace", () => {
+  it("accepts the keyless demo call that a login-created agent is allowed to make", async () => {
+    const res = await POST(request({ provider: "demo", model: "demo-1" }), {
+      params: Promise.resolve({ id: AGENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    expect(traceMock).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "u1", agentId: AGENT_ID, provider: "demo", model: "demo-1" })
+    );
+    expect((await res.json()).data.snapshot).toBe(true);
+  });
+
   it("uses an independent tenant-scoped limiter and returns a non-cacheable snapshot", async () => {
     const res = await POST(request({ provider: "openai", model: "gpt-4.1" }), {
       params: Promise.resolve({ id: AGENT_ID }),

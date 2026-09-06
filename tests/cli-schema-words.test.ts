@@ -68,9 +68,32 @@ describe("the schema probe is bounded", () => {
     expect(source).toMatch(/api\(\s*"GET",\s*"\/system"[\s\S]{0,120}?timeoutMs:\s*\d+/);
   });
 
-  it("still leaves every other control call unbounded", () => {
+  it("bounds only reads, and only the reads named here", () => {
+    // This replaces a count of one. The count was a proxy for the property that
+    // actually matters — a MUTATION must never carry a deadline — and it went
+    // stale the moment the settings browser started bounding its own reads.
+    // Asserting the property directly lets a new bounded read through review
+    // while still failing on a bounded write.
+    //
+    // The pattern deliberately does NOT require a digit after `timeoutMs:`. A
+    // named constant would make a `\d+` regex match nothing, and the guard
+    // would go green by finding no bounded calls at all.
     const source = readFileSync(join(repo, "bin/passcontrol.mjs"), "utf8");
-    const timed = [...source.matchAll(/timeoutMs:\s*\d+/g)];
-    expect(timed).toHaveLength(1);
+    const calls = [...source.matchAll(/api\(\s*"([A-Z]+)",\s*(?:controlPath\(\s*)?"([^"]*)"/gu)];
+    const bounded = [...source.matchAll(/timeoutMs:/gu)].map((hit) => {
+      const call = calls.filter((c) => c.index! < hit.index!).at(-1);
+      if (!call) throw new Error("a timeoutMs with no api() call before it — this test can no longer read the file");
+      return { method: call[1]!, path: call[2]! };
+    });
+
+    expect(bounded.filter((call) => call.method !== "GET")).toEqual([]);
+    // And the set itself is pinned, so adding one is a decision somebody makes
+    // on purpose rather than a line that slips through a self-maintaining rule.
+    expect([...new Set(bounded.map((call) => call.path))].sort()).toEqual([
+      "/agents",            // the settings browser's agent pickers
+      "/agents?limit=100",
+      "/kill-switch",       // read to decide which confirmation the menu asks for
+      "/system",            // doctor's schema probe — the original bounded read
+    ]);
   });
 });

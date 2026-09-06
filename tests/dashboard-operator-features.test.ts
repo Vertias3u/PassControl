@@ -103,6 +103,92 @@ describe("operator-priority dashboard read models", () => {
     expect(buildFleetAttention([healthy], [log()], NOW)).toEqual([]);
   });
 
+  it("flags an active passport agent that has no expiry", () => {
+    const immortal = agent({
+      budget_tokens: null,
+      budget_cents: null,
+      spent_tokens: 0,
+      spent_microcents: 0,
+      passport_pubkey: "passport-public-key",
+      expires_at: null,
+    });
+
+    expect(buildFleetAttention([immortal], [log()], NOW)[0]?.reasons).toContainEqual({
+      kind: "no_expiry",
+      label: "Set a passport expiry",
+      detail: "Choose an expiry on the agent page to give this passport a rotation deadline.",
+      tone: "neutral",
+    });
+  });
+
+  it("does not treat a Direct Agent Key's optional expiry as passport hygiene", () => {
+    const directKey = agent({
+      budget_tokens: null,
+      budget_cents: null,
+      spent_tokens: 0,
+      spent_microcents: 0,
+      passport_pubkey: null,
+      expires_at: null,
+    });
+
+    expect(buildFleetAttention([directKey], [log()], NOW)).toEqual([]);
+  });
+
+  it("does not flag an immortal passport after it is revoked or while it is suspended", () => {
+    const credential = {
+      budget_tokens: null,
+      budget_cents: null,
+      spent_tokens: 0,
+      spent_microcents: 0,
+      passport_pubkey: "passport-public-key",
+      expires_at: null,
+    };
+    const revoked = agent({ ...credential, status: "revoked" });
+    const suspended = agent({ ...credential, status: "suspended" });
+
+    expect(buildFleetAttention([revoked], [log()], NOW)).toEqual([]);
+    expect(
+      buildFleetAttention([suspended], [log()], NOW)[0]?.reasons.some(
+        (reason) => reason.kind === "no_expiry"
+      )
+    ).toBe(false);
+  });
+
+  it("does not flag a passport that has any expiry", () => {
+    const expiringEventually = agent({
+      budget_tokens: null,
+      budget_cents: null,
+      spent_tokens: 0,
+      spent_microcents: 0,
+      passport_pubkey: "passport-public-key",
+      expires_at: "2027-08-08T12:00:00.000Z",
+    });
+
+    expect(buildFleetAttention([expiringEventually], [log()], NOW)).toEqual([]);
+  });
+
+  it("keeps a real expiry warning ahead of no-expiry hygiene", () => {
+    const shared = {
+      budget_tokens: null,
+      budget_cents: null,
+      spent_tokens: 0,
+      spent_microcents: 0,
+      passport_pubkey: "passport-public-key",
+    };
+    const immortal = agent({ ...shared, id: "immortal", name: "Immortal", expires_at: null });
+    const expiring = agent({
+      ...shared,
+      id: "expiring",
+      name: "Expiring",
+      expires_at: "2026-08-11T12:00:00.000Z",
+    });
+    const rows = [log({ agent_id: "immortal" }), log({ agent_id: "expiring" })];
+
+    const items = buildFleetAttention([immortal, expiring], rows, NOW);
+    expect(items.map((item) => item.agentId)).toEqual(["expiring", "immortal"]);
+    expect(items[0]?.score).toBeGreaterThan(items[1]?.score ?? 0);
+  });
+
   it("never presents missing or stale shadow stamps as allow", () => {
     expect(describeStoredShadow(null, "rev-2").state).toBe("not-evaluated");
     expect(describeStoredShadow("allow", "rev-2").state).toBe("not-evaluated");

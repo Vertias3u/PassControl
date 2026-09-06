@@ -20,7 +20,7 @@ export interface SystemHealthSnapshot {
   overall: SystemHealthOverall;
   build: { version: string; commit: string | null; channel: "beta" | "stable" | "development" | "unknown" };
   migrations: { state: MigrationHealthState; expected_head: string; applied_head: string | null; missing_count: number; extra_count: number; action: string };
-  protocols: { control_api: { minimum: 1; maximum: 1 }; gateway_api: { minimum: 1; maximum: 1 }; receipt: { minimum: 1; maximum: 2 }; agent_token: { minimum: 1; maximum: 1 }; workspace_export: { minimum: 1; maximum: 1 } };
+  protocols: { control_api: { minimum: 1; maximum: 1 }; gateway_api: { minimum: 1; maximum: 1 }; receipt: { minimum: 1; maximum: 2 }; agent_token: { minimum: 1; maximum: 1 }; workspace_export: { minimum: 1; maximum: 1 }; statement: { minimum: 1; maximum: 1 } };
   checks: Array<{
     id: SystemHealthCheckId;
     category: "application" | "database" | "runtime" | "trust";

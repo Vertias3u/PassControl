@@ -1,19 +1,47 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const raiseSpentFloorMock = vi.fn();
+const countOpenHoldsMock = vi.fn();
+const readReservedMock = vi.fn();
+
+/**
+ * The hold module is mocked, NOT re-implemented.
+ *
+ * `raiseSpentFloor` is a Lua script, and a TypeScript copy of it living in this
+ * fake would be a second definition of the one rule that matters — "never lower
+ * a spend counter" — free to drift from the real one while this file stayed
+ * green. What the script DOES is pinned against real Redis in
+ * tests/holds.redis.test.ts; what this file pins is that the cron RAISES rather
+ * than SETS, and that it no longer writes reservations at all.
+ */
+vi.mock("@/lib/state/holds", () => ({
+  raiseSpentFloor: (...args: unknown[]) => raiseSpentFloorMock(...args),
+  countOpenHolds: (...args: unknown[]) => countOpenHoldsMock(...args),
+  readReserved: (...args: unknown[]) => readReservedMock(...args),
+}));
+
 import { runReconcile } from "../lib/reconcile";
 
 // Minimal in-memory Redis supporting the subset runReconcile uses:
 // scan(match), mget, set, get. scan returns one page (cursor "0").
-function makeRedis(initial: Record<string, number> = {}) {
+function makeRedis(
+  initial: Record<string, number> = {},
+  initialLists: Record<string, string[]> = {}
+) {
   const store = new Map<string, number>(Object.entries(initial));
+  const lists = new Map<string, string[]>(Object.entries(initialLists));
   const sets: Record<string, number> = {};
   const r = {
     scan: vi.fn(async (_cursor: string, { match }: { match: string; count?: number }) => {
       const prefix = match.replace(/\*$/, "");
-      const keys = [...store.keys()].filter((kk) => kk.startsWith(prefix));
+      const keys = [...new Set([...store.keys(), ...lists.keys()])].filter((kk) => kk.startsWith(prefix));
       return ["0", keys] as [string, string[]];
     }),
     mget: vi.fn(async (...keys: string[]) => keys.map((kk) => store.get(kk) ?? null)),
     get: vi.fn(async (kk: string) => store.get(kk) ?? null),
+    lrange: vi.fn(async (kk: string, start: number, stop: number) =>
+      (lists.get(kk) ?? []).slice(start, stop + 1)
+    ),
     set: vi.fn(async (kk: string, v: number) => {
       store.set(kk, v);
       sets[kk] = v;
@@ -107,6 +135,9 @@ describe("runReconcile — incremental, checkpoint-backed spend reconciliation",
   let redish: ReturnType<typeof makeRedis>;
   beforeEach(() => {
     redish = makeRedis();
+    raiseSpentFloorMock.mockReset().mockResolvedValue({ raised: true });
+    countOpenHoldsMock.mockReset().mockResolvedValue(0);
+    readReservedMock.mockReset().mockResolvedValue({ tokens: 0, microcents: 0 });
   });
 
   it("calls the incremental RPC with the settle-lag (no per-agent log scan)", async () => {
@@ -115,49 +146,98 @@ describe("runReconcile — incremental, checkpoint-backed spend reconciliation",
     expect(rpc).toHaveBeenCalledWith("reconcile_agent_spend", { p_lag_seconds: 90 });
   });
 
-  it("sets spent:<agid> to the authoritative total returned by the RPC", async () => {
+  // THE CLOBBER, REVERSED. This used to assert `set`, and the `sets` recorder
+  // below exists because that assertion was written to pin exactly the wrong
+  // behaviour: the RPC total is LAGGED, so setting from it erased every
+  // settlement made inside the lag window — up to a full day of spend handed
+  // back as capacity, once a day, silently.
+  it("RAISES spent toward the authoritative total, and never SETS it", async () => {
     const { db } = makeDb([
       { agent_id: "a1", spent_tokens: 1200, spent_microcents: 45_000 },
       { agent_id: "a2", spent_tokens: 0, spent_microcents: 0 },
     ]);
     const res = await runReconcile(db, redish.r as any, { lagSeconds: 60 });
-    expect(redish.sets["spent:a1"]).toBe(1200);
-    expect(redish.sets["spent_cost:a1"]).toBe(45_000);
-    expect(redish.sets["spent:a2"]).toBe(0);
-    expect(redish.sets["spent_cost:a2"]).toBe(0);
+
+    expect(raiseSpentFloorMock).toHaveBeenCalledWith(
+      { agentId: "a1", tokens: 1200, microcents: 45_000 },
+      redish.r
+    );
+    expect(raiseSpentFloorMock).toHaveBeenCalledWith(
+      { agentId: "a2", tokens: 0, microcents: 0 },
+      redish.r
+    );
+    // Not one direct write to a spend counter. A `set` here is the bug.
+    expect(Object.keys(redish.sets).filter((kk) => kk.startsWith("spent"))).toEqual([]);
     expect(res.agents).toBe(2);
   });
 
-  it("resets reserved:<agid> to the sum of still-live per-jti markers", async () => {
-    redish = makeRedis({ "reserve:a1:j1": 50, "reserve:a1:j2": 75, "reserve:a2:j9": 10 });
+  // Step 12. The old code rebuilt `reserved:` from a SCAN of per-request
+  // markers and wrote the sum back — non-atomic across a round trip, so a
+  // reservation taken concurrently was simply overwritten. Reservations now move
+  // only through the atomic hold transitions, so the cron must not touch them AT
+  // ALL. This asserts the absence, because a partial write here is invisible
+  // until an agent is refused for money it is not spending.
+  it("never writes a reservation counter, and never scans for reserve markers", async () => {
+    redish = makeRedis({ "reserve:a1:j1": 50, "reserve:a1:j2": 75, "reserved:a1": 125 });
     const { db } = makeDb([{ agent_id: "a1", spent_tokens: 0, spent_microcents: 0 }]);
     await runReconcile(db, redish.r as any, { lagSeconds: 60 });
-    // a1 has two live markers => reserved = 125; a2 was not returned, untouched.
-    expect(redish.sets["reserved:a1"]).toBe(125);
-    expect(redish.sets["reserved:a2"]).toBeUndefined();
+
+    expect(Object.keys(redish.sets).filter((kk) => kk.startsWith("reserved"))).toEqual([]);
+    // The counter that was already there is left exactly as it was.
+    expect(redish.store.get("reserved:a1")).toBe(125);
+    const scanned = redish.r.scan.mock.calls.map(([, o]: any) => o.match);
+    expect(scanned.some((m: string) => m.startsWith("reserve"))).toBe(false);
   });
 
-  it("resets reserved to 0 when an agent has no live markers (leak self-heal)", async () => {
-    const { db } = makeDb([{ agent_id: "a1", spent_tokens: 500, spent_microcents: 2_500 }]);
-    await runReconcile(db, redish.r as any, { lagSeconds: 60 });
-    expect(redish.sets["reserved:a1"]).toBe(0);
-    expect(redish.sets["reserved_cost:a1"]).toBe(0);
-  });
-
-  it("resets reserved_cost:<agid> to the sum of still-live cost markers", async () => {
-    redish = makeRedis({
-      "reserve:a1:j1": 50,
-      "reserve_cost:a1:j1": 500,
-      "reserve:a1:j2": 75,
-      "reserve_cost:a1:j2": 900,
-      "reserve_cost:a2:j9": 10,
-    });
+  // Reported, never acted on. A cron that closed open holds would be
+  // self-heal-by-expiry with a scheduler attached — the original defect.
+  it("reports open holds and reservation drift without correcting either", async () => {
+    countOpenHoldsMock.mockResolvedValue(3);
     const { db } = makeDb([{ agent_id: "a1", spent_tokens: 0, spent_microcents: 0 }]);
-    await runReconcile(db, redish.r as any, { lagSeconds: 60 });
-    expect(redish.sets["reserved:a1"]).toBe(125);
-    expect(redish.sets["reserved_cost:a1"]).toBe(1_400);
-    expect(redish.sets["reserved_cost:a2"]).toBeUndefined();
+    const res = await runReconcile(db, redish.r as any, { lagSeconds: 60 });
+
+    expect(res.openHolds).toBe(3);
+    // Drift is only meaningful with no holds open; with three open, a non-zero
+    // reservation is exactly what should be there.
+    expect(res.reservedDrift).toBe(0);
+    expect(Object.keys(redish.sets).filter((kk) => kk.startsWith("reserved"))).toEqual([]);
   });
+
+  it("flags a reservation left behind with no hold to justify it", async () => {
+    countOpenHoldsMock.mockResolvedValue(0);
+    readReservedMock.mockResolvedValue({ tokens: 40, microcents: 0 });
+    const { db } = makeDb([{ agent_id: "a1", spent_tokens: 0, spent_microcents: 0 }]);
+    const res = await runReconcile(db, redish.r as any, { lagSeconds: 60 });
+
+    expect(res.reservedDrift).toBe(1);
+    // Surfaced, not silently repaired: an invariant broke, and overwriting the
+    // counter is how the old code hid exactly this.
+    expect(Object.keys(redish.sets).filter((kk) => kk.startsWith("reserved"))).toEqual([]);
+  });
+
+  // A housekeeping read must never be able to fail the half of the run that
+  // moved money — which has already happened by the time it executes.
+  it("survives a housekeeping read that throws", async () => {
+    countOpenHoldsMock.mockRejectedValue(new Error("redis blip"));
+    const { db } = makeDb([{ agent_id: "a1", spent_tokens: 7, spent_microcents: 8 }]);
+    const res = await runReconcile(db, redish.r as any, { lagSeconds: 60 });
+
+    expect(res.agents).toBe(1);
+    expect(res.openHolds).toBe(0);
+    expect(raiseSpentFloorMock).toHaveBeenCalled();
+  });
+
+  // The two tests that stood here — "resets reserved to 0 when an agent has no
+  // live markers (leak self-heal)" and its cost-dimension twin — are DELETED
+  // rather than adapted, because the mechanism they pinned is the defect.
+  //
+  // Self-heal by marker expiry meant money was released on a timer: a call that
+  // had genuinely been billed got its reservation back once its marker aged out,
+  // whether or not anyone had settled it. An open hold now never expires, and
+  // only an explicit transition or an audited operator rebuild can move a
+  // reservation. See tests/holds.redis.test.ts, which asserts `TTL == -1` on an
+  // open hold precisely so nobody restores this as hygiene.
+
 
   it("flushes coalesced lastseen:<agid> into agents.last_seen_at", async () => {
     const ms = 1_700_000_000_000;
@@ -181,7 +261,13 @@ describe("runReconcile — incremental, checkpoint-backed spend reconciliation",
       // produce the same output.
       retiredKeysCleared: 0,
       expiringSoon: [],
+      passportSourceSignals: [],
       grantsClosed: 0,
+      // Zero open holds and zero drift, reported rather than omitted — for the
+      // same reason as the sweep counts above. "Nothing is outstanding" and
+      // "nobody looked" must not be the same output.
+      openHolds: 0,
+      reservedDrift: 0,
     });
   });
 });
@@ -294,5 +380,24 @@ describe("runReconcile — passport sweep", () => {
     expect(res.retiredKeysCleared).toBe(0);
     expect(res.expiringSoon).toEqual([]);
     expect(res.grantsClosed).toBe(0);
+  });
+});
+
+describe("runReconcile — passport source observation summary", () => {
+  it("reports the bounded Redis signal without turning it into enforcement", async () => {
+    const signal = {
+      strength: "strong",
+      observedAt: "2026-08-31T10:00:00.000Z",
+      countries: ["DE", "US"],
+    };
+    const redish = makeRedis({}, {
+      "passport_source_signals:a9": [JSON.stringify(signal)],
+    });
+    const { db } = makeDb([]);
+
+    const res = await runReconcile(db, redish.r as any, { lagSeconds: 60 });
+
+    expect(res.passportSourceSignals).toEqual([{ agentId: "a9", ...signal }]);
+    expect(res).not.toHaveProperty("agentsSuspended");
   });
 });

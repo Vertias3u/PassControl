@@ -9,6 +9,7 @@ import type { AgentPolicyView } from "@/lib/scope";
 import { visaTtlSeconds } from "@/lib/auth/visa";
 import { DecisionTracePanel } from "./DecisionTracePanel";
 import { PolicyShadowPanel } from "@/components/PolicyShadowPanel";
+import { SenderProofPanel } from "@/components/SenderProofPanel";
 import { PassportLifecycle } from "@/components/PassportLifecycle";
 import { BreakGlassPanel } from "@/components/BreakGlassPanel";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
@@ -19,6 +20,14 @@ import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { operatorEmails } from "@/lib/operator-allowlist";
+import { redis } from "@/lib/state/redis";
+import { readPassportSourceSignals } from "@/lib/passport-source-observation";
+import { KeyStoragePanel } from "@/components/KeyStoragePanel";
+import {
+  readDeclaredKeyStorage,
+  toDeclaredKeyStorageView,
+} from "@/lib/passport-key-storage";
+import { readKeyCustodyExpectation } from "@/lib/key-custody-expectation";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +35,39 @@ export const metadata: Metadata = {
   title: "Agent Passport",
   robots: { index: false, follow: false },
 };
+
+async function loadPassportSourceSignals(agentId: string) {
+  try {
+    return await readPassportSourceSignals(redis(), agentId);
+  } catch {
+    return [];
+  }
+}
+
+async function loadDeclaredKeyStorage(agentId: string) {
+  try {
+    return await readDeclaredKeyStorage(redis(), agentId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The freshest evidence this page has that the agent authenticated, used only
+ * to say whether a custody claim has been left behind by later activity. The
+ * log-derived time leads because `agents.last_seen_at` lags the reconcile flush
+ * by up to a day — which can only under-report staleness, the safe direction.
+ */
+function latestActivityAt(
+  lastEntryAt: string | null,
+  recordedAt: string | null | undefined
+): string | null {
+  const times = [lastEntryAt, recordedAt ?? null]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => Date.parse(value))
+    .filter((value) => Number.isFinite(value));
+  return times.length ? new Date(Math.max(...times)).toISOString() : null;
+}
 
 function AgentPolicySummary({ policy }: { policy: AgentPolicyView }) {
   return (
@@ -113,6 +155,23 @@ export default async function AgentPassportPage({
   if (await needsMfaStepUp(db)) redirect("/login/verify");
 
   const passport = await requireAgentPassport(db, user.id, id);
+  // Supplementary observation only: ownership has already been established,
+  // and an unavailable Redis signal must never take down the agent page.
+  const sourceSignals = passport.agent.passportId
+    ? await loadPassportSourceSignals(passport.agent.id)
+    : [];
+  // Passport agents only. A Direct Agent Key is a bearer credential with no
+  // private key to keep anywhere, so a custody panel on one is a category error.
+  const declaredKeyStorage = passport.agent.passportId
+    ? await loadDeclaredKeyStorage(passport.agent.id)
+    : null;
+  // The same line the fleet table marks this agent against. Read on both pages
+  // rather than passed down, but through the one function, so the two surfaces
+  // cannot end up giving one fact two answers.
+  const keyCustodyExpectation = passport.agent.passportId
+    ? await readKeyCustodyExpectation(db, user.id)
+    : null;
+  const passportWithSourceSignals = { ...passport, sourceSignals };
   // The exported card carries real colour values, so the accent has to reach it as
   // data — it cannot read var(--pc-brand) through an image serialisation.
   const firstVisa = passport.visas[0];
@@ -162,7 +221,7 @@ export default async function AgentPassportPage({
         <section id="agent-overview" className="scroll-mt-40">
         <div id="agent-identity" className="scroll-mt-40">
         <AgentPassport
-          passport={passport}
+          passport={passportWithSourceSignals}
           visaTtlSeconds={visaTtlSeconds()}
         />
         </div>
@@ -180,6 +239,21 @@ export default async function AgentPassportPage({
           visaTtlSeconds={visaTtlSeconds()}
         />
         </div> : null}
+        {/* With the key's own lifecycle, not with policy: this is a fact about
+            where the private half lives, and — unlike everything around it —
+            one this server can only ever repeat, never check. */}
+        {passport.agent.passportId ? (
+          <KeyStoragePanel
+            expectation={keyCustodyExpectation?.expectation ?? null}
+            view={toDeclaredKeyStorageView(
+              declaredKeyStorage,
+              latestActivityAt(
+                passport.agent.lastEntryAt,
+                passport.lastRecordedAuthentication?.recordedAt
+              )
+            )}
+          />
+        ) : null}
         <DirectAgentKeyPanel
           agentId={passport.agent.id}
           agentName={passport.agent.name}
@@ -222,6 +296,15 @@ export default async function AgentPassportPage({
           shadow={passport.shadow}
           liveConfigured={passport.policy.configured}
           livePolicy={passport.policyDocument}
+        />
+        {/* Beside the shadow panel because they are the same idea one boundary
+            apart: both check something for real and let the call through, so an
+            operator can decide from their own traffic instead of from a guess. */}
+        <SenderProofPanel
+          agentId={passport.agent.id}
+          mode={passport.agent.senderConstraintMode}
+          summary={passport.senderProof}
+          hasPassport={Boolean(passport.agent.passportId)}
         />
         </div>
         {/* Below the policy it cannot widen, and above the trace that now

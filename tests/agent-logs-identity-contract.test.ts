@@ -185,10 +185,10 @@ describe("every agent_logs writer satisfies the discriminated identity", () => {
 
   // Both gateway routes (real provider and demo) build the identity the same way.
   it("builds a complete identity at every gateway call site", () => {
-    const identities = gateway.match(/const logIdentity =[\s\S]*?\n  const reserveId/g) ?? [];
+    const identities = gateway.match(/const logIdentity =[\s\S]*?\n        } as const\);/g) ?? [];
     expect(identities).toHaveLength(2);
     for (const identity of identities) {
-      expect(identity).toMatch(/passportId: principal\.passportId, jti: principal\.visaJti/);
+      expect(identity).toMatch(/authMethod: passportAuthMethod[\s\S]*passportId: principal\.passportId[\s\S]*jti: principal\.visaJti/);
       expect(identity).toMatch(/authMethod: "direct_key"[\s\S]*agentAccessKeyId: principal\.keyId[\s\S]*credentialUseId/);
     }
   });

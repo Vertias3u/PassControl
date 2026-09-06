@@ -100,12 +100,28 @@ const EVENT_ROUTE: Record<
   upstream_error: { stop: "provider", tone: "warning", label: "Provider error" },
   provider_exhausted: { stop: "provider", tone: "warning", label: "Provider credit exhausted" },
   no_provider_key: { stop: "credential", tone: "warning", label: "No provider key stored" },
+  // A credential-stage stop like no_provider_key, and for the same reason: the
+  // call never reached a provider. The key exists here — where it should go is
+  // what could not be read.
+  endpoint_unavailable: { stop: "credential", tone: "warning", label: "Endpoint lookup failed" },
   blocked_scope: { stop: "gate", tone: "blocked", label: "Blocked by visa scope" },
   blocked_policy: { stop: "gate", tone: "blocked", label: "Blocked by live policy" },
   blocked_budget: { stop: "gate", tone: "blocked", label: "Blocked by PassControl budget" },
   blocked_killed: { stop: "gate", tone: "blocked", label: "Blocked by kill switch" },
   blocked_suspended: { stop: "gate", tone: "blocked", label: "Blocked by suspension" },
   blocked_endpoint: { stop: "gate", tone: "blocked", label: "Blocked endpoint" },
+  // A PROVIDER-stage stop, not a gate one: the call got past every gate and went
+  // out. What is missing is the accounting that should have come back.
+  usage_unknown: { stop: "provider", tone: "warning", label: "Sent, usage unconfirmed" },
+  // A GATE stop, because the call was refused before forwarding — but tone
+  // "warning" rather than "blocked". "Blocked" reads as a rule doing its job;
+  // this is the gateway unable to vouch for its own spend records, which is a
+  // fault to fix rather than a decision to respect.
+  blocked_budget_state: { stop: "gate", tone: "warning", label: "Budget state unavailable" },
+  // Stops at the GATE, not the provider. The request never left, and drawing it
+  // as a provider event would put a call on the graph that the provider never
+  // saw.
+  dispatch_unavailable: { stop: "gate", tone: "warning", label: "Dispatch unconfirmed" },
 };
 
 export function routeForStoredStatus(status: string | null): {
@@ -129,8 +145,12 @@ const PRESENTATION_OUTCOMES: Record<LogEntry["status"], string> = {
   blocked_policy: "POLICY",
   blocked_endpoint: "ENDPOINT",
   no_provider_key: "NO KEY",
+  endpoint_unavailable: "NO ROUTE",
   upstream_error: "PROVIDER ERROR",
   provider_exhausted: "PROVIDER CREDIT",
+  usage_unknown: "UNCONFIRMED",
+  blocked_budget_state: "NO RECKONING",
+  dispatch_unavailable: "NOT CLEARED",
 };
 
 export function presentationOutcomeForStatus(status: string | null): PresentationOutcome {

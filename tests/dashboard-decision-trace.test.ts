@@ -44,6 +44,18 @@ beforeEach(() => {
 });
 
 describe("dashboard decision trace action", () => {
+  it("accepts demo as a governed call rather than requiring a credential provider", async () => {
+    const form = new FormData();
+    form.set("provider", "demo");
+    form.set("model", "demo-1");
+    const result = await runDecisionTrace(AGENT_ID, undefined, form);
+    expect(result.error).toBeUndefined();
+    expect(traceMock).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "u1", agentId: AGENT_ID, provider: "demo", model: "demo-1" })
+    );
+    expect(result.trace?.snapshot).toBe(true);
+  });
+
   it("uses the same tenant trace limiter and parses the optional UTC policy time", async () => {
     const form = new FormData();
     form.set("provider", "openai");

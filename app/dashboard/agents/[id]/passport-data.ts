@@ -6,6 +6,13 @@ import { toFallbackRows, type FallbackRow } from "@/lib/fallback-rows";
 import { toCapabilityHistory, type CapabilityChange } from "@/lib/audit-history";
 import { toShadowState, type ShadowState } from "@/lib/policy-shadow";
 import { readLiveGrant, type BreakGlassGrant } from "@/lib/break-glass";
+import type { AuthMethod } from "@/lib/log";
+import type { PassportSourceSignal } from "@/lib/passport-source-observation";
+import { toSenderConstraintMode, type SenderConstraintMode } from "@/lib/sender-constraint";
+import {
+  toSenderProofObservations,
+  type SenderProofSummary,
+} from "@/lib/sender-proof-observation";
 
 // `policy_shadow` is named here rather than omitted-when-absent the way
 // lib/log.ts handles `policy_shadow_would`, and the asymmetry is deliberate.
@@ -14,12 +21,17 @@ import { readLiveGrant, type BreakGlassGrant } from "@/lib/break-glass";
 // and only for the operator who can fix it — the same trade `fallbacks` already
 // makes against 0018.
 const AGENT_PASSPORT_COLUMNS =
-  "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, policy, policy_shadow, fallbacks, expires_at, previous_passport_pubkey, previous_valid_until, created_at, last_seen_at, published, public_label";
-const PASSPORT_LOG_COLUMNS = "id, provider, model, status, created_at";
+  "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, policy, policy_shadow, fallbacks, expires_at, previous_passport_pubkey, previous_valid_until, created_at, last_seen_at, published, public_label, sender_constraint_mode";
+const PASSPORT_LOG_COLUMNS = "id, provider, model, status, auth_method, created_at";
 // created_at is selected so the sample can be cut at the moment the CURRENT
 // draft was saved. Without it the panel attributes an earlier draft's verdicts
 // to the one now in the column — see loadShadowCutoff.
-const SHADOW_LOG_COLUMNS = "status, policy_shadow_would, created_at";
+// Serves two panels off one query: the shadow draft's verdicts and observe
+// mode's sender-proof verdicts. Unlike the agent select above, this loader
+// swallows a 42703 and returns an empty sample — so a deployment running ahead
+// of 0049 loses both panels rather than the page.
+const SHADOW_LOG_COLUMNS =
+  "status, policy_shadow_would, sender_proof_would, created_at";
 const SHADOW_SAMPLE_LIMIT = 200;
 const HISTORY_COLUMNS = "id, action, target_type, target_id, metadata, created_at";
 const HISTORY_LIMIT = 20;
@@ -56,6 +68,7 @@ export interface AgentPassportRow extends Record<string, unknown> {
   // only for the operator who can apply the migration.
   published?: boolean;
   public_label?: string | null;
+  sender_constraint_mode?: string;
 }
 
 export interface PassportLogRow extends Record<string, unknown> {
@@ -63,6 +76,7 @@ export interface PassportLogRow extends Record<string, unknown> {
   provider: string | null;
   model: string | null;
   status: string;
+  auth_method?: AuthMethod | null;
   created_at: string;
 }
 
@@ -83,7 +97,13 @@ export interface PassportVerdictView {
   provider: string;
   model: string | null;
   status: string;
+  authMethod: AuthMethod | null;
   createdAt: string | null;
+}
+
+export interface RecordedAuthenticationView {
+  method: AuthMethod;
+  recordedAt: string | null;
 }
 
 export interface PassportTokenBudgetView {
@@ -124,18 +144,25 @@ export interface AgentPassportView {
     /** The name shown publicly. Never `name`: internal agent names are
      *  customer-identifying, which is why 0033 gave this its own column. */
     publicLabel: string | null;
+    /** Current configuration only; never presented as proof of a past call. */
+    senderConstraintMode: SenderConstraintMode;
   };
   visas: PassportVisaView[];
   policy: AgentPolicyView;
   /** Exact stored policy document, used only for prospective promotion wording. */
   policyDocument: unknown;
   shadow: ShadowState;
+  senderProof: SenderProofSummary;
   /** A live break-glass elevation, or null. */
   breakGlass: BreakGlassGrant | null;
   fallbacks: FallbackRow[];
   history: CapabilityChange[];
   providerStamps: PassportProviderStampView[];
   recentVerdicts: PassportVerdictView[];
+  /** Newest row carrying an auth method: what that request actually enforced. */
+  lastRecordedAuthentication: RecordedAuthenticationView | null;
+  /** Observe-only source anomalies from verified passport mints. */
+  sourceSignals: PassportSourceSignal[];
   directKeys: AgentAccessKeyView[];
   budgets: {
     tokens: PassportTokenBudgetView;
@@ -166,6 +193,14 @@ function text(value: unknown, fallback = ""): string {
 function timestamp(value: unknown): string | null {
   if (typeof value !== "string" || !value.trim()) return null;
   return Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+function authMethod(value: unknown): AuthMethod | null {
+  return value === "passport" ||
+    value === "passport_proof_per_request" ||
+    value === "direct_key"
+    ? value
+    : null;
 }
 
 function nonNegativeInteger(value: unknown): number {
@@ -213,6 +248,7 @@ function normalizeVerdicts(logs: readonly PassportLogRow[]): PassportVerdictView
         provider: text(record.provider, "unknown"),
         model: text(record.model) || null,
         status: text(record.status, "unknown"),
+        authMethod: authMethod(record.auth_method),
         createdAt: timestamp(record.created_at),
       };
     })
@@ -297,11 +333,16 @@ export function buildAgentPassportView(
       // says an agent is already visible to strangers.
       published: agent.published === true,
       publicLabel: text(agent.public_label) || null,
+      senderConstraintMode: toSenderConstraintMode(agent.sender_constraint_mode),
     },
     visas: normalizeVisas(agent.allowed_scopes),
     policy: agentPolicyForDisplay(agent.policy ?? null),
     policyDocument: agent.policy ?? null,
     shadow: toShadowState(agent.policy_shadow ?? null, rawShadowLogs ?? [], shadowSince ?? null),
+    senderProof: toSenderProofObservations(
+      toSenderConstraintMode(agent.sender_constraint_mode),
+      Array.isArray(rawShadowLogs) ? rawShadowLogs : []
+    ),
     breakGlass,
     fallbacks: toFallbackRows(agent.fallbacks ?? null),
     history: toCapabilityHistory(rawHistory ?? []),
@@ -309,6 +350,13 @@ export function buildAgentPassportView(
       ? [...lifetimeProviderStamps]
       : buildProviderStamps(verdicts),
     recentVerdicts: verdicts.slice(0, RECENT_VERDICT_LIMIT),
+    lastRecordedAuthentication: (() => {
+      const recorded = verdicts.find((verdict) => verdict.authMethod !== null);
+      return recorded?.authMethod
+        ? { method: recorded.authMethod, recordedAt: recorded.createdAt }
+        : null;
+    })(),
+    sourceSignals: [],
     directKeys: [...directKeys],
     budgets: {
       tokens: {

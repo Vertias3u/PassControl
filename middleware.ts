@@ -45,6 +45,67 @@ function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
 }
 
+/**
+ * Paths that are definitionally not a page here, answered before the auth gate.
+ *
+ * WHY THIS IS A COST FIX AND NOT A SECURITY FEATURE. Nothing below was ever
+ * reachable: these all 307'd to /login and revealed nothing. The problem is that
+ * the redirect decision happens AFTER `supabase.auth.getUser()`, which is a
+ * network round trip to Supabase Auth — so every line of a scanner's wordlist
+ * bought one Auth request from an unauthenticated stranger, on a free tier.
+ * Returning here is the same move the /@handle rewrite makes for the same
+ * reason, and the same reason `.well-known` is excluded by the matcher rather
+ * than added to PUBLIC_PATHS.
+ *
+ * A 404 is also the more honest answer. /wp-admin is not a gated page, and
+ * sending it to /login said it might be.
+ *
+ * DELIBERATELY A CLOSED LIST, NOT A HEURISTIC. The failure mode of a clever
+ * rule here is silently 404-ing a real page for everyone, which nothing in the
+ * suite would fail to compile over — so tests/middleware-scanner-paths.test.ts
+ * walks the real app directory and asserts no route it serves matches. Anything
+ * this does not recognise simply falls through to the ordinary gate, which is
+ * the safe direction and the same choice REWRITABLE_HANDLE makes above.
+ */
+const PROBE_PATTERNS = [
+  // Any first segment beginning with a dot. No route here starts with one, and
+  // /.well-known — the single real exception — never reaches the matcher.
+  // Covers .env, .env.local, .git/config, .aws/credentials, .ssh/, .DS_Store.
+  /^\/\.[^/]/,
+  // Someone else's stack. We serve no PHP, and never will.
+  /^\/(wp-admin|wp-content|wp-includes|wp-login|xmlrpc|phpmyadmin|pma|adminer|cgi-bin|vendor|node_modules)(\/|$|\.)/,
+  // Server-side extensions and the leftovers of a bad deploy. Static assets the
+  // app really serves (svg/png/jpg/…) are excluded by the matcher, not here.
+  //
+  // ANCHORED TO A SINGLE ROOT SEGMENT ON PURPOSE — `/^\/[^/]+\.ext$/`, not a
+  // bare `\.ext$`. A dynamic segment is a value a stranger chooses, and
+  // /verify/<passportId> passes an unconstrained one straight to the public
+  // verification lookup. An unanchored rule would 404 a passport id ending in
+  // `.old` or `.conf` before the page could answer, on the one surface whose
+  // entire job is answering strangers about ids we did not choose. Deeper junk
+  // is already covered by the prefix rule above (/wp-content/uploads/x.php,
+  // /cgi-bin/test.cgi, /vendor/…), so nothing is lost by the anchor.
+  /^\/[^/]+\.(php\d?|asp|aspx|jsp|cgi|pl|sh|bak|old|swp|sql|zip|tar|gz|rar|7z|ini|conf)$/,
+];
+
+/**
+ * Exported for the test that pins it against every route the app really serves.
+ * Takes the pathname only — never the query string, which is attacker-controlled
+ * and irrelevant to whether a page exists.
+ */
+export function isProbePath(pathname: string): boolean {
+  const p = pathname.toLowerCase();
+  // BELT AND BRACES ON THE ONE ROUTE THAT MUST NEVER 404. The matcher already
+  // excludes /.well-known, so this branch is unreachable today — it is here so
+  // the dotfile rule above cannot become a receipt outage if the matcher is
+  // ever widened. /.well-known/jwks.json is how a stranger checks a receipt
+  // this instance signed; 404 it and every receipt ever issued stops verifying
+  // at once, with nothing anywhere naming the cause. The suite asserts this
+  // against the real route list rather than trusting the matcher to hold.
+  if (p === "/.well-known" || p.startsWith("/.well-known/")) return false;
+  return PROBE_PATTERNS.some((re) => re.test(p));
+}
+
 export async function middleware(request: NextRequest) {
   // One nonce per request. Setting the policy on the REQUEST headers as well as
   // the response is what makes Next stamp the same nonce onto the scripts it
@@ -73,6 +134,17 @@ export async function middleware(request: NextRequest) {
     response.headers.set(CSP_HEADER, csp);
     return response;
   };
+
+  // ── Scanner traffic, before anything costs money ──────────────────────────
+  //
+  // First, because it is the cheapest possible answer and because everything
+  // below this line either allocates a Supabase client or does regex work on a
+  // path we already know is not ours. `withCsp` still applies: a response that
+  // skips it is the easy mistake in this file, and it fails in a way that looks
+  // like a styling bug rather than a missing header.
+  if (isProbePath(request.nextUrl.pathname)) {
+    return withCsp(new NextResponse(null, { status: 404 }));
+  }
 
   // ── /@handle, before the auth gate ────────────────────────────────────────
   //

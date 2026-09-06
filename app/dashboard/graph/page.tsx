@@ -51,7 +51,7 @@ export default async function ControlGraphPage() {
       .limit(75),
     db
       .from("agent_logs")
-      .select("id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, status, latency_ms, receipt, policy_shadow_would")
+      .select("id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(LOG_LIMIT),

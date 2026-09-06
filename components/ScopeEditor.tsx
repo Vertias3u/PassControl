@@ -14,7 +14,7 @@
 //     it; the form warns instead.
 import { type FormEvent, useState } from "react";
 import { updateAgentScopes } from "@/app/dashboard/actions";
-import { PROVIDERS, type ProviderId } from "@/lib/providers";
+import { PROVIDERS, SCOPE_PROVIDERS, type ProviderId } from "@/lib/providers";
 import { describeDelay, parseModels, type ScopeRow } from "@/lib/scope-rows";
 import { prospectiveAgentChange } from "@/lib/impact-preview";
 import { ImpactPreview } from "@/components/ImpactPreview";
@@ -74,7 +74,13 @@ export function ScopeEditor({
                 value={row.provider}
                 onChange={(e) => setRow(index, { provider: e.target.value as ProviderId })}
               >
-                {PROVIDERS.map((p) => (
+                {/* SCOPE_PROVIDERS, not PROVIDERS: the validator accepts the
+                    keyless demo provider in a scope, and `passcontrol login`
+                    creates agents holding one. Offering less than the validator
+                    accepts does not prevent that row from existing — it only
+                    stops this editor from naming it, and leaves the select
+                    showing a provider the agent does not actually have. */}
+                {SCOPE_PROVIDERS.map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>
@@ -115,7 +121,9 @@ export function ScopeEditor({
       </div>
 
       <p className="m-0 text-xs leading-5 text-muted-foreground">
-        Comma-separated. <code>*</code> matches any model, and <code>claude-*</code> matches a
+        <code>demo</code> is the keyless self-test provider: it never reaches a real key and
+        never forwards anywhere, and it is what <code>passcontrol login</code> proves itself
+        with. Comma-separated. <code>*</code> matches any model, and <code>claude-*</code> matches a
         prefix. An exact name must match exactly — <code>claude-haiku-4-5</code> does not cover{" "}
         <code>claude-haiku-4-5-20251001</code>.
       </p>

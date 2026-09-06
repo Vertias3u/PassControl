@@ -14,6 +14,14 @@ interface Price {
 }
 
 export const MICROCENTS_PER_CENT = 1_000_000;
+/**
+ * The divisor for anything that prints a `$`. Named because the two constants
+ * differ by exactly the factor that makes a wrong one look plausible: both
+ * statement surfaces divided by MICROCENTS_PER_CENT and wrote a dollar sign in
+ * front of the answer, overstating every total 100-fold, and no test failed
+ * because the result is still a believable amount of money.
+ */
+export const MICROCENTS_PER_USD = 100 * MICROCENTS_PER_CENT;
 
 export interface TokenUsageEstimate {
   inputTokens: number;
@@ -131,13 +139,55 @@ function priceFor(model: string, provider?: ProviderId): Price | undefined {
   );
 }
 
+/**
+ * Is a call to this endpoint something we can put a price on?
+ *
+ * Only calls to the provider's own host are priced. A custom endpoint is
+ * unpriced EVEN WHEN THE MODEL NAME MATCHES ONE WE KNOW, and that is the part
+ * worth stating: `gpt-4o-mini` arriving from somebody's own proxy may be marked
+ * up, re-routed to a different provider, aliased onto a local model, or free.
+ * Charging OpenAI's retail rate because a string matched would be a number the
+ * operator could act on and we could not stand behind — the same class of false
+ * assurance as an unenforced proof upgrading a receipt.
+ *
+ * Separate from the cost functions so a surface can say "not priced" rather than
+ * "$0.00". A silent zero on a spend graph is worse than a visible gap.
+ */
+export function isPricedEndpoint(endpointBaseUrl: string | null | undefined): boolean {
+  return !endpointBaseUrl;
+}
+
 /** Cost in integer micro-cents for a token split. Falls back per provider when possible. */
+/**
+ * The keyless demo's flat rate, and the only place it is written down.
+ *
+ * The demo synthesizes its response, so there is no invoice to price against —
+ * but it debits the SAME counters as a billed call, deliberately, so the budget
+ * and kill demos show real behaviour. That makes the rate a number two readers
+ * must agree on: the proxy, which charges it, and the decision trace, which
+ * projects it. They did not: the trace priced demo through `costMicrocents`,
+ * which has no row for it and answers 0, so the panel called every demo call
+ * affordable no matter how little of the cap was left.
+ *
+ * `costMicrocents` deliberately still refuses to price it. A pricing row would
+ * imply a tariff for a provider that has no bill, and would silently give a
+ * `demo` string a cost anywhere a real provider is expected.
+ */
+export const DEMO_MICROCENTS_PER_TOKEN = 1;
+
+/** What a demo call of this size costs, for whoever needs to charge or project it. */
+export function demoCostMicrocents(totalTokens: number): number {
+  return Math.max(0, Math.trunc(totalTokens)) * DEMO_MICROCENTS_PER_TOKEN;
+}
+
 export function costMicrocents(
   model: string,
   inputTokens: number,
   outputTokens: number,
-  provider?: ProviderId
+  provider?: ProviderId,
+  endpointBaseUrl?: string | null
 ): number {
+  if (!isPricedEndpoint(endpointBaseUrl)) return 0;
   const p = priceFor(model, provider);
   // A known provider should always have a fallback row. Returning 0 here means a
   // provider was added without pricing rows, which should be treated as a bug.
@@ -183,8 +233,12 @@ export function costMicrocentsForUsage(
     cacheWriteTokens: number;
   },
   model: string,
-  provider?: ProviderId
+  provider?: ProviderId,
+  endpointBaseUrl?: string | null
 ): number {
+  // Unpriced rather than mispriced — see isPricedEndpoint. The tokens are still
+  // counted and logged; only the money is unknown.
+  if (!isPricedEndpoint(endpointBaseUrl)) return 0;
   const p = priceFor(model, provider);
   if (!p) return 0;
   return (
@@ -198,10 +252,16 @@ export function costMicrocentsForUsage(
 /** Cheap pre-flight usage estimate from a request body. */
 export function estimateTokenUsage(body: unknown, fallback = 1000): TokenUsageEstimate {
   try {
-    const b = body as { max_tokens?: number; max_completion_tokens?: number; messages?: unknown };
-    const rawMax = b.max_tokens ?? b.max_completion_tokens;
+    const b = body as {
+      max_tokens?: number;
+      max_completion_tokens?: number;
+      max_output_tokens?: number;
+      messages?: unknown;
+      input?: unknown;
+    };
+    const rawMax = b.max_tokens ?? b.max_completion_tokens ?? b.max_output_tokens;
     const max = typeof rawMax === "number" && Number.isFinite(rawMax) ? rawMax : 0;
-    const promptChars = JSON.stringify(b.messages ?? "").length;
+    const promptChars = JSON.stringify(b.messages ?? b.input ?? "").length;
     const promptTokens = Math.ceil(promptChars / 4);
     const outputTokens = Math.max(0, Math.floor(max || 1024));
     const totalTokens = promptTokens + outputTokens;

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 
 // The keyless `demo` provider must run the FULL governance pipeline (visa, kill,
 // scope, budget) and only replace the Vault-key resolution + upstream forward
@@ -10,8 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   verifyVisaMock,
   serviceClientMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   getCachedKeyMock,
   setCachedKeyMock,
   getCachedAgentPolicyMock,
@@ -26,8 +27,8 @@ const {
   return {
     verifyVisaMock: vi.fn(),
     serviceClientMock: vi.fn(),
-    reserveBudgetMock: vi.fn(),
-    reconcileBudgetMock: vi.fn(),
+    openHoldMock: vi.fn(),
+    settleHoldMock: vi.fn(),
     getCachedKeyMock: vi.fn(),
     setCachedKeyMock: vi.fn(),
     getCachedAgentPolicyMock: vi.fn(),
@@ -41,6 +42,11 @@ const {
   };
 });
 
+// The proxy now reaches lib/demo/identity.ts to tell the seeded PUBLIC demo
+// passport apart from a tenant that holds a demo scope. That module is
+// `server-only`, which Next enforces at build time and vitest cannot resolve
+// at all — same stub tests/site-demo-routes.test.ts already uses.
+vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (p: unknown) => p }));
 vi.mock("@/lib/auth/visa", () => ({
   extractVisaToken: (headers: Headers) => headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "",
@@ -54,15 +60,51 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
-  reserveBudget: (...args: unknown[]) => reserveBudgetMock(...args),
-  reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
-  seedSpent: vi.fn(),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    openHold: (...args: unknown[]) => openHoldMock(...args),
+    // Always granted here: these suites assert what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself (tests/proxy-dispatch-permission.test.ts).
+    consumeDispatchPermission: async () => ({ granted: true }),
+    settleKnown: (p: Record<string, unknown>) => settle("complete", p),
+    settleUnknown: (p: Record<string, unknown>) => settle("usage_unknown", p),
+    releaseUndispatched: (p: Record<string, unknown>) => settle("not_dispatched", p),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
@@ -105,8 +147,9 @@ async function callDemo(body?: unknown) {
 beforeEach(() => {
   verifyVisaMock.mockReset();
   serviceClientMock.mockReset();
-  reserveBudgetMock.mockReset();
-  reconcileBudgetMock.mockReset();
+  openHoldMock.mockReset();
+  settleHoldMock.mockReset();
+  establishBudgetStateMock.mockReset();
   getCachedKeyMock.mockReset();
   setCachedKeyMock.mockReset();
   getCachedAgentPolicyMock.mockReset();
@@ -122,8 +165,9 @@ beforeEach(() => {
   serviceClientMock.mockReturnValue({
     rpc: vi.fn(async () => ({ data: "SHOULD-NOT-RESOLVE-A-KEY", error: null })),
   });
-  reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 1 });
-  reconcileBudgetMock.mockResolvedValue(undefined);
+  openHoldMock.mockResolvedValue({ ok: true, reserved: 1 });
+  settleHoldMock.mockResolvedValue(undefined);
+  establishBudgetStateMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
@@ -155,11 +199,46 @@ describe("keyless demo provider", () => {
     expect(rpc).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
     // But governance IS real: budget reserved + reconciled, logged as ok.
-    expect(reserveBudgetMock).toHaveBeenCalled();
-    expect(reconcileBudgetMock).toHaveBeenCalled();
+    expect(openHoldMock).toHaveBeenCalled();
+    expect(settleHoldMock).toHaveBeenCalled();
     expect(writeLogMock).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "demo", status: "ok" })
     );
+  });
+
+  // The demo opens and settles a REAL hold against the SAME counters as a billed
+  // call — that is deliberate, and it is what makes the budget and kill demos
+  // honest rather than theatre. It follows that the demo cannot be laxer than
+  // the proxy about the durable generation those counters are fenced by. If the
+  // generation write fails and the call is answered anyway, a later Redis loss
+  // reads the agent as never-established and hands its whole cap back.
+  //
+  // That was survivable only while a demo-scoped agent could not also hold a
+  // real provider scope. `passcontrol login` asks for exactly that pair, and the
+  // control plane now accepts it, so the same `budget_epoch` fences demo calls
+  // and billed calls alike. The two-sided contract has to hold on both paths.
+  it("does not answer a demo call when the budget generation cannot be persisted", async () => {
+    openHoldMock.mockResolvedValue({ ok: true, reserved: 1, epochToPersist: "epoch-1" });
+    establishBudgetStateMock.mockRejectedValue(new Error("statement timeout"));
+
+    const res = await callDemo();
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "blocked_budget_state" });
+    // Nothing was synthesized, so the reservation must go back. This returns
+    // above the response, so a full release is the honest ending.
+    expect(settleHoldMock).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "not_dispatched" })
+    );
+  });
+
+  it("answers normally once the generation is durable", async () => {
+    openHoldMock.mockResolvedValue({ ok: true, reserved: 1, epochToPersist: "epoch-1" });
+
+    const res = await callDemo();
+
+    expect(res.status).toBe(200);
+    expect(establishBudgetStateMock).toHaveBeenCalledWith(expect.any(String), "epoch-1");
   });
 
   it("blocks a demo call when the kill switch is armed", async () => {
@@ -169,7 +248,7 @@ describe("keyless demo provider", () => {
 
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "blocked_suspended" });
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
   });
 
   it("enforces scope on demo calls", async () => {

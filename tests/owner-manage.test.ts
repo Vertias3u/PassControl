@@ -13,7 +13,7 @@ vi.mock("@/lib/owner/domain", async (importOriginal) => {
   return { ...actual, verifyDomainControl: (...a: unknown[]) => h.verifyDomainMock(...a) };
 });
 
-import { OWNER_FAILURE_LIMIT, setOwner, verifyOwnerDomain } from "@/lib/owner/manage";
+import { OWNER_FAILURE_LIMIT, setOwner, verifyOwnerControl } from "@/lib/owner/manage";
 
 let selected: { data: unknown; error: unknown } = { data: null, error: null };
 const eqCalls: [string, unknown][] = [];
@@ -125,7 +125,7 @@ describe("verifying a domain claim", () => {
     h.verifyDomainMock.mockResolvedValue({ ok: true });
     const now = new Date("2026-08-05T12:00:00.000Z");
 
-    await verifyOwnerDomain(db(), "u1", { now: () => now });
+    await verifyOwnerControl(db(), "u1", { now: () => now });
 
     expect(h.updateMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -138,7 +138,7 @@ describe("verifying a domain claim", () => {
 
   it("checks the subject on file, never one supplied by the caller", async () => {
     h.verifyDomainMock.mockResolvedValue({ ok: true });
-    await verifyOwnerDomain(db(), "u1");
+    await verifyOwnerControl(db(), "u1");
 
     expect(h.verifyDomainMock).toHaveBeenCalledWith(
       "acme.com",
@@ -154,7 +154,7 @@ describe("verifying a domain claim", () => {
     h.verifyDomainMock.mockResolvedValue({ ok: false, reason: "unreachable" });
     selected = { data: { ...OWNER_ROW, tier: "domain", failure_count: 0 }, error: null };
 
-    await verifyOwnerDomain(db(), "u1");
+    await verifyOwnerControl(db(), "u1");
 
     const patch = h.updateMock.mock.calls[0]![0] as Record<string, unknown>;
     expect(patch.failure_count).toBe(1);
@@ -173,7 +173,7 @@ describe("verifying a domain claim", () => {
       error: null,
     };
 
-    await verifyOwnerDomain(db(), "u1");
+    await verifyOwnerControl(db(), "u1");
 
     const patch = h.updateMock.mock.calls[0]![0] as Record<string, unknown>;
     expect(patch.tier).toBe("unverified");
@@ -185,16 +185,16 @@ describe("verifying a domain claim", () => {
 
   it("refuses to verify a self-attested binding", async () => {
     selected = { data: { ...OWNER_ROW, kind: "self_attested" }, error: null };
-    const result = await verifyOwnerDomain(db(), "u1");
+    const result = await verifyOwnerControl(db(), "u1");
 
     expect(result.ok).toBe(false);
-    expect(result.ok === false && result.code).toBe("not_a_domain_owner");
+    expect(result.ok === false && result.code).toBe("not_verifiable_kind");
     expect(h.verifyDomainMock).not.toHaveBeenCalled();
   });
 
   it("404s when no owner is bound", async () => {
     selected = { data: null, error: null };
-    const result = await verifyOwnerDomain(db(), "u1");
+    const result = await verifyOwnerControl(db(), "u1");
 
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.status).toBe(404);
@@ -202,7 +202,7 @@ describe("verifying a domain claim", () => {
 
   it("never returns anything derived from the fetched document", async () => {
     h.verifyDomainMock.mockResolvedValue({ ok: false, reason: "token_mismatch" });
-    const result = await verifyOwnerDomain(db(), "u1");
+    const result = await verifyOwnerControl(db(), "u1");
 
     // `reason` is a fixed enum, so the response cannot carry response bodies out
     // of a host the caller chose. See lib/owner/domain.ts.
@@ -214,7 +214,7 @@ describe("verifying a domain claim", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // The claim that was CHECKED must be the claim that gets STAMPED.
 //
-// verifyOwnerDomain reads the row, then awaits an HTTPS fetch of a host the
+// verifyOwnerControl reads the row, then awaits an HTTPS fetch of a host the
 // owner chose — which the owner of that host controls the timing of, and can
 // hold open indefinitely. Anything the tenant does in that window changes the
 // row underneath the in-flight check. A write filtered only on `user_id` lands
@@ -300,7 +300,7 @@ describe("a check in flight cannot stamp a claim it never checked", () => {
     const { db, store } = ledger(BOUND_ROW);
     const held = heldCheck();
 
-    const inFlight = verifyOwnerDomain(db, "u1");
+    const inFlight = verifyOwnerControl(db, "u1");
     await held.atTheFetch;
 
     // The window. A Server Action is addressable by id, so a disabled button in
@@ -323,7 +323,7 @@ describe("a check in flight cannot stamp a claim it never checked", () => {
     const { db, store } = ledger({ ...BOUND_ROW, tier: "unverified" });
     const held = heldCheck();
 
-    const inFlight = verifyOwnerDomain(db, "u1");
+    const inFlight = verifyOwnerControl(db, "u1");
     await held.atTheFetch;
 
     await setOwner(db, "u1", { kind: "domain", subject: "acme.com" });
@@ -343,7 +343,7 @@ describe("a check in flight cannot stamp a claim it never checked", () => {
     const { db, store } = ledger({ ...BOUND_ROW, tier: "domain", failure_count: 2 });
     const held = heldCheck();
 
-    const inFlight = verifyOwnerDomain(db, "u1");
+    const inFlight = verifyOwnerControl(db, "u1");
     await held.atTheFetch;
     await setOwner(db, "u1", { kind: "domain", subject: "evil.example" });
 
@@ -358,7 +358,7 @@ describe("a check in flight cannot stamp a claim it never checked", () => {
     const { db, store } = ledger(BOUND_ROW);
     h.verifyDomainMock.mockResolvedValue({ ok: true });
 
-    const result = await verifyOwnerDomain(db, "u1");
+    const result = await verifyOwnerControl(db, "u1");
 
     expect(result.ok).toBe(true);
     expect(store.row).toMatchObject({
@@ -372,7 +372,7 @@ describe("a check in flight cannot stamp a claim it never checked", () => {
     const { db, store } = ledger({ ...BOUND_ROW, tier: "domain", failure_count: 1 });
     h.verifyDomainMock.mockResolvedValue({ ok: false, reason: "unreachable" });
 
-    const result = await verifyOwnerDomain(db, "u1");
+    const result = await verifyOwnerControl(db, "u1");
 
     expect(result.ok).toBe(true);
     expect(store.row).toMatchObject({ tier: "domain", failure_count: 2 });
@@ -386,7 +386,7 @@ describe("a check in flight cannot stamp a claim it never checked", () => {
     const { db, store } = ledger(BOUND_ROW);
     store.writeError = { code: "57P01" };
 
-    const result = await verifyOwnerDomain(db, "u1");
+    const result = await verifyOwnerControl(db, "u1");
 
     expect(result.ok).toBe(false);
     expect(result.ok === false && result.status).toBe(500);
@@ -412,7 +412,7 @@ describe("a cache blip never fails a write that landed", () => {
     h.purgeMock.mockRejectedValue(new Error("redis down"));
     h.verifyDomainMock.mockResolvedValue({ ok: true });
 
-    const result = await verifyOwnerDomain(db(), "u1");
+    const result = await verifyOwnerControl(db(), "u1");
 
     expect(result.ok).toBe(true);
     expect(h.updateMock).toHaveBeenCalledWith(expect.objectContaining({ tier: "domain" }));

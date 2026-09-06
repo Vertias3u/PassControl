@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 import { bytesToBase64url } from "@/lib/encoding";
 
 const {
   verifyVisaMock,
   serviceClientMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   getCachedKeyMock,
   setCachedKeyMock,
   getCachedAgentPolicyMock,
@@ -22,8 +23,8 @@ const {
 } = vi.hoisted(() => ({
   verifyVisaMock: vi.fn(),
   serviceClientMock: vi.fn(),
-  reserveBudgetMock: vi.fn(),
-  reconcileBudgetMock: vi.fn(),
+  openHoldMock: vi.fn(),
+  settleHoldMock: vi.fn(),
   getCachedKeyMock: vi.fn(),
   setCachedKeyMock: vi.fn(),
   getCachedAgentPolicyMock: vi.fn(),
@@ -39,6 +40,11 @@ const {
   order: [] as string[],
 }));
 
+// The proxy now reaches lib/demo/identity.ts to tell the seeded PUBLIC demo
+// passport apart from a tenant that holds a demo scope. That module is
+// `server-only`, which Next enforces at build time and vitest cannot resolve
+// at all — same stub tests/site-demo-routes.test.ts already uses.
+vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: vi.fn() }));
 vi.mock("@/lib/auth/visa", () => ({
   extractVisaToken: (headers: Headers) => headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "",
@@ -49,21 +55,72 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => ({
   readKillState: (...args: unknown[]) => readKillStateMock(...args),
 }));
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
-  reserveBudget: (...args: unknown[]) => {
-    order.push("reserve");
-    return reserveBudgetMock(...args);
-  },
-  reconcileBudget: (...args: unknown[]) => {
-    order.push("release");
-    return reconcileBudgetMock(...args);
-  },
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
-  seedSpent: vi.fn(),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    // The ORDER tags stay on this boundary, because the invariant they pin —
+    // the held attempt is settled BEFORE the next attempt opens — is a property
+    // of these calls and not of Redis. Moving them here with the functions is
+    // what keeps the mutation-tested ordering assertion below alive across the
+    // rename; asserting invocation order alone still passes with the bug live,
+    // which is why that test checks completion rather than invocation.
+    openHold: (...args: unknown[]) => {
+      order.push("reserve");
+      return openHoldMock(...args);
+    },
+    settleKnown: (p: Record<string, unknown>) => {
+      order.push("release");
+      return settle("complete", p);
+    },
+    settleUnknown: (p: Record<string, unknown>) => {
+      order.push("release");
+      return settle("usage_unknown", p);
+    },
+    releaseUndispatched: (p: Record<string, unknown>) => {
+      order.push("release");
+      return settle("not_dispatched", p);
+    },
+    // Always granted here: this suite asserts what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself
+    // (tests/proxy-dispatch-permission.test.ts). Deliberately NOT pushed onto
+    // `order`: the ordering assertions here are about reserve-vs-release across
+    // two attempts, and a third token would only make them harder to read.
+    consumeDispatchPermission: async () => ({ granted: true }),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
@@ -130,7 +187,7 @@ function loggedStatuses() {
 beforeEach(() => {
   order.length = 0;
   for (const m of [
-    verifyVisaMock, serviceClientMock, reserveBudgetMock, reconcileBudgetMock,
+    verifyVisaMock, serviceClientMock, openHoldMock, settleHoldMock,
     getCachedKeyMock, setCachedKeyMock, getCachedAgentPolicyMock, setCachedAgentPolicyMock,
     readKillStateMock, isSuspendedMock, writeLogMock, mirrorSpendMock, rateLimitMock,
     fetchMock, readProvidersWithKeysMock, readFallbacksMock,
@@ -138,8 +195,8 @@ beforeEach(() => {
 
   verifyVisaMock.mockResolvedValue(baseClaims);
   serviceClientMock.mockReturnValue({ rpc: vi.fn(async () => ({ data: "provider-key", error: null })) });
-  reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 1 });
-  reconcileBudgetMock.mockResolvedValue(undefined);
+  openHoldMock.mockResolvedValue({ ok: true, reserved: 1 });
+  settleHoldMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
@@ -297,7 +354,7 @@ describe("budget across attempts", () => {
     // What matters is that the Redis round-trip has COMPLETED, so the next
     // reserve cannot see the previous attempt's tokens still counted. So the
     // release is made genuinely slow and its completion recorded separately.
-    reconcileBudgetMock.mockImplementation(async () => {
+    settleHoldMock.mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
       order.push("release-done");
     });
@@ -319,22 +376,32 @@ describe("budget across attempts", () => {
 
     await callProxy();
 
-    const ids = reserveBudgetMock.mock.calls.map(([a]) => a.reserveId);
+    // One HOLD per attempt, each with its own id — the reason the id is per
+    // attempt and not per request. A shared id would make the second attempt's
+    // settle read as a replay of the first and silently skip a real charge.
+    const ids = openHoldMock.mock.calls.map(([a]) => a.attemptId);
     expect(ids).toHaveLength(2);
     expect(new Set(ids).size).toBe(2);
-    expect(reconcileBudgetMock.mock.calls.map(([a]) => a.reserveId)).toEqual(ids);
+    expect(settleHoldMock.mock.calls.map(([a]) => a.attemptId)).toEqual(ids);
   });
 
   it("records the failed attempt with zero spend and the successful one with usage", async () => {
     fetchMock.mockResolvedValueOnce(upstream(QUOTA, 429));
-    fetchMock.mockResolvedValueOnce(upstream(JSON.stringify({ ok: true }), 200));
+    fetchMock.mockResolvedValueOnce(
+      upstream(JSON.stringify({ usage: { prompt_tokens: 1, completion_tokens: 1 } }), 200)
+    );
 
     await callProxy();
 
     expect(loggedStatuses()).toEqual(["provider_exhausted", "ok"]);
-    expect(reconcileBudgetMock.mock.calls[0]?.[0]).toMatchObject({
-      actualTokens: 0,
-      actualMicrocents: 0,
+    // A 429 that the classifier read as credit_exhausted is the provider
+    // DECLINING before it did any work — `mayHaveBeenBilled` says so — so the
+    // failed attempt settles complete at zero and its hold is fully released.
+    // Contrast the upstream_5xx case below, which may have been billed.
+    expect(settleHoldMock.mock.calls[0]?.[0]).toMatchObject({
+      outcome: "complete",
+      tokens: 0,
+      microcents: 0,
     });
   });
 });
@@ -345,7 +412,9 @@ describe("policy rate limiting is charged per client request, not per attempt", 
       JSON.stringify({ p: { max_requests_per_hour: 10 }, s: null })
     );
     fetchMock.mockResolvedValueOnce(upstream(QUOTA, 429));
-    fetchMock.mockResolvedValueOnce(upstream(JSON.stringify({ ok: true }), 200));
+    fetchMock.mockResolvedValueOnce(
+      upstream(JSON.stringify({ usage: { prompt_tokens: 1, completion_tokens: 1 } }), 200)
+    );
 
     await callProxy();
 
@@ -534,7 +603,9 @@ describe("the shadow verdict follows the attempt, not the primary", () => {
       JSON.stringify({ p: {}, s: { deny: [{ provider: "groq", models: ["*"] }] } })
     );
     fetchMock.mockResolvedValueOnce(upstream(QUOTA, 429));
-    fetchMock.mockResolvedValueOnce(upstream(JSON.stringify({ ok: true }), 200));
+    fetchMock.mockResolvedValueOnce(
+      upstream(JSON.stringify({ usage: { prompt_tokens: 1, completion_tokens: 1 } }), 200)
+    );
 
     await callProxy();
 

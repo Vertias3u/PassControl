@@ -11,6 +11,7 @@ import { createVisaClient } from "./visa-client.mjs";
 // have no meaning upstream.
 const STRIP_REQ = new Set([
   "authorization",
+  "x-passcontrol-proof",
   "x-api-key",
   "host",
   "content-length",
@@ -100,6 +101,7 @@ export function createSidecar({
   gateway,
   passportId,
   passportSecret,
+  keyStorage = null,
   port = 8788,
   host = "127.0.0.1",
   refreshSkewSeconds = 30,
@@ -114,6 +116,7 @@ export function createSidecar({
     gateway: origin,
     passportId,
     passportSecret,
+    keyStorage,
     refreshSkewSeconds,
     missingVisaMessage: "challenge returned no visa",
   });
@@ -140,6 +143,7 @@ export function createSidecar({
       if (!isStripped(k) && typeof v === "string") headers[k] = v;
     }
     headers["authorization"] = `Bearer ${visa}`;
+    headers["x-passcontrol-proof"] = visas.createProof(visa, req.method, new URL(path, origin));
     headers["accept-encoding"] = "identity";
     return fetch(`${origin}${path}`, { method: req.method, headers, body: body ?? undefined });
   }

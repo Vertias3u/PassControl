@@ -28,5 +28,15 @@ services:
       SRH_TOKEN: passcontrol_local_dev_token
       SRH_CONNECTION_STRING: "redis://redis:6379"
     ports:
-      - "${PASSCONTROL_SRH_PORT:-8079}:80"
+      # LOOPBACK ONLY, deliberately. SRH authenticates with the fixed dev token
+      # three lines up, which is committed to this repository — so this bridge
+      # is safe exactly as long as nothing off this machine can reach it. Docker
+      # publishes on every interface when no host address is given, and writes
+      # its own iptables rules on Linux, so "I have a firewall" does not cover
+      # it: `up -d` on a laptop joined to any shared network was handing every
+      # host on that network an authenticated Redis holding the kill switch,
+      # every nonce and every budget counter. The host address goes in front of
+      # the port variable, which callers always set to a bare integer
+      # (scripts/dev-stack.sh, and the CLI's `setup --port-offset`).
+      - "127.0.0.1:${PASSCONTROL_SRH_PORT:-8079}:80"
     restart: unless-stopped

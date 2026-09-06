@@ -16,6 +16,7 @@ import { recordAdminAction } from "@/lib/audit";
 import { IDLE_WINDOW_MS } from "@/lib/control/auth";
 import { ensureProfileRow } from "@/lib/profile/manage";
 import { generateApiKey } from "@/lib/apikeys";
+import { endpointPolicy, normalizeEndpoint } from "@/lib/providers/endpoint";
 import {
   authHeaders,
   isProvider,
@@ -53,6 +54,8 @@ type CreateAgentInput = {
   scopes: { provider: string; models: string[] }[];
   budget_tokens?: number | null;
   budget_cents?: number | null;
+  /** Omit for the product default; explicit null is the deliberate never-expire opt-out. */
+  expiresAt?: string | null;
 };
 type ProviderKeyInput = { provider: string; label: string; key: string };
 
@@ -118,7 +121,7 @@ export async function setAgentSuspended(agentId: string, suspended: boolean) {
 async function createAgentForUser(
   { db, user }: RequiredUser,
   input: CreateAgentInput
-): Promise<{ id: string; name: string; createdAt: string }> {
+): Promise<{ id: string; name: string; createdAt: string; expiresAt: string | null }> {
   await requireCredentialMfa(db, user);
   // Ensure profile row exists (FK target). Service role, not `db`: 0032 revokes
   // INSERT on public.users from `authenticated` for the same reason 0028 revoked
@@ -151,9 +154,9 @@ async function createAgentForUser(
 /** Register a new agent passport (public key generated in the browser). */
 export async function createAgent(
   input: CreateAgentInput
-): Promise<{ agentId: string; createdAt: string }> {
+): Promise<{ agentId: string; createdAt: string; expiresAt: string | null }> {
   const created = await createAgentForUser(await requireUser(), input);
-  return { agentId: created.id, createdAt: created.createdAt };
+  return { agentId: created.id, createdAt: created.createdAt, expiresAt: created.expiresAt };
 }
 
 /**
@@ -598,6 +601,13 @@ export async function probeProviderKey(input: {
       headers: { accept: "application/json", ...authHeaders(provider, clean.key) },
       cache: "no-store",
       signal: controller.signal,
+      // Same guard as the proxy's forward fetch, for the same reason: this
+      // carries the user's key — before it has reached Vault — in the same
+      // `authHeaders()` shape, and `x-api-key` survives a cross-origin redirect
+      // where a bearer token would be stripped. The destination here is the
+      // provider's own host rather than anything a tenant picked, so the risk
+      // is smaller; the header is identical, so the guard is the same.
+      redirect: "manual",
     });
     if (response.status === 401) {
       return { ok: false, error: "invalid_key", message: "That key didn't work." };
@@ -838,6 +848,70 @@ export async function setActiveProviderKey(input: { credentialId: string }) {
     targetType: "provider_key",
     targetId: credentialId,
     metadata: { provider },
+  });
+  revalidatePath("/");
+}
+
+/**
+ * Point a credential at an endpoint other than the provider's own host.
+ *
+ * Refused outright unless the operator has set `PROVIDER_ENDPOINT_MODE` — the
+ * gate is the control, and it is off by default, so on a hosted deployment this
+ * action cannot store anything at all until somebody decides otherwise.
+ *
+ * MFA-gated like every other credential mutation, and this one earns it: choosing
+ * WHERE a provider key is sent is at least as consequential as choosing which key
+ * it is. The endpoint is normalised through the same validator the proxy uses on
+ * read, so a value that stores is a value that will still be honoured.
+ */
+export async function setProviderEndpoint(input: {
+  credentialId: string;
+  endpoint: string;
+}) {
+  const auth = await requireUser();
+  const { db, user } = auth;
+  await requireCredentialMfa(db, user);
+  const credentialId = String(input?.credentialId ?? "").trim();
+  if (!UUID_RE.test(credentialId)) throw new Error("Invalid credential id.");
+  const provider = await ownedCredentialProvider(auth, credentialId);
+  if (!provider) throw new Error("That credential could not be found.");
+
+  const raw = String(input?.endpoint ?? "").trim();
+  const policy = endpointPolicy();
+  if (raw && policy.kind === "off") {
+    throw new Error(
+      "Custom endpoints are not enabled on this deployment. Set PROVIDER_ENDPOINT_MODE to turn them on."
+    );
+  }
+  // Empty clears it and returns to the provider's own host — always allowed,
+  // whatever the gate says, so a narrowed policy never traps an operator with a
+  // stored endpoint they can no longer remove.
+  const endpoint = raw ? normalizeEndpoint(raw, policy) : null;
+  if (raw && !endpoint) {
+    throw new Error(
+      policy.kind === "allowlist"
+        ? "That endpoint is not one this deployment allows. It must be HTTPS on the default port, at a host the operator has listed."
+        : "That is not an endpoint we can use. Give a base URL with no query string, no fragment and no credentials in it."
+    );
+  }
+
+  const { error } = await serviceClient()
+    .from("provider_credentials")
+    .update({ endpoint_base_url: endpoint })
+    .eq("user_id", user.id) // tenant boundary — service_role bypasses RLS
+    .eq("id", credentialId);
+  if (error) failGeneric("setProviderEndpoint", error);
+
+  await purgeProviderKeyForTenant(auth, provider);
+  await recordAdminAction({
+    userId: user.id,
+    action: "provider_key.endpoint",
+    targetType: "provider_key",
+    targetId: credentialId,
+    // The endpoint is an address the operator chose to route their own traffic
+    // to, not a secret — and recording it is the point: this is the audit row
+    // that answers "when did this key start going somewhere else".
+    metadata: { provider, endpoint },
   });
   revalidatePath("/");
 }

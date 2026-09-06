@@ -24,6 +24,8 @@ import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { Fingerprint, KeyRound, ShieldCheck, UserRound, Vault } from "lucide-react";
 import { operatorEmails } from "@/lib/operator-allowlist";
+import { KeyCustodyExpectation } from "@/components/KeyCustodyExpectation";
+import { readKeyCustodyExpectation } from "@/lib/key-custody-expectation";
 
 export const dynamic = "force-dynamic";
 
@@ -42,7 +44,16 @@ export default async function SettingsPage() {
   // agent_owners is SELECT-only for `authenticated` (0017) and readOwner filters
   // on user_id explicitly, so the service-role client here is the same tenant
   // boundary the control route uses — enforced in code, not by RLS.
-  const [{ data: apiKeys }, mfaStatus, owner, profile, publishedAgents, providerCredentials, { data: lastExport }] = await Promise.all([
+  const [
+    { data: apiKeys },
+    mfaStatus,
+    owner,
+    profile,
+    publishedAgents,
+    providerCredentials,
+    { data: lastExport },
+    keyCustodyExpectation,
+  ] = await Promise.all([
     db
       .from("api_keys")
       .select("id, name, key_prefix, scope, last_used_at, revoked_at, created_at")
@@ -64,7 +75,7 @@ export default async function SettingsPage() {
     // list that is briefly missing, and the add form must keep working either way.
     db
       .from("provider_credentials")
-      .select("id, provider, label, created_at, is_active")
+      .select("id, provider, label, created_at, is_active, endpoint_base_url")
       .order("created_at", { ascending: false }),
     // When this workspace last had a configuration export taken, from either
     // surface. The plain user client is enough: admin_audit's select policy is
@@ -77,6 +88,12 @@ export default async function SettingsPage() {
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle(),
+    // Its own query and its own tolerant reader: migration 0051 is the owner's
+    // to apply, so a build carrying this code will run against a database
+    // without the column. Kept out of readProfile's select list on purpose —
+    // PostgREST fails the whole request for an unknown column, which would take
+    // the profile panels down alongside this one.
+    readKeyCustodyExpectation(db, user.id),
   ]);
 
   const activeApiKeys = (apiKeys ?? []).filter((key) => !key.revoked_at).length;
@@ -139,6 +156,7 @@ export default async function SettingsPage() {
       <div className="pc-settings-layout">
         <nav aria-label="Settings sections" className="pc-settings-nav">
           <a href="#profile">Your profile</a>
+          <a href="#key-custody">Key custody</a>
           <a href="#provider-credentials">Provider credentials</a>
           <a href="#control-api-keys">Control API keys</a>
           <a href="#account-security">Security and MFA</a>
@@ -163,6 +181,28 @@ export default async function SettingsPage() {
           </div>
         </section>
 
+
+        {/* Deliberately NOT next to the kill switch or any other control that
+            acts on an agent. This one acts on people: it is a line the operator
+            states, and the fleet table marks who is not on it. */}
+        <section id="key-custody" className="pc-section scroll-mt-28">
+          <SectionHeader
+            eyebrow="Agent key hygiene"
+            title="Key custody"
+            description={<>
+            Where you expect agents to keep their passport private keys. A stated
+            expectation, <strong>never an enforced one</strong> — the key lives on the
+            agent&rsquo;s machine and this server has never seen it, so nothing here can
+            move a key or refuse a call.
+            </>}
+          />
+          <div className="pc-section__body">
+            <KeyCustodyExpectation
+              state={keyCustodyExpectation.state}
+              expectation={keyCustodyExpectation.expectation}
+            />
+          </div>
+        </section>
 
         <section id="provider-credentials" className="pc-section scroll-mt-28">
           <SectionHeader

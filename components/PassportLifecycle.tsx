@@ -25,7 +25,11 @@ import { ed25519 } from "@noble/curves/ed25519";
 import { Check, Copy, KeyRound } from "lucide-react";
 
 import { bytesToBase64url } from "@/lib/encoding";
-import { MAX_ROTATION_GRACE_S } from "@/lib/passport-limits";
+import {
+  DEFAULT_PASSPORT_LIFETIME_DAYS,
+  MAX_ROTATION_GRACE_S,
+  PASSPORT_EXPIRY_WARNING_DAYS,
+} from "@/lib/passport-limits";
 import {
   rotateAgentPassport,
   setAgentPassportExpiry,
@@ -49,14 +53,22 @@ const GRACE_CHOICES = [
 function Countdown({ until }: { until: string }) {
   const remaining = Date.parse(until) - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0) return null;
+  const days = Math.floor(remaining / 86_400_000);
   const hours = Math.floor(remaining / 3_600_000);
   const minutes = Math.floor((remaining % 3_600_000) / 60_000);
   return (
     <span className="font-mono tabular-nums">
-      {hours > 0 ? `${hours}h ` : ""}
+      {days > 0 ? `${days}d ` : ""}
+      {hours > 0 ? `${hours % 24}h ` : ""}
       {minutes}m
     </span>
   );
+}
+
+function defaultRenewalExpiry(): string {
+  return new Date(
+    Date.now() + DEFAULT_PASSPORT_LIFETIME_DAYS * 24 * 60 * 60 * 1000
+  ).toISOString();
 }
 
 export function PassportLifecycle({
@@ -102,6 +114,9 @@ export function PassportLifecycle({
     Boolean(previousValidUntil) &&
     Date.parse(previousValidUntil ?? "") > Date.now();
   const expired = Boolean(expiresAt) && Date.parse(expiresAt ?? "") <= Date.now();
+  const expiryWarning = Boolean(expiresAt) && !expired &&
+    Date.parse(expiresAt ?? "") - Date.now() <=
+      PASSPORT_EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000;
   const proposedExpiry = expiryInput
     ? new Date(`${expiryInput}:00.000Z`).toISOString()
     : null;
@@ -142,6 +157,9 @@ export function PassportLifecycle({
 
   const saveExpiry = (value: string | null) =>
     run(() => setAgentPassportExpiry(agentId, value), () => setEditingExpiry(false));
+
+  const renewPassport = () =>
+    run(() => setAgentPassportExpiry(agentId, defaultRenewalExpiry()), () => router.refresh());
 
   const acknowledgeSecret = () => {
     if (!secretAck) return;
@@ -276,6 +294,60 @@ export function PassportLifecycle({
           <code className="mt-2 block break-all text-xs text-muted-foreground">
             retiring: {previousPassportId}
           </code>
+        </div>
+      ) : null}
+
+      {active && !expiresAt ? (
+        <div
+          className="rounded-lg border border-border bg-secondary/40 p-4"
+          data-state="expiry-missing"
+        >
+          <p className="m-0 text-sm font-semibold text-foreground">
+            This passport never expires.
+          </p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Set the product default now so this credential has a known end date. Renewal keeps
+            the current keypair and requires no agent redeploy; rotation is a separate control.
+          </p>
+          <button type="button" className="mt-3" disabled={pending} onClick={renewPassport}>
+            {pending ? "Setting expiry…" : `Set a ${DEFAULT_PASSPORT_LIFETIME_DAYS}-day expiry`}
+          </button>
+        </div>
+      ) : active && expired && expiresAt ? (
+        <div
+          className="rounded-lg border border-destructive/40 bg-destructive/10 p-4"
+          data-state="expiry-expired"
+        >
+          <p className="m-0 text-sm font-semibold text-destructive">
+            This passport expired at {when(expiresAt)}.
+          </p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            Renew it to extend the current passport. Renewal keeps the current keypair and
+            requires no agent redeploy.
+          </p>
+          <button type="button" className="mt-3" disabled={pending} onClick={renewPassport}>
+            {pending ? "Renewing…" : `Renew for ${DEFAULT_PASSPORT_LIFETIME_DAYS} days`}
+          </button>
+        </div>
+      ) : active && expiryWarning && expiresAt ? (
+        <div
+          className="rounded-lg border p-4"
+          style={{
+            borderColor: "var(--warning)",
+            background: "color-mix(in srgb, var(--warning) 10%, transparent)",
+          }}
+          data-state="expiry-warning"
+        >
+          <p className="m-0 text-sm font-semibold" style={{ color: "var(--warning)" }}>
+            Passport renewal is due in <Countdown until={expiresAt} />.
+          </p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            It expires at {when(expiresAt)}. Renewal keeps the current keypair and requires no
+            agent redeploy; rotation is not required.
+          </p>
+          <button type="button" className="mt-3" disabled={pending} onClick={renewPassport}>
+            {pending ? "Renewing…" : `Renew for ${DEFAULT_PASSPORT_LIFETIME_DAYS} days`}
+          </button>
         </div>
       ) : null}
 

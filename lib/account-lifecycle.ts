@@ -38,7 +38,11 @@ export const ACCOUNT_EXPORT_TABLES = [
   {
     key: "ownerBinding",
     table: "agent_owners",
-    columns: "user_id,kind,subject,tier,published,verified_at,last_checked_at,failure_count,created_at",
+    // Includes the company line. Same rule as the workspace export: this is the
+    // operator's own assertion about themselves, and a data export that silently
+    // omits part of what they entered is not the thing it claims to be.
+    columns:
+      "user_id,kind,subject,tier,published,verified_at,last_checked_at,failure_count,created_at,company_id,company_source,company_name,company_jurisdiction,company_active,company_checked_at",
   },
   {
     key: "breakGlassGrants",

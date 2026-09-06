@@ -104,6 +104,9 @@ describe("content security policy", () => {
         "/learn/ai-agent-identity",
         "/learn/ai-agent-credential-gateway",
         "/learn/verifiable-ai-agent-audit-trails",
+        "/learn/mcp-server-security",
+        "/learn/ai-agent-budget-controls",
+        "/learn/ai-agent-access-revocation",
       ]);
       expect(isPrerenderedPublicPath("/")).toBe(true);
       expect(isPrerenderedPublicPath("/updates")).toBe(false);
@@ -225,9 +228,20 @@ describe("external JWKS fetching", () => {
 
   // Exact match, not startsWith. A prefix test would hand the widened policy to
   // /verify/receipt-anything, and one careless route later, to more than that.
-  it("applies to exactly one route", () => {
-    expect(EXTERNAL_JWKS_PATHS).toEqual(["/verify/receipt"]);
+  it("applies to exactly the two public verifier routes", () => {
+    // BOTH public verifiers need this, and /verify/statement was missing for its
+    // whole first release — the page fetched an external issuer's key set, CSP
+    // refused, and it surfaced as "the issuer's key list could not be reached".
+    // Honest copy, wrong cause, and untestable from the suite: the unit tests
+    // call verifyStatement directly, where there is no CSP at all. Only a real
+    // browser on one origin, verifying a statement issued by another, shows it.
+    //
+    // It is load-bearing rather than cosmetic. A deployment that does not
+    // operate a chain can ONLY ever verify another issuer's statement, so
+    // without this the page verifies nothing there, ever.
+    expect(EXTERNAL_JWKS_PATHS).toEqual(["/verify/receipt", "/verify/statement"]);
     expect(needsExternalJwks("/verify/receipt")).toBe(true);
+    expect(needsExternalJwks("/verify/statement")).toBe(true);
   });
 
   it.each([
@@ -237,6 +251,9 @@ describe("external JWKS fetching", () => {
     "/verify/receipt/extra",
     "/verify/receipts",
     "/verify/receipt-forged",
+    "/verify/statement/extra",
+    "/verify/statements",
+    "/verify/statement-forged",
     "/login",
     "/dashboard",
     "/dashboard/agents/abc",

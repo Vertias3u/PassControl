@@ -118,6 +118,7 @@ const pc = new ControlClient({
 });
 
 const agents = await pc.agents.list({ status: "active" });
+const account = await pc.account.get(); // { email, control_key_scope }
 const created = await pc.agents.create(
   { name: "billing-bot", passportPubkey, scopes: [{ provider: "anthropic", models: ["claude-*"] }] },
   { idempotencyKey: "create-billing-bot" } // safe retries
@@ -134,7 +135,7 @@ fleet, so it is only ever attached to `<origin>/api/control/v1` on the validated
 HTTP off loopback, a sub-path, or embedded userinfo throw at construction, before the transport
 — default or custom — is called. Keep the key server-side; it is never printed by the client.
 
-Resources: `agents.{list,get,create,update,suspend,resume,revoke}`, `logs.list`,
+Resources: `account.get`, `agents.{list,get,create,update,suspend,resume,revoke}`, `logs.list`,
 `audit.list`, `spend.get`, `killSwitch.{get,set}`. Writes accept `{ idempotencyKey }`.
 The full reference lives in [the public OpenAPI document](https://github.com/Vertias3u/PassControl/blob/main/openapi.yaml).
 

@@ -45,11 +45,12 @@ describe("POST /agents (create)", () => {
   });
 
   it("creates, audits with via=api, returns 201", async () => {
-    createAgent.mockResolvedValue({ ok: true, value: { id: "a1", name: "bot" } });
+    const expiresAt = "2027-08-31T12:00:00.000Z";
+    createAgent.mockResolvedValue({ ok: true, value: { id: "a1", name: "bot", expiresAt } });
     const res = await createRoute(post("https://x/api/control/v1/agents", { name: "bot" }));
     expect(res.status).toBe(201);
     expect(createAgent).toHaveBeenCalledWith({ tag: "db" }, "u1", { name: "bot" });
-    expect((await res.json()).data).toMatchObject({ id: "a1" });
+    expect((await res.json()).data).toMatchObject({ id: "a1", expires_at: expiresAt });
     expect(auditMock).toHaveBeenCalledWith(
       expect.objectContaining({ userId: "u1", action: "agent.create", metadata: expect.objectContaining({ via: "api", key_id: "k1" }) })
     );

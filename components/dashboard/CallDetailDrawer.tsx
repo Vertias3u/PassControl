@@ -13,6 +13,7 @@ import {
   describeUpstreamStatus,
 } from "@/lib/verify/receipt-view";
 import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
+import { authenticationProofLabel } from "@/lib/first-call-activation";
 
 export interface CallContext {
   shadowRevisions: Record<string, string | null>;
@@ -23,9 +24,13 @@ const STATUS: Record<LogEntry["status"], { label: string; explanation: string }>
   upstream_error: { label: "Provider error", explanation: "PassControl allowed the attempt, but the upstream provider returned an error." },
   provider_exhausted: { label: "Provider credit exhausted", explanation: "PassControl allowed the attempt; the provider account, not the PassControl budget, had no credit." },
   no_provider_key: { label: "No provider key stored", explanation: "PassControl refused before forwarding: no key is stored for this provider, so there was nothing to inject. The provider never received this call — store a key for it and retry." },
+  endpoint_unavailable: { label: "Endpoint lookup failed", explanation: "PassControl refused before forwarding because it could not read which endpoint this credential is meant to reach. It does not send the key to the provider's own host on a guess: a credential set up for your own server may not belong there. The provider never received this call — this is a PassControl-side read failure, so retry it." },
   blocked_scope: { label: "Blocked by visa scope", explanation: "The visa's stored capability snapshot did not cover this provider and model." },
   blocked_policy: { label: "Blocked by live policy", explanation: "The live policy recorded on this attempt refused it." },
   blocked_budget: { label: "Blocked by PassControl budget", explanation: "The PassControl budget gate refused the attempt before provider forwarding." },
+  usage_unknown: { label: "Sent, usage unconfirmed", explanation: "PassControl allowed the attempt and it went upstream, but no usage report ever came back \u2014 the stream broke, or it closed without one. The provider may have billed for work nobody could measure, so this attempt was charged at the greater of what was observed and what was reserved. The tokens and cost shown are what was OBSERVED, and are marked unconfirmed; where the row records them, the figures charged to the budget are shown separately below." },
+  dispatch_unavailable: { label: "Dispatch unconfirmed", explanation: "Each attempt claims a single, one-use permission to reach the provider in the instant before the request is sent, and this attempt could not claim its own. Either its record was unreadable, or another handler already held it and may be inside that provider call right now. Sending anyway risks the same request being billed twice, so nothing was sent. The reservation this attempt made is deliberately still held rather than returned \u2014 handing it back would free capacity that another handler may be about to spend. No cap was reached and raising one will not change this." },
+  blocked_budget_state: { label: "Budget state unavailable", explanation: "PassControl refused before forwarding because its own spend counters for this agent were lost, and it will not invent a starting balance \u2014 doing so would hand back the difference as spendable capacity. This is not a budget denial and raising the cap will not fix it. An operator rebuilds the agent's spend from the audit trail, which is authoritative." },
   blocked_killed: { label: "Blocked by kill switch", explanation: "A platform, tenant, or denylist kill state refused the attempt." },
   blocked_suspended: { label: "Blocked by agent suspension", explanation: "This agent was suspended when the attempt was recorded." },
   blocked_endpoint: { label: "Blocked endpoint", explanation: "The requested provider endpoint was outside the proxy's allowed route set." },
@@ -73,6 +78,29 @@ export function CallDetailDrawer({
   const status = row ? statusDetail(row.status) : null;
   const shadow = row ? describeStoredShadow(row.policy_shadow_would, currentShadowRevision) : null;
   const tokens = row ? (row.input_tokens ?? 0) + (row.output_tokens ?? 0) : 0;
+
+  // ── The zero that is not an observation ────────────────────────────────────
+  //
+  // A `usage_unknown` row records 0/0 because no usage report ever arrived, not
+  // because the call was free. Rendering that as a plain "0" beside a "Cost
+  // $0.000000" is the same failure this project has already been bitten by
+  // once: a stored fact displayed as a confirmation of something it does not
+  // say. Worse here, because the row DID move money — it was charged at the
+  // greater of observed and reserved, and that figure is the only one on the
+  // row an operator can reconcile against a provider bill.
+  //
+  // So the observed figures are labelled unconfirmed, and the enforced pair is
+  // shown beside them whenever it exists.
+  const unconfirmedUsage = row?.status === "usage_unknown";
+  const enforcedTokens = row?.enforced_tokens ?? null;
+  const enforcedMicrocents = row?.enforced_microcents ?? null;
+  const hasEnforced = enforcedTokens != null || enforcedMicrocents != null;
+  const observed = (value: number | null | undefined): string =>
+    value == null
+      ? "Not recorded"
+      : unconfirmedUsage
+        ? `${value.toLocaleString()} (unconfirmed)`
+        : value.toLocaleString();
   const endpoint = readRecordedEndpoint(row?.receipt);
   const upstreamStatus = readRecordedUpstreamStatus(row?.receipt);
   const upstreamMeaning = upstreamStatus === null ? null : describeUpstreamStatus(upstreamStatus);
@@ -113,7 +141,7 @@ export function CallDetailDrawer({
               visa — not the passport itself. The passport's public-key suffix and
               the visa JTI are separate rows below; this one names the credential
               the proxy actually verified. Same phrase as the Control Graph. */}
-          <div><dt>Authentication method</dt><dd>{row.auth_method === "direct_key" ? "Direct Agent Key" : row.auth_method === "passport" ? "Passport visa" : "Not recorded"}</dd></div>
+          <div><dt>Authentication method</dt><dd>{authenticationProofLabel(row.auth_method)}</dd></div>
           <div><dt>Request ID · JTI</dt><dd><code>{row.jti ?? "Not recorded"}</code></dd></div>
           <div><dt>Passport public-key suffix</dt><dd><code>{row.passport_id ? `…${row.passport_id.slice(-16)}` : "Not recorded"}</code></dd></div>
           <div><dt>Direct key ID</dt><dd><code>{row.agent_access_key_id ?? "Not recorded"}</code></dd></div>
@@ -145,10 +173,39 @@ export function CallDetailDrawer({
               </dd>
             </div>
           ) : null}
-          <div><dt>Input tokens</dt><dd>{row.input_tokens?.toLocaleString() ?? "Not recorded"}</dd></div>
-          <div><dt>Output tokens</dt><dd>{row.output_tokens?.toLocaleString() ?? "Not recorded"}</dd></div>
-          <div><dt>Total tokens</dt><dd>{tokens.toLocaleString()}</dd></div>
-          <div><dt>Cost</dt><dd>{row.cost_microcents == null ? "Not recorded" : `$${(row.cost_microcents / 100_000_000).toFixed(6)}`}</dd></div>
+          <div><dt>Input tokens</dt><dd>{observed(row.input_tokens)}</dd></div>
+          <div><dt>Output tokens</dt><dd>{observed(row.output_tokens)}</dd></div>
+          <div><dt>Total tokens</dt><dd>{observed(tokens)}</dd></div>
+          <div>
+            <dt>Cost</dt>
+            <dd>
+              {row.cost_microcents == null
+                ? "Not recorded"
+                : `$${(row.cost_microcents / 100_000_000).toFixed(6)}${unconfirmedUsage ? " (unconfirmed)" : ""}`}
+            </dd>
+          </div>
+          {hasEnforced ? (
+            <>
+              <div>
+                <dt>Tokens charged to the budget</dt>
+                <dd>
+                  {enforcedTokens == null ? "Not recorded" : enforcedTokens.toLocaleString()}
+                  <small className="pc-call-detail__hint">
+                    What this attempt actually consumed of the cap, as opposed to what was
+                    measured. Uncertainty is charged, not forgiven.
+                  </small>
+                </dd>
+              </div>
+              <div>
+                <dt>Cost charged to the budget</dt>
+                <dd>
+                  {enforcedMicrocents == null
+                    ? "Not recorded"
+                    : `$${(enforcedMicrocents / 100_000_000).toFixed(6)}`}
+                </dd>
+              </div>
+            </>
+          ) : null}
           <div><dt>Latency</dt><dd>{row.latency_ms == null ? "Not recorded" : `${row.latency_ms.toLocaleString()} ms`}</dd></div>
         </dl>
 

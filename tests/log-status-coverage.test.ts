@@ -21,9 +21,25 @@ const DISPLAY_MAPS = [
   "components/dashboard/CallDetailDrawer.tsx",
 ];
 
-/** The statuses a call can be logged with, parsed from the union in lib/log.ts. */
+/**
+ * The statuses a call can be logged with, parsed from the union in lib/log.ts.
+ *
+ * COMMENTS ARE STRIPPED FIRST, and that is not tidiness. The union is written
+ * with a prose comment above most of its members, the region ends at the first
+ * `;`, and a semicolon inside one of those comments therefore TRUNCATES the
+ * parse — silently. When `blocked_budget_state` was added under a comment
+ * reading "answers 402; an agent reads that as final", this function stopped
+ * seeing it, every map below went on passing, and the status this file exists to
+ * protect was the one it no longer checked.
+ *
+ * A gate that quietly narrows itself is worse than no gate: it reports success
+ * about work it did not do. Stripping comments makes the parse depend on the
+ * code rather than on the punctuation someone chose in a sentence.
+ */
 function logStatuses(): string[] {
-  const src = read("lib/log.ts");
+  const src = read("lib/log.ts")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "");
   const block = /status\??:\s*([\s\S]*?);/.exec(src);
   const region = block?.[1] ?? src;
   const found = new Set<string>();
@@ -56,6 +72,11 @@ describe("every log status has words on every surface", () => {
     expect(statuses).toContain("ok");
     expect(statuses).toContain("upstream_error");
     expect(statuses).toContain("provider_exhausted");
+    // Named explicitly because these two were added under comments containing
+    // punctuation that used to truncate the parse above. If a future edit
+    // re-breaks it, this fails here rather than by quietly checking less.
+    expect(statuses).toContain("usage_unknown");
+    expect(statuses).toContain("blocked_budget_state");
     expect(statuses.length).toBeGreaterThanOrEqual(8);
   });
 

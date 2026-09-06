@@ -16,7 +16,11 @@ import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { ActivityWorkspace } from "@/components/dashboard/ActivityWorkspace";
 import { FleetAttentionQueue } from "@/components/dashboard/FleetAttentionQueue";
-import { buildFleetAttention, withLastSeenFromLogs } from "@/lib/dashboard-attention";
+import {
+  buildFleetAttention,
+  summariseFleetAttention,
+  withLastSeenFromLogs,
+} from "@/lib/dashboard-attention";
 import { partitionByClass } from "@/lib/call-class";
 import { shadowRevision } from "@/lib/policy-shadow";
 import { OperationsPanel } from "@/components/dashboard/OperationsPanel";
@@ -27,6 +31,13 @@ import { loadInstanceSigner, instanceIssuer } from "@/lib/crypto/instanceKey";
 import { isSentryConfigured } from "@/lib/observability";
 import { isProvider } from "@/lib/providers";
 import { operatorEmails } from "@/lib/operator-allowlist";
+import { redis } from "@/lib/state/redis";
+import {
+  readDeclaredKeyStorageMany,
+  toDeclaredKeyStorageView,
+  type DeclaredKeyStorageView,
+} from "@/lib/passport-key-storage";
+import { readKeyCustodyExpectation } from "@/lib/key-custody-expectation";
 // The shipped CLI is plain ESM and intentionally has no TypeScript declaration.
 // @ts-expect-error Import the preset source of truth on the server only.
 import { SIDECAR_PRESETS } from "@/cli/presets.mjs";
@@ -35,6 +46,38 @@ export const dynamic = "force-dynamic";
 
 const ATTENTION_SCAN_DAYS = 30;
 const ATTENTION_SCAN_LIMIT = 2_000;
+
+/**
+ * Declared key custody for every passport agent on the page.
+ *
+ * Fails to `{}` rather than to an error: nothing on this dashboard should go
+ * down because an agent's self-report could not be read, and the view already
+ * knows how to say "nothing declared" honestly. `last_seen_at` here is the
+ * log-resolved value, so a claim left behind by later activity is detectable —
+ * the fleet cell does not render that, but the view carries it either way.
+ */
+async function buildKeyCustodyViews(
+  agents: { id: string; passport_pubkey: string | null; last_seen_at: string | null }[]
+): Promise<Record<string, DeclaredKeyStorageView>> {
+  const passportAgents = agents.filter((agent) => agent.passport_pubkey);
+  if (!passportAgents.length) return {};
+  let declarations: Awaited<ReturnType<typeof readDeclaredKeyStorageMany>> = {};
+  try {
+    declarations = await readDeclaredKeyStorageMany(
+      redis(),
+      passportAgents.map((agent) => agent.id)
+    );
+  } catch {
+    // An unconfigured or unreachable Redis. Every agent then reads as
+    // undeclared, which is true: this instance has not heard a claim.
+  }
+  return Object.fromEntries(
+    passportAgents.map((agent) => [
+      agent.id,
+      toDeclaredKeyStorageView(declarations[agent.id] ?? null, agent.last_seen_at),
+    ])
+  );
+}
 
 export default async function ControlTowerPage() {
   const db = await userClient();
@@ -65,12 +108,13 @@ export default async function ControlTowerPage() {
     providerKeys,
     quota,
     { data: onboardingState },
+    keyCustodyExpectation,
   ] =
     await Promise.all([
     db.from("agents").select("*").order("created_at", { ascending: false }),
     db
       .from("agent_logs")
-      .select("id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, status, latency_ms, receipt, policy_shadow_would")
+      .select("id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would")
       .gte("created_at", attentionCutoff)
       .order("created_at", { ascending: false })
       .limit(ATTENTION_SCAN_LIMIT),
@@ -98,6 +142,11 @@ export default async function ControlTowerPage() {
       .select("dismissed_at, completed_at")
       .eq("user_id", user.id)
       .maybeSingle(),
+    // Its own query, and its own read function: on an instance that has not
+    // applied 0051 the column does not exist, and PostgREST fails the whole
+    // request for an unknown column. Kept out of any shared select so the blast
+    // radius of an unapplied migration is this one line of the fleet table.
+    readKeyCustodyExpectation(db, user.id),
   ]);
 
   const agentList = agents ?? [];
@@ -115,6 +164,15 @@ export default async function ControlTowerPage() {
   // filling it in inside a bundle an operator hands to support would hide the
   // very failure the bundle exists to surface.
   const fleetAgents = withLastSeenFromLogs(agentList, attentionLogRows, renderedAt);
+  // ONE extra Redis round trip, and it cannot join the Promise.all above because
+  // it needs the agent ids that query returns. One `mget` for the whole page
+  // rather than a `get` per row — this file already counts its round trips, and
+  // the fleet table is the surface people scan fastest.
+  //
+  // Passport agents only: a Direct Agent Key has no passport private key, so
+  // asking where it keeps one would turn a question nobody asked into an
+  // unanswered one. Those rows are told apart in the table by passport_pubkey.
+  const keyCustody = await buildKeyCustodyViews(fleetAgents);
   const displayLogs = attentionLogRows.slice(0, 100);
   const attentionQueue = buildFleetAttention(agentList, attentionLogRows);
   const blockedCalls = displayLogs.filter((l) => l.status.startsWith("blocked")).length;
@@ -207,7 +265,7 @@ export default async function ControlTowerPage() {
           blockedCalls={blockedCalls}
           recentCalls={inferenceLogs.length}
           housekeepingCalls={housekeepingLogs.length}
-          attentionAgents={attentionQueue.length}
+          attention={summariseFleetAttention(attentionQueue)}
         />
 
         {/* Directly under the kill switch on purpose: arming it and watching the
@@ -243,7 +301,12 @@ export default async function ControlTowerPage() {
           />
           <div className="pc-section__body p-0!">
             <FleetAttentionQueue items={attentionQueue} />
-            <AgentFleetTable agents={fleetAgents} visaTtlSeconds={visaTtlSeconds()} />
+            <AgentFleetTable
+              agents={fleetAgents}
+              visaTtlSeconds={visaTtlSeconds()}
+              keyCustody={keyCustody}
+              keyCustodyExpectation={keyCustodyExpectation.expectation}
+            />
           </div>
         </section>
 

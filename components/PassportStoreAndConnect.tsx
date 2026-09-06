@@ -15,6 +15,11 @@ import type { ProviderId } from "@/lib/providers";
 import { browserClient } from "@/lib/supabase/client";
 
 type CopyKind = "env" | "install" | "client" | "smoke" | "sidecar";
+const PASSPORT_AUTH_METHODS = ["passport", "passport_proof_per_request"] as const;
+
+function isPassportAuthMethod(value: FirstCallRow["auth_method"]): boolean {
+  return value === "passport" || value === "passport_proof_per_request";
+}
 
 function gatewayOrigin(): string {
   return typeof window === "undefined" ? "" : window.location.origin;
@@ -88,7 +93,7 @@ export function PassportStoreAndConnect({
       .from("agent_logs")
       .select("id, agent_id, provider, model, status, receipt, auth_method, created_at")
       .eq("agent_id", agentId)
-      .eq("auth_method", "passport")
+      .in("auth_method", [...PASSPORT_AUTH_METHODS])
       .gt("created_at", issuedAt)
       .order("created_at", { ascending: false })
       .limit(1)
@@ -106,10 +111,10 @@ export function PassportStoreAndConnect({
           const next = payload.new as FirstCallRow;
           // Same three conditions as the historical read, applied to the live feed:
           // this agent, a passport-derived visa, and stored after this passport
-          // existed. The row records which credential authenticated the call, not
-          // a per-call signature — see authenticationProofLabel for why that
-          // distinction is load-bearing here.
-          if (next.agent_id === agentId && next.auth_method === "passport" && next.created_at > issuedAt) {
+          // existed. The row records the exact assurance the gateway enforced:
+          // bearer passport visa or passport proof per request. See
+          // authenticationProofLabel for why that distinction is load-bearing.
+          if (next.agent_id === agentId && isPassportAuthMethod(next.auth_method) && next.created_at > issuedAt) {
             setRow(next);
           }
         }
@@ -137,7 +142,8 @@ export function PassportStoreAndConnect({
       })
     : "";
   const diagnosis = row && row.status !== "ok" ? activationDiagnosis(row) : null;
-  const verified = row?.status === "ok" && row.auth_method === "passport";
+  const verified = row?.status === "ok" && isPassportAuthMethod(row.auth_method);
+  const proofedPerRequest = row?.auth_method === "passport_proof_per_request";
 
   const copy = async (kind: CopyKind, value: string) => {
     try {
@@ -204,25 +210,30 @@ export function PassportStoreAndConnect({
         <p className="pc-field-note">Running this makes one real provider call and may use provider credits. PassControl will not mark setup complete until the resulting call is stored.</p>
       </section>
 
-      {/* The DOM-level contract for this panel, so the token has to carry the same
-          semantics as the copy: a passport-derived VISA was accepted, not a
-          per-call passport signature. Anything asserting on this panel reads
-          `passport-visa-ok`. */}
-      <section className="pc-first-call__diagnosis" aria-live="polite" data-passport-proof={verified ? "passport-visa-ok" : row ? row.status : "none"}>
+      {/* The DOM-level contract follows the STORED method, not this agent's
+          setting. A setup call can prove bearer visa acceptance or the stronger
+          per-request private-key proof, and the two must not collapse here. */}
+      <section className="pc-first-call__diagnosis" aria-live="polite" data-passport-proof={verified ? proofedPerRequest ? "passport-proof-per-request-ok" : "passport-visa-ok" : row ? row.status : "none"}>
         {verified ? <Check aria-hidden="true" /> : row ? <ShieldAlert aria-hidden="true" /> : <Radio aria-hidden="true" />}
         <div>
           <span>{live ? "Watching immutable call records" : "Connecting to call records"}</span>
           {verified ? (
             <>
-              {/* `verified` already pins auth_method === "passport", so the literal
-                  argument is the guard restated — and the phrase itself comes from
-                  the one helper the dashboard uses, so the two cannot drift apart. */}
-              <strong>{authenticationProofLabel("passport")}.</strong>
-              <p>
-                The passport signed the challenge, PassControl issued a short-lived visa, and this call
-                presented that visa. Cloud then used the provider credential server-side and stored the
-                governed call.
-              </p>
+              {/* `verified` pins the two passport-family methods and excludes
+                  Direct Agent Keys. The row's actual method chooses the claim. */}
+              <strong>{authenticationProofLabel(row?.auth_method)}.</strong>
+              {proofedPerRequest ? (
+                <p>
+                  This call presented the visa and a fresh passport proof bound to that visa, method,
+                  and path. The gateway verified both before using the provider credential server-side.
+                </p>
+              ) : (
+                <p>
+                  The passport signed the challenge, PassControl issued a short-lived visa, and this call
+                  presented that bearer visa. Cloud then used the provider credential server-side and stored
+                  the governed call.
+                </p>
+              )}
               <small data-receipt-state={row?.receipt ? "recorded" : "missing"}>
                 {row?.receipt
                   ? "Signed receipt attached to the stored call."

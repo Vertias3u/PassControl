@@ -48,10 +48,13 @@ export const WORKSPACE_CONFIG_TABLES = [
   {
     key: "ownership",
     table: "agent_owners",
-    // No `verification_token`: it is a live domain-control proof, not a record
-    // of one. `tier` and `verified_at` say what was proven; the token would let
-    // the holder re-prove it.
-    columns: "user_id,kind,subject,tier,published,verified_at,created_at",
+    // No `verification_token`: it is a live proof of control, not a record of
+    // one. `tier` and `verified_at` say what was proven; the token would let the
+    // holder re-prove it. The company line IS exported — it is the operator's
+    // own assertion about themselves, and an export that quietly drops what a
+    // tenant put in is not a copy of their data.
+    columns:
+      "user_id,kind,subject,tier,published,verified_at,created_at,company_id,company_source,company_name,company_jurisdiction,company_active,company_checked_at",
   },
   {
     key: "breakGlassGrants",

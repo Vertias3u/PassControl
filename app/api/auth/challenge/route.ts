@@ -9,13 +9,26 @@ import { waitUntil } from "@vercel/functions";
 import { NextResponse } from "next/server";
 import { base64urlToBytes, bytesToUtf8 } from "@/lib/encoding";
 import { verifySignature, passportIdToPublicKey } from "@/lib/crypto/ed25519";
-import { claimNonce, touchLastSeen } from "@/lib/state/redis";
+import { claimNonce, redis, touchLastSeen } from "@/lib/state/redis";
 import { serviceClient } from "@/lib/supabase";
 import { mintVisa, type ScopeEntry } from "@/lib/auth/visa";
 import { findAuthenticatablePassport } from "@/lib/auth/passport";
 import { readLiveGrant, unionScopes } from "@/lib/break-glass";
 import { rateLimit } from "@/lib/ratelimit";
-import { captureError, captureSecurityEvent } from "@/lib/observability";
+import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
+import { PASSPORT_EXPIRY_WARNING_DAYS } from "@/lib/passport-limits";
+import {
+  AUTH_HMAC_LABELS,
+  authHmacKey,
+} from "@/lib/crypto/derived-auth-hmac";
+import {
+  observePassportSource,
+  passportSourceFingerprint,
+} from "@/lib/passport-source-observation";
+import {
+  parseKeyStorageDeclaration,
+  recordDeclaredKeyStorage,
+} from "@/lib/passport-key-storage";
 
 const SKEW_MS = 90_000;
 const NONCE_TTL_S = 180;
@@ -27,10 +40,32 @@ const MAX_BODY_BYTES = 8 * 1024;
 const CHALLENGE_LIMIT = 20;
 const CHALLENGE_WINDOW_S = 60;
 
+let rateLimitHmacKey: Promise<CryptoKey> | null = null;
+let sourceFingerprintHmacKey: Promise<CryptoKey> | null = null;
+
+function challengeRateLimitHmacKey() {
+  rateLimitHmacKey ??= authHmacKey(AUTH_HMAC_LABELS.challengeRateLimit);
+  return rateLimitHmacKey;
+}
+
+function passportSourceHmacKey() {
+  sourceFingerprintHmacKey ??= authHmacKey(AUTH_HMAC_LABELS.passportSourceFingerprint);
+  return sourceFingerprintHmacKey;
+}
+
 interface ChallengePayload {
   passport_id: string;
   ts: number;
   nonce: string;
+  /**
+   * Optional, and OPTIONAL FOREVER: the SDK, every older CLI and the examples
+   * mint without one. What the agent says about where it keeps its passport
+   * private key — a self-report the gateway cannot check at any tier. It rides
+   * inside the signed payload rather than beside it so the claim is
+   * attributable to the key holder, which is only true if it is recorded after
+   * the signature verifies. See lib/passport-key-storage.ts.
+   */
+  key_storage?: unknown;
 }
 
 function fail(status: number, error: string) {
@@ -53,7 +88,15 @@ export async function POST(req: Request) {
   }
 }
 
-function securityFail(status: number, error: string, context: { agentId?: string } = {}) {
+function securityFail(
+  status: number,
+  error: string,
+  context: {
+    agentId?: string;
+    expiresAt?: string;
+    expiryKind?: "passport" | "retired_key";
+  } = {}
+) {
   waitUntil(
     captureSecurityEvent(`challenge.${error}`, {
       route: "api.auth.challenge",
@@ -63,7 +106,48 @@ function securityFail(status: number, error: string, context: { agentId?: string
       agentId: context.agentId,
     })
   );
+  if (error === "passport_expired" && context.agentId && context.expiresAt) {
+    const lifecyclePath = `/dashboard/agents/${context.agentId}#agent-lifecycle`;
+    if (context.expiryKind === "retired_key") {
+      return NextResponse.json(
+        {
+          error,
+          expires_at: context.expiresAt,
+          expiry_kind: "retired_key",
+          recovery: "deploy_current_passport",
+          recovery_path: lifecyclePath,
+        },
+        { status }
+      );
+    }
+    return NextResponse.json(
+      {
+        error,
+        expires_at: context.expiresAt,
+        renewal_path: lifecyclePath,
+      },
+      { status }
+    );
+  }
   return fail(status, error);
+}
+
+function presentedSignatureStatus(
+  encodedSignature: string,
+  encodedPayload: string,
+  passportId: string
+): "valid" | "bad_passport_id" | "bad_signature" {
+  const publicKey = passportIdToPublicKey(passportId);
+  if (!publicKey) return "bad_passport_id";
+  try {
+    return verifySignature(
+      base64urlToBytes(encodedSignature),
+      base64urlToBytes(encodedPayload),
+      publicKey
+    ) ? "valid" : "bad_signature";
+  } catch {
+    return "bad_signature";
+  }
 }
 
 async function handlePost(req: Request) {
@@ -72,7 +156,22 @@ async function handlePost(req: Request) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "unknown";
-  const rl = await rateLimit(`challenge:${ip}`, CHALLENGE_LIMIT, CHALLENGE_WINDOW_S);
+  // The limiter is Redis-backed too, so its key must not undo the detector's
+  // privacy boundary by persisting the raw address. If the keyed hash cannot be
+  // produced, preserve the limiter's existing fail-open posture.
+  let rateLimitFingerprint: string | null = null;
+  try {
+    rateLimitFingerprint = await passportSourceFingerprint(
+      "challenge-rate-limit",
+      ip,
+      await challengeRateLimitHmacKey()
+    );
+  } catch {
+    logFailOpen("ratelimit");
+  }
+  const rl = rateLimitFingerprint
+    ? await rateLimit(`challenge:${rateLimitFingerprint}`, CHALLENGE_LIMIT, CHALLENGE_WINDOW_S)
+    : { success: true, remaining: CHALLENGE_LIMIT };
   if (!rl.success) {
     waitUntil(
       captureSecurityEvent("challenge.rate_limited", {
@@ -148,6 +247,25 @@ async function handlePost(req: Request) {
       );
       return fail(500, "lookup_failed");
     }
+    if (found.code === "passport_expired") {
+      // Expiry remains an authentication refusal at lookup time, but its
+      // timestamp and agent-specific recovery URL are private diagnostics. A
+      // caller gets those details only after proving possession of the key it
+      // presented; a scanner that merely knows a public passport ID gets the
+      // stable bare error code.
+      const signature = presentedSignatureStatus(
+        body.signature,
+        body.payload,
+        payload.passport_id
+      );
+      return securityFail(found.status, found.code, signature === "valid"
+        ? {
+            agentId: found.agentId,
+            expiresAt: found.expiresAt,
+            expiryKind: found.expiryKind,
+          }
+        : { agentId: found.agentId });
+    }
     return securityFail(found.status, found.code, { agentId: found.agentId });
   }
   const agent = found.agent;
@@ -159,14 +277,9 @@ async function handlePost(req: Request) {
   // and the retired key can match, and deriving from the row would accept the
   // old key forever or reject the new one. The helper cannot return the stored
   // key, so this stays true by construction.
-  const pubkey = passportIdToPublicKey(payload.passport_id);
-  if (!pubkey) return securityFail(400, "bad_passport_id");
-  const ok = verifySignature(
-    base64urlToBytes(body.signature),
-    base64urlToBytes(body.payload),
-    pubkey
-  );
-  if (!ok) return securityFail(401, "bad_signature", { agentId: agent.id });
+  const signature = presentedSignatureStatus(body.signature, body.payload, payload.passport_id);
+  if (signature === "bad_passport_id") return securityFail(400, signature);
+  if (signature === "bad_signature") return securityFail(401, signature, { agentId: agent.id });
 
   // 6. Mint the visa.
   //
@@ -235,5 +348,77 @@ async function handlePost(req: Request) {
   // Coalesced last-seen (flushed to Postgres by the reconcile cron).
   await touchLastSeen(agent.id);
 
-  return NextResponse.json({ visa: token, token_type: "Bearer", expires_in: expSeconds, jti });
+  // Evidence about custody, recorded only now — after step 5 proved the caller
+  // holds the key. A passport id is public (`/verify/[passportId]`, the
+  // published fleet listing), so a write any earlier would let a stranger who
+  // merely knows an agent's id decide what its operator's dashboard reports.
+  // Fail-open like the source detector below: a dashboard line is never worth
+  // an agent's visa.
+  const declaredKeyStorage = parseKeyStorageDeclaration(payload.key_storage);
+  if (declaredKeyStorage) {
+    try {
+      waitUntil(
+        recordDeclaredKeyStorage(redis(), agent.id, declaredKeyStorage).catch(() =>
+          logFailOpen("passport_key_storage_declaration")
+        )
+      );
+    } catch {
+      logFailOpen("passport_key_storage_declaration");
+    }
+  }
+
+  // Source observation is evidence, not authentication. It runs once per
+  // verified mint (never on the proxy hot path), and every failure is
+  // deliberately fail-open: losing this Redis signal must not lock an agent
+  // out. Only the detector receives the raw source address; it immediately
+  // replaces it with a keyed hash and never includes it in a stored signal.
+  if (ip !== "unknown") {
+    try {
+      const observation = observePassportSource(redis(), {
+        agentId: agent.id,
+        ip,
+        country: req.headers.get("x-vercel-ip-country"),
+        visaTtlSeconds: expSeconds,
+        hashKey: await passportSourceHmacKey(),
+      });
+      waitUntil(
+        observation
+          .then((signal) => {
+            if (!signal) return;
+            return captureSecurityEvent(`challenge.passport_source_${signal.strength}`, {
+              route: "api.auth.challenge",
+              method: "POST",
+              status: 200,
+              code: `passport_source_${signal.strength}`,
+              agentId: agent.id,
+            });
+          })
+          .catch(() => logFailOpen("passport_source_observation"))
+      );
+    } catch {
+      logFailOpen("passport_source_observation");
+    }
+  }
+
+  const passportExpiry = (() => {
+    if (typeof agent.expires_at !== "string") return null;
+    const expiresAt = Date.parse(agent.expires_at);
+    const remainingMs = expiresAt - Date.now();
+    const warningMs = PASSPORT_EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000;
+    if (!Number.isFinite(expiresAt) || remainingMs <= 0 || remainingMs > warningMs) return null;
+    return {
+      expires_at: agent.expires_at,
+      expires_in_seconds: Math.max(0, Math.ceil(remainingMs / 1000)),
+      warning: true,
+      renewal_path: `/dashboard/agents/${agent.id}#agent-lifecycle`,
+    };
+  })();
+
+  return NextResponse.json({
+    visa: token,
+    token_type: "Bearer",
+    expires_in: expSeconds,
+    jti,
+    ...(passportExpiry ? { passport_expiry: passportExpiry } : {}),
+  });
 }

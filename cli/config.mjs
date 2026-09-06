@@ -3,6 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WORKSPACE_EXPORT_PROTOCOL } from "./protocols.mjs";
+import {
+  createPassportCredentialStore,
+  keyStorageDeclaration,
+  resolvePassportKey,
+} from "./passport-key-store.mjs";
 
 export const CONFIG_FILE = ".passcontrol";
 
@@ -45,6 +50,7 @@ const CONFIG_KEYS = [
   "PASSCONTROL_GATEWAY",
   "PASSPORT_ID",
   "PASSPORT_SECRET",
+  "PASSPORT_KEY_STORAGE",
   "PASSCONTROL_API_KEY",
   "PROVIDER",
   "MODEL",
@@ -58,6 +64,12 @@ const ANSI = {
   red: "\x1b[31m",
   yellow: "\x1b[33m",
   heading: "\x1b[1;32m",
+  // Two more, for the settings browser's header. Both stay inside the 16-colour
+  // set on purpose: nothing in this CLI emits 38;5; or 38;2;, and a lone file
+  // that did would look wrong beside the rest and can disappear entirely on a
+  // terminal that has not been told its palette.
+  lime: "\x1b[92m",   // bright green — the focus and healthy colour
+  faint: "\x1b[90m",  // bright black — a second dim level below \x1b[2m
 };
 
 function paint(code, value) {
@@ -218,10 +230,34 @@ export function resolvedConfig() {
 
 function currentConfig() {
   const provider = process.env.PROVIDER ?? DEFAULT_PROVIDER;
+  const passportId = process.env.PASSPORT_ID ?? "";
+  const fileSecret = process.env.PASSPORT_SECRET ?? "";
+  const passportStorageMarker = process.env.PASSPORT_KEY_STORAGE ?? "";
+  const fileLabel = operatorEnv("PASSPORT_SECRET") !== undefined
+    ? "environment variable"
+    : configPathLabel(configSources);
+  let passport = null;
+  const resolvedPassport = () => {
+    passport ??= resolvePassportKey({
+      passportId,
+      fileSecret,
+      fileLabel,
+      preferFileSecret: fileLabel === "environment variable" && Boolean(fileSecret),
+      storageMarker: passportStorageMarker,
+      store: createPassportCredentialStore(),
+    });
+    return passport;
+  };
   return {
     gateway: trimSlash(process.env.PASSCONTROL_GATEWAY ?? DEFAULT_GATEWAY),
-    passportId: process.env.PASSPORT_ID ?? "",
-    passportSecret: process.env.PASSPORT_SECRET ?? "",
+    passportId,
+    get passportSecret() {
+      return resolvedPassport().secret;
+    },
+    get passportStorage() {
+      return resolvedPassport().storage;
+    },
+    passportStorageMarker,
     apiKey: process.env.PASSCONTROL_API_KEY ?? "",
     provider,
     model: resolveModel(provider),
@@ -240,10 +276,11 @@ export function configPathLabel(sources = configSources) {
 }
 
 /**
- * Write the whole config. Every CONFIG_KEY is emitted, so a key absent from
- * `values` is BLANKED — that is correct for `init`, which collects all of them,
- * and wrong for any caller that means to change a subset. Use mergeConfigFile
- * for those.
+ * Write the whole config. Every ordinary CONFIG_KEY is emitted, so a key absent
+ * from `values` is BLANKED — that is correct for `init`, which collects all of
+ * them, and wrong for any caller that means to change a subset. The one
+ * exception is an unset PASSPORT_KEY_STORAGE marker: omitting it keeps a Tier 0
+ * file byte-for-byte in the old shape. Use mergeConfigFile for partial changes.
  *
  * The chmod is not redundant with the `mode` option. Node applies `mode` only
  * when it CREATES the file, so overwriting a config that already exists as 0644
@@ -262,6 +299,7 @@ export function writeConfigFile(file, values) {
     "",
   ];
   for (const key of CONFIG_KEYS) {
+    if (key === "PASSPORT_KEY_STORAGE" && !values[key]) continue;
     lines.push(`${key}=${values[key] ?? ""}`);
   }
   fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
@@ -298,6 +336,19 @@ export function heading(message = "") {
   return paint(ANSI.heading, message);
 }
 
+/**
+ * Colour helpers for callers that lay out their own columns.
+ *
+ * `formatLabel` above owns the label/value shape used by every report. The
+ * settings browser's header is a glyph table instead, so it paints its own
+ * cells — but it must do so through the same `paint`, which is what keeps
+ * NO_COLOR, CI and a piped stdout honoured in one place.
+ */
+export const accent = (value) => paint(ANSI.lime, value);
+export const muted = (value) => paint(ANSI.faint, value);
+export const amber = (value) => paint(ANSI.yellow, value);
+export const alarm = (value) => paint(ANSI.red, value);
+
 export function formatLabel(label, value, width = 11) {
   return `${paint(ANSI.cyan, `${label}:`.padEnd(width))}${value}`;
 }
@@ -327,12 +378,23 @@ export function die(message) {
 
 export function requirePassport(current = config) {
   assertConfigLoaded();
-  if (!current.passportId || !current.passportSecret) {
+  const passportSecret = current.passportSecret;
+  const storage = current.passportStorage;
+  if (!current.passportId || !passportSecret) {
     die(
-      "No passport configured. Run `passcontrol init`, copy .passcontrol.example to .passcontrol, or pass PASSPORT_ID/PASSPORT_SECRET as env."
+      storage?.tier === 1 && storage?.available === false
+        ? `No passport key available. ${storage.message}.`
+        : "No passport configured. Run `passcontrol init`, copy .passcontrol.example to .passcontrol, or pass PASSPORT_ID/PASSPORT_SECRET as env."
     );
   }
-  return { passportId: current.passportId, passportSecret: current.passportSecret };
+  if (storage?.fallback) warn(`Key storage fallback: ${storage.message}.`);
+  // Handed out beside the secret so every minting caller declares the tier it
+  // actually read from, without any of them deriving it a second time.
+  return {
+    passportId: current.passportId,
+    passportSecret,
+    keyStorage: keyStorageDeclaration(storage),
+  };
 }
 
 export function requireControlApiKey(current = config) {

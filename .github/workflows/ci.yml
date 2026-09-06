@@ -20,9 +20,20 @@ jobs:
     runs-on: ubuntu-latest
     # GitHub-hosted runners on the Free plan include monthly minutes for private
     # repos; this job is a few minutes per run, well within the $0 budget.
-    # redis+srh mirror docker/compose.yml so the budget-reserve Lua integration
-    # test (tests/reserve.redis.test.ts) runs against a real Redis in CI instead
-    # of silently skipping — the money boundary must gate here, not just locally.
+    # redis+srh mirror docker/compose.yml so the attempt-lifecycle Lua runs
+    # against a real Redis in CI instead of silently skipping — the money
+    # boundary must gate here, not just locally.
+    #
+    # The suite is tests/holds.redis.test.ts. It used to be named here as
+    # tests/reserve.redis.test.ts, which no longer exists: that file
+    # hand-copied the reserve Lua into TypeScript, the copy drifted, and it was
+    # replaced by one that calls the exported functions. A comment naming a
+    # deleted file is how these services come to look unused and get removed.
+    #
+    # THE SKIP IS NOW A FAILURE HERE. That suite skips when SRH is unreachable,
+    # which is right locally and wrong on CI: a green build that skipped the
+    # money boundary has not tested it. Actions sets CI=true, and the gate in
+    # tests/support/redis-gate.ts throws on that combination.
     services:
       redis:
         image: redis:7-alpine
@@ -33,6 +44,14 @@ jobs:
           SRH_TOKEN: ci_test_token
           SRH_CONNECTION_STRING: "redis://redis:6379"
         ports:
+          # NOT `127.0.0.1:8079:80`, unlike docker/compose.yml — deliberately.
+          # This is a GitHub Actions service container on a throwaway runner VM
+          # that exists for one job and is reachable by nothing else; the
+          # loopback binding in compose protects a developer's own machine on a
+          # shared network, which is a situation a runner is never in. Actions
+          # also does not document a host-address form here, so prefixing one
+          # risks a parse failure that would take the whole money-test lane down
+          # to fix a non-problem. Leave it.
           - 8079:80
     steps:
       - uses: actions/checkout@v4
@@ -174,6 +193,14 @@ jobs:
 
       - name: System-health database invariant test
         run: psql -v ON_ERROR_STOP=1 -f db/tests/system_health_invariants.sql "$DB_URL"
+
+      # The money one, and it was written and then never wired up here — it had
+      # an npm script and no caller, so the assertions that guard the spend
+      # rebuild ran only when somebody remembered to run them by hand. Every
+      # other file in this list is here because nothing else can check it; this
+      # one is the same, and it is the one that decides what an agent has spent.
+      - name: Budget accounting invariant test
+        run: psql -v ON_ERROR_STOP=1 -f db/tests/budget_accounting_invariants.sql "$DB_URL"
 
       - name: Stop Supabase
         if: always()

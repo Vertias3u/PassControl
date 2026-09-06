@@ -8,7 +8,8 @@
 // Dependencies: only @noble/curves + the platform `fetch`. Runs on Node 18+,
 // edge runtimes, and the browser.
 import { ed25519 } from "@noble/curves/ed25519";
-import { RECEIPT_PROTOCOL } from "../cli/protocols.mjs";
+import { sha256 } from "@noble/hashes/sha256";
+import { RECEIPT_PROTOCOL, STATEMENT_PROTOCOL } from "../cli/protocols.mjs";
 
 export const RECEIPT_TYP = "passcontrol-receipt+jwt";
 export const AGENT_TOKEN_TYP = "passcontrol-agent+jwt";
@@ -61,7 +62,9 @@ export interface ReceiptClaims {
   iat: number;
   agid: string;
   vjti?: string;
-  auth?: { kind: "direct_key"; kid: string; use: string };
+  auth?:
+    | { kind: "direct_key"; kid: string; use: string }
+    | { kind: "passport_proof_per_request" };
   prov: string;
   mdl: string | null;
   mth: string;
@@ -78,9 +81,21 @@ export interface ReceiptClaims {
    */
   use: { in: number; out: number; cr?: number; cw?: number };
   cost: number;
+  /**
+   * Present and true only when the gateway could not price this call: it went to
+   * a custom endpoint, which may mark up, re-route, alias onto a local model, or
+   * be free. `cost` is then 0 because this field is required, AND THAT ZERO MEANS
+   * NOTHING — do not add it to a total or report it as a free call.
+   *
+   * Optional and added like `cr` / `cw` above, so receipts that predate it are
+   * unaffected and verifiers that predate it ignore it by design.
+   */
+  unp?: boolean;
   res: { status: string; http: number };
   t0: number;
   lat: number;
+  /** Revision of the effective live policy, scope and budget rules. */
+  pol?: string;
   own?: { kind: string; sub: string; tier: string; vat: string | null };
   /**
    * Present only on an attempt that followed a failed one: the `jti` of the
@@ -244,10 +259,28 @@ function tracer(onStep: VerifyOptions["onStep"]) {
   };
 }
 
-async function verifySigned<T extends { iss?: unknown; ver?: unknown }>(
+/**
+ * Which claim carries the artifact's version, and the newest value understood.
+ *
+ * Receipts version themselves with `ver`; statements use `v` and have their own
+ * version line entirely. Without this parameter a statement would flow through
+ * the receipt's gate, find no `ver`, read as version 0 and be accepted whatever
+ * it claimed — so a future statement v2 would pass a v1 verifier silently. That
+ * is the exact forward-compatibility failure SUPPORTED_VER exists to prevent.
+ *
+ * The default reproduces the receipt behaviour byte for byte, so the
+ * verifyReceipt call site is unchanged.
+ */
+interface VersionGate {
+  claim: "ver" | "v";
+  max: number;
+}
+
+async function verifySigned<T extends { iss?: unknown; ver?: unknown; v?: unknown }>(
   token: string,
   typ: string,
-  options: VerifyOptions
+  options: VerifyOptions,
+  version: VersionGate = { claim: "ver", max: SUPPORTED_VER }
 ): Promise<VerifyResult<T>> {
   const trace = tracer(options.onStep);
 
@@ -296,8 +329,9 @@ async function verifySigned<T extends { iss?: unknown; ver?: unknown }>(
   // (it may rely on a claim we would ignore), but unknown claims within a
   // supported version are fine — that is what lets the issuer add a field
   // without invalidating verifiers already in the field.
-  const ver = typeof claims.ver === "number" ? claims.ver : 0;
-  if (ver > SUPPORTED_VER) return fail("version", "unsupported_version");
+  const declared = (claims as Record<string, unknown>)[version.claim];
+  const ver = typeof declared === "number" ? declared : 0;
+  if (ver > version.max) return fail("version", "unsupported_version");
   trace("version", true);
 
   const keys = await loadJwks(iss, options);
@@ -342,7 +376,9 @@ async function verifySigned<T extends { iss?: unknown; ver?: unknown }>(
  *
  * What a valid receipt proves: this issuer attests that the named passport or
  * Direct Agent Key authenticated this call, with this verdict and this cost.
- * A direct receipt proves bearer possession, not a passport signature. It does
+ * `auth.kind === "passport_proof_per_request"` additionally attests that the
+ * gateway verified the passport proof for this exact request. A direct receipt
+ * proves bearer possession, not a passport signature. It does
  * NOT prove:
  * anything about the response, and nothing at all by its absence — see
  * lib/receipt.ts for the limits, which are deliberate and documented.
@@ -352,6 +388,129 @@ export function verifyReceipt(
   options: VerifyOptions
 ): Promise<VerifyResult<ReceiptClaims>> {
   return verifySigned<ReceiptClaims>(jws, RECEIPT_TYP, options);
+}
+
+// ── Signed spend statements ────────────────────────────────────────────────
+
+export const STATEMENT_TYP = "passcontrol-statement+jws";
+
+/** The newest statement version this verifier understands. See STATEMENT_PROTOCOL. */
+export const STATEMENT_SUPPORTED_VER = STATEMENT_PROTOCOL.maximum;
+
+/** One agent's slice of a statement. `agid` is null for a deleted agent. */
+export interface StatementAgentSubtotal {
+  agid: string | null;
+  n: number;
+  cost: number;
+}
+
+export interface StatementClaims {
+  iss: string;
+  sub: string;
+  jti: string;
+  iat: number;
+  fmt: string;
+  v: number;
+  /** Position in this workspace's chain. */
+  seq: number;
+  /** Half-open window `[from, to)`, epoch seconds. */
+  per: { from: number; to: number };
+  /** Calls the root covers. */
+  n: number;
+  /** Total rows in the window — may EXCEED `n`; the difference is disclosed, not hidden. */
+  nr: number;
+  cost: number;
+  /** Calls known to be unpriceable. Their cost is unknowable, not zero. */
+  unp: number;
+  /** Calls whose cost was never recorded, reason unrecorded. Also not zero. */
+  unk: number;
+  /** base64url SHA-256 Merkle root, or null when the window covered nothing. */
+  root: string | null;
+  /** Digest of the previous statement's JWS; null at the head of a chain. */
+  pst: string | null;
+  by: StatementAgentSubtotal[];
+}
+
+/** One step of an inclusion path. `hash` is raw bytes or base64url. */
+export interface InclusionProofStep {
+  right: boolean;
+  hash: Uint8Array | string;
+}
+
+/**
+ * Verify a signed spend statement.
+ *
+ * WHAT A VALID STATEMENT PROVES: this issuer committed to a fixed set of
+ * receipts for the named window at the time it signed, and — via `pst` — that
+ * this statement follows a specific earlier one. Nothing was removed from or
+ * reordered in the chain without breaking that link.
+ *
+ * WHAT IT DOES NOT PROVE, and the distinction matters: it is NOT an independent
+ * audit of `cost` or `n`. Recomputing `root` requires every receipt in the
+ * window, which the holder of a statement does not have. A valid statement means
+ * the issuer cannot now change what it committed to — not that the totals were
+ * right when they were computed.
+ */
+export function verifyStatement(
+  jws: string,
+  options: VerifyOptions
+): Promise<VerifyResult<StatementClaims>> {
+  return verifySigned<StatementClaims>(jws, STATEMENT_TYP, options, {
+    claim: "v",
+    max: STATEMENT_SUPPORTED_VER,
+  });
+}
+
+/**
+ * Check that a receipt is one of the leaves a statement's root commits to.
+ *
+ * READ WHAT `false` MEANS BEFORE ACTING ON IT. It means "not in THIS root" — not
+ * "not attested". Pairing a receipt with the wrong day's statement returns a
+ * perfectly truthful `false` that reads like an accusation, and nothing in this
+ * signature stops a caller doing that: `root` and `proof` come from a statement
+ * the caller chose. Confirm the receipt's own timestamp falls inside that
+ * statement's `per` window before treating a `false` as a finding.
+ *
+ * Verification is pure and offline — no fetch, no clock, no key. Give it the
+ * receipt's compact JWS exactly as issued, the proof steps from the control API,
+ * and the statement's `root`.
+ */
+export function verifyInclusion(
+  receiptJws: string,
+  proof: readonly InclusionProofStep[],
+  root: Uint8Array | string
+): boolean {
+  const asBytes = (v: Uint8Array | string) => (typeof v === "string" ? b64urlToBytes(v) : v);
+  // Same domain separation as lib/merkle.ts, restated rather than imported: this
+  // file is vendored by people who take `sdk/` alone, so it must stand up with
+  // nothing but @noble/curves and the platform.
+  const hash = (prefix: number, ...parts: Uint8Array[]) => {
+    const total = parts.reduce((sum, p) => sum + p.length, 1);
+    const buf = new Uint8Array(total);
+    buf[0] = prefix;
+    let at = 1;
+    for (const p of parts) {
+      buf.set(p, at);
+      at += p.length;
+    }
+    return sha256(buf);
+  };
+
+  try {
+    let node = hash(0x00, utf8(receiptJws));
+    for (const step of proof) {
+      const sibling = asBytes(step.hash);
+      node = step.right ? hash(0x01, node, sibling) : hash(0x01, sibling, node);
+    }
+    const target = asBytes(root);
+    if (node.length !== target.length) return false;
+    for (let i = 0; i < node.length; i++) if (node[i] !== target[i]) return false;
+    return true;
+  } catch {
+    // A malformed proof step or root is "not proven", never a throw into a
+    // caller's verification path.
+    return false;
+  }
 }
 
 export interface VerifyAgentTokenOptions extends VerifyOptions {

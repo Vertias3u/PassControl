@@ -59,6 +59,26 @@ describe("verifying a genuine receipt", () => {
     }
   });
 
+  it("surfaces passport proof-per-request as signed authentication evidence", async () => {
+    const result = await verifyReceipt(
+      signReceipt({ ...INPUT, authMethod: "passport_proof_per_request" })!,
+      opts()
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.claims.auth).toEqual({ kind: "passport_proof_per_request" });
+      expect(result.claims.ver).toBe(1);
+    }
+  });
+
+  it("still verifies historical passport receipts with no authentication block", async () => {
+    const result = await verifyReceipt(signReceipt(INPUT)!, opts());
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.claims.auth).toBeUndefined();
+  });
+
   it("fetches the key set from the issuer named in the token", async () => {
     let requested = "";
     await verifyReceipt(

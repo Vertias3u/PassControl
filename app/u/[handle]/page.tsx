@@ -215,6 +215,9 @@ function Sigil({ passportId }: { passportId: string }) {
 
 const AGENT_STATUS: Record<PublicProfileAgentView["status"], { label: string; badge: string }> = {
   active: { label: "Active", badge: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600" },
+  // Amber rather than red: an expiry is the ordinary end of a key's life, not
+  // an incident. It must not read as green either — the gateway refuses it.
+  expired: { label: "Expired", badge: "border-amber-500/40 bg-amber-500/10 text-amber-600" },
   suspended: { label: "Suspended", badge: "border-amber-500/40 bg-amber-500/10 text-amber-600" },
   revoked: { label: "Revoked", badge: "border-destructive/40 bg-destructive/10 text-destructive" },
   unknown: { label: "Unrecognised", badge: "border-border bg-secondary text-muted-foreground" },

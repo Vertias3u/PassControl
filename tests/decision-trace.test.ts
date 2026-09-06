@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 
 const {
   readKillStateMock,
@@ -6,8 +7,8 @@ const {
   readBudgetSnapshotMock,
   readCurrentAgentPolicyMock,
   peekRateLimitMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   seedSpentMock,
   claimNonceMock,
   getCachedKeyMock,
@@ -20,8 +21,8 @@ const {
   readBudgetSnapshotMock: vi.fn(),
   readCurrentAgentPolicyMock: vi.fn(),
   peekRateLimitMock: vi.fn(),
-  reserveBudgetMock: vi.fn(),
-  reconcileBudgetMock: vi.fn(),
+  openHoldMock: vi.fn(),
+  settleHoldMock: vi.fn(),
   seedSpentMock: vi.fn(),
   claimNonceMock: vi.fn(),
   getCachedKeyMock: vi.fn(),
@@ -34,16 +35,52 @@ vi.mock("@/lib/state/killswitch", () => ({
   readKillState: (...args: unknown[]) => readKillStateMock(...args),
 }));
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
   readBudgetSnapshot: (...args: unknown[]) => readBudgetSnapshotMock(...args),
-  reserveBudget: (...args: unknown[]) => reserveBudgetMock(...args),
-  reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
-  seedSpent: (...args: unknown[]) => seedSpentMock(...args),
   claimNonce: (...args: unknown[]) => claimNonceMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    openHold: (...args: unknown[]) => openHoldMock(...args),
+    // Always granted here: these suites assert what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself (tests/proxy-dispatch-permission.test.ts).
+    consumeDispatchPermission: async () => ({ granted: true }),
+    settleKnown: (p: Record<string, unknown>) => settle("complete", p),
+    settleUnknown: (p: Record<string, unknown>) => settle("usage_unknown", p),
+    releaseUndispatched: (p: Record<string, unknown>) => settle("not_dispatched", p),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/state/policy", () => ({
   readCurrentAgentPolicy: (...args: unknown[]) => readCurrentAgentPolicyMock(...args),
 }));
@@ -103,8 +140,8 @@ beforeEach(() => {
   readBudgetSnapshotMock.mockReset();
   readCurrentAgentPolicyMock.mockReset();
   peekRateLimitMock.mockReset();
-  reserveBudgetMock.mockReset();
-  reconcileBudgetMock.mockReset();
+  openHoldMock.mockReset();
+  settleHoldMock.mockReset();
   seedSpentMock.mockReset();
   claimNonceMock.mockReset();
   getCachedKeyMock.mockReset();
@@ -124,6 +161,57 @@ beforeEach(() => {
 });
 
 describe("read-only decision trace", () => {
+  // A trace that projects a demo call at zero cost is a simulator that disagrees
+  // with the gateway about the only thing the panel is consulted for. The demo
+  // path charges its own flat rate per token against the SAME counters as a
+  // billed call, so the projection has to use that rate — `costMicrocents` has
+  // no pricing row for demo and answers 0, which reads as "always affordable".
+  const demoAgent = (overrides: Record<string, unknown>) => ({
+    ...ownedAgent,
+    allowed_scopes: [{ provider: "demo", models: ["*"] }],
+    budget_tokens: null,
+    budget_cents: 1,
+    spent_tokens: 0,
+    ...overrides,
+  });
+
+  it("refuses a demo call the demo path would refuse, at the demo rate", async () => {
+    // One micro-cent of a one-cent cap left. Any real projection exceeds it.
+    dataset = { data: demoAgent({ spent_microcents: 999_999 }), error: null };
+
+    const result = await evaluateDecisionTrace({
+      db: database(),
+      userId: USER_ID,
+      agentId: AGENT_ID,
+      provider: "demo" as never,
+      model: "demo-1",
+      evaluatedAt: EVALUATED_AT,
+      policyAt: POLICY_AT,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected trace");
+    expect(result.trace.denied_by).toBe("budget");
+  });
+
+  it("allows the same demo call when the cap has room, so the rate is not punitive", async () => {
+    dataset = { data: demoAgent({ spent_microcents: 0 }), error: null };
+
+    const result = await evaluateDecisionTrace({
+      db: database(),
+      userId: USER_ID,
+      agentId: AGENT_ID,
+      provider: "demo" as never,
+      model: "demo-1",
+      evaluatedAt: EVALUATED_AT,
+      policyAt: POLICY_AT,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected trace");
+    expect(result.trace.verdict).toBe("allow");
+  });
+
   it("returns a key-free, point-in-time snapshot from the same ordered evaluator", async () => {
     const result = await evaluateDecisionTrace({
       db: database(),
@@ -154,8 +242,8 @@ describe("read-only decision trace", () => {
     expect(JSON.stringify(result.trace)).not.toContain("must-never-appear");
     expect(selectCalls.join(",")).not.toMatch(/key|credential|secret/i);
     expect(rpcMock).not.toHaveBeenCalled();
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
-    expect(reconcileBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(settleHoldMock).not.toHaveBeenCalled();
     expect(seedSpentMock).not.toHaveBeenCalled();
     expect(claimNonceMock).not.toHaveBeenCalled();
     expect(getCachedKeyMock).not.toHaveBeenCalled();

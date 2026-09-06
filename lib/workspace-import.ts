@@ -16,8 +16,11 @@ import { policyIsWellFormed } from "@/lib/scope";
 // fall through to the column default, which is 'active'.
 const AGENT_STATUSES = new Set(["active", "suspended", "revoked"]);
 
-// The check constraint on agent_owners.kind (0017_agent_owners.sql:47).
-const OWNER_KINDS = new Set(["self_attested", "domain", "idv"]);
+// The check constraint on agent_owners.kind (0048 widened 0017's original).
+// Pinned against the migration by tests/owner-portability.test.ts: a kind
+// missing here does not fail loudly, it rejects a real binding on restore with
+// "unknown_kind", which reads as a corrupt export rather than a stale list.
+const OWNER_KINDS = new Set(["self_attested", "domain", "github", "idv"]);
 
 export type AgentImportPlan =
   | { action: "create"; name: string; passportPubkey: string; row: Record<string, unknown> }
@@ -189,6 +192,11 @@ export function planAgentImports(agents: unknown, existingPubkeys: Iterable<stri
  * make the verified badge self-declared, which is the exact failure
  * 0017_agent_owners.sql warns about ("never derive a verified label from
  * kind"). An imported declaration lands unverified and is re-proven normally.
+ *
+ * The company line does not travel either, for a different reason: it is not a
+ * claim the exporter made, it is the answer a register gave US when we asked.
+ * Carrying it across would import a lookup nobody performed on this instance,
+ * and it may have lapsed since. It is one click to look up again.
  */
 export function planOwnershipImport(ownership: unknown, alreadyHasOwner: boolean): OwnershipImportPlan {
   if (!isRecord(ownership)) return { action: "reject", reason: "not_an_object" };

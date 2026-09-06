@@ -10,3 +10,10 @@
 // validateFallbacks documents at length: a form offering a choice the server
 // refuses, discovered by an operator at the moment they try to use it.
 export const MAX_ROTATION_GRACE_S = 7 * 24 * 60 * 60;
+
+/** Product-wide absolute lifetime for a newly issued or rotated passport.
+ * Existing null-expiry rows are deliberately not backfilled. */
+export const DEFAULT_PASSPORT_LIFETIME_DAYS = 365;
+
+/** Operators get this much notice through both the dashboard and challenge. */
+export const PASSPORT_EXPIRY_WARNING_DAYS = 30;

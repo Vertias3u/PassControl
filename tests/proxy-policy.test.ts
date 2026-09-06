@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 
 const {
   verifyVisaMock,
   serviceClientMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   getCachedKeyMock,
   setCachedKeyMock,
   getCachedAgentPolicyMock,
@@ -15,12 +16,13 @@ const {
   mirrorSpendMock,
   rateLimitMock,
   captureSecurityEventMock,
+  signReceiptMock,
   fetchMock,
 } = vi.hoisted(() => ({
   verifyVisaMock: vi.fn(),
   serviceClientMock: vi.fn(),
-  reserveBudgetMock: vi.fn(),
-  reconcileBudgetMock: vi.fn(),
+  openHoldMock: vi.fn(),
+  settleHoldMock: vi.fn(),
   getCachedKeyMock: vi.fn(),
   setCachedKeyMock: vi.fn(),
   getCachedAgentPolicyMock: vi.fn(),
@@ -31,9 +33,15 @@ const {
   mirrorSpendMock: vi.fn(),
   rateLimitMock: vi.fn(),
   captureSecurityEventMock: vi.fn(),
+  signReceiptMock: vi.fn(),
   fetchMock: vi.fn(),
 }));
 
+// The proxy now reaches lib/demo/identity.ts to tell the seeded PUBLIC demo
+// passport apart from a tenant that holds a demo scope. That module is
+// `server-only`, which Next enforces at build time and vitest cannot resolve
+// at all — same stub tests/site-demo-routes.test.ts already uses.
+vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (promise: unknown) => promise }));
 vi.mock("@/lib/auth/visa", () => ({
   extractVisaToken: (headers: Headers) =>
@@ -45,20 +53,59 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
   return { ...actual, readKillState: (...args: unknown[]) => readKillStateMock(...args) };
 });
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
-  reserveBudget: (...args: unknown[]) => reserveBudgetMock(...args),
-  reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
-  seedSpent: vi.fn(),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    openHold: (...args: unknown[]) => openHoldMock(...args),
+    // Always granted here: these suites assert what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself (tests/proxy-dispatch-permission.test.ts).
+    consumeDispatchPermission: async () => ({ granted: true }),
+    settleKnown: (p: Record<string, unknown>) => settle("complete", p),
+    settleUnknown: (p: Record<string, unknown>) => settle("usage_unknown", p),
+    releaseUndispatched: (p: Record<string, unknown>) => settle("not_dispatched", p),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
   writeLog: (...args: unknown[]) => writeLogMock(...args),
   mirrorSpend: (...args: unknown[]) => mirrorSpendMock(...args),
+}));
+vi.mock("@/lib/receipt", () => ({
+  signReceipt: (...args: unknown[]) => signReceiptMock(...args),
 }));
 vi.mock("@/lib/ratelimit", () => ({
   rateLimit: (...args: unknown[]) => rateLimitMock(...args),
@@ -120,8 +167,8 @@ beforeEach(() => {
   for (const mock of [
     verifyVisaMock,
     serviceClientMock,
-    reserveBudgetMock,
-    reconcileBudgetMock,
+    openHoldMock,
+    settleHoldMock,
     getCachedKeyMock,
     setCachedKeyMock,
     getCachedAgentPolicyMock,
@@ -132,6 +179,7 @@ beforeEach(() => {
     mirrorSpendMock,
     rateLimitMock,
     captureSecurityEventMock,
+    signReceiptMock,
     fetchMock,
   ]) {
     mock.mockReset();
@@ -141,8 +189,8 @@ beforeEach(() => {
     from: vi.fn(),
     rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
   });
-  reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 1 });
-  reconcileBudgetMock.mockResolvedValue(undefined);
+  openHoldMock.mockResolvedValue({ ok: true, reserved: 1 });
+  settleHoldMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue("provider-key");
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
@@ -153,6 +201,7 @@ beforeEach(() => {
   mirrorSpendMock.mockResolvedValue(undefined);
   rateLimitMock.mockResolvedValue({ success: true, remaining: 1 });
   captureSecurityEventMock.mockResolvedValue(undefined);
+  signReceiptMock.mockReturnValue("signed-receipt");
   fetchMock.mockImplementation(async () =>
     new Response(JSON.stringify({ usage: { prompt_tokens: 1, completion_tokens: 1 } }), {
       status: 200,
@@ -167,15 +216,86 @@ afterEach(() => {
   delete process.env.PASSCONTROL_DEMO;
 });
 
+/**
+ * Let the work the route handed to `waitUntil` actually run.
+ *
+ * `vi.advanceTimersByTimeAsync`, NOT a bare `setTimeout` — this file installs
+ * fake timers, so a real macrotask never fires and the flush would simply hang
+ * until the test times out. And not a single `Promise.resolve()` either: the
+ * deferred chain contains several awaits, and one microtask flush drains only
+ * one level of it.
+ */
+const flushDeferredWork = () => vi.advanceTimersByTimeAsync(0);
+
 describe("proxy agent policy", () => {
+  it("signs the evaluated revision into allowed and every governed blocked receipt", async () => {
+    const revision = async (
+      policy: unknown,
+      claims: typeof baseClaims = baseClaims
+    ): Promise<string> => {
+      signReceiptMock.mockClear();
+      await callProxy(policy, claims);
+      await vi.waitFor(() => expect(signReceiptMock).toHaveBeenCalled());
+      const value = signReceiptMock.mock.calls.at(-1)?.[0]?.policyRevision;
+      expect(value).toEqual(expect.any(String));
+      return value as string;
+    };
+
+    const first = await revision({});
+    const budgetChanged = await revision(
+      {},
+      { ...baseClaims, bt: 2_000 } as unknown as typeof baseClaims
+    );
+    const scopeChanged = await revision(
+      {},
+      {
+        ...baseClaims,
+        scope: [{ provider: "openai", models: ["gpt-4.1"] }],
+      }
+    );
+    const scopeBlocked = await revision(
+      {},
+      {
+        ...baseClaims,
+        scope: [{ provider: "openai", models: ["gpt-3.5"] }],
+      }
+    );
+    expect(signReceiptMock.mock.calls.at(-1)?.[0]?.status).toBe("blocked_scope");
+
+    readKillStateMock.mockResolvedValueOnce({
+      platformKill: true,
+      tenantKill: false,
+      denylist: [],
+    });
+    const killed = await revision({});
+    expect(signReceiptMock.mock.calls.at(-1)?.[0]?.status).toBe("blocked_killed");
+
+    const blocked = await revision({
+      deny: [{ provider: "openai", models: ["gpt-4*"] }],
+    });
+
+    expect(budgetChanged).not.toBe(first);
+    expect(scopeChanged).not.toBe(first);
+    expect(scopeBlocked).not.toBe(first);
+    expect(killed).toBe(first);
+    expect(blocked).not.toBe(first);
+    expect(signReceiptMock.mock.calls.at(-1)?.[0]).toMatchObject({
+      status: "blocked_policy",
+      policyRevision: blocked,
+    });
+    // The first receipt input is a historical snapshot, not a live reference
+    // that can change when later calls observe a different rule set.
+    expect(first).not.toBe(blocked);
+  });
+
   it("blocks a denied model after scope and before budget reservation", async () => {
     let reservedTokens = 0;
     let spentTokens = 50;
-    reserveBudgetMock.mockImplementation(async ({ estimate }: { estimate: number }) => {
+    openHoldMock.mockImplementation(async ({ estimate }: { estimate: number }) => {
       reservedTokens += estimate;
       return { ok: true, reserved: reservedTokens };
     });
-    reconcileBudgetMock.mockImplementation(async () => {
+    settleHoldMock.mockImplementation(async () => {
       spentTokens += reservedTokens;
     });
 
@@ -187,8 +307,8 @@ describe("proxy agent policy", () => {
     expect(await res.json()).toEqual({ error: "blocked_policy" });
     expect(reservedTokens).toBe(0);
     expect(spentTokens).toBe(50);
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
-    expect(reconcileBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(settleHoldMock).not.toHaveBeenCalled();
     expect(writeLogMock).toHaveBeenCalledWith(
       expect.objectContaining({ status: "blocked_policy", model: "gpt-4.1" })
     );
@@ -206,12 +326,12 @@ describe("proxy agent policy", () => {
     vi.setSystemTime(new Date("2026-07-27T20:00:00.000Z"));
     const outside = await callProxy(policy);
     expect(outside.status).toBe(403);
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
 
     vi.setSystemTime(new Date("2026-07-27T10:00:00.000Z"));
     const inside = await callProxy(policy);
     expect(inside.status).toBe(200);
-    expect(reserveBudgetMock).toHaveBeenCalledTimes(1);
+    expect(openHoldMock).toHaveBeenCalledTimes(1);
   });
 
   it("keeps null and empty policies identical to the legacy path", async () => {
@@ -220,7 +340,7 @@ describe("proxy agent policy", () => {
 
     expect(nullPolicy.status).toBe(200);
     expect(emptyPolicy.status).toBe(200);
-    expect(reserveBudgetMock).toHaveBeenCalledTimes(2);
+    expect(openHoldMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -236,7 +356,7 @@ describe("proxy agent policy", () => {
     expect(invalidShape.status).toBe(403);
     expect(await invalidJson.json()).toEqual({ error: "blocked_policy" });
     expect(await invalidShape.json()).toEqual({ error: "blocked_policy" });
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
     expect(captureSecurityEventMock).toHaveBeenCalledWith(
       "proxy.blocked_policy_malformed",
       expect.objectContaining({ code: "blocked_policy_malformed" })
@@ -274,15 +394,11 @@ describe("proxy agent policy", () => {
     ]);
   });
 
-  // A transient Supabase error is NOT the same as a malformed stored policy.
-  // Malformed config is the owner's mistake and must fail closed (they can see
-  // it in the dashboard and fix it). An unreadable row is an infrastructure
-  // blip, and blocking on it would turn a database hiccup into a total gateway
-  // outage for every agent — including the overwhelming majority that have no
-  // policy at all and needed no `agents` read before this feature existed.
-  // House precedent is lib/state/killswitch.ts: read failures fail OPEN unless
-  // the operator opts into strict mode.
-  it("fails OPEN when the policy row cannot be read, and closed when opted in", async () => {
+  // Live policy is still allowed to fail open. The sender-constraint bit on the
+  // same row is an authentication fact, though: an unreadable value cannot be
+  // guessed false without silently turning an opted-in passport back into a
+  // bearer. This refusal is therefore independent of POLICY_FAIL_CLOSED.
+  it("fails passport authentication closed when the row cannot reveal the sender-constraint flag", async () => {
     const unreadable = () => {
       const builder = {
         select: vi.fn(() => builder),
@@ -298,7 +414,8 @@ describe("proxy agent policy", () => {
     const open = await POST(request(), {
       params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
     });
-    expect(open.status).toBe(200);
+    expect(open.status).toBe(503);
+    expect(await open.json()).toEqual({ error: "sender_constraint_state_unavailable" });
 
     process.env.POLICY_FAIL_CLOSED = "true";
     try {
@@ -308,8 +425,8 @@ describe("proxy agent policy", () => {
       const closed = await POST(request(), {
         params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
       });
-      expect(closed.status).toBe(403);
-      expect(await closed.json()).toEqual({ error: "blocked_policy" });
+      expect(closed.status).toBe(503);
+      expect(await closed.json()).toEqual({ error: "sender_constraint_state_unavailable" });
     } finally {
       delete process.env.POLICY_FAIL_CLOSED;
     }
@@ -355,18 +472,22 @@ describe("proxy agent policy", () => {
     expect(filters).toContainEqual(["user_id", "tenant-a"]);
     expect(filters).toContainEqual(["id", "agent-a"]);
 
-    // ONE row read carries both the live policy and the shadow candidate. This
+    // ONE row read carries the live policy, shadow candidate, and proof opt-in. This
     // is the whole reason shadow mode costs nothing on the credential path — a
     // separate read for the shadow value would be a second round-trip on the
     // way to a provider key, for a decision that decides nothing.
-    expect(builder.select).toHaveBeenCalledWith("policy, policy_shadow");
+    // 0055 added the budget-state pair to the SAME read, for the same reason:
+    // the epoch check on the money path costs no round trip of its own.
+    expect(builder.select).toHaveBeenCalledWith(
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at"
+    );
 
     // Cached together for the same reason, so a cache HIT is also one round
     // trip. `s: null` is a real value meaning "shadow mode is off".
     expect(setCachedAgentPolicyMock).toHaveBeenCalledWith(
       "tenant-a",
       "agent-a",
-      JSON.stringify({ p: null, s: null }),
+      JSON.stringify({ p: null, s: null, r: "off", be: null, bs: false }),
       60
     );
   });
@@ -439,14 +560,22 @@ describe("proxy agent policy", () => {
 
     // The two-column read is still what runs FIRST, so a current schema keeps
     // paying for exactly one round trip. The narrowed retry is the fallback.
-    expect(policySelects).toEqual(["policy, policy_shadow", "policy"]);
+    // The full read still runs FIRST, so a current schema keeps paying for
+    // exactly one round trip. Each narrower rung drops exactly one migration's
+    // columns, in deployment order — 0055, then 0049, then 0020.
+    expect(policySelects).toEqual([
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at",
+      "policy, policy_shadow, sender_constraint_mode",
+      "policy, policy_shadow",
+      "policy",
+    ]);
 
     // Shadow mode is off, not broken: there is no such thing as an unreadable
     // shadow policy, because an unreadable one simply does not run.
     expect(setCachedAgentPolicyMock).toHaveBeenCalledWith(
       "tenant-a",
       "agent-a",
-      JSON.stringify({ p: denyAll, s: null }),
+      JSON.stringify({ p: denyAll, s: null, r: "off", be: null, bs: false }),
       60
     );
     expect(writeLogMock).toHaveBeenCalledWith(
@@ -466,6 +595,12 @@ describe("proxy agent policy", () => {
     });
 
     expect(res.status).toBe(200);
+    // The audit row is written inside waitUntil, which this file mocks as an
+    // identity function — so it lands on a later turn of the event loop and this
+    // assertion has to wait for it. Its sibling tests get that for free from an
+    // `await res.json()` they happen to make; relying on that is how a test
+    // starts passing or failing on the number of awaits in unrelated code.
+    await flushDeferredWork();
     expect(writeLogMock).toHaveBeenCalledWith(
       expect.not.objectContaining({ policyShadowWould: expect.anything() })
     );
@@ -496,8 +631,12 @@ describe("proxy agent policy", () => {
       params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
     });
 
-    expect(res.status).toBe(200); // fail-open, as documented
-    expect(policySelects).toEqual(["policy, policy_shadow"]);
+    // The policy evaluator remains fail-open, but this row now also carries an
+    // authentication flag. Guessing that unreadable flag off would let an opted-
+    // in passport silently fall back to bearer, so the passport path fails closed.
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "sender_constraint_state_unavailable" });
+    expect(policySelects).toEqual(["policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at"]);
     expect(setCachedAgentPolicyMock).not.toHaveBeenCalled();
   });
 
@@ -517,7 +656,7 @@ describe("proxy agent policy", () => {
 
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "blocked_policy" });
-    expect(reserveBudgetMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -544,7 +683,7 @@ describe("policy shadow mode", () => {
     // The call still went upstream. A shadow deny that quietly skipped the
     // provider would be enforcement wearing a diagnostic's name.
     expect(fetchMock.mock.calls.length).toBe(forwardedWithout + 1);
-    expect(reserveBudgetMock).toHaveBeenCalled();
+    expect(openHoldMock).toHaveBeenCalled();
   });
 
   /**

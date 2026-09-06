@@ -9,8 +9,13 @@ import { readKillState } from "@/lib/state/killswitch";
 import { isSuspended, readBudgetSnapshot } from "@/lib/state/redis";
 import { readCurrentAgentPolicy } from "@/lib/state/policy";
 import { peekRateLimit } from "@/lib/ratelimit";
-import { costMicrocents, estimateTokenUsage, MICROCENTS_PER_CENT } from "@/lib/pricing";
-import type { ProviderId } from "@/lib/providers";
+import {
+  costMicrocents,
+  demoCostMicrocents,
+  estimateTokenUsage,
+  MICROCENTS_PER_CENT,
+} from "@/lib/pricing";
+import { isProvider, type ScopeProviderId } from "@/lib/providers";
 import type { ScopeEntry } from "@/lib/auth/visa";
 import { readLiveGrant, unionScopes } from "@/lib/break-glass";
 
@@ -32,7 +37,7 @@ export interface DecisionTrace {
   evaluated_at: string;
   policy_time: string;
   agent_id: string;
-  provider: ProviderId;
+  provider: ScopeProviderId;
   model: string;
   method: "POST";
   path: string[];
@@ -62,8 +67,24 @@ export interface EvaluateDecisionTraceInput {
   db: Pick<SupabaseClient, "from">;
   userId: string;
   agentId: string;
-  provider: ProviderId;
+  provider: ScopeProviderId;
   model: string;
+  /**
+   * The output allowance to project, when the operator knows the call they mean.
+   *
+   * The panel has no request body, so it projects `estimateTokenUsage`'s own
+   * default of 1024 output tokens — exactly what the gateway projects for a body
+   * that names no maximum. It is therefore EXACT for a default-shaped call and
+   * permissive for a larger one: an agent with 1,500 tokens of headroom traces
+   * as allowed, then a request carrying `max_tokens: 2000` is refused 402 by the
+   * gateway that agreed a moment earlier. Nothing about the panel is wrong for
+   * the call it was asked about; the size was simply never part of the question.
+   *
+   * So the size becomes part of the question. Optional, because the default is
+   * the honest answer to "what happens if I just call it", and the projection is
+   * stated on the budget step either way.
+   */
+  maxOutputTokens?: number | null;
   evaluatedAt: Date;
   policyAt: Date;
 }
@@ -92,27 +113,31 @@ function scopes(value: unknown): ScopeEntry[] {
   });
 }
 
-function defaultChatPath(provider: ProviderId): string[] {
+function defaultChatPath(provider: ScopeProviderId): string[] {
   return provider === "anthropic" ? ["v1", "messages"] : ["chat", "completions"];
 }
 
 function projectBudget(
   agent: TraceAgentRow,
   snapshot: Awaited<ReturnType<typeof readBudgetSnapshot>>,
-  provider: ProviderId,
-  model: string
+  provider: ScopeProviderId,
+  model: string,
+  maxOutputTokens: number | null
 ): GateBudgetInput {
   // The panel has no prompt body by design. Use the same estimator as the proxy
   // with the selected model and its normal default-output allowance, and label
   // the result as a projection rather than an atomic reservation.
-  const usage = estimateTokenUsage({ model });
-  const estimateTokens = usage.totalTokens;
-  const estimateMicrocents = costMicrocents(
-    model,
-    usage.inputTokens,
-    usage.outputTokens,
-    provider
+  const usage = estimateTokenUsage(
+    maxOutputTokens === null ? { model } : { model, max_tokens: maxOutputTokens }
   );
+  const estimateTokens = usage.totalTokens;
+  // The demo has no invoice to price against, so `costMicrocents` has no row for
+  // it and would answer 0 — which renders as "affordable" whatever is left of
+  // the cap. It charges a flat rate per token against the same counters, so the
+  // projection uses the same helper the proxy charges with.
+  const estimateMicrocents = isProvider(provider)
+    ? costMicrocents(model, usage.inputTokens, usage.outputTokens, provider)
+    : demoCostMicrocents(estimateTokens);
   const capTokens = nullableCap(agent.budget_tokens);
   const capMicrocents =
     agent.budget_cents === null
@@ -124,6 +149,24 @@ function projectBudget(
   const reservedTokens = finiteNonNegative(snapshot.reservedTokens);
   const reservedMicrocents = finiteNonNegative(snapshot.reservedMicrocents);
 
+  // Stated on EVERY outcome, not just the permissive one. A refusal is when the
+  // number matters most — "cannot reserve 2001" alone does not tell an operator
+  // whether they are 500 tokens over or 500,000, and the browser is where that
+  // omission showed: the allow path carried the room and the deny path did not.
+  const headroom = {
+    ...(capTokens === null
+      ? {}
+      : { headroomTokens: Math.max(0, capTokens - reservedTokens - spentTokens) }),
+    ...(capMicrocents === null
+      ? {}
+      : {
+          headroomMicrocents: Math.max(
+            0,
+            capMicrocents - reservedMicrocents - spentMicrocents
+          ),
+        }),
+  };
+
   if (
     capTokens !== null &&
     reservedTokens + spentTokens + estimateTokens > capTokens
@@ -134,6 +177,7 @@ function projectBudget(
       estimateTokens,
       estimateMicrocents,
       source: "snapshot",
+      ...headroom,
     };
   }
   if (
@@ -146,6 +190,7 @@ function projectBudget(
       estimateTokens,
       estimateMicrocents,
       source: "snapshot",
+      ...headroom,
     };
   }
   return {
@@ -155,6 +200,10 @@ function projectBudget(
     reservedTokens: reservedTokens + estimateTokens,
     reservedMicrocents: reservedMicrocents + estimateMicrocents,
     source: "snapshot",
+    // What is left regardless of how big the next call is. The projection above
+    // answers one question — "does a call THIS size fit" — and a reader with no
+    // way to see the headroom cannot tell how much of the answer was the size.
+    ...headroom,
   };
 }
 
@@ -189,7 +238,13 @@ export async function evaluateDecisionTrace(
     readLiveGrant(input.db, input.userId, input.agentId),
   ]);
   const path = defaultChatPath(input.provider);
-  const budget = projectBudget(agent, budgetSnapshot, input.provider, input.model);
+  const budget = projectBudget(
+    agent,
+    budgetSnapshot,
+    input.provider,
+    input.model,
+    input.maxOutputTokens ?? null
+  );
   const gateInput = {
     agentId: input.agentId,
     killState,

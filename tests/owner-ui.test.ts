@@ -43,11 +43,28 @@ describe("the server actions", () => {
     return next === -1 ? rest : rest.slice(0, next);
   };
 
+  // Enumerated rather than discovered, so a NEW action does not silently inherit
+  // none of the invariants below. Adding one here is the deliberate act; the
+  // tests then insist it is session-scoped, audited, revalidating, and unable to
+  // write its own tier.
+  const ACTIONS = [
+    "declareOwner",
+    "publishOwner",
+    "checkOwnerControl",
+    "setCompany",
+    "clearCompany",
+  ];
+
+  it("exports every action this file is known to have, and no more", () => {
+    const exported = [...actions.matchAll(/export async function (\w+)/g)].map((m) => m[1]);
+    expect(exported.sort()).toEqual([...ACTIONS].sort());
+  });
+
   it("runs on the server", () => {
     expect(actions.startsWith('"use server"')).toBe(true);
   });
 
-  it.each(["declareOwner", "publishOwner", "checkOwnerDomain"])("exports %s", (name) => {
+  it.each(ACTIONS)("exports %s", (name) => {
     expect(actions).toMatch(new RegExp(`export async function ${name}`));
   });
 
@@ -59,7 +76,7 @@ describe("the server actions", () => {
   // go through the helper, and the helper must do both checks. Grepping each
   // body for `auth.getUser()` would fail on correct code and pass on a copy of
   // the check that had quietly dropped the step-up half.
-  it.each(["declareOwner", "publishOwner", "checkOwnerDomain"])(
+  it.each(ACTIONS)(
     "%s derives the acting user from the session, never from an argument",
     (name) => {
       const body = fn(name);
@@ -81,18 +98,18 @@ describe("the server actions", () => {
     expect(body).not.toMatch(/needsMfaStepUp/);
   });
 
-  // checkOwnerDomain makes an outbound HTTPS request to a hostname the caller
+  // checkOwnerControl makes an outbound HTTPS request to a hostname the caller
   // chose. Unthrottled, that is a request amplifier pointed at anything the
   // gateway can reach.
-  it("rate-limits the outbound domain check", () => {
-    expect(fn("checkOwnerDomain")).toMatch(/rateLimit\(/);
+  it.each(["checkOwnerControl", "setCompany"])("rate-limits the outbound call in %s", (name) => {
+    expect(fn(name)).toMatch(/rateLimit\(/);
   });
 
   // The rule that makes the tier worth anything, restated at the new surface.
   // lib/owner/manage.ts decides tier and verified_at from evidence it gathered;
   // an action that passed either through would hand the caller the label.
   it("never writes tier or verified_at itself", () => {
-    for (const name of ["declareOwner", "publishOwner", "checkOwnerDomain"]) {
+    for (const name of ACTIONS) {
       const body = fn(name);
       expect(body, name).not.toMatch(/tier\s*[:=]/);
       expect(body, name).not.toMatch(/verified_at/);
@@ -109,7 +126,9 @@ describe("the server actions", () => {
   it("records an audit row for each mutation", () => {
     expect(fn("declareOwner")).toMatch(/owner\.set/);
     expect(fn("publishOwner")).toMatch(/owner\.publish/);
-    expect(fn("checkOwnerDomain")).toMatch(/owner\.verify/);
+    expect(fn("checkOwnerControl")).toMatch(/owner\.verify/);
+    expect(fn("setCompany")).toMatch(/owner\.company\.set/);
+    expect(fn("clearCompany")).toMatch(/owner\.company\.clear/);
   });
 
   // The token is the secret that proves domain control. admin_audit is readable
@@ -121,7 +140,7 @@ describe("the server actions", () => {
   // deleted rather than fixed.
   it("never puts the verification token in an audit row", () => {
     const metadata = [...actions.matchAll(/metadata:\s*\{[^}]*\}/g)].map((m) => m[0]);
-    expect(metadata.length).toBe(3);
+    expect(metadata.length).toBe(ACTIONS.length);
     for (const block of metadata) {
       expect(block).not.toMatch(/token/i);
       expect(block).not.toMatch(/subject/);
@@ -129,7 +148,7 @@ describe("the server actions", () => {
   });
 
   it("revalidates the page the operator is looking at", () => {
-    for (const name of ["declareOwner", "publishOwner", "checkOwnerDomain"]) {
+    for (const name of ACTIONS) {
       expect(fn(name), name).toMatch(/revalidatePath\("\/dashboard\/settings"\)/);
     }
   });
@@ -177,5 +196,52 @@ describe("the editor UI", () => {
   it("distinguishes a demoted binding from one that was never verified", () => {
     expect(ui).toMatch(/data-state="demoted"/);
     expect(ui).toMatch(/OWNER_FAILURE_LIMIT|failure_count|failureCount/);
+  });
+
+  // Same rule as the well-known path above, one identifier over: the repository
+  // URL a GitHub owner is told to create must be DERIVED from the module that
+  // fetches it. Typing it here would let the instruction drift from the path we
+  // actually read, and the operator would publish a proof nowhere we look.
+  it("derives the GitHub proof URL rather than typing it", () => {
+    expect(ui).toMatch(/githubProofUrl/);
+    expect(ui).not.toContain("raw.githubusercontent.com");
+  });
+
+  it("offers GitHub as a claim a reader can check", () => {
+    expect(ui).toMatch(/value="github"/);
+  });
+
+  // The company line is the one place on this screen where a value looks like
+  // evidence and is not. The operator's own view has to say so — a UI that
+  // flatters the operator here is how an unproven company name ends up quoted
+  // back at a customer as though we had checked it.
+  it("tells the operator the company line is asserted, not proven", () => {
+    expect(ui).toMatch(/data-panel="company"/);
+    expect(ui).toMatch(/asserted, not proven/i);
+    expect(ui).toMatch(/cannot show that these passports are/i);
+  });
+});
+
+// The same claim on the page a stranger reads. Both ends of the ladder word it
+// off tier, and both have to disclaim the company line — this is the surface
+// that gets quoted, so it is the one where an implied proof would do the damage.
+describe("the public verification page", () => {
+  // The card, not the route: `PassportCard` moved into its own module because
+  // Next forbids a page from exporting anything but its route exports.
+  const page = read("app/verify/[passportId]/PassportCard.tsx");
+
+  it("labels the company line as an assertion, right where it renders it", () => {
+    expect(page).toMatch(/Not proof that this passport belongs to that company/i);
+    expect(page).toMatch(/data-company-state=/);
+  });
+
+  it("names a GitHub proof for what it is", () => {
+    expect(page).toMatch(/control of this GitHub account/i);
+  });
+
+  // Drift resolves downward everywhere else in this file; the wording table has
+  // to do the same or an unknown tier renders with no sentence at all.
+  it("falls back to the weakest true wording, never a stronger one", () => {
+    expect(page).toMatch(/PROVEN_BY\[owner\.tier\] \?\? "Verified"/);
   });
 });

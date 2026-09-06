@@ -25,14 +25,21 @@ export type { ControlClientOptions, WriteOpts } from "./control.js";
 export {
   verifyReceipt,
   verifyAgentToken,
+  verifyStatement,
+  verifyInclusion,
   matchesIssuer,
   RECEIPT_TYP,
   AGENT_TOKEN_TYP,
+  STATEMENT_TYP,
   SUPPORTED_VER,
+  STATEMENT_SUPPORTED_VER,
 } from "./verify.js";
 export type {
   ReceiptClaims,
   AgentTokenClaims,
+  StatementClaims,
+  StatementAgentSubtotal,
+  InclusionProofStep,
   VerifyOptions,
   VerifyAgentTokenOptions,
   VerifyResult,

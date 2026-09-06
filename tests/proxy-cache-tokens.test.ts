@@ -18,12 +18,13 @@
 // between what the receipt records and what the log row records — see the
 // comments in the proxy's reconcile().
 import { beforeEach, describe, expect, it, vi } from "vitest";
+const establishBudgetStateMock = vi.fn();
 
 const {
   verifyVisaMock,
   serviceClientMock,
-  reserveBudgetMock,
-  reconcileBudgetMock,
+  openHoldMock,
+  settleHoldMock,
   getCachedKeyMock,
   setCachedKeyMock,
   getCachedAgentPolicyMock,
@@ -38,8 +39,8 @@ const {
 } = vi.hoisted(() => ({
   verifyVisaMock: vi.fn(),
   serviceClientMock: vi.fn(),
-  reserveBudgetMock: vi.fn(),
-  reconcileBudgetMock: vi.fn(),
+  openHoldMock: vi.fn(),
+  settleHoldMock: vi.fn(),
   getCachedKeyMock: vi.fn(),
   setCachedKeyMock: vi.fn(),
   getCachedAgentPolicyMock: vi.fn(),
@@ -57,6 +58,11 @@ const {
 // waitUntil after the response is already committed, so a no-op mock would make
 // every assertion here unreachable.
 const deferred: Promise<unknown>[] = [];
+// The proxy now reaches lib/demo/identity.ts to tell the seeded PUBLIC demo
+// passport apart from a tenant that holds a demo scope. That module is
+// `server-only`, which Next enforces at build time and vitest cannot resolve
+// at all — same stub tests/site-demo-routes.test.ts already uses.
+vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({
   waitUntil: (p: Promise<unknown>) => {
     deferred.push(Promise.resolve(p));
@@ -72,15 +78,51 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
   return { ...actual, readKillState: (...args: unknown[]) => readKillStateMock(...args) };
 });
 vi.mock("@/lib/state/redis", () => ({
+  purgeAgentPolicy: vi.fn(),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
-  reserveBudget: (...args: unknown[]) => reserveBudgetMock(...args),
-  reconcileBudget: (...args: unknown[]) => reconcileBudgetMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
-  seedSpent: vi.fn(),
 }));
+/**
+ * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
+ *
+ * tests/reserve-id.test.ts used to hand-copy the reserve Lua into TypeScript and
+ * the copy drifted — it collapsed the -1/-2 return codes, so one whole branch of
+ * the money boundary was covered by a test that could not fail on it. Mocking
+ * the boundary removes that hazard: what the real scripts DO is Tier A's job
+ * (tests/holds.redis.test.ts, real Lua on real Redis); what this file asserts is
+ * WHICH transition the route chooses and with WHAT arguments.
+ *
+ * The three settle entry points funnel into one spy carrying an `outcome` tag,
+ * because the choice between them IS the behaviour under test.
+ */
+vi.mock("@/lib/state/holds", () => {
+  const settle = async (outcome: string, p: Record<string, unknown>) => {
+    const r = await settleHoldMock({ ...p, outcome });
+    // A test that does not care about the applied figures gets a realistic
+    // settlement rather than `undefined`, which the route would then read
+    // fields off. Tests that DO care override the return.
+    return (
+      r ?? {
+        applied: true,
+        appliedTokens: Number(p.tokens ?? 0),
+        appliedMicrocents: Number(p.microcents ?? 0),
+      }
+    );
+  };
+  return {
+    openHold: (...args: unknown[]) => openHoldMock(...args),
+    // Always granted here: these suites assert what the proxy does AROUND the
+    // dispatch boundary, not the boundary itself (tests/proxy-dispatch-permission.test.ts).
+    consumeDispatchPermission: async () => ({ granted: true }),
+    settleKnown: (p: Record<string, unknown>) => settle("complete", p),
+    settleUnknown: (p: Record<string, unknown>) => settle("usage_unknown", p),
+    releaseUndispatched: (p: Record<string, unknown>) => settle("not_dispatched", p),
+    establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
+  };
+});
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({
   seal: async () => "sealed",
@@ -95,7 +137,7 @@ vi.mock("@/lib/providers/available", () => ({
   readProvidersWithKeys: (...args: unknown[]) => readProvidersWithKeysMock(...args),
 }));
 
-import { POST } from "@/app/api/v1/[provider]/[...path]/route";
+import { GET, POST } from "@/app/api/v1/[provider]/[...path]/route";
 import { costMicrocentsForUsage } from "@/lib/pricing";
 
 const MODEL = "claude-opus-4-5";
@@ -197,8 +239,8 @@ beforeEach(() => {
   for (const m of [
     verifyVisaMock,
     serviceClientMock,
-    reserveBudgetMock,
-    reconcileBudgetMock,
+    openHoldMock,
+    settleHoldMock,
     getCachedKeyMock,
     setCachedKeyMock,
     getCachedAgentPolicyMock,
@@ -218,8 +260,8 @@ beforeEach(() => {
   serviceClientMock.mockReturnValue({
     rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
   });
-  reserveBudgetMock.mockResolvedValue({ ok: true, reserved: 1_000 });
-  reconcileBudgetMock.mockResolvedValue(undefined);
+  openHoldMock.mockResolvedValue({ ok: true, reserved: 1_000 });
+  settleHoldMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
@@ -240,28 +282,67 @@ describe.each([
     fetchMock.mockResolvedValue(upstream());
   });
 
+  it("keeps a truthful linked row when settlement fails before Redis executes", async () => {
+    settleHoldMock.mockRejectedValue(new Error("transport unavailable before execution"));
+    await drain(await callProxy(upstream === anthropicStream));
+    await flushDeferred();
+    const row = writeLogMock.mock.calls[0]?.[0];
+    expect(row.attemptId).toEqual(expect.any(String));
+    expect(row.attemptId).toBe(openHoldMock.mock.calls[0]?.[0]?.attemptId);
+    expect(row.enforcedTokens).toBeUndefined();
+    expect(row.enforcedMicrocents).toBeUndefined();
+    expect(row.inputTokens + row.outputTokens).toBe(TOTAL_TOKENS);
+    expect(row.costMicrocents).toBe(EXPECTED_COST);
+  });
+
+  it.each(["conflict", "anomaly"] as const)(
+    "does not turn a %s settlement into a free ledger row",
+    async (reason) => {
+      settleHoldMock.mockResolvedValue({
+        applied: false, appliedTokens: 0, appliedMicrocents: 0, [reason]: true,
+      });
+      await drain(await callProxy(upstream === anthropicStream));
+      await flushDeferred();
+
+      expect(settleHoldMock).toHaveBeenCalledWith(expect.objectContaining({
+        outcome: expect.stringMatching(/^(complete|usage_unknown)$/),
+        tokens: TOTAL_TOKENS, microcents: EXPECTED_COST,
+      }));
+      const row = writeLogMock.mock.calls[0]?.[0];
+      expect(row).toMatchObject({
+        status: expect.stringMatching(/^(ok|usage_unknown)$/), costMicrocents: EXPECTED_COST,
+      });
+      expect(row.inputTokens + row.outputTokens).toBe(TOTAL_TOKENS);
+      // Migration 0055 reads COALESCE(enforced, observed). A refused or
+      // missing settlement cannot certify that this provider call was free.
+      // Assert the spend readers' result without prescribing a repair shape.
+      expect.soft(row.enforcedTokens ?? row.inputTokens + row.outputTokens).toBe(TOTAL_TOKENS);
+      expect.soft(row.enforcedMicrocents ?? row.costMicrocents).toBe(EXPECTED_COST);
+    }
+  );
+
   it("charges the budget for every token the prompt consumed, not just the uncached remainder", async () => {
     await drain(await callProxy(upstream === anthropicStream));
     await flushDeferred();
 
-    expect(reconcileBudgetMock).toHaveBeenCalledWith(
+    expect(settleHoldMock).toHaveBeenCalledWith(
       expect.objectContaining({
         agentId: "agent-id",
-        actualTokens: TOTAL_TOKENS, // 19,412 — not 212
+        tokens: TOTAL_TOKENS, // 19,412 — not 212
       })
     );
     // The bug in one assertion: the old figure would have been the input+output
     // pair alone, which is a rounding error against the real consumption.
-    const call = reconcileBudgetMock.mock.calls[0]?.[0];
-    expect(call.actualTokens).toBeGreaterThan((CACHED.input + CACHED.output) * 90);
+    const call = settleHoldMock.mock.calls[0]?.[0];
+    expect(call.tokens).toBeGreaterThan((CACHED.input + CACHED.output) * 90);
   });
 
   it("charges the cost of the cache traffic too", async () => {
     await drain(await callProxy(upstream === anthropicStream));
     await flushDeferred();
 
-    expect(reconcileBudgetMock).toHaveBeenCalledWith(
-      expect.objectContaining({ actualMicrocents: EXPECTED_COST })
+    expect(settleHoldMock).toHaveBeenCalledWith(
+      expect.objectContaining({ microcents: EXPECTED_COST })
     );
     expect(writeLogMock).toHaveBeenCalledWith(
       expect.objectContaining({ costMicrocents: EXPECTED_COST })
@@ -287,6 +368,19 @@ describe.each([
     expect(row.inputTokens + row.outputTokens).toBe(TOTAL_TOKENS);
   });
 
+  // The link migration 0056 rests on. Without it in the audit row, an operator
+  // recovering an abandoned attempt has nothing to collide with, and the insert
+  // that is supposed to bounce lands instead — charging the same attempt twice.
+  // An id that is merely PRESENT is not enough; it has to be this attempt's.
+  it("stamps the audit row with the attempt id the hold was opened under", async () => {
+    await drain(await callProxy(upstream === anthropicStream));
+    await flushDeferred();
+
+    const opened = openHoldMock.mock.calls[0]?.[0]?.attemptId;
+    expect(opened).toBeTruthy();
+    expect(writeLogMock.mock.calls[0]?.[0]?.attemptId).toBe(opened);
+  });
+
   it("mirrors the same total to the dashboard, so the two cannot disagree", async () => {
     await drain(await callProxy(upstream === anthropicStream));
     await flushDeferred();
@@ -310,9 +404,34 @@ describe("an uncached call is unaffected", () => {
     expect(writeLogMock).toHaveBeenCalledWith(
       expect.objectContaining({ inputTokens: 900, outputTokens: 100 })
     );
-    expect(reconcileBudgetMock).toHaveBeenCalledWith(
-      expect.objectContaining({ actualTokens: 1_000 })
+    expect(settleHoldMock).toHaveBeenCalledWith(
+      expect.objectContaining({ tokens: 1_000 })
     );
     expect(mirrorSpendMock).toHaveBeenCalledWith("agent-id", 1_000, expect.any(Number));
+  });
+});
+
+
+describe("Session 02 — genuine zero discovery accounting", () => {
+  it("logs measured zero for discovery even when settlement never executes", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: [] }), {
+      status: 200, headers: { "content-type": "application/json" },
+    }));
+    settleHoldMock.mockRejectedValue(new Error("transport unavailable before execution"));
+    const res = await GET(new Request("https://gateway.test/api/v1/anthropic/v1/models", {
+      method: "GET", headers: { authorization: "Bearer visa" },
+    }), { params: Promise.resolve({ provider: "anthropic", path: ["v1", "models"] }) });
+    expect(res.status).toBe(200);
+    await drain(res);
+    await flushDeferred();
+    expect(settleHoldMock).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "complete", tokens: 0, microcents: 0,
+    }));
+    const row = writeLogMock.mock.calls[0]?.[0];
+    expect(row).toMatchObject({ status: "ok", inputTokens: 0, outputTokens: 0, costMicrocents: 0 });
+    expect(row.enforcedTokens).toBeUndefined();
+    expect(row.enforcedMicrocents).toBeUndefined();
+    expect(row.attemptId).toEqual(expect.any(String));
+    expect(row.attemptId).toBe(openHoldMock.mock.calls[0]?.[0]?.attemptId);
   });
 });

@@ -5,7 +5,14 @@
 //   - @noble/ed25519 v2 sync verify throws unless etc.sha512Sync is wired.
 // @noble/curves bundles SHA-512, so verify works synchronously with no globals.
 import { ed25519 } from "@noble/curves/ed25519";
-import { base64urlToBytes } from "../encoding";
+import { sha256 } from "@noble/hashes/sha256";
+import { base64urlToBytes, bytesToBase64url, utf8ToBytes } from "../encoding";
+
+/** RFC 7638 thumbprint of an Ed25519 public JWK, whose required members are
+ *  serialised in lexicographic order with no whitespace. */
+export function jwkThumbprint(x: string): string {
+  return bytesToBase64url(sha256(utf8ToBytes(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`)));
+}
 
 /** Verify an Ed25519 signature over raw message bytes. Never throws. */
 export function verifySignature(

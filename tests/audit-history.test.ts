@@ -579,3 +579,52 @@ describe("the page loads the history", () => {
     expect(data).toMatch(/history:/);
   });
 });
+
+// summariseRotation has always read `metadata.from`, and until the public
+// revocation list needed the retired key, NO WRITER EVER SET IT. So the moat
+// feature this module is (M7 in COMPETITIVE_GAPS.md) was degraded on its most
+// security-relevant row: every passport rotation in every workspace rendered as
+// "the previous value was not recorded". Same shape as the isPricedEndpoint
+// defect — a correct reader wired to nothing. Pinned so it cannot regress, and
+// so the field is understood as load-bearing in two places at once.
+describe("a passport rotation names the key it retired", () => {
+  const rotation = (metadata: Record<string, unknown>) => [
+    {
+      id: "rot-1",
+      action: "agent.update",
+      target_type: "agent",
+      target_id: "a1",
+      metadata,
+      created_at: "2026-09-02T00:00:00.000Z",
+    },
+  ];
+
+  const OLD = "OLDKEYaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const NEW = "NEWKEYbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+  it("renders both keys and counts as recorded", () => {
+    const [entry] = toCapabilityHistory(
+      rotation({
+        fields: "passport_pubkey",
+        rotated: true,
+        from: OLD,
+        to: NEW,
+        previous_valid_until: "2026-09-03T00:00:00.000Z",
+      })
+    );
+    expect(entry?.summary).toBe("Passport key rotated.");
+    expect(entry?.recorded).toBe(true);
+    expect(entry?.snapshot).toBe("recorded");
+    expect(entry?.detail?.[0]).toMatch(/public key: .+ → .+/);
+  });
+
+  // The honest fallback is kept, because rows written before the writer set
+  // `from` still exist and must not be dressed up as complete.
+  it("still refuses to guess when the retired key was never recorded", () => {
+    const [entry] = toCapabilityHistory(
+      rotation({ fields: "passport_pubkey", rotated: true, to: NEW })
+    );
+    expect(entry?.recorded).toBe(false);
+    expect(entry?.summary).toMatch(/not recorded/i);
+  });
+});

@@ -18,6 +18,7 @@ vi.mock("@/lib/ratelimit", () => ({
 
 import {
   PUBLIC_PASSPORT_FIELDS,
+  PUBLIC_COMPANY_FIELDS,
   PUBLIC_OWNER_FIELDS,
   PUBLIC_VERIFY_LIMIT,
   PUBLIC_VERIFY_WINDOW_SECONDS,
@@ -70,12 +71,30 @@ describe("the public field set", () => {
   it("publishes this exact surface, and widening it is a deliberate act", () => {
     expect([...PUBLIC_PASSPORT_FIELDS].sort()).toEqual([
       "displayId",
+      "expiresAt",
       "issuedAt",
       "owner",
       "passportId",
+      "retired",
       "status",
     ]);
-    expect([...PUBLIC_OWNER_FIELDS].sort()).toEqual(["kind", "subject", "tier", "verifiedAt"]);
+    expect([...PUBLIC_OWNER_FIELDS].sort()).toEqual([
+      "company",
+      "kind",
+      "subject",
+      "tier",
+      "verifiedAt",
+    ]);
+    // The company line is its own object rather than four more owner fields, so
+    // a template rendering the proof cannot pick up an asserted legal name as
+    // though it were part of it. Widening it is the same deliberate act.
+    expect([...PUBLIC_COMPANY_FIELDS].sort()).toEqual([
+      "active",
+      "checkedAt",
+      "id",
+      "name",
+      "source",
+    ]);
   });
 
   it("exposes exactly the advertised owner fields", () => {
@@ -260,6 +279,10 @@ describe("the owner assertion", () => {
       subject: "acme.com",
       tier: "domain",
       verifiedAt: "2026-08-01T00:00:00.000Z",
+      // 0048's asserted register line, absent here. It is a peer of the proof
+      // rather than part of it, so an owner who has asserted nothing carries an
+      // explicit null instead of the key being missing.
+      company: null,
     });
   });
 
@@ -305,5 +328,144 @@ describe("the owner assertion", () => {
       })
     );
     expect(JSON.stringify(view)).not.toContain("9f1d0c7a");
+  });
+});
+
+
+// ── Expiry and rotation on the public surface ───────────────────────────────
+//
+// Two false statements this page used to make, both because verify_passport
+// returned neither deadline (fixed in 0052):
+//
+//   an EXPIRED passport rendered as "Valid" — the gateway refuses it
+//   a key inside its ROTATION GRACE WINDOW returned 404 — the gateway accepts it
+//
+// The second is the one that reads backwards: "no such passport" about a
+// credential that is minting visas right now.
+describe("what the page says about a deadline", () => {
+  const FUTURE = "2099-01-01T00:00:00.000Z";
+  const PAST = "2020-01-01T00:00:00.000Z";
+  const current = (o: Record<string, unknown> = {}) => row({ matched_current: true, agent_id: AGENT_UUID, ...o });
+
+  it("publishes the expiry deadline so a reader can check it themselves", () => {
+    const view = buildPublicPassportView(current({ expires_at: FUTURE }));
+    expect(view?.expiresAt).toBe(FUTURE);
+    expect(view?.status).toBe("active");
+  });
+
+  it("says a passport past its expiry is expired, not valid", () => {
+    expect(buildPublicPassportView(current({ expires_at: PAST }))?.status).toBe("expired");
+  });
+
+  it("keeps never-expires as never-expires", () => {
+    const view = buildPublicPassportView(current({ expires_at: null }));
+    expect(view?.expiresAt).toBeNull();
+    expect(view?.status).toBe("active");
+  });
+
+  // A revoked passport that also aged out is revoked. Same order the gateway
+  // uses, and for its stated reason.
+  it("keeps lifecycle status ahead of expiry", () => {
+    expect(buildPublicPassportView(current({ status: "revoked", expires_at: PAST }))?.status).toBe("revoked");
+  });
+
+  it("marks a retired key as retired, and vouches for it while its grace window is open", () => {
+    const view = buildPublicPassportView(
+      row({ matched_current: false, agent_id: AGENT_UUID, previous_valid_until: FUTURE })
+    );
+    expect(view?.retired).toEqual({ notValidAfter: FUTURE });
+    expect(view?.status).toBe("active");
+  });
+
+  it("expires a retired key once its grace window has closed", () => {
+    const view = buildPublicPassportView(
+      row({ matched_current: false, agent_id: AGENT_UUID, previous_valid_until: PAST })
+    );
+    expect(view?.status).toBe("expired");
+  });
+
+  it("says nothing about rotation when the current key was presented", () => {
+    expect(buildPublicPassportView(current({ previous_valid_until: PAST }))?.retired).toBeNull();
+  });
+});
+
+// Found by reading live output, not by a unit test: asked about a key retired
+// by rotation, the page answered about the agent's CURRENT key — different
+// passportId, different displayId. A counterparty checking a receipt signed by
+// the retired key would have seen a document about a key that did not sign it.
+// It also disclosed the successor key to anyone who asked about the old one,
+// which nobody needs to know.
+describe("the answer is about the key that was asked about", () => {
+  const RETIRED_ID = "cmV0aXJlZHJldGlyZWRyZXRpcmVkcmV0aXJlZHJldGlyZWQ";
+
+  it("echoes the presented retired key, never the successor", () => {
+    const view = buildPublicPassportView(
+      row({ matched_current: false, previous_valid_until: "2099-01-01T00:00:00.000Z" }),
+      RETIRED_ID
+    );
+    expect(view?.passportId).toBe(RETIRED_ID);
+    expect(view?.displayId).toContain("cmV0aXJl");
+    expect(JSON.stringify(view)).not.toContain(PASSPORT_ID);
+  });
+
+  it("still reports the current key when that is what was asked about", () => {
+    const view = buildPublicPassportView(row({ matched_current: true }), PASSPORT_ID);
+    expect(view?.passportId).toBe(PASSPORT_ID);
+  });
+
+  // The row's own key remains the fallback, so a caller that does not thread
+  // the presented id through still describes a real passport rather than none.
+  it("falls back to the row's key when no presented id is given", () => {
+    expect(buildPublicPassportView(row({ matched_current: true }))?.passportId).toBe(PASSPORT_ID);
+  });
+});
+
+describe("a key that answers to two different agents", () => {
+  // findAuthenticatablePassport refuses this rather than guess an identity: the
+  // two columns are unique only within themselves, so one id can be tenant A's
+  // current key and tenant V's retired one. Resolving it here would publish an
+  // identity claim the gateway itself declines to make.
+  it("refuses rather than describing either of them", async () => {
+    const result = await lookupPublicPassport(
+      db({ data: [row({ matched_current: true, matched_rows: 2 })], error: null }),
+      PASSPORT_ID,
+      IP
+    );
+    expect(result).toEqual({ ok: false, reason: "ambiguous" });
+  });
+
+  it("proceeds when exactly one agent answers", async () => {
+    const result = await lookupPublicPassport(
+      db({ data: [row({ matched_current: true, matched_rows: 1 })], error: null }),
+      PASSPORT_ID,
+      IP
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  // An instance that has not applied 0052 returns no count at all. Refusing
+  // every passport on that basis would take the page down to protect against a
+  // collision 0035 already makes unreachable for new rows.
+  it("treats a missing count as no collision rather than refusing everything", async () => {
+    for (const matched_rows of [undefined, null, "many"]) {
+      const result = await lookupPublicPassport(
+        db({ data: [row({ matched_current: true, matched_rows })], error: null }),
+        PASSPORT_ID,
+        IP
+      );
+      expect(result.ok, String(matched_rows)).toBe(true);
+    }
+  });
+
+  // The count is how a collision is reported; the identities never are. This is
+  // an unauthenticated endpoint, and knowing WHICH other tenant holds the key
+  // buys the caller nothing it is entitled to.
+  it("never returns the colliding identity", async () => {
+    const result = await lookupPublicPassport(
+      db({ data: [row({ matched_current: true, matched_rows: 2 })], error: null }),
+      PASSPORT_ID,
+      IP
+    );
+    expect(JSON.stringify(result)).not.toMatch(/agent|uuid|[0-9a-f]{8}-/i);
   });
 });

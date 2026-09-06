@@ -24,6 +24,7 @@ import {
   setPassportExpiry,
   grantBreakGlass,
   MAX_ROTATION_GRACE_S,
+  DEFAULT_PASSPORT_LIFETIME_DAYS,
 } from "@/lib/fleet";
 import { PROVIDERS } from "@/lib/providers";
 import { validateAgentUpdate, LIMITS } from "@/lib/validate";
@@ -63,14 +64,38 @@ const validInput = { name: "bot", passportPubkey: validPubkey, scopes: [{ provid
 beforeEach(() => vi.clearAllMocks());
 
 describe("createAgent", () => {
-  it("inserts scoped to userId and returns the new id", async () => {
+  it("inserts scoped to userId and returns the new id with a default passport expiry", async () => {
     const { db, calls } = makeDb({ data: { id: "a1", created_at: "2026-08-14T10:00:00Z" }, error: null });
+    const before = Date.now();
     const r = await createAgent(db, "u1", validInput);
-    expect(r).toEqual({ ok: true, value: { id: "a1", name: "bot", createdAt: "2026-08-14T10:00:00Z" } });
+    expect(r).toEqual({
+      ok: true,
+      value: {
+        id: "a1",
+        name: "bot",
+        createdAt: "2026-08-14T10:00:00Z",
+        expiresAt: calls.insert.expires_at,
+      },
+    });
     expect(calls.insert.user_id).toBe("u1"); // tenant binding
     expect(calls.insert.passport_pubkey).toBe(validPubkey);
     expect(calls.insert.budget_tokens).toBeNull();
     expect(calls.insert.budget_cents).toBeNull();
+    expect(Date.parse(calls.insert.expires_at)).toBeGreaterThanOrEqual(
+      before + DEFAULT_PASSPORT_LIFETIME_DAYS * 86_400_000
+    );
+    expect(Date.parse(calls.insert.expires_at)).toBeLessThanOrEqual(
+      Date.now() + DEFAULT_PASSPORT_LIFETIME_DAYS * 86_400_000
+    );
+  });
+
+  it("keeps an explicit null expiry as a deliberate never-expire opt-out", async () => {
+    const { db, calls } = makeDb({ data: { id: "a1", created_at: "2026-08-14T10:00:00Z" }, error: null });
+    const r = await createAgent(db, "u1", { ...validInput, expiresAt: null });
+
+    expect(r.ok).toBe(true);
+    expect(calls.insert.expires_at).toBeNull();
+    expect(r.ok && r.value.expiresAt).toBeNull();
   });
 
   // The timestamp is the floor onboarding uses to decide which stored calls prove
@@ -289,7 +314,20 @@ const activeAgent = (over: Record<string, unknown> = {}) => ({
 });
 
 describe("rotatePassport", () => {
-  it("installs the new key, retires the current one, and stamps a deadline", async () => {
+  // The retired key has to come back out of this call, because the audit row is
+  // the only place it survives: lib/reconcile.ts clears
+  // previous_passport_pubkey once the grace window closes, and after that
+  // nothing in the database can say which key was retired. The public
+  // revocation list is built from that audit row.
+  it("returns the key it retired, so the audit row can outlive the column", async () => {
+    const { db } = makeDb({ data: { id: "a1" }, error: null }, { data: activeAgent(), error: null });
+    const r = await rotatePassport(db, "u1", "a1", NEW_KEY, 3600);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.previousPassportPubkey).toBe(CURRENT_KEY);
+  });
+
+  it("installs the new key, retires the current one, and stamps grace and fresh expiry deadlines", async () => {
     const { db, calls } = makeDb({ data: { id: "a1" }, error: null }, { data: activeAgent(), error: null });
     const before = Date.now();
     const r = await rotatePassport(db, "u1", "a1", NEW_KEY, 3600);
@@ -301,8 +339,24 @@ describe("rotatePassport", () => {
     });
     const until = Date.parse(calls.update.previous_valid_until);
     expect(until).toBeGreaterThanOrEqual(before + 3600_000);
+    const expiresAt = Date.parse(calls.update.expires_at);
+    expect(expiresAt).toBeGreaterThanOrEqual(
+      before + DEFAULT_PASSPORT_LIFETIME_DAYS * 86_400_000
+    );
+    expect(expiresAt).toBeLessThanOrEqual(
+      Date.now() + DEFAULT_PASSPORT_LIFETIME_DAYS * 86_400_000
+    );
     // Tenant-scoped, like every other mutation in this module.
     expect(calls.eq).toContainEqual(["user_id", "u1"]);
+  });
+
+  it("keeps an explicit null rotation expiry as a deliberate never-expire opt-out", async () => {
+    const { db, calls } = makeDb({ data: { id: "a1" }, error: null }, { data: activeAgent(), error: null });
+    const r = await rotatePassport(db, "u1", "a1", NEW_KEY, 60, null);
+
+    expect(r.ok).toBe(true);
+    expect(calls.update.expires_at).toBeNull();
+    expect(r.ok && r.value.expiresAt).toBeNull();
   });
 
   /**

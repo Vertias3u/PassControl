@@ -47,6 +47,15 @@ export default function sitemap(): MetadataRoute.Sitemap {
       changeFrequency: "monthly",
       priority: 0.5,
     },
+    // Indexable for the same reason as /verify/receipt: a paste box with nothing
+    // private in the URL. It is also the surface that makes the published
+    // statement format checkable by someone who does not work here, which is
+    // only true if they can find it.
+    {
+      url: `${BASE}/verify/statement`,
+      changeFrequency: "monthly",
+      priority: 0.5,
+    },
     // Legal pages deliberately stay out of the sitemap until the public service
     // address is resolved and the draft banner can be removed.
   ];

@@ -141,6 +141,11 @@ describe("the derivation's standing assumption", () => {
     // returns strictly less than the listing already allowed, so it belongs to
     // the same class. Driven by a real agent whose context-length probe hit it
     // around every prompt and filled the board with blocked_endpoint refusals.
+    //
+    // Recorded decision (2026-08-31): OpenAI Responses is inference, not
+    // housekeeping. An admitted call is model-bound by the same scope gate as
+    // Chat Completions and its provider-reported tokens are reserved,
+    // reconciled, logged, and receipted.
     const src = readFileSync(join(root, "lib/scope.ts"), "utf8");
     const block = src.slice(
       src.indexOf("const ENDPOINT_ALLOWLIST"),
@@ -149,9 +154,11 @@ describe("the derivation's standing assumption", () => {
 
     const MODEL_BOUND = new Set([
       "OPENAI_CHAT_PATH",
+      "OPENAI_RESPONSES_PATH",
       "ANTHROPIC_MESSAGES_PATH",
       "DEEPSEEK_CHAT_PATH",
       '["chat", "completions"]',
+      '["responses"]',
     ]);
     // Recorded decision (2026-08-25): `VERSIONLESS_MODELS_PATH` (= ["models"])
     // arrived with the gemini provider, whose OpenAI-compat base already carries

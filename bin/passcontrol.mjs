@@ -7,13 +7,26 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519";
+import { availableGroups, browse, printStatic, updateRecents } from "../cli/menu.mjs";
+import {
+  agentStateArgv,
+  collectMenuRemoteStatus,
+  integrationPreviewArgv,
+  killSwitchArgv,
+  logsArgv,
+  verificationArgv,
+} from "../cli/menu-session.mjs";
 import {
   CLOUD_GATEWAY,
   CONFIG_FILE,
   OPENAI_SHAPE_PROVIDERS,
   PROVIDERS,
   WORKSPACE_IMPORT_MAX_VERSION,
+  accent,
+  alarm,
+  amber,
   assertConfigLoaded,
+  bareGatewayOrigin,
   config,
   configPathLabel,
   defaultModelForProvider,
@@ -23,6 +36,7 @@ import {
   formatProxyError,
   globalConfigPath,
   mergeConfigFile,
+  muted,
   heading,
   ok,
   redact,
@@ -46,6 +60,7 @@ import {
 } from "../cli/mcp/integration.mjs";
 import {
   GUI_PRESET_LABELS,
+  INTEGRATIONS,
   integrationChoices,
   isGuiPreset,
   isIntegration,
@@ -54,6 +69,7 @@ import {
 import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
 import { checkForUpdate } from "../cli/update-check.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
+import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
 import { logoutCommand } from "../cli/logout.mjs";
 import { proveItWorks } from "../cli/selftest.mjs";
@@ -62,8 +78,14 @@ import {
   generateInstanceKey,
   instanceKidFromSeed,
 } from "../cli/instance-key.mjs";
-import { FAILURE_REASONS, verifyAgentToken, verifyReceipt } from "../cli/verify.mjs";
+import { FAILURE_REASONS, verifyAgentToken, verifyReceipt, verifyStatement } from "../cli/verify.mjs";
 import { compareProtocolSets } from "../cli/protocols.mjs";
+import {
+  PASSPORT_KEY_STORAGE_OS,
+  createPassportCredentialStore,
+  keyStorageDeclaration,
+  migratePassportKey,
+} from "../cli/passport-key-store.mjs";
 
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -142,7 +164,8 @@ function usage() {
 Governed identity and credentials for AI agents.
 
 ${heading("Usage:")}
-  ${cmd}                         show cockpit status
+  ${cmd}                         browse the commands (shows status when not a terminal)
+  ${cmd} settings                browse the commands
   ${cmd} <command> [options]
 
 ${heading("Quick start")}
@@ -176,6 +199,8 @@ ${heading("Manage")}
                                  show operator audit history
   ${cmd} logs [--limit 20] [--json]
                                  show governed call logs
+  ${cmd} statements [--limit 20] [--json]
+                                 show the chain of signed spend statements
   ${cmd} kill on|off              toggle the tenant kill switch
   ${cmd} export [--out FILE]      save a workspace configuration snapshot
   ${cmd} import <file> [--confirm IMPORT]
@@ -188,6 +213,8 @@ ${heading("Integrate")}
   integrations: ${integrationChoices()}
 
 ${heading("Trust")}
+  ${cmd} key status               show the local passport key storage tier
+  ${cmd} key migrate              move a tier 0 file key into the OS credential store
   ${cmd} keygen instance          create the receipt-signing key
   ${cmd} verify receipt <jws> --issuer <origin>
                                  verify a signed call receipt
@@ -268,8 +295,10 @@ async function fetchWithTimeout(url, init = {}, timeoutMs = 1200) {
 
 async function gatewayStatus(noNetwork = false) {
   if (noNetwork) return { label: "not checked", ok: null };
+  const origin = probeGatewayOrigin(config);
+  if (!origin) return { label: "invalid configuration", ok: false };
   try {
-    const res = await fetchWithTimeout(config.gateway, { method: "GET" });
+    const res = await fetchWithTimeout(origin, { method: "GET" });
     return { label: res.ok ? `online (${res.status})` : `unhealthy (${res.status})`, ok: res.ok };
   } catch {
     return { label: "offline or unreachable", ok: false };
@@ -278,7 +307,9 @@ async function gatewayStatus(noNetwork = false) {
 
 async function printCockpit({ noNetwork = false, json = false } = {}) {
   const gateway = await gatewayStatus(noNetwork);
-  const passportConfigured = Boolean(config.passportId && config.passportSecret);
+  const passportSecret = config.passportSecret;
+  const passportStorage = config.passportStorage;
+  const passportConfigured = Boolean(config.passportId && passportSecret);
   const adminConfigured = Boolean(config.apiKey);
   const dashboard = dashboardStatusLabel(gateway, noNetwork);
   const app = appRootLabel();
@@ -299,6 +330,9 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
         provider: config.provider,
         model: config.model,
         passport_configured: passportConfigured,
+        passport_key_storage_tier: passportStorage.tier,
+        passport_key_storage_source: passportStorage.source,
+        passport_key_storage_fallback: passportStorage.fallback,
         control_api_key_configured: adminConfigured,
       },
       system_health: systemHealthForJson(systemHealth),
@@ -314,6 +348,7 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
   console.log(formatLabel("Provider", config.provider));
   console.log(formatLabel("Model", config.model));
   console.log(formatLabel("Passport", passportConfigured ? redact(config.passportId) : "missing"));
+  console.log(formatLabel("Key storage", passportStorage.message));
   console.log(formatLabel("Admin key", adminConfigured ? redact(config.apiKey, 6) : "missing"));
   console.log(formatLabel("System health", systemHealthLabel(systemHealth)));
   console.log(`${formatLabel("Sidecar", `foreground command (\`${cliCommand("sidecar")}\`)`)}\n`);
@@ -876,14 +911,29 @@ async function waitForPortRelease(port, timeoutMs = 5000) {
   return !await portIsListening(port);
 }
 
-async function waitForGateway(timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const gateway = await gatewayStatus(false);
-    if (gateway.ok) return true;
-    await pause(250);
-  }
-  return false;
+/**
+ * Adapter over cli/gateway-wait.mjs — that module owns the decision, this
+ * supplies the three real probes. `port` and `pid` are optional because one
+ * caller (an already-running dashboard we did not spawn) knows the pid but the
+ * budget logic is the same either way.
+ */
+async function waitForGateway({ port = null, pid = null } = {}) {
+  return awaitGateway({
+    probeGateway: async () => (await gatewayStatus(false)).ok,
+    probePort: port ? () => portIsListening(port) : null,
+    processAlive: pid
+      ? () => {
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        }
+      : null,
+    onCompiling: () =>
+      step("server is up and compiling — first run only, this can take a couple of minutes…"),
+  });
 }
 
 function ownSupabaseDatabaseIsRunning(offset = 0) {
@@ -978,7 +1028,7 @@ async function startDashboard(opts = {}) {
   const running = runningManagedDashboard();
   if (running) {
     step(`dashboard is still starting (PID ${running.pid}); waiting for ${dashboard.url}…`);
-    if (await waitForGateway()) {
+    if (await waitForGateway({ port: dashboard.port, pid: running.pid })) {
       ok(`dashboard online at ${dashboard.url}`);
       return dashboard;
     }
@@ -1004,7 +1054,7 @@ async function startDashboard(opts = {}) {
   );
 
   step(`starting local dashboard at ${dashboard.url}…`);
-  if (!await waitForGateway()) {
+  if (!await waitForGateway({ port: dashboard.port, pid: child.pid })) {
     throw new Error(`Dashboard did not become ready. See ${logPath}.`);
   }
   ok(`dashboard online at ${dashboard.url}`);
@@ -1255,10 +1305,24 @@ async function initCommand(opts) {
     const provider = await ask("Provider", config.provider || "anthropic");
     assertProvider(provider);
     const modelFallback = provider === config.provider ? config.model : defaultModelForProvider(provider);
+    const gatewayInput = await ask("Gateway URL", config.gateway);
+    const passportIdInput = await ask("Passport ID", config.passportId);
+    // Never use a passport secret as ask()'s fallback: fallbacks are rendered
+    // inside square brackets, which would print a Keychain-retrieved key. A
+    // blank answer preserves the current key silently. For Tier 1 that means
+    // preserving only the non-secret marker; the key stays in the OS store.
+    const passportSecretInput = await ask(
+      "Passport Secret (input is visible; leave blank to keep current)"
+    );
+    const preserveOsStorage =
+      !passportSecretInput && config.passportStorageMarker === PASSPORT_KEY_STORAGE_OS;
     const values = {
-      PASSCONTROL_GATEWAY: await ask("Gateway URL", config.gateway),
-      PASSPORT_ID: await ask("Passport ID", config.passportId),
-      PASSPORT_SECRET: await ask("Passport Secret (input is visible)", config.passportSecret),
+      PASSCONTROL_GATEWAY: gatewayInput,
+      PASSPORT_ID: passportIdInput,
+      PASSPORT_SECRET: preserveOsStorage
+        ? ""
+        : passportSecretInput || config.passportSecret,
+      PASSPORT_KEY_STORAGE: preserveOsStorage ? PASSPORT_KEY_STORAGE_OS : "",
       PASSCONTROL_API_KEY: await ask("Control API key (optional, input is visible)", config.apiKey),
       PROVIDER: provider,
       MODEL: await ask("Model", modelFallback),
@@ -1277,8 +1341,15 @@ async function initCommand(opts) {
 // covers every minting caller, `doctor --deep` and `try` included.
 async function mintVisa(current = config) {
   const origin = requirePassportGateway(current);
-  const { passportId, passportSecret } = requirePassport(current);
-  const payloadObj = { passport_id: passportId, ts: Date.now(), nonce: crypto.randomUUID() };
+  const { passportId, passportSecret, keyStorage } = requirePassport(current);
+  const payloadObj = {
+    passport_id: passportId,
+    ts: Date.now(),
+    nonce: crypto.randomUUID(),
+    // Declared, never checked: see lib/passport-key-storage.ts. Inside the
+    // signed bytes so the claim belongs to whoever holds the key.
+    ...(keyStorage ? { key_storage: keyStorage } : {}),
+  };
   const payload = b64url(new TextEncoder().encode(JSON.stringify(payloadObj)));
   const signature = b64url(ed25519.sign(fromB64url(payload), fromB64url(passportSecret)));
   const res = await fetch(`${origin}/api/auth/challenge`, {
@@ -1478,7 +1549,11 @@ async function agentCommand(rest, opts) {
               "  Re-run with --force to replace it, or without --write to print the new one instead."
           );
         }
-        mergeConfigFile(target, { PASSPORT_ID: passportId, PASSPORT_SECRET: b64url(priv) });
+        mergeConfigFile(target, {
+          PASSPORT_ID: passportId,
+          PASSPORT_SECRET: b64url(priv),
+          PASSPORT_KEY_STORAGE: "",
+        });
         ok(`wrote the passport to ${target} — it was not printed`);
         break;
       }
@@ -1595,6 +1670,7 @@ async function logsCommand(opts) {
     controlPath("/logs", {
       limit: safeLimit(opts.limit),
       agent_id: opts.agentId,
+      class: opts.class,
       status: opts.status,
     })
   );
@@ -1643,11 +1719,12 @@ async function sidecarCommand(rest, opts) {
   // sidecar mints on demand for the lifetime of the process, so a bad
   // destination has to be refused at start, not at the first proxied request.
   const gateway = requirePassportGateway(config);
-  const { passportId, passportSecret } = requirePassport(config);
+  const { passportId, passportSecret, keyStorage } = requirePassport(config);
   startSidecar({
     gateway,
     passportId,
     passportSecret,
+    keyStorage,
     port: sidecarPort(opts),
     host: String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1"),
     // Named on the command line, never inferred. A sidecar reachable off-host
@@ -1676,9 +1753,9 @@ async function sidecarCommand(rest, opts) {
 
 async function mcpCommand() {
   const gateway = requirePassportGateway(config);
-  const { passportId, passportSecret } = requirePassport(config);
+  const { passportId, passportSecret, keyStorage } = requirePassport(config);
   const { startMcpServer } = await import("../cli/mcp/server.mjs");
-  await startMcpServer({ gateway, passportId, passportSecret });
+  await startMcpServer({ gateway, passportId, passportSecret, keyStorage });
 }
 
 function sidecarPort(opts = {}) {
@@ -2085,6 +2162,7 @@ async function doctorCommand(opts = {}) {
       origin: requirePassportGateway(config),
       passportId: config.passportId,
       passportSecret: config.passportSecret,
+      keyStorage: keyStorageDeclaration(config.passportStorage),
       apiKey: config.apiKey,
       fetchImpl: fetch,
     });
@@ -2151,10 +2229,11 @@ async function verifyCommand(rest, opts) {
   const artifact = rest[1];
   const issuer = String(opts.issuer || process.env.PASSCONTROL_ISSUER || "");
 
-  if ((what !== "token" && what !== "receipt") || !artifact) {
+  if ((what !== "token" && what !== "receipt" && what !== "statement") || !artifact) {
     throw new Error(
       "Usage: passcontrol verify token <jwt> --audience <aud> --issuer <origin>\n" +
-        "       passcontrol verify receipt <jws> --issuer <origin>"
+        "       passcontrol verify receipt <jws> --issuer <origin>\n" +
+        "       passcontrol verify statement <jws> --issuer <origin>"
     );
   }
   if (!issuer) {
@@ -2167,7 +2246,9 @@ async function verifyCommand(rest, opts) {
   const result =
     what === "token"
       ? await verifyAgentToken(artifact, { issuer, audience: String(opts.audience || "") })
-      : await verifyReceipt(artifact, { issuer });
+      : what === "statement"
+        ? await verifyStatement(artifact, { issuer })
+        : await verifyReceipt(artifact, { issuer });
 
   if (!result.ok) {
     fail(`Not valid: ${FAILURE_REASONS[result.reason] ?? result.reason}`);
@@ -2176,8 +2257,32 @@ async function verifyCommand(rest, opts) {
   }
 
   const c = result.claims;
-  ok(what === "token" ? "Token is valid." : "Receipt is valid.");
+  ok(what === "token" ? "Token is valid." : what === "statement" ? "Statement is valid." : "Receipt is valid.");
   step(`Issuer:   ${c.iss}`);
+  if (what === "statement") {
+    // What this signature does and does not settle. The totals below are what
+    // the issuer CLAIMED and committed to — verifying the signature proves they
+    // cannot change it now, not that it was right when they computed it.
+    // Recomputing `root` needs every receipt in the window, which you do not have.
+    step(`Workspace: ${c.sub}`);
+    step(`Statement: #${c.seq}${c.pst ? "" : " (first in this chain)"}`);
+    step(
+      `Window:    ${new Date(c.per?.from * 1000).toISOString()} → ${new Date(c.per?.to * 1000).toISOString()}`
+    );
+    step(`Covers:    ${c.n} of ${c.nr} logged calls · ${c.cost} µ¢`);
+    if (c.nr > c.n) {
+      step(`           ${c.nr - c.n} call(s) carried no receipt and are NOT covered by the root.`);
+    }
+    if (c.unp) step(`           ${c.unp} call(s) could not be priced — that cost is unknown, not zero.`);
+    if (c.unk) step(`           ${c.unk} call(s) have no recorded cost and no recorded reason.`);
+    step(`Root:      ${c.root ?? "none — this window covered no receipts"}`);
+    step(`Follows:   ${c.pst ?? "nothing — this is the head of the chain"}`);
+    step("");
+    step("This proves the issuer committed to that set of receipts at that time and");
+    step("cannot change it now. It does not independently confirm the totals: that");
+    step("would need every receipt in the window.");
+    return;
+  }
   step(`Passport: ${c.sub}`);
   if (what === "token") {
     step(`Audience: ${c.aud}`);
@@ -2193,6 +2298,61 @@ async function verifyCommand(rest, opts) {
       `Owner:    ${c.own.sub} (${c.own.tier === "unverified" ? "self-declared, unverified" : c.own.tier})`
     );
   }
+}
+
+/**
+ * The chain of signed spend statements for this workspace.
+ *
+ * `covered` and `rows` are shown side by side on purpose, and so are the two
+ * pricing columns. A statement's honesty is in the gap between them — rows it
+ * could not cover, calls nobody could price, calls whose pricing was never
+ * recorded — and a table that printed only the count and the cost would quietly
+ * turn "we cannot say" into "zero".
+ */
+async function statementsCommand(opts) {
+  // One binary serves both audiences, so this command ships everywhere while the
+  // endpoint behind it exists only on a deployment that OPERATES a chain. A
+  // gateway that merely verifies statements has no /statements route, and the
+  // 404 that comes back is a correct answer about that gateway rather than a
+  // fault — say so, instead of letting a raw HTTP error read as a broken CLI.
+  let rows;
+  try {
+    rows = await api("GET", controlPath("/statements", { limit: safeLimit(opts.limit) }));
+  } catch (e) {
+    // api() formats a failure as `<status> <code> <message> (req <id>)`, so the
+    // status is the leading token. Anchor on it: a 200 body that merely contains
+    // "404" must not be read as a missing route.
+    if (/^404\b/.test(String(e?.message || ""))) {
+      step("This gateway does not operate a statement chain.");
+      step("Producing statements — the nightly job, the stored chain, inclusion proofs —");
+      step("is a hosted capability. Verifying one needs no account and works here:");
+      step("  passcontrol verify statement <jws> --issuer <origin>");
+      return;
+    }
+    throw e;
+  }
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    step("No signed statements yet. They are produced once a day, for the day before.");
+    step("If this stays empty, check that the deployment sets INSTANCE_SIGNING_KEY and");
+    step("that its statements cron is scheduled.");
+    return;
+  }
+  console.table(
+    rows.map((row) => ({
+      seq: row.seq,
+      day: String(row.period_start ?? "").slice(0, 10),
+      covered: row.covered_count,
+      rows: row.row_count,
+      "µ¢": row.cost_microcents,
+      unpriced: row.unpriced_count,
+      unknown: row.unknown_pricing_count,
+      chained: row.prev_digest ? "yes" : "first",
+    }))
+  );
 }
 
 async function keygenCommand(rest) {
@@ -2214,6 +2374,66 @@ async function keygenCommand(rest) {
   step("Unlike VISA_SECRET_PREV we never sign with it — its public key stays published so");
   step("receipts signed before the rotation still verify. Publish the new key, wait one");
   step("JWKS max-age window, then start signing with it.");
+}
+
+function passportFileForMigration() {
+  if (operatorEnv("PASSPORT_SECRET") !== undefined) {
+    throw new Error(
+      "PASSPORT_SECRET comes from the operator environment. Migration can remove only a tier 0 config-file key; move it into a PassControl config file first."
+    );
+  }
+
+  let source = null;
+  for (const candidate of config.sources) {
+    if (Object.prototype.hasOwnProperty.call(candidate.values, "PASSPORT_SECRET")) source = candidate;
+  }
+  const secret = String(source?.values?.PASSPORT_SECRET ?? "");
+  if (!source || !secret) {
+    throw new Error("No tier 0 passport key was found in a PassControl config file.");
+  }
+  return { path: source.path, secret };
+}
+
+async function keyCommand(rest, opts = {}) {
+  const subcommand = rest[0] ?? "status";
+  if (subcommand === "status") {
+    if (rest.length > 1) throw new Error(`Usage: ${cliCommand("key status")}`);
+    assertConfigLoaded();
+    const storage = config.passportStorage;
+    console.log(formatLabel("Key storage", storage.message, 14));
+    if (storage.fallback) warn("The OS credential store was not used; this process is using the tier 0 file key.");
+    return;
+  }
+
+  if (subcommand !== "migrate" || rest.length > 1) {
+    throw new Error(`Usage: ${cliCommand("key status")}\n       ${cliCommand("key migrate")}`);
+  }
+  if (opts.to && opts.to !== "keychain" && opts.to !== "os") {
+    throw new Error("--to supports only `keychain` (the operating system credential store).");
+  }
+  assertConfigLoaded();
+  if (config.passportStorageMarker === PASSPORT_KEY_STORAGE_OS) {
+    throw new Error("This passport is already configured for tier 1 OS credential storage.");
+  }
+  if (!config.passportId) throw new Error("No PASSPORT_ID is configured for this passport key.");
+
+  const file = passportFileForMigration();
+  const store = createPassportCredentialStore();
+  const result = migratePassportKey({
+    passportId: config.passportId,
+    secret: file.secret,
+    store,
+    removeFileSecret: () => mergeConfigFile(file.path, {
+      PASSPORT_SECRET: "",
+      PASSPORT_KEY_STORAGE: PASSPORT_KEY_STORAGE_OS,
+    }),
+  });
+
+  if (!result.ok) {
+    throw new Error(`${result.message} Key storage in use: tier 0 — file (${file.path}).`);
+  }
+  ok(result.message);
+  step(`Removed PASSPORT_SECRET from ${file.path} only after verified readback.`);
 }
 
 async function openDashboard(opts = {}) {
@@ -2378,8 +2598,408 @@ function printImportReport(report, { preview }) {
   console.log(`\nAn agent already in the workspace is left exactly as it is — import never overwrites.`);
 }
 
-async function main() {
-  const { opts, rest } = parseArgv(process.argv.slice(2));
+function menuLocalStatus() {
+  let gateway = "invalid or unavailable";
+  // `host` is what the header shows and `gateway` is what the per-item "Current:"
+  // lines show, so both are kept. Dropping the scheme from the header loses
+  // nothing an operator needs: bareGatewayOrigin only accepts plain HTTP for a
+  // loopback host, so http ⟺ loopback ⟺ the LOCAL badge already on the line.
+  let host = "";
+  let loopback = false;
+  try {
+    gateway = bareGatewayOrigin(config.gateway);
+    const url = new URL(gateway);
+    host = url.host;
+    loopback = LOCAL_DASHBOARD_HOSTS.has(url.hostname);
+  } catch {
+    // Never the configured value: a rejected gateway URL can itself carry a
+    // credential. "invalid" and "not configured" are different failures and the
+    // operator fixes them differently, so they are not collapsed into one word.
+    host = config.gateway ? "invalid" : "not configured";
+  }
+  const passportReady = Boolean(config.passportId && config.passportSecret);
+  const controlReady = Boolean(config.apiKey);
+  const source = configPathLabel(config.sources);
+  const key = config.passportStorage?.message ?? `tier ${config.passportStorage?.tier ?? "unknown"}`;
+  return {
+    gateway,
+    host,
+    loopback,
+    source,
+    provider: `${config.provider}/${config.model}`,
+    passport: passportReady ? "ready" : "missing",
+    control: controlReady ? "ready" : "missing",
+    key,
+    app: appRootLabel(),
+    current: {
+      config: source,
+      provider: `${config.provider}/${config.model}`,
+      account: controlReady ? "control key configured" : "control key missing",
+      app: appRootLabel(),
+      key,
+      gateway,
+    },
+  };
+}
+
+async function menuRemoteStatus() {
+  return collectMenuRemoteStatus({
+    hasApiKey: Boolean(config.apiKey),
+    gatewayStatus: () => gatewayStatus(false),
+    request: (pathPart, options) => api("GET", pathPart, undefined, options),
+    safeText: safeHealthText,
+  });
+}
+
+/**
+ * Status tones for the browser header. Semantic, not decorative: a green ● is a
+ * working thing, a dim ○ is an absent-but-not-broken thing, an amber ! is
+ * degraded, and a red × is failed. Red appears in exactly two places in this
+ * whole interface — a failed row here, and the Danger zone under the cursor —
+ * which is what keeps it meaning something.
+ */
+const MENU_TONES = {
+  ok: { glyph: "\u25cf", ink: accent },
+  idle: { glyph: "\u25cb", ink: muted },
+  warn: { glyph: "!", ink: amber },
+  bad: { glyph: "\u00d7", ink: alarm },
+};
+const MENU_LABEL_WIDTH = 10;
+const MENU_STATE_WIDTH = 16;
+
+/**
+ * Fit a cell to its column, with an ellipsis when it does not.
+ *
+ * The state column has to hold whatever `collectMenuRemoteStatus` produces, and
+ * two of its values are already longer than the column: "100+ agents (partial)"
+ * on a fleet of a hundred, and any account email past sixteen characters. An
+ * overlong cell does not wrap, it pushes that row's tail right of every other
+ * row's and the table stops being a table. Truncating loses the end of one
+ * value; not truncating loses the alignment of all of them.
+ */
+function menuCell(text, width) {
+  const value = String(text ?? "");
+  // A truncated cell still ends in a space. Filling the column edge to edge
+  // ran the ellipsis straight into the next column — "…write key" reads as one
+  // mangled word rather than as two cells, which is the exact failure the
+  // truncation is here to prevent.
+  if (value.length <= width - 1) return value.padEnd(width);
+  return `${value.slice(0, width - 2)}\u2026 `;
+}
+
+function menuRow(tone, label, state, tail = "") {
+  const { glyph, ink } = MENU_TONES[tone];
+  // Pad the RAW strings, then colour them. padEnd counts escape bytes, so
+  // colouring first pushes every later column right by the width of an
+  // invisible sequence — and because only some rows are coloured, the table
+  // would jitter as the cursor moved. Every padEnd here is on plain text.
+  const head = `  ${ink(glyph)} ${menuCell(label, MENU_LABEL_WIDTH)}`;
+  if (!tail) return `${head}${ink(state)}`;
+  return `${head}${ink(menuCell(state, MENU_STATE_WIDTH))}${muted(tail)}`;
+}
+
+/**
+ * Shorten a gatewayStatus label to one word, with the tone it deserves.
+ *
+ * The HTTP code in that label is real information, but it belongs in
+ * `passcontrol status`, not on a line the operator reads fifty times a day.
+ * "not authenticated" maps to "not checked" rather than to a failure on
+ * purpose: with no control key the menu never probes the gateway at all, so its
+ * health is unknown rather than bad — and the Account row directly below is the
+ * one that should explain why.
+ */
+function gatewayTone(label) {
+  const text = String(label ?? "");
+  if (text.startsWith("online")) return ["ok", "online"];
+  if (text.startsWith("unhealthy")) return ["warn", "unhealthy"];
+  if (text === "not authenticated" || text === "not checked") return ["idle", "not checked"];
+  if (text === "invalid configuration") return ["bad", "misconfigured"];
+  return ["bad", "unreachable"];
+}
+
+/**
+ * Where the passport private key resolves from, as a tone and two short cells.
+ *
+ * The tail never carries the file path, only the word "file". The path is in
+ * `passcontrol key status` and in `passcontrol status`; on the front door it is
+ * an implementation detail wide enough to push the row off the screen.
+ */
+function keyTone(storage) {
+  if (storage?.fallback) return ["warn", "file fallback", "the OS store was unavailable"];
+  if (storage?.available !== true) return ["idle", "not configured", ""];
+  if (storage?.tier === 1) return ["ok", "ready", String(storage.source ?? "OS store")];
+  return ["ok", "ready", "file"];
+}
+
+/**
+ * `PassControl <version>` on the left, a LOCAL/REMOTE badge at the right margin.
+ *
+ * The badge comes from the same loopback set the stack commands use, so LOCAL
+ * means exactly what `passcontrol start` means by it. REMOTE rather than CLOUD:
+ * a self-hosted gateway on a LAN address or a company domain is neither local
+ * nor Cloud, and only one of those two words stays true for it. On a non-TTY
+ * `columns` is undefined, so the badge falls back to two spaces instead of
+ * padding a piped line out to a width nobody is watching.
+ */
+function menuTitle(local) {
+  const badge = local.loopback ? "LOCAL" : "REMOTE";
+  const plain = `PassControl ${CLI_VERSION}`;
+  const painted = `${heading("PassControl")} ${muted(CLI_VERSION)}`;
+  const gap = (Number(process.stdout.columns) || 0) - plain.length - badge.length - 1;
+  return gap > 2 ? `${painted}${" ".repeat(gap)}${muted(badge)}` : `${painted}  ${muted(badge)}`;
+}
+
+/**
+ * The browser header: a glyph table, not a status dump.
+ *
+ * It answers three questions and stops — is PassControl alive, what is it
+ * pointed at, and is anything wrong. The configuration path, the HTTP status
+ * code, the storage tier number and the redacted identifiers that used to sit
+ * here are all one keystroke away in `passcontrol status`. A front door has to
+ * be readable at a glance, and a detail that is always on screen stops reading
+ * as a detail.
+ *
+ * THE TABLE IS A FIXED HEIGHT FOR A GIVEN INSTALL, and that is a layout
+ * requirement rather than a nicety. The four control-plane reads land about a
+ * second after the first frame; if the rows they fill did not exist until then,
+ * the whole menu below would shift down under the reader's eyes just as they
+ * were choosing. So Account and Fleet are drawn as "checking…" while the reads
+ * are in flight and as "unavailable" when they fail — same rows, same height,
+ * only the words change. `remote` has four states and each renders: `null` in
+ * flight, `false` on the static non-TTY path that makes no requests at all,
+ * `{unavailable:true}` for failed reads, and an object for the answer.
+ *
+ * The one row that appears and disappears is the kill switch, and only into the
+ * gap at the bottom: it is drawn when armed, which is an emergency worth a line
+ * and a colour, and omitted when clear, which is the state that should take up
+ * no room. Six rows is the ceiling, and the whole top level fits an 80x24
+ * terminal with it.
+ */
+function menuHeader(local, remote) {
+  const pending = remote === null;
+  const staticOnly = remote === false;
+  const broken = Boolean(remote) && remote !== true && remote.unavailable === true;
+  const live = !pending && !staticOnly && !broken ? remote : null;
+  const rows = [];
+
+  if (pending) rows.push(menuRow("idle", "Gateway", "checking\u2026", local.host));
+  else if (staticOnly) rows.push(menuRow("idle", "Gateway", "not checked", local.host));
+  else if (broken) rows.push(menuRow("bad", "Gateway", "unreachable", local.host));
+  else {
+    const [tone, state] = gatewayTone(live.gateway);
+    rows.push(menuRow(tone, "Gateway", state, local.host));
+  }
+
+  rows.push(local.passport === "ready"
+    ? menuRow("ok", "Provider", "ready", local.provider)
+    : menuRow("idle", "Provider", "no passport", local.provider));
+
+  const [tone, state, tail] = keyTone(config.passportStorage);
+  rows.push(menuRow(tone, "Key", state, tail));
+
+  // Everything below is a control-plane fact, so the static path ends here
+  // rather than printing rows of "unknown" it never tried to look up. So does
+  // an install with no control key: "no control key" on the Account row is the
+  // whole explanation, and two more rows repeating it would be noise.
+  if (staticOnly) return [menuTitle(local), ...rows].join("\n");
+  if (local.control === "missing") {
+    rows.push(menuRow("idle", "Account", "no control key"));
+    return [menuTitle(local), ...rows].join("\n");
+  }
+
+  if (pending) rows.push(menuRow("idle", "Account", "checking\u2026"));
+  else if (!live || live.account === "unavailable") rows.push(menuRow("idle", "Account", "unavailable"));
+  else if (live.account === null) rows.push(menuRow("idle", "Account", "not served here"));
+  else {
+    const [email, scope = ""] = String(live.account).split(" \u00b7 ");
+    rows.push(menuRow("ok", "Account", email, scope));
+  }
+
+  if (pending) rows.push(menuRow("idle", "Fleet", "checking\u2026"));
+  else if (live && live.fleet !== "unavailable") {
+    const [size, ...rest] = String(live.fleet).split(" \u00b7 ");
+    rows.push(menuRow("ok", "Fleet", size, rest.join(" \u00b7 ")));
+  } else rows.push(menuRow("idle", "Fleet", "unavailable"));
+
+  // Armed, the kill switch is the reason every call in the workspace is
+  // failing, and it must not read as another grey line in a table. Clear, it is
+  // the absence of an alarm and takes no row at all — `passcontrol kill` and
+  // `passcontrol status` both still report it in full.
+  if (live && String(live.kill).includes("armed")) {
+    rows.push(menuRow("bad", "Kill", "ARMED", live.kill));
+  }
+
+  return [menuTitle(local), ...rows].join("\n");
+}
+
+async function chooseMenuOption(question, options) {
+  console.log(`\n${heading(question)}`);
+  options.forEach((option, index) => console.log(`  ${index + 1}. ${option.label}`));
+  const answer = await promptLine("Choose a number, or q to cancel: ", "q");
+  if (String(answer).toLowerCase() === "q") return null;
+  const index = Number(answer) - 1;
+  return Number.isInteger(index) && options[index] ? options[index] : null;
+}
+
+async function eligibleAgent(status) {
+  const agents = await api("GET", controlPath("/agents", { status, limit: 100 }), undefined, { timeoutMs: 1200 });
+  if (!Array.isArray(agents) || agents.length === 0) {
+    step(`No ${status} agents are eligible.`);
+    return null;
+  }
+  return chooseMenuOption(
+    status === "active" ? "Suspend an active agent" : "Resume a suspended agent",
+    agents.map((agent) => ({ value: agent.id, label: `${safeHealthText(agent.name, "unnamed")} · ${String(agent.id).slice(0, 8)}…` }))
+  );
+}
+
+async function guideMenuChoice(chosen) {
+  switch (chosen.guide) {
+    case "integration": {
+      const picked = await chooseMenuOption("Preview an integration", INTEGRATIONS.map((value) => ({ value, label: value })));
+      return picked ? integrationPreviewArgv(picked.value) : null; // Preview only: never append --write.
+    }
+    case "logs": {
+      const agents = await api("GET", "/agents?limit=100", undefined, { timeoutMs: 1200 });
+      const agent = await chooseMenuOption("Logs: agent", [
+        { value: "", label: "All agents" },
+        ...(Array.isArray(agents) ? agents.map((row) => ({ value: row.id, label: `${safeHealthText(row.name, "unnamed")} · ${String(row.id).slice(0, 8)}…` })) : []),
+      ]);
+      if (!agent) return null;
+      const callClass = await chooseMenuOption("Logs: call class", ["all", "inference", "housekeeping"].map((value) => ({ value, label: value })));
+      if (!callClass) return null;
+      const status = await promptLine("Optional status filter (Enter for all): ", "");
+      const limit = await chooseMenuOption("Logs: limit", [20, 50, 100].map((value) => ({ value, label: String(value) })));
+      if (!limit) return null;
+      return logsArgv({ agentId: agent.value, callClass: callClass.value, status, limit: limit.value });
+    }
+    case "verify-receipt":
+    case "verify-token": {
+      const type = chosen.guide === "verify-token" ? "token" : "receipt";
+      const artifact = await promptLine(`${type === "token" ? "Token" : "Receipt"}: `, "");
+      if (!artifact) return null;
+      const issuer = await promptLine("Trusted issuer (https origin): ", process.env.PASSCONTROL_ISSUER || "");
+      if (!issuer) return null;
+      const audience = type === "token" ? await promptLine("Expected token audience: ", "") : "";
+      if (type === "token" && !audience) return null;
+      return verificationArgv({ type, artifact, issuer, audience });
+    }
+    case "suspend":
+    case "resume": {
+      const suspend = chosen.guide === "suspend";
+      const picked = await eligibleAgent(suspend ? "active" : "suspended");
+      if (!picked) return null;
+      const confirmed = await confirmYes(`${suspend ? "Suspend" : "Resume"} ${picked.label}? [y/N] `, { default: false });
+      return confirmed ? agentStateArgv({ suspend, id: picked.value }) : null;
+    }
+    case "kill": {
+      const state = await api("GET", "/kill-switch", undefined, { timeoutMs: 1200 });
+      if (state.armed) {
+        const confirmed = await confirmYes("Disable the tenant kill switch? [y/N] ", { default: false });
+        return killSwitchArgv({ armed: true, confirmed });
+      }
+      const typed = await promptLine("Type ARM to enable the tenant kill switch: ", "");
+      return killSwitchArgv({ armed: false, typed });
+    }
+    case "key-migrate": {
+      const confirmed = await confirmYes("Move the file key into the OS credential store? [y/N] ", { default: false });
+      return confirmed ? ["key", "migrate"] : null;
+    }
+    default:
+      return [...chosen.run];
+  }
+}
+
+async function pauseForSettings() {
+  const answer = await promptLine("\nPress Enter to return to Settings, or q to quit: ", "");
+  return String(answer).toLowerCase() !== "q";
+}
+
+/** Drive one in-memory settings session; no arguments, artifacts, or secrets are retained. */
+/**
+ * What this machine can actually do, for the groups that ask.
+ *
+ * `localStack` is true when a PassControl checkout resolves — the surrounding
+ * repo, `PASSCONTROL_APP_ROOT`, or a remembered one. An install from npm has
+ * none of those, and on that machine the Local stack commands would all fail
+ * and `setup` would be an unsolicited invitation to run the server yourself.
+ *
+ * A THROW counts as true, not false. `resolveAppRootSource` only throws when
+ * `PASSCONTROL_APP_ROOT` is set to something that is not a checkout — which is
+ * an operator who has deliberately pointed at a local deployment and got the
+ * path wrong. Hiding the group would take away `doctor`'s neighbours from
+ * exactly the person trying to fix it. Absence of a checkout is the signal;
+ * a broken pointer is a self-hoster with a typo.
+ */
+function menuCapabilities() {
+  try {
+    return { localStack: resolveAppRootSource() !== null };
+  } catch {
+    return { localStack: true };
+  }
+}
+
+async function settingsCommand() {
+  const local = menuLocalStatus();
+  const staticHeader = menuHeader(local, false);
+  const capabilities = menuCapabilities();
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    printStatic((text) => process.stdout.write(text), {
+      header: staticHeader,
+      groups: availableGroups(capabilities),
+    });
+    return;
+  }
+
+  let recentIds = [];
+  for (;;) {
+    const chosen = await browse({
+      header: (remote) => menuHeader(local, remote),
+      context: local.current,
+      recentIds,
+      status: menuRemoteStatus(),
+      capabilities,
+    });
+    if (!chosen) return;
+
+    let argv;
+    if (chosen.guide) {
+      // A guide only GATHERS input — its first act is a control-plane read, and
+      // nothing has been written when that read fails. So the failure costs the
+      // answer, not the session. Without this the error escapes settingsCommand
+      // entirely and main()'s top-level catch calls process.exit(1) from inside
+      // the menu: picking "Governed call logs" with the gateway down ended the
+      // whole session with a bare "fetch failed". Unlike the run below, this
+      // catch is NOT gated on returnToMenu — no command has run yet, so there is
+      // no half-finished write for the session to end on.
+      try {
+        argv = await guideMenuChoice(chosen);
+      } catch (error) {
+        fail(error.message);
+        if (!(await pauseForSettings())) return;
+        continue;
+      }
+    } else if (chosen.needsArgs) {
+      console.log(`\n  ${heading("Command template — nothing was run:")}\n\n    passcontrol ${chosen.detail}\n`);
+      if (!(await pauseForSettings())) return;
+      continue;
+    } else argv = [...chosen.run];
+    if (!argv) continue;
+
+    console.log(`\n  ${heading("Running:")} passcontrol ${argv.join(" ")}\n`);
+    try {
+      await main(argv, { skipUpdate: true });
+    } catch (error) {
+      if (!chosen.returnToMenu) throw error;
+      fail(error.message);
+    }
+    recentIds = updateRecents(recentIds, chosen);
+    if (!chosen.returnToMenu || !(await pauseForSettings())) return;
+  }
+}
+
+async function main(argv = process.argv.slice(2), runtime = {}) {
+  const { opts, rest } = parseArgv(argv);
   const [command, ...commandRest] = rest;
 
   // Started here and awaited at the very end, so the registry lookup overlaps
@@ -2388,7 +3008,7 @@ async function main() {
   // it can never turn a registry outage into a slow `passcontrol call`.
   // .catch() rather than try/catch: an unhandled rejection from a background
   // nicety must not take down a command that already did its job.
-  const updateNotice = checkForUpdate({
+  const updateNotice = runtime.skipUpdate ? Promise.resolve(null) : checkForUpdate({
     current: CLI_VERSION,
     json: Boolean(opts.json),
   }).catch(() => null);
@@ -2408,7 +3028,23 @@ async function main() {
     return;
   }
 
+  // Bare `passcontrol` opens the browser for a human at a terminal, and keeps
+  // printing status for everything else. The TTY guard is what makes this safe
+  // to change: scripts, CI and `cli/mcp/gateway.mjs` all reach the old
+  // behaviour, because none of them is a terminal. `--json` and `--no-network`
+  // are explicit requests for the status output and win over the menu.
+  if (command === undefined && !opts.json && !opts.noNetwork && process.stdin.isTTY && process.stdout.isTTY) {
+    await settingsCommand();
+    await announceUpdate();
+    return;
+  }
+
   switch (command) {
+    case "settings":
+    case "menu": {
+      await settingsCommand();
+      break;
+    }
     case undefined:
     case "status":
       await printCockpit({ noNetwork: Boolean(opts.noNetwork), json: Boolean(opts.json) });
@@ -2489,6 +3125,9 @@ async function main() {
     case "logs":
       await logsCommand(opts);
       break;
+    case "statements":
+      await statementsCommand(opts);
+      break;
     case "kill":
       await killCommand(commandRest);
       break;
@@ -2503,6 +3142,9 @@ async function main() {
       break;
     case "keygen":
       await keygenCommand(commandRest);
+      break;
+    case "key":
+      await keyCommand(commandRest, opts);
       break;
     case "verify":
       await verifyCommand(commandRest, opts);

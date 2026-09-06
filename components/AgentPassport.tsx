@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import type { AgentPassportView } from "@/app/dashboard/agents/[id]/passport-data";
-import type { LogEntry } from "@/lib/log";
+import type { AuthMethod, LogEntry } from "@/lib/log";
 import { createPassportSigil, passportIdForDisplay } from "@/lib/passport-art";
 import { ScopeEditor } from "./ScopeEditor";
 import { FallbackEditor } from "./FallbackEditor";
@@ -39,6 +39,17 @@ const ACCENT_INK = {
   sky: "#4ab7f3",
 } as const;
 
+// Export-safe counterparts of --pc-petal-dark / --pc-petal-mid / --pc-brand.
+// Green is the existing token triple byte-for-byte. The other rows hold the
+// petals' saturation and lightness while moving only their hue to the accent.
+const PETALS = {
+  sky: {
+    dark: "#337fa9",
+    mid: "#3b95c6",
+    light: "#4ab7f3",
+  },
+} as const;
+
 export type PassportAccent = keyof typeof NEUTRALS;
 
 const DEFAULT_ACCENT: PassportAccent = "sky";
@@ -48,6 +59,7 @@ function paletteFor(accent: PassportAccent = DEFAULT_ACCENT) {
   return {
     ...NEUTRALS[accent],
     signal: ACCENT_INK[accent],
+    petals: PETALS[accent],
     warning: "#f59e0b",
     danger: "#ef4444",
     info: "#22d3ee",
@@ -127,7 +139,11 @@ const VERDICT_LABELS: Record<LogEntry["status"], string> = {
   blocked_policy: "Policy rule",
   provider_exhausted: "Provider out of credit",
   no_provider_key: "No provider key stored",
+  endpoint_unavailable: "Endpoint lookup failed",
   upstream_error: "Provider error",
+  usage_unknown: "Sent, usage unconfirmed",
+  blocked_budget_state: "Budget state unavailable",
+  dispatch_unavailable: "Not sent, dispatch unconfirmed",
 };
 
 function verdictLabel(status: string): string {
@@ -135,6 +151,14 @@ function verdictLabel(status: string): string {
     VERDICT_LABELS[status as LogEntry["status"]] ??
     `Unknown · ${cleanedText(status, 28) || "unlabelled"}`
   );
+}
+
+function recordedAuthenticationLabel(method: AuthMethod): string {
+  if (method === "passport_proof_per_request") {
+    return "Passport proof verified for this request";
+  }
+  if (method === "passport") return "Passport visa accepted as a bearer credential";
+  return "Direct Agent Key accepted as a bearer credential";
 }
 
 function slug(value: string): string {
@@ -282,11 +306,21 @@ function PassportSvg({
         strokeWidth="2"
       />
       <path d="M36 96H924" stroke={PALETTE.line} strokeWidth="2" />
-      <circle cx="62" cy="54" r="18" fill={PALETTE.signal} opacity="0.14" />
-      <path
-        d="M62 69C59 60 49 51 49 40C49 33 54 29 58 32C62 35 62 48 62 56C63 47 64 35 68 32C72 29 77 33 75 41C73 51 65 61 62 69Z"
-        fill={PALETTE.signal}
-      />
+      <circle cx="62" cy="54" r="18" fill={PALETTE.petals.light} opacity="0.14" />
+      <g transform="translate(44.6 36) scale(0.6)">
+        <path
+          d="M29 57C25 47 12 36 10 20 8 9 14 3 19 6c6 4 7 20 9 33 1 8 1 13 1 18Z"
+          fill={PALETTE.petals.dark}
+        />
+        <path
+          d="M29 57c-2-12-5-29-3-43 1-8 4-13 7-12 4 1 5 8 3 19-2 13-5 26-7 36Z"
+          fill={PALETTE.petals.light}
+        />
+        <path
+          d="M29 57c4-10 14-21 19-37 3-10-2-17-7-14-6 4-8 20-10 33-1 8-2 13-2 18Z"
+          fill={PALETTE.petals.mid}
+        />
+      </g>
       <text
         x="92"
         y="50"
@@ -313,7 +347,7 @@ function PassportSvg({
         x="902"
         y="59"
         textAnchor="end"
-        fill={PALETTE.signal}
+        fill={PALETTE.petals.light}
         fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
         fontSize="16"
         fontWeight="800"
@@ -670,7 +704,7 @@ function PassportSvg({
       <text
         x="53"
         y="893"
-        fill={PALETTE.signal}
+        fill={PALETTE.petals.light}
         fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
         fontSize="15"
         fontWeight="700"
@@ -818,6 +852,26 @@ function MobilePassportCard({
     </div>
   );
 }
+
+/**
+ * Worded off the MODE, never off "is a proof being sent" — the same rule the
+ * owner binding follows for tier over kind. `observe` is the one that has to be
+ * unambiguous: a proof is being checked and it is deciding nothing, so a reader
+ * must not come away thinking the agent is protected.
+ */
+const ASSURANCE_HEADLINE: Record<string, string> = {
+  off: "Passport visa bearer access",
+  observe: "Passport proof observed, not required",
+  required: "Passport proof required on every request",
+};
+
+const ASSURANCE_DETAIL: Record<string, string> = {
+  off: "Future passport calls need the work-visa only; no fresh passport signature is required per request.",
+  observe:
+    "Proofs are being checked and recorded so you can see whether requiring them would break anything. Nothing is refused: a call with a missing or bad proof still goes through, and its receipt still says bearer access.",
+  required:
+    "Future passport calls must prove possession of this passport\u2019s private key, bound to the exact visa, method, and path.",
+};
 
 export function AgentPassport({
   passport,
@@ -1030,6 +1084,87 @@ export function AgentPassport({
 
       <section
         className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6"
+        aria-labelledby="authentication-assurance-heading"
+      >
+        <div>
+          <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+            Authentication assurance
+          </p>
+          <h2 id="authentication-assurance-heading" className="mt-2 text-lg font-bold">
+            Configured requirement
+          </h2>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="rounded-lg border border-border bg-secondary/30 p-4">
+            <p className="m-0 text-sm font-bold text-foreground" data-assurance={
+              !passport.agent.passportId ? "direct_key" : passport.agent.senderConstraintMode
+            }>
+              {!passport.agent.passportId
+                ? "Direct Agent Key bearer access"
+                : ASSURANCE_HEADLINE[passport.agent.senderConstraintMode]}
+            </p>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">
+              {!passport.agent.passportId
+                ? "Direct Agent Keys remain bearer credentials and do not use passport proof."
+                : ASSURANCE_DETAIL[passport.agent.senderConstraintMode]}
+            </p>
+          </div>
+          <div className="rounded-lg border border-border bg-secondary/30 p-4">
+            <p className="m-0 text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">
+              Last recorded enforcement
+            </p>
+            {passport.lastRecordedAuthentication ? (
+              <>
+                <p className="mt-2 text-sm font-bold text-foreground">
+                  {recordedAuthenticationLabel(passport.lastRecordedAuthentication.method)}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {format(passport.lastRecordedAuthentication.recordedAt)}
+                </p>
+              </>
+            ) : (
+              <p className="mt-2 text-sm text-muted-foreground">
+                No call with a recorded authentication method yet.
+              </p>
+            )}
+          </div>
+        </div>
+        <p className="m-0 text-xs leading-5 text-muted-foreground">
+          Configuration states what the gateway should require. Only a signed receipt proves what the gateway actually enforced for a particular call.
+        </p>
+      </section>
+
+      {passport.sourceSignals.length ? (
+        <section
+          className="grid gap-3 rounded-xl border border-warning/40 bg-warning/10 p-4 sm:p-6"
+          aria-labelledby="passport-source-observation-heading"
+        >
+          <div>
+            <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-warning">
+              Observation only
+            </p>
+            <h2 id="passport-source-observation-heading" className="mt-2 text-lg font-bold text-foreground">
+              Possible passport misuse observed
+            </h2>
+          </div>
+          <ul className="m-0 grid gap-2 pl-5 text-sm leading-6 text-foreground">
+            {passport.sourceSignals.map((signal, index) => (
+              <li key={`${signal.observedAt}-${signal.strength}-${index}`}>
+                {signal.strength === "strong"
+                  ? `Overlapping passport use was observed from ${signal.countries.join(" and ")}. Replicas normally share an egress country, so review this activity.`
+                  : `A new passport source appeared in ${signal.countries.join(" and ")} after at least seven days of stable use.`}
+                {` ${format(signal.observedAt)}.`}
+              </li>
+            ))}
+          </ul>
+          <p className="m-0 text-xs leading-5 text-muted-foreground">
+            This detector did not block or suspend the agent. Confirm the activity before taking action.
+          </p>
+        </section>
+      ) : null}
+
+      <section
+        className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6"
         aria-labelledby="passport-visas-heading"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1232,6 +1367,7 @@ export function AgentPassport({
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {format(entry.createdAt)}
+                    {entry.authMethod ? ` · ${recordedAuthenticationLabel(entry.authMethod)}` : ""}
                   </p>
                 </div>
                 <span

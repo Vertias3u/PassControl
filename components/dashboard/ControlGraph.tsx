@@ -28,6 +28,9 @@ import {
 } from "d3-force";
 import { browserClient } from "@/lib/supabase/client";
 import type { DepartureRow } from "@/lib/departures";
+import { authenticationProofLabel } from "@/lib/first-call-activation";
+// The shared label retains "Passport visa" for bearer rows and names the
+// stronger proof-per-request value separately; this graph never infers either.
 import {
   appendPresentationEventQueue,
   eventFromStoredRow,
@@ -681,7 +684,7 @@ export function ControlGraph({
                   <strong>{presentationOutcome.label}</strong>
                   <span>{shown.agents[shownActiveEvent.row.agent_id ?? ""]?.name ?? "Historical identity"}</span>
                   <p>{shownActiveEvent.row.provider ?? "unknown provider"}{shownActiveEvent.row.model ? ` / ${shownActiveEvent.row.model}` : ""}</p>
-                  <small>{shownActiveEvent.row.auth_method === "passport" ? "Passport visa" : shownActiveEvent.row.auth_method === "direct_key" ? "Direct Agent Key" : "Stored authentication method unavailable"}</small>
+                  <small>{authenticationProofLabel(shownActiveEvent.row.auth_method)}</small>
                   {shownActiveEvent.receiptRecorded ? <em>Receipt returned</em> : null}
                 </>
               ) : (

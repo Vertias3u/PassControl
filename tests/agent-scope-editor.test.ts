@@ -88,6 +88,39 @@ describe("scope validation the editor must not be able to bypass", () => {
     expect(validateAgentUpdate({ scopes: [] })).toEqual({ allowed_scopes: [] });
   });
 
+  // The editor's chooser and the validator have to agree in BOTH directions.
+  // They disagreed once: the validator accepted the keyless demo provider that
+  // `passcontrol login` puts on every agent it creates, and the chooser did not
+  // offer it — so a saved demo row rendered as the first real provider in the
+  // list, and the control tower named a provider the agent could not call.
+  // Reading the component's source keeps this honest without a DOM: the option
+  // list must be generated from the same module the validator uses.
+  it("offers exactly the providers the validator accepts, generated not typed", async () => {
+    const source = readFileSync(resolve(process.cwd(), "components/ScopeEditor.tsx"), "utf8");
+    expect(source).toMatch(/SCOPE_PROVIDERS\.map\(/u);
+    const { SCOPE_PROVIDERS } = await import("@/lib/providers");
+    for (const provider of SCOPE_PROVIDERS) {
+      expect(
+        validateAgentUpdate({ scopes: [{ provider, models: ["*"] }] }).allowed_scopes
+      ).toEqual([{ provider, models: ["*"] }]);
+    }
+    // And no literal provider list in the markup, which is how it drifted.
+    expect(source).not.toMatch(/"(openai|anthropic)"\s*,\s*"/u);
+  });
+
+  it("saves a mixed real + keyless agent unchanged, the shape login creates", () => {
+    const patch = validateAgentUpdate({
+      scopes: [
+        { provider: "demo", models: ["*"] },
+        { provider: "anthropic", models: ["claude-*"] },
+      ],
+    });
+    expect(patch.allowed_scopes).toEqual([
+      { provider: "demo", models: ["*"] },
+      { provider: "anthropic", models: ["claude-*"] },
+    ]);
+  });
+
   it("preserves multiple provider entries", () => {
     // The issuance modal only ever writes one entry; an editor built on that
     // assumption would drop the second on save.

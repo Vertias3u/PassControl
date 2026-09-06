@@ -71,6 +71,13 @@ describe("ControlClient — request shaping", () => {
     expect(JSON.parse(calls[0]!.body!)).toEqual({ armed: true });
     expect(calls[0]!.headers.get("idempotency-key")).toBe("k1");
   });
+
+  it("reads the authenticated account without accepting an account id", async () => {
+    next = { status: 200, body: { data: { email: "owner@example.test", control_key_scope: "read" } } };
+    const out = await pc().account.get();
+    expect(out).toEqual({ email: "owner@example.test", control_key_scope: "read" });
+    expect(calls[0]!).toMatchObject({ method: "GET", url: "https://gw.example.com/api/control/v1/account" });
+  });
 });
 
 describe("ControlClient — errors", () => {

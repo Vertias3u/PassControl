@@ -22,6 +22,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  PASSPORT_KEY_STORAGE_OS,
+  createPassportCredentialStore,
+} from "./passport-key-store.mjs";
+import {
   CONFIG_FILE,
   config,
   configSources,
@@ -50,9 +54,16 @@ import {
 export function credentialFile(opts = {}, { sources = configSources, cwd = process.cwd() } = {}) {
   if (opts.project) return path.join(cwd, CONFIG_FILE);
   if (opts.global) return globalConfigPath();
+  // A tier 1 machine holds its passport in the OS credential store, so its
+  // config file has an EMPTY PASSPORT_SECRET and a PASSPORT_KEY_STORAGE marker
+  // instead. Matching only on the secret makes `logout` answer "nothing to
+  // clear" on precisely the machines that still hold a key — the failure this
+  // function's own docblock exists to prevent, arriving through the other door.
   const holder = [...sources]
     .reverse()
-    .find((source) => String(source?.values?.PASSPORT_SECRET ?? "").trim());
+    .find((source) =>
+      String(source?.values?.PASSPORT_SECRET ?? "").trim() ||
+      String(source?.values?.PASSPORT_KEY_STORAGE ?? "").trim());
   return holder?.path ?? null;
 }
 
@@ -99,7 +110,14 @@ export async function logoutCommand(opts = {}, deps = {}) {
   // never asked for and cannot easily read. Answering "no" to a destructive
   // prompt should mean nothing happened, so nothing has yet.
   if (!opts.yes) {
-    const holdsPassport = /^PASSPORT_SECRET=(.+)$/mu.exec(fs.readFileSync(target, "utf8"))?.[1]?.trim();
+    // Tier 1 moved the key OUT of this file, so matching only PASSPORT_SECRET
+    // would silently stop asking for exactly the passports that are hardest to
+    // lose — the migrated ones. The marker is the tier 1 tell, and it stands in
+    // for a secret this file no longer contains.
+    const contents = fs.readFileSync(target, "utf8");
+    const holdsPassport =
+      /^PASSPORT_SECRET=(.+)$/mu.exec(contents)?.[1]?.trim() ||
+      /^PASSPORT_KEY_STORAGE=(.+)$/mu.exec(contents)?.[1]?.trim();
     if (holdsPassport) {
       warn(`${target} holds a passport secret, and PassControl has no copy of it.`);
       step("Clearing it is permanent — anything still using that passport keeps working, but");
@@ -186,7 +204,33 @@ export async function logoutCommand(opts = {}, deps = {}) {
   // are not credentials and the operator did not ask to lose them. `mergeConfigFile`
   // spreads over what is already there, and writeConfigFile emits `?? ""` for every
   // key, so an empty string is the supported way to clear one.
-  mergeConfigFile(target, { PASSPORT_ID: "", PASSPORT_SECRET: "", PASSCONTROL_API_KEY: "" });
+  // The OS store is cleared BEFORE the file, because the file holds the
+  // PASSPORT_ID that addresses the item; blanking first orphans a private key
+  // that nothing can then name. A failure here is reported rather than
+  // swallowed: "cleared the credentials" must not be printed over a key that is
+  // still sitting in the operator's Keychain.
+  let osKeyCleared = null;
+  if (config.passportStorageMarker === PASSPORT_KEY_STORAGE_OS && config.passportId) {
+    // Injectable for the same reason the fetch and confirm seams exist: a test
+    // must be able to assert this deletion without reaching into the developer's
+    // real Keychain. tests/passport-key-store-os.test.ts covers the real one.
+    const store = deps.credentialStore ?? createPassportCredentialStore();
+    osKeyCleared = store.delete(config.passportId);
+    if (osKeyCleared.ok) {
+      ok(`removed the passport key from the ${store.name}`);
+    } else {
+      warnings.push(
+        `The passport key is STILL in the ${store.name}. Remove it there before trusting this machine as logged out.`
+      );
+    }
+  }
+
+  mergeConfigFile(target, {
+    PASSPORT_ID: "",
+    PASSPORT_SECRET: "",
+    PASSPORT_KEY_STORAGE: "",
+    PASSCONTROL_API_KEY: "",
+  });
   ok(`cleared the credentials in ${target}`);
 
   for (const line of warnings) warn(line);
@@ -195,5 +239,5 @@ export async function logoutCommand(opts = {}, deps = {}) {
   }
   step("Log back in any time with `passcontrol login`.");
 
-  return { target, keyRevoked, agentRevoked, agent, warnings };
+  return { target, keyRevoked, agentRevoked, agent, warnings, osKeyCleared };
 }

@@ -41,6 +41,11 @@ export interface WriteOpts {
   idempotencyKey?: string;
 }
 
+export interface ControlAccount {
+  email: string | null;
+  control_key_scope: "read" | "write";
+}
+
 type Query = Record<string, string | number | undefined>;
 
 export class ControlClient {
@@ -106,9 +111,9 @@ export class ControlClient {
       this.req<any[]>("GET", "/agents", { query: params }),
     get: (id: string) => this.req<any>("GET", `/agents/${encodeURIComponent(id)}`),
     create: (
-      body: { name: string; passportPubkey: string; scopes: { provider: string; models: string[] }[]; budget_tokens?: number | null; budget_cents?: number | null },
+      body: { name: string; passportPubkey: string; scopes: { provider: string; models: string[] }[]; budget_tokens?: number | null; budget_cents?: number | null; expiresAt?: string | null },
       opts?: WriteOpts
-    ) => this.req<{ id: string; name: string }>("POST", "/agents", { body, idempotencyKey: opts?.idempotencyKey }),
+    ) => this.req<{ id: string; name: string; expires_at: string | null }>("POST", "/agents", { body, idempotencyKey: opts?.idempotencyKey }),
     update: (
       id: string,
       patch: { name?: string; scopes?: { provider: string; models: string[] }[]; budget_tokens?: number | null; budget_cents?: number | null },
@@ -120,6 +125,10 @@ export class ControlClient {
       this.req<{ id: string; status: string }>("POST", `/agents/${encodeURIComponent(id)}/resume`, { idempotencyKey: opts?.idempotencyKey }),
     revoke: (id: string, opts?: WriteOpts) =>
       this.req<{ id: string; status: string }>("DELETE", `/agents/${encodeURIComponent(id)}`, { idempotencyKey: opts?.idempotencyKey }),
+  };
+
+  readonly account = {
+    get: () => this.req<ControlAccount>("GET", "/account"),
   };
 
   readonly logs = {
@@ -139,6 +148,39 @@ export class ControlClient {
 
   readonly audit = {
     list: (params?: { limit?: number }) => this.req<any[]>("GET", "/audit", { query: params }),
+  };
+
+  readonly statements = {
+    /**
+     * The chain of signed spend statements, newest first. Metadata only — fetch
+     * `get(seq)` for the signed artifact, which is ~600 bytes each.
+     *
+     * `row_count` may exceed `covered_count`, and `unpriced_count` /
+     * `unknown_pricing_count` are not decoration: they are the statement's own
+     * account of calls it could not cover or could not price. Rendering only
+     * `covered_count` and `cost_microcents` converts "we cannot say" into "zero".
+     */
+    list: (params?: { limit?: number }) => this.req<any[]>("GET", "/statements", { query: params }),
+
+    get: (seq: number) => this.req<any>("GET", `/statements/${encodeURIComponent(String(seq))}`),
+
+    /**
+     * One statement plus proof that `receiptId` is among the receipts it
+     * committed to. Pass the returned `inclusion.proof` and `inclusion.root` to
+     * `verifyInclusion` from the verifier.
+     *
+     * Three outcomes worth handling separately, because they are not all errors:
+     * a 404 `receipt_not_in_statement` means that call is simply not in this
+     * window; a 200 carrying `drift: "statement_window_grew"` means rows arrived
+     * after the window was attested, which is benign and expected; and a **409**
+     * (`statement_receipts_missing` / `statement_receipts_altered`) means the
+     * record no longer matches what was signed. The last is the finding this
+     * whole mechanism exists to surface — do not swallow it as a generic error.
+     */
+    inclusion: (seq: number, receiptId: string) =>
+      this.req<any>("GET", `/statements/${encodeURIComponent(String(seq))}`, {
+        query: { receipt_id: receiptId },
+      }),
   };
 
   readonly spend = {

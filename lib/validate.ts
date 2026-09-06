@@ -2,7 +2,7 @@
 // the server regardless of any client-side checks. Each validator throws an
 // Error with a safe, generic message (no internals) on bad input; callers let it
 // surface to the action's error boundary.
-import { isProvider } from "./providers";
+import { isProvider, isScopeProvider } from "./providers";
 import {
   MAX_FALLBACKS,
   MAX_FALLBACK_MODEL_LEN,
@@ -86,7 +86,9 @@ export function validateScopes(raw: unknown): { provider: string; models: string
   return raw.map((s: unknown) => {
     const entry = (s ?? {}) as { provider?: unknown; models?: unknown };
     const provider = str(entry.provider).trim();
-    if (!isProvider(provider)) throw new Error("Unknown provider in scope.");
+    // Scopes admit the keyless demo provider; keys and fallbacks below do not.
+    // See SCOPE_ONLY_PROVIDERS for why the asymmetry is the point.
+    if (!isScopeProvider(provider)) throw new Error("Unknown provider in scope.");
     if (!Array.isArray(entry.models) || entry.models.length > LIMITS.models) {
       throw new Error("Invalid models in scope.");
     }

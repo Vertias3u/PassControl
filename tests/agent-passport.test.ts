@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   buildAgentPassportView,
   requireAgentPassport,
@@ -43,6 +45,7 @@ const agentA: AgentPassportRow & { user_id: string } = {
   },
   created_at: "2026-07-20T08:00:00.000Z",
   last_seen_at: "2026-07-28T10:30:00.000Z",
+  sender_constraint_mode: "off",
 };
 
 const agentB: AgentPassportRow & { user_id: string } = {
@@ -61,6 +64,7 @@ const logs: Array<PassportLogRow & { user_id: string; agent_id: string }> = [
     provider: "openai",
     model: "gpt-4.1-mini",
     status: "ok",
+    auth_method: "passport",
     created_at: "2026-07-21T08:00:00.000Z",
   },
   {
@@ -70,6 +74,7 @@ const logs: Array<PassportLogRow & { user_id: string; agent_id: string }> = [
     provider: "openai",
     model: "gpt-4.1-mini",
     status: "ok",
+    auth_method: "passport_proof_per_request",
     created_at: "2026-07-22T08:00:00.000Z",
   },
   {
@@ -79,6 +84,7 @@ const logs: Array<PassportLogRow & { user_id: string; agent_id: string }> = [
     provider: "deepseek",
     model: "deepseek-chat",
     status: "blocked_scope",
+    auth_method: "passport",
     created_at: "2026-07-23T08:00:00.000Z",
   },
   {
@@ -88,6 +94,7 @@ const logs: Array<PassportLogRow & { user_id: string; agent_id: string }> = [
     provider: "anthropic",
     model: "claude-opus-4-6",
     status: "ok",
+    auth_method: "direct_key",
     created_at: "2026-07-24T08:00:00.000Z",
   },
 ];
@@ -236,6 +243,49 @@ describe("Agent Passport tenant boundary", () => {
       expect(call.filters).toContainEqual(["user_id", TENANT_A]);
       expect(call.filters).toContainEqual(["agent_id", AGENT_A]);
     }
+  });
+});
+
+describe("Agent Passport authentication assurance", () => {
+  it("separates the configured requirement from the latest recorded enforcement", () => {
+    const configured = buildAgentPassportView(
+      { ...agentA, sender_constraint_mode: "required" },
+      logs.filter((row) => row.user_id === TENANT_A)
+    );
+
+    expect(configured.agent.senderConstraintMode).toBe("required");
+    expect(configured.recentVerdicts[0]).toMatchObject({
+      id: "log-a-3",
+      authMethod: "passport",
+    });
+    expect(configured.lastRecordedAuthentication).toMatchObject({
+      method: "passport",
+      recordedAt: "2026-07-23T08:00:00.000Z",
+    });
+  });
+
+  it("renders configuration as configuration and calls receipts the per-call proof", () => {
+    const source = readFileSync(
+      join(process.cwd(), "components/AgentPassport.tsx"),
+      "utf8"
+    );
+    expect(source).toContain("Configured requirement");
+    expect(source).toContain("Passport proof required on every request");
+    expect(source).toContain("Last recorded enforcement");
+    expect(source).toContain("Passport proof verified for this request");
+    expect(source).toMatch(/Only a signed receipt proves what the gateway actually enforced/i);
+  });
+
+  it("surfaces source signals as observation without claiming enforcement", () => {
+    const source = readFileSync(
+      join(process.cwd(), "components/AgentPassport.tsx"),
+      "utf8"
+    );
+    expect(source).toContain("Possible passport misuse observed");
+    expect(source).toContain("Overlapping passport use was observed from");
+    expect(source).toContain("Observation only");
+    expect(source).toMatch(/did not block or suspend/i);
+    expect(source).toMatch(/passport\.sourceSignals/);
   });
 });
 

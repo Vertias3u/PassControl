@@ -1,7 +1,7 @@
 // POST /api/control/v1/agents/{id}/rotate — retire this passport's key and
 // install a new one, keeping the agent (write scope).
 //
-// body: { passportPubkey: string, graceSeconds?: number }
+// body: { passportPubkey: string, graceSeconds?: number, expiresAt?: string | null }
 //
 // The gateway never sees the private half, and there is nothing here that could
 // generate one: the caller creates the keypair on its own machine and sends the
@@ -25,7 +25,7 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId, 
   const id = params.id ?? "";
   if (!UUID_RE.test(id)) return errorResponse(400, "invalid_id", requestId);
 
-  let body: { passportPubkey?: unknown; graceSeconds?: unknown };
+  let body: { passportPubkey?: unknown; graceSeconds?: unknown; expiresAt?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -33,7 +33,14 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId, 
   }
 
   const grace = body.graceSeconds === undefined ? DEFAULT_GRACE_S : Number(body.graceSeconds);
-  const r = await rotatePassport(db, userId, id, String(body.passportPubkey ?? ""), grace);
+  const r = await rotatePassport(
+    db,
+    userId,
+    id,
+    String(body.passportPubkey ?? ""),
+    grace,
+    body.expiresAt === undefined ? undefined : body.expiresAt === null ? null : String(body.expiresAt)
+  );
   // The message comes from respond.ts MESSAGES, keyed by code — no library
   // string is reflected into a response.
   if (!r.ok) return errorResponse(r.status, r.code, requestId);
@@ -48,10 +55,12 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId, 
     action: "agent.update",
     targetType: "agent",
     targetId: id,
-    // The NEW public key is recorded — it is public, and an audit row saying a
-    // key changed without saying to what is not much of an audit row. The
-    // retired key is not repeated here; it is already on the row until the
-    // sweep clears it, and this metadata is served by GET /audit.
+    // Both keys are recorded, and both are public. The NEW one because an audit
+    // row saying a key changed without saying to what is not much of an audit
+    // row. The RETIRED one because this row is the only place it survives:
+    // lib/reconcile.ts clears previous_passport_pubkey once the grace window
+    // closes, and the public revocation list is built from this field — a
+    // rotation recorded without it is a dead key no verifier can be told about.
     //
     // From fleet, never from the request: the submitted value is normalized
     // before it is stored, so echoing the request here would record a key that
@@ -61,8 +70,10 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId, 
       via: "api",
       key_id: keyId,
       rotated: true,
+      from: r.value.previousPassportPubkey,
       to: r.value.passportPubkey,
       previous_valid_until: r.value.previousValidUntil,
+      expires_at: r.value.expiresAt,
     },
   });
   return jsonResponse(
@@ -73,6 +84,7 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId, 
         // authenticates instead of being handed its own input back.
         passport_pubkey: r.value.passportPubkey,
         previous_valid_until: r.value.previousValidUntil,
+        expires_at: r.value.expiresAt,
         max_grace_seconds: MAX_ROTATION_GRACE_S,
       },
     },

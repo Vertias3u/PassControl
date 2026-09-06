@@ -13,9 +13,10 @@
 // instead. The receipt is built inline in the writeLog argument list inside
 // reconcile(), and a throw at that point takes out the whole tasks array.
 import { ed25519 } from "@noble/curves/ed25519";
-import { sha256 } from "@noble/hashes/sha256";
+import { base64urlToBytes, bytesToBase64url } from "../encoding";
+import { jwkThumbprint } from "./ed25519";
 
-import { base64urlToBytes, bytesToBase64url, utf8ToBytes } from "../encoding";
+export { jwkThumbprint } from "./ed25519";
 
 const SEED_BYTES = 32;
 
@@ -47,10 +48,6 @@ export interface PublicJwk {
  * it means the operator supplies only a seed and both the current and previous
  * kid fall out of it — and any standard verifier can recompute it.
  */
-export function jwkThumbprint(x: string): string {
-  return bytesToBase64url(sha256(utf8ToBytes(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`)));
-}
-
 export function publicJwk(publicKey: Uint8Array): PublicJwk {
   const x = bytesToBase64url(publicKey);
   return { kty: "OKP", crv: "Ed25519", x, alg: "EdDSA", use: "sig", kid: jwkThumbprint(x) };

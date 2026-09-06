@@ -1,7 +1,7 @@
 "use client";
 
 import { useFormState, useFormStatus } from "react-dom";
-import { PROVIDERS, type ProviderId } from "@/lib/providers";
+import { SCOPE_PROVIDERS, type ScopeProviderId } from "@/lib/providers";
 import type { GateStepResult } from "@/lib/gate";
 import {
   runDecisionTrace,
@@ -98,9 +98,9 @@ export function DecisionTracePanel({
     action,
     undefined
   );
-  const provider = (PROVIDERS as readonly string[]).includes(initialProvider ?? "")
-    ? (initialProvider as ProviderId)
-    : PROVIDERS[0];
+  const provider = (SCOPE_PROVIDERS as readonly string[]).includes(initialProvider ?? "")
+    ? (initialProvider as ScopeProviderId)
+    : SCOPE_PROVIDERS[0];
   const model = initialModel && !initialModel.includes("*") ? initialModel : "";
   const trace = state?.trace;
 
@@ -122,7 +122,7 @@ export function DecisionTracePanel({
         </span>
       </div>
 
-      <form action={formAction} className="mt-5 grid gap-4 md:grid-cols-3" autoComplete="off">
+      <form action={formAction} className="mt-5 grid gap-4 md:grid-cols-4" autoComplete="off">
         <label className="grid gap-1.5 text-sm font-semibold text-foreground">
           Provider
           <select
@@ -130,7 +130,11 @@ export function DecisionTracePanel({
             defaultValue={provider}
             className="h-10 rounded-lg border border-border bg-background px-3 text-sm font-normal"
           >
-            {PROVIDERS.map((candidate) => (
+            {/* SCOPE_PROVIDERS: the gateway governs the keyless demo provider
+                through the same ordered chain, and it is the only call a
+                brand-new agent can make — so it is the first call worth
+                tracing, and the chooser has to be able to name it. */}
+            {SCOPE_PROVIDERS.map((candidate) => (
               <option key={candidate} value={candidate}>
                 {candidate}
               </option>
@@ -148,6 +152,22 @@ export function DecisionTracePanel({
             className="h-10 rounded-lg border border-border bg-background px-3 text-sm font-normal"
           />
         </label>
+        {/* The projection's size, which is the assumption behind its verdict.
+            Blank projects the gateway's own default output allowance, which is
+            exact for a request that names no maximum and optimistic for a
+            larger one — so an operator whose agent sends a bigger max_tokens
+            can ask about the call they actually make. */}
+        <label className="grid gap-1.5 text-sm font-semibold text-foreground">
+          Max output tokens (optional)
+          <input
+            name="max_tokens"
+            type="number"
+            min={1}
+            max={10_000_000}
+            placeholder="1024"
+            className="h-10 rounded-lg border border-border bg-background px-3 text-sm font-normal"
+          />
+        </label>
         <label className="grid gap-1.5 text-sm font-semibold text-foreground">
           Policy time (UTC, optional)
           <input
@@ -156,7 +176,7 @@ export function DecisionTracePanel({
             className="h-10 rounded-lg border border-border bg-background px-3 text-sm font-normal"
           />
         </label>
-        <div className="md:col-span-3">
+        <div className="md:col-span-4">
           <SubmitButton />
         </div>
       </form>

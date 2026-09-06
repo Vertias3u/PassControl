@@ -18,11 +18,30 @@ const k = {
   spent: (agid: string) => `spent:${agid}`,
   reservedCost: (agid: string) => `reserved_cost:${agid}`,
   spentCost: (agid: string) => `spent_cost:${agid}`,
-  reserveMarker: (agid: string, reserveId: string) => `reserve:${agid}:${reserveId}`,
-  reserveCostMarker: (agid: string, reserveId: string) => `reserve_cost:${agid}:${reserveId}`,
   key: (agid: string, provider: string) => `key:${agid}:${provider}`,
-  // `policy2` deliberately, not `policy` — see the cache-shape note below.
-  policy: (uid: string, agid: string) => `policy2:${uid}:${agid}`,
+  // The endpoint a credential is sent to. Its own key rather than a field on the
+  // sealed one above, because it is NOT a secret: it is an address, so it does
+  // not go through lib/crypto/aesgcm.ts and a cache read of it decrypts nothing.
+  endpoint: (agid: string, provider: string) => `endpoint:${agid}:${provider}`,
+  // `policy4` deliberately: the cached row also carries the sender-proof setting
+  // and, since 0055, the agent's budget epoch. A policy2 value has no
+  // sender-proof setting and must not silently disable it for a full cache
+  // window after a deploy.
+  //
+  // 0049 turned the sender-proof setting from a boolean into a three-state mode
+  // and did NOT bump, because lib/state/policy.ts decodes the old shape instead
+  // (`true` -> required, `false` -> off). A bump throws away every tenant's
+  // cached policy; a decode costs two lines. Bump when the old value cannot be
+  // read at all — decode when it can.
+  //
+  // 0055 IS a bump, and the rule above is why. A policy3 value carries no budget
+  // epoch, and the two ways to decode that absence are both wrong: reading it as
+  // "not established" would leave a genuinely established agent unprotected for
+  // a full cache window — exactly the flush this check exists to catch — while
+  // reading it as "unknown, therefore refuse" would deny live traffic for the
+  // same window. There is no third reading, so the old value cannot be read at
+  // all, and it is discarded. The whole cost is 60 seconds of misses on deploy.
+  policy: (uid: string, agid: string) => `policy4:${uid}:${agid}`,
   fallbacks: (uid: string, agid: string) => `fallbacks:${uid}:${agid}`,
   suspended: (agid: string) => `suspended:${agid}`,
   owner: (uid: string) => `owner:${uid}`,
@@ -78,46 +97,23 @@ export async function claimNonce(nonce: string, ttlSeconds = 180): Promise<boole
   return res === "OK";
 }
 
-// ── Budget reserve (atomic) ───────────────────────────────────────────────────
-// Reserve token and cost estimates for agid unless reserved+spent would exceed
-// either cap. cap < 0 means unlimited. The single Lua script keeps both budget
-// dimensions atomic: if either cap fails, both reservations roll back together.
-// Per-request reserve markers let a crashed reconcile self-heal after marker expiry.
-const RESERVE_LUA = `
-local tokenCap = tonumber(ARGV[1])
-local tokenEstimate = tonumber(ARGV[2])
-local costCap = tonumber(ARGV[3])
-local costEstimate = tonumber(ARGV[4])
-local markerTtl = tonumber(ARGV[5])
-local spentTokens = tonumber(redis.call('GET', KEYS[2]) or '0')
-local spentCost = tonumber(redis.call('GET', KEYS[5]) or '0')
-local reservedTokens = redis.call('INCRBY', KEYS[1], tokenEstimate)
-local reservedCost = redis.call('INCRBY', KEYS[4], costEstimate)
-
-local function rollback()
-  redis.call('DECRBY', KEYS[1], tokenEstimate)
-  redis.call('DECRBY', KEYS[4], costEstimate)
-end
-
-if tokenCap >= 0 and (reservedTokens + spentTokens) > tokenCap then
-  rollback()
-  return {-1, 0}
-end
-if costCap >= 0 and (reservedCost + spentCost) > costCap then
-  rollback()
-  return {-2, 0}
-end
-redis.call('SET', KEYS[3], tokenEstimate, 'EX', markerTtl)
-redis.call('SET', KEYS[6], costEstimate, 'EX', markerTtl)
-return {reservedTokens, reservedCost}
-`;
-
-export interface ReserveResult {
-  ok: boolean;
-  reserved?: number;
-  reservedMicrocents?: number;
-  reason?: "tokens" | "cost";
-}
+// ── Budget accounting lives in lib/state/holds.ts ────────────────────────────
+//
+// `reserveBudget`, `reconcileBudget`, `seedSpent`, `getSpent`, `setSpent` and
+// `setReserved` were all removed here, and the last three had ZERO callers
+// anywhere in the tree. They are named in this comment rather than deleted
+// silently because they are exactly the shape this work exists to close: a
+// non-atomic read here, a write there, and a settlement that trusted whatever
+// estimate the caller handed it.
+//
+// The replacement is one Lua eval per transition, idempotent on an attempt id,
+// with the release computed from the estimate the script itself stored. The
+// counters `spent:` / `reserved:` are written ONLY by those scripts and, for
+// `spent:` alone, by the monotone raise the reconcile cron calls. Nothing else
+// may SET them — a plain setter is how a lagged total came to erase live spend.
+//
+// `readBudgetSnapshot` stays: it only READS, and the decision trace needs to
+// show an operator the same four numbers the gate saw.
 
 export interface BudgetSnapshot {
   reservedTokens: number;
@@ -127,9 +123,12 @@ export interface BudgetSnapshot {
 }
 
 /**
- * Read the four counters used by the atomic reserve without changing them.
- * Null spent values matter: the live route would seed those dimensions from
- * its database snapshot before reserving, while an existing Redis value wins.
+ * Read the four counters the atomic hold script compares, without changing them.
+ *
+ * Null spent values are meaningful and are not flattened to 0: they say the
+ * counter does not exist, which for a budgeted agent is the difference between
+ * "has never spent" and "the state was lost". The hot path answers that question
+ * inside the open script; this is for showing a human what was there.
  */
 export async function readBudgetSnapshot(agentId: string): Promise<BudgetSnapshot> {
   const values = await redis().mget<[number | null, number | null, number | null, number | null]>(
@@ -151,96 +150,30 @@ export async function readBudgetSnapshot(agentId: string): Promise<BudgetSnapsho
   };
 }
 
-export async function reserveBudget(params: {
-  agentId: string;
-  reserveId: string;
-  estimate: number;
-  estimateMicrocents?: number;
-  capTokens: number | null; // null = unlimited
-  capMicrocents?: number | null; // null = no cost cap
-  markerTtlSeconds: number;
-}): Promise<ReserveResult> {
-  const tokenCap = params.capTokens == null ? -1 : Math.max(0, Math.floor(params.capTokens));
-  const costCap = params.capMicrocents == null ? -1 : Math.max(0, Math.round(params.capMicrocents));
-  const tokenEstimate = Math.max(0, Math.floor(params.estimate));
-  const costEstimate = Math.max(0, Math.round(params.estimateMicrocents ?? 0));
-  const tracksCost = params.estimateMicrocents != null || params.capMicrocents != null;
-  const res = (await redis().eval(
-    RESERVE_LUA,
-    [
-      k.reserved(params.agentId),
-      k.spent(params.agentId),
-      k.reserveMarker(params.agentId, params.reserveId),
-      k.reservedCost(params.agentId),
-      k.spentCost(params.agentId),
-      k.reserveCostMarker(params.agentId, params.reserveId),
-    ],
-    [
-      String(tokenCap),
-      String(tokenEstimate),
-      String(costCap),
-      String(costEstimate),
-      String(params.markerTtlSeconds),
-    ]
-  )) as number[] | number;
-  const out = Array.isArray(res) ? res.map(Number) : [Number(res), 0];
-  if (out[0] === -1) return { ok: false, reason: "tokens" };
-  if (out[0] === -2) return { ok: false, reason: "cost" };
-  return tracksCost
-    ? { ok: true, reserved: out[0], reservedMicrocents: out[1] ?? 0 }
-    : { ok: true, reserved: out[0] };
-}
-
-// Reconcile after a stream: release the estimate from `reserved`, add the true
-// usage to `spent`, and drop the per-request marker. Done in one pipeline.
-export async function reconcileBudget(params: {
-  agentId: string;
-  reserveId: string;
-  estimate: number;
-  estimateMicrocents?: number;
-  actualTokens: number;
-  actualMicrocents?: number;
-}): Promise<void> {
-  const estimate = Math.max(0, Math.floor(params.estimate));
-  const actualTokens = Math.max(0, Math.floor(params.actualTokens));
-  const estimateMicrocents = Math.max(0, Math.round(params.estimateMicrocents ?? 0));
-  const actualMicrocents = Math.max(0, Math.round(params.actualMicrocents ?? 0));
-  const pipe = redis().pipeline();
-  pipe.decrby(k.reserved(params.agentId), estimate);
-  pipe.decrby(k.reservedCost(params.agentId), estimateMicrocents);
-  pipe.incrby(k.spent(params.agentId), actualTokens);
-  pipe.incrby(k.spentCost(params.agentId), actualMicrocents);
-  pipe.del(k.reserveMarker(params.agentId, params.reserveId));
-  pipe.del(k.reserveCostMarker(params.agentId, params.reserveId));
-  await pipe.exec();
-}
-
-export async function getSpent(agentId: string): Promise<number> {
-  return Number((await redis().get<number>(k.spent(agentId))) ?? 0);
-}
-
-export async function setSpent(agentId: string, tokens: number): Promise<void> {
-  await redis().set(k.spent(agentId), tokens);
-}
-
-export async function setReserved(agentId: string, tokens: number): Promise<void> {
-  await redis().set(k.reserved(agentId), tokens);
-}
-
-/** Seed spent:<agid> from the DB mirror once (NX), so cold instances don't
- *  under-count before the reconcile cron runs. */
-export async function seedSpent(
-  agentId: string,
-  dbSpentTokens: number,
-  dbSpentMicrocents = 0
-): Promise<void> {
-  const pipe = redis().pipeline();
-  pipe.set(k.spent(agentId), dbSpentTokens, { nx: true });
-  pipe.set(k.spentCost(agentId), dbSpentMicrocents, { nx: true });
-  await pipe.exec();
-}
-
 // ── Provider-key cache (stores ciphertext only; see aesgcm.ts) ────────────────
+/**
+ * The custom endpoint for this (agent, provider), or the empty string for "none".
+ *
+ * The empty string is a real cached value and not a miss: most credentials have
+ * no custom endpoint, and caching that absence is what keeps the common case
+ * from paying a database read on every call. `null` means nothing is cached.
+ */
+export async function getCachedEndpoint(
+  agentId: string,
+  provider: string
+): Promise<string | null> {
+  return asCachedString(await redis().get<unknown>(k.endpoint(agentId, provider)));
+}
+
+export async function setCachedEndpoint(
+  agentId: string,
+  provider: string,
+  endpoint: string,
+  ttlSeconds = 60
+): Promise<void> {
+  await redis().set(k.endpoint(agentId, provider), endpoint, { ex: ttlSeconds });
+}
+
 export async function getCachedKey(agentId: string, provider: string): Promise<string | null> {
   return asCachedString(await redis().get<unknown>(k.key(agentId, provider)));
 }
@@ -354,8 +287,17 @@ export async function purgeProviderKeysCache(userId: string): Promise<void> {
   await redis().del(k.providerKeys(userId));
 }
 
+/**
+ * Drop everything cached per (agent, provider) after a credential changes.
+ *
+ * Both the sealed key AND the endpoint, because they are two halves of one
+ * answer — "which credential, sent where". Purging only the key would leave a
+ * changed endpoint deciding for a full TTL, which is the same defect the
+ * sender-proof mode write had: the write lands and the old value keeps being
+ * used. Anything else cached per (agent, provider) belongs in this list too.
+ */
 export async function purgeAgentCaches(agentId: string, providers: string[]): Promise<void> {
-  const keys = providers.map((p) => k.key(agentId, p));
+  const keys = providers.flatMap((p) => [k.key(agentId, p), k.endpoint(agentId, p)]);
   if (keys.length) await redis().del(...keys);
 }
 

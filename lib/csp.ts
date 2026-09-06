@@ -54,24 +54,37 @@ function connectSources(
 /**
  * Routes allowed to fetch a JWK Set from an issuer we cannot know in advance.
  *
- * Exactly one: the public receipt-verification page, which verifies in the
- * BROWSER. That is the point of it — the pasted receipt never reaches the host,
- * and the page runs the same sdk/verify.ts a third party runs on their own
- * machine. To check a signature it must fetch the issuer's published keys, and
- * the issuer is whatever the receipt names, including a self-hosted deployment.
+ * The two public verification pages, both of which verify in the BROWSER. That
+ * is the point of them — the pasted artifact never reaches the host, and the
+ * page runs the same sdk/verify.ts a third party runs on their own machine. To
+ * check a signature it must fetch the issuer's published keys, and the issuer is
+ * whatever the artifact names, including a self-hosted deployment.
+ *
+ * /verify/statement was missing here for its entire first release, and the
+ * failure was well disguised: CSP refused the key fetch, and the page reported
+ * "the issuer's key list could not be reached" — honest copy, wrong cause, and
+ * correctly classified as unchecked rather than forged, so nothing looked
+ * broken. No unit test could see it, because the verifier tests call
+ * verifyStatement directly where there is no CSP. It takes a real browser on one
+ * origin verifying a statement issued by another.
+ *
+ * For statements it is load-bearing rather than convenient. Operating a
+ * statement chain is a hosted capability; a deployment that does not operate one
+ * can ONLY ever be handed a statement from a different issuer. Without this
+ * entry that page verifies nothing there, ever.
  *
  * Why widening here is acceptable where it would not be elsewhere: the page
- * holds no session, no cookie and no secret, and the only data on it is a
- * receipt the visitor pasted themselves. The alternative — proxying the key
+ * holds no session, no cookie and no secret, and the only data on it is an
+ * artifact the visitor pasted themselves. The alternative — proxying the key
  * fetch through our own server — creates an anonymous SSRF surface AND puts our
  * server back in the trust path, where a compromised or lying server could
  * serve a key that makes a forgery verify. Removing exactly that dependency is
- * the reason the page exists.
+ * the reason these pages exist.
  *
  * Matched EXACTLY (see needsExternalJwks). A prefix test would hand the same
  * relaxation to /verify/receipt-anything.
  */
-export const EXTERNAL_JWKS_PATHS: readonly string[] = ["/verify/receipt"];
+export const EXTERNAL_JWKS_PATHS: readonly string[] = ["/verify/receipt", "/verify/statement"];
 
 export function needsExternalJwks(pathname: string): boolean {
   return EXTERNAL_JWKS_PATHS.includes(pathname);
@@ -103,6 +116,9 @@ export const PRERENDERED_PUBLIC_PATHS: readonly string[] = [
   "/learn/ai-agent-identity",
   "/learn/ai-agent-credential-gateway",
   "/learn/verifiable-ai-agent-audit-trails",
+  "/learn/mcp-server-security",
+  "/learn/ai-agent-budget-controls",
+  "/learn/ai-agent-access-revocation",
 ];
 
 export function isPrerenderedPublicPath(pathname: string): boolean {

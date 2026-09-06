@@ -6,9 +6,13 @@ import {
   AGENT_TOKEN_TYP,
   FAILURE_REASONS,
   RECEIPT_TYP,
+  STATEMENT_SUPPORTED_VER,
+  STATEMENT_TYP,
   matchesIssuer,
   verifyAgentToken,
+  verifyInclusion,
   verifyReceipt,
+  verifyStatement,
 } from "../verify.mjs";
 
 const b64url = (bytes) => Buffer.from(bytes).toString("base64url").replace(/=+$/, "");
@@ -207,5 +211,97 @@ describe("the CLI and the SDK agree", () => {
     if (!sdk) return;
     expect(sdk.RECEIPT_TYP).toBe(RECEIPT_TYP);
     expect(sdk.AGENT_TOKEN_TYP).toBe(AGENT_TOKEN_TYP);
+    expect(sdk.STATEMENT_TYP).toBe(STATEMENT_TYP);
+  });
+
+  it("gates statement versions on the same line, and not on the receipt's", async () => {
+    // Asserted, not escaped. The `catch(() => null); if (!sdk) return;` idiom
+    // above it is inherited, and it means a parity case can pass by doing
+    // nothing if the TS module ever stops resolving in a runner — which is
+    // exactly the moment the two implementations would be free to drift. These
+    // newer cases fail loudly instead.
+    const sdk = await import("../../sdk/verify.ts").catch(() => null);
+    expect(sdk, "the SDK verifier must be loadable for parity to mean anything").not.toBeNull();
+    expect(sdk.STATEMENT_SUPPORTED_VER).toBe(STATEMENT_SUPPORTED_VER);
+    // If these ever became the same number by accident, a statement claiming the
+    // receipt's version would pass both verifiers. Pin them apart.
+    expect(sdk.SUPPORTED_VER).not.toBe(STATEMENT_SUPPORTED_VER);
+  });
+
+  it("folds an inclusion proof to the same answer as the SDK", async () => {
+    const sdk = await import("../../sdk/verify.ts").catch(() => null);
+    const merkle = await import("../../lib/merkle.ts").catch(() => null);
+    expect(sdk, "the SDK verifier must be loadable for parity to mean anything").not.toBeNull();
+    expect(merkle, "lib/merkle must be loadable for parity to mean anything").not.toBeNull();
+
+    const receipts = ["receipt-1", "receipt-2", "receipt-3", "receipt-4", "receipt-5"];
+    const leaves = receipts.map((r) => merkle.merkleLeaf(r));
+    const root = merkle.merkleRoot(leaves);
+
+    for (let i = 0; i < receipts.length; i++) {
+      const proof = merkle.merkleProof(leaves, i);
+      expect(verifyInclusion(receipts[i], proof, root), receipts[i]).toBe(true);
+      expect(sdk.verifyInclusion(receipts[i], proof, root)).toBe(true);
+    }
+    // And agree on a denial, which is the answer that gets acted on.
+    const wrong = merkle.merkleProof(leaves, 0);
+    expect(verifyInclusion("receipt-forged", wrong, root)).toBe(false);
+    expect(sdk.verifyInclusion("receipt-forged", wrong, root)).toBe(false);
+  });
+});
+
+describe("verifying a statement from the CLI", () => {
+  const statementClaims = (over = {}) => ({
+    iss: ISSUER,
+    sub: "tenant-1",
+    jti: "statement-1",
+    iat: 1_788_000_000,
+    fmt: "passcontrol.statement",
+    v: 1,
+    seq: 2,
+    per: { from: 1_787_900_000, to: 1_787_990_000 },
+    n: 3,
+    nr: 4,
+    cost: 900,
+    unp: 1,
+    unk: 0,
+    root: "cm9vdA",
+    pst: "cHJldg",
+    by: [{ agid: "agent-1", n: 3, cost: 900 }],
+    ...over,
+  });
+
+  const fetchJwks = async () => ({ ok: true, json: async () => ({ keys: [JWK] }) });
+
+  it("accepts one this issuer signed", async () => {
+    const jws = sign(statementClaims(), STATEMENT_TYP);
+    const result = await verifyStatement(jws, { issuer: ISSUER, fetch: fetchJwks });
+    expect(result.ok).toBe(true);
+    expect(result.claims.seq).toBe(2);
+  });
+
+  it("refuses a receipt presented as a statement", async () => {
+    const jws = sign(statementClaims(), RECEIPT_TYP);
+    const result = await verifyStatement(jws, { issuer: ISSUER, fetch: fetchJwks });
+    expect(result).toEqual({ ok: false, reason: "wrong_type" });
+  });
+
+  it("refuses a statement newer than it understands", async () => {
+    const jws = sign(statementClaims({ v: STATEMENT_SUPPORTED_VER + 1 }), STATEMENT_TYP);
+    const result = await verifyStatement(jws, { issuer: ISSUER, fetch: fetchJwks });
+    expect(result).toEqual({ ok: false, reason: "unsupported_version" });
+  });
+
+  it("does not let the receipt's version line raise the statement's ceiling", async () => {
+    // A receipt v2 exists. A statement claiming v2 must still be refused.
+    const jws = sign(statementClaims({ v: 2 }), STATEMENT_TYP);
+    const result = await verifyStatement(jws, { issuer: ISSUER, fetch: fetchJwks });
+    expect(result).toEqual({ ok: false, reason: "unsupported_version" });
+  });
+
+  it("refuses one from an untrusted issuer", async () => {
+    const jws = sign(statementClaims(), STATEMENT_TYP);
+    const result = await verifyStatement(jws, { issuer: "https://other.example.com", fetch: fetchJwks });
+    expect(result).toEqual({ ok: false, reason: "untrusted_issuer" });
   });
 });

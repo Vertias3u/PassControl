@@ -22,15 +22,18 @@ import { mfaAuthorizedUser } from "@/lib/mfa";
 import { logSecurityEvent } from "@/lib/seclog";
 import { serviceClient } from "@/lib/supabase";
 import { userClient } from "@/lib/supabase/server";
-import { rotatePassport, setPassportExpiry } from "@/lib/fleet";
+import { rotatePassport, setPassportExpiry, setSenderConstraintMode } from "@/lib/fleet";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface PassportActionState {
   ok?: true;
   error?: string;
+  /** Echoed back by a mode change so the control can settle on the real value. */
+  senderConstraintMode?: string;
   /** Set by a successful rotation, so the UI can state the deadline exactly. */
   previousValidUntil?: string;
+  expiresAt?: string | null;
 }
 
 async function actingUser(): Promise<{ userId: string } | { error: string }> {
@@ -96,14 +99,25 @@ export async function rotateAgentPassport(
       fields: "passport_pubkey",
       via: "dashboard",
       rotated: true,
+      // The RETIRED key, and this row is the only place it survives:
+      // lib/reconcile.ts clears previous_passport_pubkey once the grace window
+      // closes. The public revocation list is built from this field, so a
+      // rotation recorded without it is a dead key no verifier can be told
+      // about. Public material, like `to` beside it.
+      from: result.value.previousPassportPubkey,
       to: result.value.passportPubkey,
       previous_valid_until: result.value.previousValidUntil,
+      expires_at: result.value.expiresAt,
     },
   });
   // Do not revalidate here. The browser has generated the replacement private
   // key but cannot commit it to reveal-once React state until this action
   // returns. PassportLifecycle refreshes both views only after acknowledgement.
-  return { ok: true, previousValidUntil: result.value.previousValidUntil };
+  return {
+    ok: true,
+    previousValidUntil: result.value.previousValidUntil,
+    expiresAt: result.value.expiresAt,
+  };
 }
 
 /** Set or clear when this passport stops authenticating. `null` = never. */
@@ -129,4 +143,41 @@ export async function setAgentPassportExpiry(
   });
   revalidatePath(`/dashboard/agents/${agentId}`);
   return { ok: true };
+}
+
+/**
+ * Choose whether this agent's calls must carry a per-request passport proof.
+ *
+ * `observe` is the state that makes the other two decidable: it verifies the
+ * proof exactly as enforcement does and admits the call regardless, so an
+ * operator can watch their real traffic for a fortnight before requiring
+ * anything. See db/migrations/0049.
+ *
+ * MFA-gated like every other action in this file, and for a stronger reason
+ * than most: `required` refuses every call from a client that does not sign,
+ * which is a fleet-wide outage if it is chosen by someone who should not have
+ * been able to choose it.
+ */
+export async function setAgentSenderConstraint(
+  agentId: string,
+  mode: string
+): Promise<PassportActionState> {
+  const acting = await actingUser();
+  if ("error" in acting) return { error: acting.error };
+  if (!UUID_RE.test(agentId)) return { error: "This agent is unavailable." };
+
+  const result = await setSenderConstraintMode(serviceClient(), acting.userId, agentId, mode);
+  if (!result.ok) {
+    return { error: result.message ?? "That setting could not be saved. Please try again." };
+  }
+
+  await recordAdminAction({
+    userId: acting.userId,
+    action: "agent.update",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: { fields: "sender_constraint_mode", via: "dashboard", to: result.value.mode },
+  });
+  revalidatePath(`/dashboard/agents/${agentId}`);
+  return { ok: true, senderConstraintMode: result.value.mode };
 }

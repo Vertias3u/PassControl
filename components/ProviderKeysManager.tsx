@@ -21,6 +21,7 @@ import {
   deleteProviderKey,
   rotateProviderKey,
   setActiveProviderKey,
+  setProviderEndpoint,
 } from "@/app/dashboard/actions";
 import { PROVIDERS } from "@/lib/providers";
 import {
@@ -31,6 +32,7 @@ import {
   EyeOff,
   KeyRound,
   LockKeyhole,
+  Globe,
   Plus,
   RefreshCw,
   Trash2,
@@ -44,6 +46,8 @@ export interface ProviderCredentialSummary {
   created_at: string;
   /** The one the gateway injects for this provider. */
   is_active: boolean;
+  /** Where this credential is sent, or null for the provider's own host. */
+  endpoint_base_url?: string | null;
 }
 
 type Message = { ok: boolean; text: string } | null;
@@ -70,6 +74,8 @@ export function ProviderKeysManager({
   const [adding, setAdding] = useState(false);
   const [rotating, setRotating] = useState<string | null>(null);
   const [rotateKey, setRotateKey] = useState("");
+  const [routing, setRouting] = useState<string | null>(null);
+  const [endpoint, setEndpoint] = useState("");
   const [msg, setMsg] = useState<Message>(null);
   const [pending, start] = useTransition();
 
@@ -191,6 +197,17 @@ export function ProviderKeysManager({
                 <button
                   type="button"
                   className="ghost"
+                  disabled={pending}
+                  onClick={() => {
+                    setEndpoint(credential.endpoint_base_url ?? "");
+                    setRouting(routing === credential.id ? null : credential.id);
+                  }}
+                >
+                  <Globe aria-hidden="true" /> Endpoint
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
                   // The database refuses this for the active credential; disabling
                   // it here states the rule before the operator hits it, rather
                   // than letting a deliberate refusal read as a failure.
@@ -210,6 +227,58 @@ export function ProviderKeysManager({
                   <Trash2 aria-hidden="true" /> Delete
                 </button>
               </div>
+
+              {/* Where this credential is SENT, which is a different question
+                  from which credential is used — and the more consequential of
+                  the two, so it says what it means rather than showing a bare
+                  field. Absent from the row until it is opened, because for
+                  almost everyone the answer is "the provider", and a form for a
+                  thing nobody needs is a form somebody fills in by accident. */}
+              {routing === credential.id ? (
+                <div className="pc-credential__rotate" data-panel="endpoint">
+                  <label className="pc-field">
+                    <span>Base URL</span>
+                    <input
+                      value={endpoint}
+                      onChange={(e) => setEndpoint(e.target.value)}
+                      placeholder={`https://api.${credential.provider}.example/v1`}
+                      spellCheck={false}
+                    />
+                  </label>
+                  <p className="m-0 text-xs leading-5 text-muted-foreground">
+                    Sends this credential to your own server instead of{" "}
+                    {credential.provider}&rsquo;s. The endpoint must speak{" "}
+                    {credential.provider}&rsquo;s API — changing where a call goes does not
+                    change what it says — and calls made through it are recorded with their
+                    token counts but <strong>no cost</strong>, because we cannot know what
+                    your server charges. Leave it empty to go back to {credential.provider}.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      disabled={pending}
+                      onClick={() => {
+                        run(
+                          () =>
+                            setProviderEndpoint({
+                              credentialId: credential.id,
+                              endpoint,
+                            }),
+                          endpoint.trim()
+                            ? "This credential now goes to your endpoint."
+                            : `This credential goes to ${credential.provider} again.`
+                        );
+                        setRouting(null);
+                      }}
+                    >
+                      Save endpoint
+                    </button>
+                    <button type="button" className="ghost" onClick={() => setRouting(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               {rotating === credential.id ? (
                 <div className="pc-credential__rotate">

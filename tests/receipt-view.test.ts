@@ -29,6 +29,21 @@ describe("receipt authentication wording", () => {
     });
   });
 
+  it("calls a proofed passport receipt proof verified for this exact request", () => {
+    const copy = describeReceiptAuthentication({
+      sub: "passport-1",
+      agid: "agent-1",
+      auth: { kind: "passport_proof_per_request" },
+    });
+    expect(copy).toMatchObject({
+      label: "Passport proof verified per request",
+      subjectLabel: "Agent passport",
+      subject: "passport-1",
+    });
+    expect(copy.detail).toMatch(/this request/i);
+    expect(copy.detail).toMatch(/private key/i);
+  });
+
   it("calls a direct receipt bearer possession and never a passport signature", () => {
     const copy = describeReceiptAuthentication({
       sub: "agent-1",
@@ -617,5 +632,36 @@ describe("upstream status, explained", () => {
     expect(describeUpstreamStatus(200)).toBeNull();
     expect(describeUpstreamStatus(204)).toBeNull();
     expect(describeUpstreamStatus(418)).toBeNull();
+  });
+});
+
+/**
+ * "No charge recorded" is the right words for a call that genuinely cost
+ * nothing. It is the wrong words for a call nobody could price — that reads as
+ * a statement about the money when it is an admission that there isn't one.
+ */
+describe("a receipt whose cost is unknown", () => {
+  it("does not present an unpriced call as a free one", () => {
+    const unpriced = formatCost(0, true);
+
+    expect(unpriced.primary).not.toMatch(/free|no charge|nothing/i);
+    expect(unpriced.primary).toMatch(/not priced/i);
+  });
+
+  it("keeps saying no charge when the zero is a real zero", () => {
+    // Unchanged for every receipt issued before `unp` existed, which is all of
+    // them: absent flag, same words as always.
+    expect(formatCost(0).primary).toBe("No charge recorded");
+    expect(formatCost(0, false).primary).toBe("No charge recorded");
+  });
+
+  it("does not invent an exact figure it does not have", () => {
+    expect(formatCost(0, true).exact).toBeNull();
+  });
+
+  it("ignores the flag when a real charge was recorded", () => {
+    // Defensive: a receipt carrying both a cost and the flag is contradictory,
+    // and the recorded number is the thing that was actually signed.
+    expect(formatCost(1_234_000_000, true).primary).toBe("$12.34");
   });
 });

@@ -35,11 +35,10 @@ import type { LogEntry } from "./log";
  * Additive-only. A verifier accepts `ver <= its own` and ignores claims it does
  * not recognise.
  *
- * Deliberately NOT the strict `ver !== VISA_VER` equality verifyVisa uses. That
- * is right for a visa: the same gateway mints and verifies it, so both sides
- * move together. A receipt is verified by third parties running code we do not
- * control and cannot upgrade — adding a claim must not invalidate every
- * verifier in the field.
+ * Visa verification accepts only the current version and one explicitly named
+ * migration predecessor; older versions remain invalid. A receipt is verified
+ * by third parties running code we do not control and cannot upgrade, so its
+ * additive range rule is deliberately broader.
  */
 export const RECEIPT_VER = RECEIPT_PROTOCOL.maximum;
 
@@ -81,6 +80,13 @@ interface ReceiptInputBase {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   costMicrocents: number;
+  /**
+   * True when nobody could price this call — it went to a custom endpoint, which
+   * may mark up, re-route, alias onto a local model, or be free. `costMicrocents`
+   * is then 0 because the type requires a number, and that 0 means NOTHING.
+   * See `isPricedEndpoint` in lib/pricing.ts, which is where the decision is made.
+   */
+  unpriced?: boolean;
   status: LogEntry["status"];
   httpStatus: number;
   startedAt: number;
@@ -92,6 +98,13 @@ interface ReceiptInputBase {
   // the provider dominates it completely. Never render this as "gateway
   // latency"; that reads as overhead we added. tests/public-receipt-page pins it.
   latencyMs: number;
+  /**
+   * Revision of the effective live authorization rules evaluated for this
+   * call: policy document, scopes, token/cost caps and unreadable-policy
+   * posture. Optional only so callers can still parse and verify historical
+   * receipts issued before this additive claim existed.
+   */
+  policyRevision?: string;
   owner?: OwnerClaim | null;
   /**
    * Set only on an attempt that followed a failed one. Two receipts, never one
@@ -110,7 +123,7 @@ interface ReceiptInputBase {
 }
 
 type PassportReceiptIdentity = {
-  authMethod?: "passport";
+  authMethod?: "passport" | "passport_proof_per_request";
   passportId: string;
   visaJti: string;
   agentAccessKeyId?: never;
@@ -165,6 +178,15 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
       ...(input.cacheWriteTokens ? { cw: input.cacheWriteTokens } : {}),
     },
     cost: Math.round(input.costMicrocents),
+    // Optional, exactly like `cr` / `cw` above and for the same compatibility
+    // reason: present only on the calls it describes, so a receipt for a priced
+    // call is byte-identical to one issued before this existed and every
+    // verifier already in the field keeps working. `ver` does not move.
+    //
+    // `cost` stays a number rather than being omitted — sdk/verify.ts types it
+    // as required, so dropping it would break published verifiers. The claim is
+    // that the number is not meaningful, and this is what says so.
+    ...(input.unpriced ? { unp: true } : {}),
     res: { status: input.status, http: input.httpStatus },
     t0: input.startedAt,
     lat: input.latencyMs,
@@ -181,7 +203,17 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
     };
   } else {
     claims.vjti = input.visaJti;
+    // Additive and absent from historical/bearer passport receipts. Keeping
+    // version 1 is deliberate: existing verifiers ignore this new field, while
+    // updated ones can distinguish proof enforced for THIS request.
+    if (input.authMethod === "passport_proof_per_request") {
+      claims.auth = { kind: "passport_proof_per_request" };
+    }
   }
+  // Additive and optional for historical inputs. New governed calls always
+  // supply it from the policy snapshot they actually evaluated; keeping `ver`
+  // unchanged is what lets existing receipt consumers ignore the new field.
+  if (input.policyRevision) claims.pol = input.policyRevision;
   // Omitted when the gateway refused before reading the body. Absent means
   // "never read"; a digest of "" would mean "the client sent nothing".
   if (input.rawBody !== null && input.rawBody !== undefined) {

@@ -17,12 +17,34 @@ const OWNER_CACHE_TTL_S = 300;
 
 type OwnerDatabase = Pick<SupabaseClient, "from">;
 
+/**
+ * Every tier the column may hold, in the order the CHECK constraint lists them.
+ *
+ * Hand-written and therefore pinned: tests/owner-tier-parity.test.ts reads the
+ * constraint out of the migration and fails if these two ever disagree. The
+ * failure without that pin is the quiet kind — an unrecognised tier falls to
+ * `unverified` below, which ALSO nulls the verification date, so the dashboard
+ * would read the row directly and say verified while every signed receipt said
+ * unverified, permanently, with nothing raising an error anywhere.
+ */
+export const OWNER_TIERS = ["unverified", "domain", "github", "idv"] as const;
+
+const PROVEN_TIERS: ReadonlySet<string> = new Set(
+  OWNER_TIERS.filter((tier) => tier !== "unverified")
+);
+
 function toClaim(row: Record<string, unknown> | null): OwnerClaim | null {
   if (!row) return null;
   const subject = typeof row.subject === "string" ? row.subject.trim() : "";
   if (!subject) return null;
 
-  const tier = row.tier === "domain" || row.tier === "idv" ? row.tier : "unverified";
+  // Note what is NOT read here: the company columns. They are asserted rather
+  // than proven, and a signed artifact handed to third parties is the wrong
+  // place for a claim we did not check. Adding one later is its own decision,
+  // made the way the policy-revision claim was — additive, optional, with the
+  // receipt version left alone.
+  const tier =
+    typeof row.tier === "string" && PROVEN_TIERS.has(row.tier) ? row.tier : "unverified";
   return {
     kind: typeof row.kind === "string" ? row.kind : "self_attested",
     sub: subject,

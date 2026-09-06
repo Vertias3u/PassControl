@@ -1,6 +1,7 @@
 import http from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
+import { sha256 } from "@noble/hashes/sha256";
 
 import { createSidecar } from "../sidecar.mjs";
 
@@ -17,6 +18,7 @@ const LEAK = "sk-a-real-users-provider-key";
 let gateway;
 let sidecar;
 let received;
+let passportId;
 
 async function listen(server) {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -40,9 +42,10 @@ beforeEach(async () => {
   const gatewayPort = await listen(gateway);
 
   const secret = ed25519.utils.randomPrivateKey();
+  passportId = b64url(ed25519.getPublicKey(secret));
   sidecar = createSidecar({
     gateway: `http://127.0.0.1:${gatewayPort}`,
-    passportId: b64url(ed25519.getPublicKey(secret)),
+    passportId,
     passportSecret: b64url(secret),
   });
 });
@@ -53,9 +56,9 @@ afterEach(async () => {
   }
 });
 
-async function proxy(headers) {
+async function proxy(headers, suffix = "") {
   const port = await listen(sidecar.server);
-  await fetch(`http://127.0.0.1:${port}/api/v1/anthropic/v1/messages`, {
+  await fetch(`http://127.0.0.1:${port}/api/v1/anthropic/v1/messages${suffix}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body: "{}",
@@ -68,6 +71,25 @@ describe("sidecar credential stripping", () => {
     const sent = await proxy({ authorization: `Bearer ${LEAK}` });
 
     expect(sent.headers.authorization).toBe("Bearer fake.visa.token");
+  });
+
+  it("signs every upstream request and binds the proof to method, URI, and exact visa", async () => {
+    const sent = await proxy({ authorization: `Bearer ${LEAK}` }, "?transport_hint=stream");
+    const [payloadPart, signaturePart] = String(sent.headers["x-passcontrol-proof"]).split(".");
+    const payloadBytes = new Uint8Array(Buffer.from(payloadPart, "base64url"));
+    const payload = JSON.parse(Buffer.from(payloadBytes).toString("utf8"));
+    const signature = new Uint8Array(Buffer.from(signaturePart, "base64url"));
+
+    expect(payload).toMatchObject({
+      htm: "POST",
+      htu: expect.stringMatching(/\/api\/v1\/anthropic\/v1\/messages$/),
+      iat: expect.any(Number),
+      jti: expect.any(String),
+      vh: b64url(sha256(new TextEncoder().encode("fake.visa.token"))),
+    });
+    expect(new URL(payload.htu).search).toBe("");
+    expect(sent.url).toContain("?transport_hint=stream");
+    expect(ed25519.verify(signature, payloadBytes, Buffer.from(passportId, "base64url"))).toBe(true);
   });
 
   // Header names are the attack surface here, not header values. A client that

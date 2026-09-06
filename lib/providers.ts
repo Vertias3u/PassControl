@@ -6,6 +6,51 @@ export function isProvider(p: string): p is ProviderId {
   return (PROVIDERS as readonly string[]).includes(p);
 }
 
+/**
+ * Providers an agent's SCOPE may name that can never hold a credential.
+ *
+ * `demo` is the keyless provider: `handleDemo` synthesizes the response inside
+ * the gateway, never calls `get_provider_key` and never forwards anywhere. A
+ * scope naming it therefore grants no upstream reach and no spend against a
+ * real key — which is why it is scope-legal while staying illegal everywhere a
+ * credential or a failover target is chosen.
+ *
+ * It has to be scope-legal because a brand-new tenant has NO key in Vault, so a
+ * demo call is the only one its first agent can lawfully make. `passcontrol
+ * login` relies on exactly that to prove itself with a verified receipt, and
+ * `scripts/seed.mjs` has always inserted the demo agent with this scope
+ * directly — so rows of this shape already existed while the validator that
+ * guards the front door rejected them. That disagreement was a live break: from
+ * 2026-08-29 (36f70e9) until this fix, `passcontrol login` could not create an
+ * agent at all, because the control plane answered its create with 422
+ * "Unknown provider in scope."
+ *
+ * NOT gated on `PASSCONTROL_DEMO`. Whether the demo route answers is a property
+ * of the gateway at call time, not of the tenant's data at creation time — and
+ * gating here would make a self-hosted gateway with the demo off refuse a login
+ * that is otherwise perfectly valid.
+ */
+export const SCOPE_ONLY_PROVIDERS = ["demo"] as const;
+
+/** A provider that may appear in a scope: a real one, or the keyless demo. */
+export type ScopeProviderId = ProviderId | (typeof SCOPE_ONLY_PROVIDERS)[number];
+
+/** True for a provider an agent may hold in scope: a real one, or keyless demo. */
+export function isScopeProvider(p: string): p is ScopeProviderId {
+  return isProvider(p) || (SCOPE_ONLY_PROVIDERS as readonly string[]).includes(p);
+}
+
+/**
+ * Every provider a scope row may name, in the order a chooser should offer them.
+ *
+ * Derived, never typed out, for the reason the CLI's usage strings are: a
+ * hand-written list drifts from the validator, and a chooser that cannot offer
+ * a provider the validator accepts will MISREPRESENT an agent that already has
+ * it — the scope editor showed a saved `demo` row as the first real provider in
+ * its list, which is the control tower lying about what an agent may call.
+ */
+export const SCOPE_PROVIDERS = [...PROVIDERS, ...SCOPE_ONLY_PROVIDERS] as const;
+
 export interface ProviderGuess {
   suggested: ProviderId | null;
   candidates: ProviderId[];

@@ -289,3 +289,40 @@ describe("looking a profile up", () => {
     expect(h.fromMock).not.toHaveBeenCalled();
   });
 });
+
+// The second public surface that reported an expired agent as active.
+//
+// This listing is fed by public_operator_agents, a completely different RPC
+// from verify_passport, and it carried its own separate status union — so
+// fixing /verify would not have touched it and the compiler would not have
+// said so. Both now derive the answer from lib/passport-validity.ts, because
+// one fact with two public answers is worse than either answer alone: a
+// stranger clicking through from /u/<handle> to /verify/<key> would have been
+// told "active" on one page and "expired" on the next.
+describe("an expired agent on the operator profile listing", () => {
+  const FUTURE = "2099-01-01T00:00:00.000Z";
+  const PAST = "2020-01-01T00:00:00.000Z";
+
+  it("says expired, not active", () => {
+    expect(buildPublicProfileAgentView(agentRow({ expires_at: PAST }))!.status).toBe("expired");
+  });
+
+  it("leaves a live agent alone, expiring or never expiring", () => {
+    expect(buildPublicProfileAgentView(agentRow({ expires_at: FUTURE }))!.status).toBe("active");
+    expect(buildPublicProfileAgentView(agentRow({ expires_at: null }))!.status).toBe("active");
+  });
+
+  // Same order the gateway uses, for the reason its header gives: an operator
+  // must be able to tell "someone revoked this" from "this aged out".
+  it("keeps lifecycle status ahead of expiry", () => {
+    expect(buildPublicProfileAgentView(agentRow({ status: "revoked", expires_at: PAST }))!.status).toBe("revoked");
+  });
+
+  // Deliberately NOT added to the published field set. The listing's job is to
+  // point at /verify/<key>, which publishes the deadline itself; repeating it
+  // here would be a second copy of a date to keep in step for no new capability.
+  it("does not widen the published field set to carry the deadline", () => {
+    const view = buildPublicProfileAgentView(agentRow({ expires_at: PAST }));
+    expect(Object.keys(view!).sort()).toEqual([...PUBLIC_PROFILE_AGENT_FIELDS].sort());
+  });
+});

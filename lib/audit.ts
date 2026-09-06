@@ -21,15 +21,28 @@ export const AUDIT_ACTIONS = [
   "agent.revoke",
   "provider_key.add",
   "provider_key.rotate",
+  "provider_key.endpoint",
   // Which stored credential the gateway injects, and the destruction of one.
   // Both change what gets billed upstream, so both belong in the audit trail.
   "provider_key.activate",
   "provider_key.delete",
   "killswitch.master",
+  // Budget-accounting recovery. Both move money, and neither is reachable from
+  // the hot path — `budget.hold_resolve` decides what an attempt that never
+  // finished actually cost, and `budget.rebuild` is the ONLY sanctioned lowering
+  // of a spend counter anywhere in the product. An unaudited lowering would be
+  // indistinguishable from the accounting bug this whole subsystem exists to
+  // prevent, which is exactly why it is written down.
+  "budget.hold_resolve",
+  "budget.rebuild",
   "agent.break_glass",
   "owner.set",
   "owner.publish",
   "owner.verify",
+  // The asserted company register line. Separate actions from owner.set because
+  // it is a separate claim with a separate strength — see db/migrations/0048.
+  "owner.company.set",
+  "owner.company.clear",
   // The operator's own identity. `profile.publish` and `profile.handle` are the
   // two that matter to a reader of this trail: one changes what a stranger can
   // see, and the other permanently consumes a handle out of a global namespace.
@@ -44,6 +57,10 @@ export const AUDIT_ACTIONS = [
   "agent.publish",
   "apikey.create",
   "apikey.revoke",
+  // The workspace's stated key-custody expectation. In the trail because it is
+  // a policy statement other people are held to — and NOT because it enforces
+  // anything: it gates no call and appears on no receipt. See migration 0051.
+  "workspace.key_custody_expectation",
   "mfa.enroll",
   "mfa.disable",
   // Taking a portable copy of the workspace configuration, and restoring one.

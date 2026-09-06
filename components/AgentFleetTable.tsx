@@ -14,6 +14,8 @@ import {
 import { StatusPill, type StatusType } from "./StatusPill";
 import { BUDGET_ATTENTION_RATIO, budgetRiskRatio } from "@/lib/dashboard-attention";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
+import type { DeclaredKeyStorageView } from "@/lib/passport-key-storage";
+import { expectationVerdict } from "@/lib/key-custody-expectation";
 
 interface Agent {
   id: string;
@@ -32,6 +34,71 @@ interface Agent {
 }
 
 type EditorKind = "budgets" | "scopes";
+
+// ── Declared key custody, one row at a time ────────────────────────────────
+//
+// The column header carries "declared" so no cell has to repeat the caveat, and
+// the panel on the agent page carries the long version. What is left here is a
+// tier and, at most, ONE secondary line — a table is scanned, not read.
+//
+// Two states that must never blur together, and the fleet is where they would:
+// an agent that has declared nothing (silence, which is not tier 0), and a
+// Direct Agent Key, which has no passport private key to keep anywhere. The
+// second is handled outside DeclaredKeyStorageView entirely, by passing no view
+// at all, so the panel's contract is not widened to carry a row shape it never
+// sees.
+const CUSTODY_LABEL: Record<string, string> = {
+  file: "Tier 0 · file",
+  os: "Tier 1 · OS store",
+};
+
+function KeyCustody({
+  view,
+  expectation,
+}: {
+  view: DeclaredKeyStorageView | null;
+  expectation: string | null;
+}) {
+  if (!view) {
+    return (
+      <span className="pc-passport-suffix" title="Direct Agent Key — there is no passport private key to keep anywhere">
+        &mdash;
+      </span>
+    );
+  }
+
+  const label =
+    view.state === "declared"
+      ? CUSTODY_LABEL[view.store as string]
+      : view.state === "unrecognised"
+        ? "Unrecognised"
+        : "Not declared";
+
+  // The fallback wins the one secondary line when both apply. It is a live
+  // misconfiguration on that machine — the agent is configured for tier 1 and
+  // running on tier 0 — and the shortfall is merely its consequence.
+  const shortfall = !view.fellBack && expectationVerdict(view, expectation) === "short";
+
+  return (
+    <>
+      <span>{label}</span>
+      {/* `display: block` inline rather than a new class: every other user of
+          pc-passport-suffix is a <div> and gets it for free, and one of these
+          sits inside a <p> in the card list where a <div> would be invalid.
+          A new rule in globals.css would also have to survive the stale-.next
+          trap for one line break. */}
+      {view.fellBack ? (
+        <span className="pc-passport-suffix" style={{ display: "block", color: "var(--warning)" }}>
+          fell back from OS store
+        </span>
+      ) : shortfall ? (
+        <span className="pc-passport-suffix" style={{ display: "block" }}>
+          below the workspace expectation
+        </span>
+      ) : null}
+    </>
+  );
+}
 
 function publicListingSummary(agent: Agent): string {
   if (!agent.passport_pubkey) return "Public listing requires a passport";
@@ -53,10 +120,19 @@ function publicListingHref(agent: Agent): string {
 export function AgentFleetTable({
   agents,
   visaTtlSeconds,
+  keyCustody = {},
+  keyCustodyExpectation = null,
 }: {
   agents: Agent[];
   // Server-side env value; this is a client component. See ScopeEditor.
   visaTtlSeconds: number;
+  // Built server-side for PASSPORT agents only, so a missing entry means "this
+  // agent has declared nothing" — a Direct Agent Key is never in here, and is
+  // told apart by `passport_pubkey` at the call site below. A plain object, not
+  // a Map: this is a client boundary and props cross it as Flight.
+  keyCustody?: Record<string, DeclaredKeyStorageView>;
+  // Stated by the operator, enforced by nothing. See lib/key-custody-expectation.
+  keyCustodyExpectation?: string | null;
 }) {
   const [pending, start] = useTransition();
   const [editing, setEditing] = useState<{ id: string; kind: EditorKind } | null>(null);
@@ -66,6 +142,9 @@ export function AgentFleetTable({
   const { format } = useDashboardTime();
   const toggle = (id: string, kind: EditorKind) =>
     setEditing((prev) => (prev?.id === id && prev.kind === kind ? null : { id, kind }));
+  // Null for a Direct Agent Key: a row with no passport key has no custody
+  // question, which is a different thing from an unanswered one.
+  const custodyOf = (agent: Agent) => (agent.passport_pubkey ? keyCustody[agent.id] ?? null : null);
 
   const risk = (agent: Agent) => budgetRiskRatio(agent);
 
@@ -149,6 +228,7 @@ export function AgentFleetTable({
           <th>Status</th>
           <th>Token budget</th>
           <th>Cost budget</th>
+          <th>Key custody (declared)</th>
           <th>Last seen</th>
           <th></th>
         </tr>
@@ -178,6 +258,12 @@ export function AgentFleetTable({
                     label="cost"
                     format={(value) => formatCentsAsUsdDisplay(Math.round(value))}
                   />
+                </td>
+                <td
+                  className="pc-key-custody"
+                  data-key-storage={custodyOf(a)?.dataState ?? "not-applicable"}
+                >
+                  <KeyCustody view={custodyOf(a)} expectation={keyCustodyExpectation} />
                 </td>
                 {/* The cell is a RELATIVE duration ("3h ago", "never"), which has
                     no time zone — "never · Europe/Sofia" was the giveaway. The
@@ -248,6 +334,13 @@ export function AgentFleetTable({
                     format={(value) => formatCentsAsUsdDisplay(Math.round(value))}
                   />
                 </div>
+                <p
+                  className="pc-key-custody"
+                  data-key-storage={custodyOf(agent)?.dataState ?? "not-applicable"}
+                >
+                  Key custody (declared):{" "}
+                  <KeyCustody view={custodyOf(agent)} expectation={keyCustodyExpectation} />
+                </p>
                 <p title={agent.last_seen_at ? format(agent.last_seen_at) : undefined}>Last activity: {relativeTime(agent.last_seen_at)}</p>
                 <div className="pc-fleet-card__actions">
                   <Link href={`/dashboard/agents/${agent.id}`} className="pc-open-agent">

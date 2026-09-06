@@ -24,9 +24,14 @@ import { revalidatePath } from "next/cache";
 
 import { recordAdminAction } from "@/lib/audit";
 import { mfaAuthorizedUser } from "@/lib/mfa";
-import { setOwner, setOwnerPublished, verifyOwnerDomain } from "@/lib/owner/manage";
-import type { OwnerRecord } from "@/lib/owner/manage";
-import type { DomainFailure } from "@/lib/owner/domain";
+import {
+  clearOwnerCompany,
+  setOwner,
+  setOwnerCompany,
+  setOwnerPublished,
+  verifyOwnerControl,
+} from "@/lib/owner/manage";
+import type { ControlFailure, OwnerRecord } from "@/lib/owner/manage";
 import { rateLimit } from "@/lib/ratelimit";
 import { serviceClient } from "@/lib/supabase";
 import { userClient } from "@/lib/supabase/server";
@@ -40,8 +45,8 @@ const VERIFY_WINDOW_S = 60;
 export interface OwnerActionState {
   owner?: OwnerRecord | null;
   error?: string;
-  /** Set only by checkOwnerDomain, so the form can explain a failed check. */
-  reason?: DomainFailure;
+  /** Set only by checkOwnerControl, so the form can explain a failed check. */
+  reason?: ControlFailure;
 }
 
 /**
@@ -71,17 +76,32 @@ async function actingUser(): Promise<{ userId: string } | { error: string }> {
 function explain(code: string): string {
   switch (code) {
     case "invalid_kind":
-      return "Choose whether you are claiming a name or a domain.";
+      return "Choose whether you are claiming a name, a domain, or a GitHub account.";
     case "invalid_subject":
-      return "Enter the name or domain this passport belongs to.";
+      return "Enter the name, domain, or GitHub account this passport belongs to.";
     case "invalid_domain":
       return "That is not a domain we can check. Use a bare hostname, like acme.com.";
+    case "invalid_login":
+      return "That is not a GitHub username. Use the account name, like octocat.";
+    // Not a typo — the right value in the wrong field. Saying "invalid" here
+    // would send someone hunting for a mistake in a string that has none.
+    case "looks_like_domain":
+      return "That looks like a domain. Choose Domain above to claim it.";
     case "no_owner":
       return "Declare an owner before publishing or checking it.";
-    case "not_a_domain_owner":
-      return "Only a domain claim can be checked. A name is self-attested by design.";
+    case "not_verifiable_kind":
+      return "Only a domain or a GitHub account can be checked. A name is self-attested by design.";
     case "no_verification_token":
-      return "This claim has no token. Re-declare the domain to get a fresh one.";
+      return "This claim has no token. Re-declare it to get a fresh one.";
+    case "invalid_company_id":
+      return "Enter an EU VAT number or a 20-character LEI. Other registers cannot be checked for free.";
+    case "company_not_found":
+      return "That register has no active entry with this number. Check the number and try again.";
+    // A register that is down is not a company that does not exist, and telling
+    // an owner their real company is not registered would be a false negative
+    // they cannot argue with.
+    case "register_unreachable":
+      return "The register did not answer. Nothing was changed — try again shortly.";
     // The binding changed while the check was still out. Nothing was written —
     // the result belongs to the claim that was replaced, not to this one.
     case "owner_changed":
@@ -96,8 +116,9 @@ function explain(code: string): string {
  *
  * Always lands at tier `unverified`, even for a domain — claiming a domain and
  * proving control of it are two different acts, and only the second moves the
- * tier. For a domain this returns a token to publish; checkOwnerDomain is what
- * goes and looks for it.
+ * tier. For a domain or a GitHub account this returns a token to publish;
+ * checkOwnerControl is what
+ * goes and looks for it. Same for a GitHub account.
  */
 export async function declareOwner(input: {
   kind: string;
@@ -161,7 +182,7 @@ export async function publishOwner(published: boolean): Promise<OwnerActionState
  * until they have published the file — so it returns the owner AND the reason,
  * and the form explains it. Only an infrastructure failure is an `error`.
  */
-export async function checkOwnerDomain(): Promise<OwnerActionState> {
+export async function checkOwnerControl(): Promise<OwnerActionState> {
   const acting = await actingUser();
   if ("error" in acting) return { error: acting.error };
 
@@ -170,7 +191,7 @@ export async function checkOwnerDomain(): Promise<OwnerActionState> {
     return { error: "Too many checks. Wait a minute and try again." };
   }
 
-  const result = await verifyOwnerDomain(serviceClient(), acting.userId);
+  const result = await verifyOwnerControl(serviceClient(), acting.userId);
   if (!result.ok) return { error: explain(result.code) };
 
   await recordAdminAction({
@@ -185,4 +206,62 @@ export async function checkOwnerDomain(): Promise<OwnerActionState> {
     owner: result.data.owner,
     ...(result.data.reason ? { reason: result.data.reason } : {}),
   };
+}
+
+/**
+ * Record a company register line against the existing binding.
+ *
+ * Separate from declareOwner on purpose, and the separation is the safety
+ * property rather than tidiness. A register lookup confirms an entry EXISTS; it
+ * cannot show that this tenant is it, because a register is a public record
+ * anyone can quote with nowhere to publish a token. So this never travels
+ * through the code path that sets `tier` — see db/migrations/0048 and the
+ * enumerated forbidden keys in tests/owner-manage-evidence.test.ts.
+ *
+ * Rate limited on the same budget as verification: both spend an outbound
+ * request to somebody else's service on a tenant's say-so.
+ */
+export async function setCompany(identifier: string): Promise<OwnerActionState> {
+  const acting = await actingUser();
+  if ("error" in acting) return { error: acting.error };
+
+  const limited = await rateLimit(`owner-verify:${acting.userId}`, VERIFY_LIMIT, VERIFY_WINDOW_S);
+  if (!limited.success) {
+    return { error: "Too many lookups. Wait a minute and try again." };
+  }
+
+  const result = await setOwnerCompany(serviceClient(), acting.userId, identifier);
+  if (!result.ok) return { error: explain(result.code) };
+
+  await recordAdminAction({
+    userId: acting.userId,
+    action: "owner.company.set",
+    targetType: "owner",
+    targetId: acting.userId,
+    // The identifier is a public register number the owner asked us to publish,
+    // so it is not a secret. The resolved legal name is not recorded here — it
+    // came from the register, not from the operator, and the row already holds it.
+    metadata: { via: "dashboard", source: result.data.company_source },
+  });
+  revalidatePath("/dashboard/settings");
+  return { owner: result.data };
+}
+
+/** Withdraw the company claim. Every column together — never a subset. */
+export async function clearCompany(): Promise<OwnerActionState> {
+  const acting = await actingUser();
+  if ("error" in acting) return { error: acting.error };
+
+  const result = await clearOwnerCompany(serviceClient(), acting.userId);
+  if (!result.ok) return { error: explain(result.code) };
+
+  await recordAdminAction({
+    userId: acting.userId,
+    action: "owner.company.clear",
+    targetType: "owner",
+    targetId: acting.userId,
+    metadata: { via: "dashboard" },
+  });
+  revalidatePath("/dashboard/settings");
+  return { owner: result.data };
 }
