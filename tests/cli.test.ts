@@ -500,7 +500,10 @@ describe("passcontrol CLI", () => {
     it("brings Supabase and Redis up before spawning the dev server", async () => {
       const body = await bodyOf("startDashboard");
       expect(body).toContain("startLocalServices()");
-      expect(body.indexOf("startLocalServices()")).toBeLessThan(body.indexOf('"run", "dev:docker"'));
+      // Marker is the dev-server spawn, whatever form it takes — `start` used to
+      // shell out to `npm run dev:docker` and now runs scripts/dev-docker.mjs
+      // directly. The assertion is the ORDER, not the invocation.
+      expect(body.indexOf("startLocalServices()")).toBeLessThan(body.indexOf("dev-docker.mjs"));
     });
 
     it("honours --dashboard-only, the same escape hatch stop has", async () => {

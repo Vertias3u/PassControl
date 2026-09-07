@@ -1039,7 +1039,18 @@ async function startDashboard(opts = {}) {
   const logPath = dashboardLogPath();
   fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
   const logFd = fs.openSync(logPath, "a", 0o600);
-  const child = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:docker"], {
+  // `node scripts/dev-docker.mjs` rather than `npm run dev:docker`: identical
+  // work (that is all the npm script is now), minus two wrapper processes. The
+  // pid recorded below is then the dev server itself, which matters because
+  // stopDashboard signals a single pid on Windows rather than a process group —
+  // through npm.cmd it would kill the wrapper and leave the server holding the
+  // port. It also keeps the one path that runs daily clear of the Windows
+  // batch-file spawn restriction that batchFileShell exists to work around.
+  const devServer = path.join(appRoot, "scripts", "dev-docker.mjs");
+  if (!fs.existsSync(devServer)) {
+    throw new Error(`${devServer} is missing — this checkout is incomplete or predates the local-stack launcher. Re-clone, or run \`npm run dev:docker\` from ${appRoot} by hand.`);
+  }
+  const child = spawn(process.execPath, [devServer], {
     cwd: appRoot,
     detached: process.platform !== "win32",
     env: { ...process.env, PORT: String(dashboard.port) },
@@ -1185,9 +1196,22 @@ async function localLogsCommand(opts = {}) {
   });
 }
 
+// Windows will not spawn a `.cmd`/`.bat` without a shell. Since Node 18.20.2 /
+// 20.12.2 (the CVE-2024-27980 hardening) it refuses outright with EINVAL rather
+// than executing it, which is how `passcontrol setup` died on the very first
+// step with nothing but `✗ spawn EINVAL` to go on.
+//
+// Scoped to batch files ON PURPOSE, not applied to every spawn. `runCommand`
+// also carries `docker compose -f docker/compose.yml` and `supabase start`;
+// routing those through cmd.exe would re-introduce shell quoting to arguments
+// that today are passed as an array and are safe in a path containing spaces.
+function batchFileShell(command) {
+  return process.platform === "win32" && /\.(cmd|bat)$/i.test(command) ? { shell: true } : {};
+}
+
 async function runCommand(command, args, { cwd = appRoot, env = process.env } = {}) {
   await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: "inherit" });
+    const child = spawn(command, args, { cwd, env, stdio: "inherit", ...batchFileShell(command) });
     child.once("error", reject);
     child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`${command} exited with code ${code}.`)));
   });

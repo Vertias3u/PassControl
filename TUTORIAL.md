@@ -80,6 +80,14 @@ upstream unless you configure a local custom endpoint. It is more to operate.
 [Supabase CLI](https://supabase.com/docs/guides/local-development), Git, and **Node 22+ with npm** for the full stack (the CLI alone declares ≥18).
 No hosted accounts needed — the whole stack runs locally. (No host `psql` required.)
 
+**On Windows, also install [Git for Windows](https://git-scm.com/download/win)** and run the
+commands from a normal terminal (PowerShell or `cmd`). The local stack bootstrap is a bash
+script, and the `bash` Windows puts on PATH by default is not a shell — it is the Microsoft
+Store alias, or the WSL launcher, which fails with `execvpe(/bin/bash) failed` when no distro
+is installed. PassControl finds Git Bash itself and does not use whichever `bash` is first on
+PATH, so you do not need to reorder anything; you just need Git Bash present. If it is
+installed somewhere unusual, point at it with `PASSCONTROL_BASH=<path to bash.exe>`.
+
 Install the CLI globally and let it fetch + boot the stack for you:
 
 ```bash
