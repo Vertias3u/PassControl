@@ -11,6 +11,11 @@ import { parseEnvFile } from "../scripts/dev-docker.mjs";
 //
 // None of this can be exercised on the CI runners (macOS/Linux), so the
 // assertions are on the code that decides, not on Windows behaviour.
+//
+// This file SHIPS to the public mirror, so it may only read files that ship.
+// The matching assertions about scripts/curate-public.sh — which never ships —
+// live in scripts/__tests__/public-curation.test.mjs. Putting them here turned
+// the mirror's CI red on a file nobody outside can open.
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const read = (rel: string) => readFileSync(path.join(ROOT, rel), "utf8");
@@ -156,22 +161,5 @@ describe(".env.docker loading matches `set -a; . ./.env.docker`", () => {
       expect(read(rel), rel).toContain("invokedDirectly");
       expect(read(rel), rel).toContain("path.resolve(fileURLToPath(import.meta.url))");
     }
-  });
-});
-
-describe("the public mirror ships what package.json points at", () => {
-  // Self-hosters clone the mirror, and it is built from an explicit file
-  // allowlist. A script named in package.json but absent from the allowlist
-  // gives them a package.json that references a file they do not have — worse
-  // than the bash-only version it replaced, and invisible to us because
-  // privately the file is right there.
-  const curate = read("scripts/curate-public.sh");
-
-  it("allowlists the two new launchers", () => {
-    expect(curate).toContain("scripts/run-bash.mjs scripts/dev-docker.mjs");
-  });
-
-  it("carries a guard so the next one cannot be forgotten", () => {
-    expect(curate).toContain("Curated package.json names files this tree does not contain");
   });
 });
