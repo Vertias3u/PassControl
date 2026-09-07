@@ -94,11 +94,44 @@ describe("the registry is pinned to the dispatch", () => {
     }
   });
 
-  it("keeps the long-lived servers out of the menu", () => {
-    // mcp and sidecar own the terminal until killed. Selecting one from a menu
-    // would look like the menu had hung.
-    expect(menuCommands().has("mcp")).toBe(false);
-    expect(menuCommands().has("sidecar")).toBe(false);
+  it("never lets the menu execute a long-lived server", () => {
+    // The invariant is that selecting a row can never hand the terminal to a
+    // server that runs until killed — that would look like the menu had hung.
+    // It used to be enforced by keeping those commands out of the menu
+    // entirely, which also made them undiscoverable: `sidecar` is the only
+    // 0.9.0 path that attaches sender proofs, so under `required` mode the one
+    // mandatory command was the one absent from the front door. A `needsArgs`
+    // row prints the command line and returns to the menu without running
+    // anything (`bin/passcontrol.mjs`, the "Command template" branch), which
+    // keeps the invariant and drops the discoverability cost.
+    //
+    // Derived from the row metadata rather than a hardcoded pair, so the next
+    // server command is covered without editing this test.
+    const servers = new Set(["mcp", "sidecar"]);
+    for (const item of allMenuItems()) {
+      if (!servers.has(item.run[0])) continue;
+      expect(item.needsArgs, `${item.id} must never run from a bare selection`).toBe(true);
+      expect(item.returnToMenu, `${item.id} must not end the session`).toBe(true);
+    }
+  });
+
+  it("lists the sidecar, because required mode makes it mandatory", () => {
+    expect(menuCommands().has("sidecar")).toBe(true);
+  });
+
+  it("lists both long-lived servers, together, in their own group", () => {
+    // The reason `mcp` was hidden was never that a listed server would hijack
+    // the menu — a `needsArgs` row prints the command and returns. It was that
+    // the frame was full in both dimensions: every group already rendered at 23
+    // lines, and a ninth group overflowed the top level, which sat at 23 with
+    // eight. The previous version of this test PINNED that and said to list mcp
+    // the day the layout gained a line. Dropping the "Choose a group" heading
+    // gained the line, so both servers are listed now, in one group.
+    const servers = GROUPS.find((group) => group.title === "Connect an agent");
+    expect(servers, "the servers group should exist").toBeTruthy();
+    expect(servers.items.map((item) => item.run[0])).toEqual(["sidecar", "mcp"]);
+    expect(HIDDEN).not.toHaveProperty("mcp");
+    expect(HIDDEN).not.toHaveProperty("sidecar");
   });
 
   it("requires complete, stable metadata for every listed command", () => {
@@ -347,7 +380,7 @@ describe("rendering", () => {
 
   it("shows exact command, current value, network use, and effect", () => {
     const lines = render(
-      { ...initialState, group: 1, index: 4 },
+      { ...initialState, group: 2, index: 4 },
       { colour: false, context: { kill: "tenant clear · platform clear" } }
     ).join("\n");
     expect(lines).toContain("passcontrol kill on|off");
@@ -367,8 +400,8 @@ describe("rendering", () => {
     const frames = [
       { ...initialState, index: 0 },                            // top, first row
       { ...initialState, index: GROUPS.length - 1 },            // top, Danger zone selected
-      { ...initialState, group: 7, index: 0 },                  // inside Danger zone
-      { ...initialState, group: 1, index: 4 },                  // an item with a Current: line
+      { ...initialState, group: 8, index: 0 },                  // inside Danger zone
+      { ...initialState, group: 2, index: 4 },                  // an item with a Current: line
       { ...initialState, search: { query: "key", index: 1 } },  // the search level
     ];
     for (const state of frames) {
@@ -391,7 +424,7 @@ describe("rendering", () => {
     for (let i = 0; i < 3; i++) state = reduce(state, "down");
     expect(state.index).toBe(3);
     expect(reduce(state, "enter").group).toBe(3);
-    expect(GROUPS[3].title).toBe("Evidence");
+    expect(GROUPS[3].title).toBe("Money");
   });
 
   it("fits every frame into an 80x24 terminal", () => {
@@ -419,6 +452,25 @@ describe("rendering", () => {
       for (let index = 0; index < GROUPS[group].items.length; index++) {
         const frame = height({ ...initialState, group, index });
         expect(frame, `${GROUPS[group].title} / ${GROUPS[group].items[index].label}`).toBeLessThanOrEqual(23);
+        // Height was measured here for years; WIDTH was not, and `render`
+        // neither wraps nor truncates. A line past 80 columns wraps in the
+        // terminal and adds rows this sweep cannot see — the same torn frame,
+        // arrived at sideways. A 154-column description slipped in that way.
+        //
+        // The bound is 86, not 80, because six rows already sit between the
+        // two: `key-migrate`, three Danger-zone descriptions and the reset
+        // detail line. Each wraps by a few characters into one extra row, which
+        // the 23-line budget absorbs. This pins that as the ceiling rather than
+        // blessing it — a new row must not be the worst one — and tightening it
+        // to 80 means rewording those six, which is worth doing separately.
+        for (const line of render({ ...initialState, group, index }, { colour: false, header, context })) {
+          for (const wrapped of line.split("\n")) {
+            expect(
+              wrapped.length,
+              `${GROUPS[group].title} / ${GROUPS[group].items[index].label}: line over 86 columns`
+            ).toBeLessThanOrEqual(86);
+          }
+        }
       }
     }
     // The search level windows its results, and `browse` sizes that window as

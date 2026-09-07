@@ -99,6 +99,56 @@ export const GROUPS = [
   },
   {
     section: "CONTROL",
+    title: "Connect an agent",
+    hint: "servers that carry agent traffic",
+    // Neither row here runs from the menu. Both carry `needsArgs`, so selecting
+    // one prints its command line and returns — the menu must never hand the
+    // terminal to a process that holds it until killed, and that invariant is
+    // what `menu.test.mjs` enforces, not their absence.
+    //
+    // Both were hidden outright before 0.9.1. The invariant was right; the cost
+    // was discoverability. The sidecar is the only 0.9 path that attaches sender
+    // proofs, so under `required` mode the one mandatory command was the one
+    // missing from the front door — which is how an owner hit it in a manual
+    // Cloud E2E. Listing them needed a line that did not exist: every group
+    // already rendered at the 23-line ceiling and the top level sat at 23 with
+    // eight groups, so this group is paid for by the "Choose a group" heading.
+    items: [
+      // Listed, but deliberately NOT runnable from a bare selection. The sidecar
+      // is a foreground server that owns the terminal until it is killed, so the
+      // menu prints its command line and returns instead of exec'ing it — the
+      // `needsArgs` branch in `bin/passcontrol.mjs`. It was hidden outright until
+      // 0.9.1, which kept the invariant but cost discoverability: the sidecar is
+      // the only 0.9.0 path that attaches sender proofs, so under `required` mode
+      // the one mandatory command was the one missing from the front door. Found
+      // in a manual Cloud E2E, by someone who went looking for it here.
+      //
+      // The description is terse because `render` neither wraps nor truncates:
+      // a line over 80 columns wraps in the terminal and adds rows the height
+      // sweep cannot count, which is the torn frame that sweep exists to stop.
+      // The base-URL shape is the one lesson worth the width — pointing a client
+      // at the bare host fails with what looks like an empty provider response.
+      //
+      // Those keywords are bare words on purpose: this file ships in the npm
+      // artifact, and `scripts/build-cli-package.mjs` scans shipped sources for
+      // imports with a regex that does not know about comments. Prose that puts
+      // the import keyword immediately before a quoted word is read as a bare
+      // import of that word and fails the build with "imports packages the root
+      // manifest does not declare". The scanner erring that way is the safe
+      // direction, since the alternative is shipping an undeclared dependency;
+      // just never write that shape in a comment in a file the npm artifact
+      // carries.
+      command({ id: "sidecar", label: "Run the local sidecar proxy", run: ["sidecar"], detail: "sidecar", description: "Local proxy signing a sender proof per call; agents use /api/v1/<provider>.", effect: "long_running", network: "provider", keywords: ["proxy", "visa", "proof", "passport"], needsArgs: true, returnToMenu: true }),
+      // The other long-lived server, on identical terms. Its own gotcha earns
+      // the description's width: MCP `chat` sends a bearer visa and attaches no
+      // sender proof in 0.9, so a workspace in required mode refuses this client
+      // while the sidecar keeps working. Most people never run it by hand —
+      // `configure <client> --write` wires it into the client's own config.
+      command({ id: "mcp", label: "Serve MCP to desktop agent clients", run: ["mcp"], detail: "mcp", description: "Stdio server for MCP clients. Its chat sends no sender proof in 0.9.", effect: "long_running", network: "provider", keywords: ["stdio", "claude", "cursor", "desktop"], needsArgs: true, returnToMenu: true }),
+    ],
+  },
+  {
+    section: "CONTROL",
     title: "Fleet",
     hint: "agents and their passports",
     items: [
@@ -197,8 +247,6 @@ export const HIDDEN = {
   help: "the menu replaces it in this mode",
   settings: "this is the menu itself",
   menu: "an alias of settings",
-  mcp: "a long-lived stdio server — it owns the terminal and would never return to the menu",
-  sidecar: "a long-lived foreground server, same reason as mcp",
   fleet: "an alias of `agent`, already listed once under Fleet",
   agent: "reached through its subcommands under Fleet",
   key: "reached through its subcommands under Trust",
@@ -550,7 +598,11 @@ export function render(state, { colour = true, header = "", groups = GROUPS, con
   }
 
   if (state.group === null) {
-    lines.push(bold("  Choose a group"));
+    // No "Choose a group" heading. It was one line telling the reader what the
+    // list under it plainly is, and this frame is measured to the row: dropping
+    // it is what made room for a ninth group, so the two long-lived servers
+    // could be listed at all. The footer already says what the keys do.
+    //
     // Section headings are drawn, never navigated. They are not entries in
     // `groups`, so `moveCursor` and `reduce` keep counting rows exactly as they
     // did — the arrow-key arithmetic is untouched by this grouping, which is

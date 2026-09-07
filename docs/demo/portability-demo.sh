@@ -29,8 +29,8 @@ passcontrol logs --limit 2 --json 2>/dev/null | node -e '
   let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
     const rows=JSON.parse(d); const list=(Array.isArray(rows)?rows:rows.data??[]);
     for(const r of list.slice(0,2).reverse()){
-      const usd=(Number(r.cost_microcents??0)/100000000).toFixed(6);
-      console.log(`  agent ${String(r.agent_id).slice(0,8)}  ${String(r.provider).padEnd(10)} ${String(r.model).padEnd(20)} ${String(r.status).padEnd(9)} $${usd}`);
+      const usd=r.cost_microcents == null ? "unknown" : "$"+(Number(r.cost_microcents)/100000000).toFixed(6);
+      console.log(`  agent ${String(r.agent_id).slice(0,8)}  ${String(r.provider).padEnd(10)} ${String(r.model).padEnd(20)} ${String(r.status).padEnd(9)} ${usd}`);
     }
     const ids=new Set(list.slice(0,2).map(r=>r.agent_id));
     console.log("");

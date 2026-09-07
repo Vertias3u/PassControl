@@ -1,12 +1,12 @@
 # PassControl on Cloudflare Workers
 
-This is an **additive deployment path** for PassControl Cloud. The committed Next.js source keeps
+This is an **additive deployment path** for PassControl 0.9.0, including the public self-host tree. The committed Next.js source keeps
 its explicit Edge runtime declarations for the existing Vercel path. `npm run build:cloudflare`
 copies only application source into an ignored, temporary directory, removes those runtime hints
 in that copy, builds with OpenNext, and writes the generated Worker to `.open-next/`. The source
 tree is never rewritten.
 
-## $0 launch shape
+## Runtime shape
 
 - **Cloudflare Workers:** Next.js application, dashboard, API routes, streaming proxy, static assets,
   and a Cron Trigger every five minutes.
@@ -16,7 +16,7 @@ tree is never rewritten.
 - **Provider accounts:** bring-your-own-key; PassControl stores each credential in Supabase Vault.
 
 The Worker has no R2/KV dependency. PassControl does not use Next's incremental cache for a trust
-decision, and the first Cloud launch should not provision storage it does not need.
+decision, and no storage service is required for that purpose. Hosting costs depend on workload and service plans.
 The committed Worker variable `PASSCONTROL_TRUST_CF_CONNECTING_IP=true` is safe only because
 Cloudflare overwrites that header at its public edge; do not copy the opt-in to Vercel or a proxy
 that passes client-supplied `cf-connecting-ip` through.
@@ -87,3 +87,23 @@ run `npx opennextjs-cloudflare deploy`. That uploads code and is intentionally *
 an agent or by the build/test scripts. Start on a non-production Worker, verify login/signup/reset,
 one real governed call, receipt verification, kill switch, and scheduled reconciliation, then move
 the custom domain.
+
+
+## Self-host boundaries and database setup
+
+Apply the migrations included in your public checkout with `DATABASE_URL=… npm run migrate`
+before serving traffic. A fresh install applies its full migration tree; existing deployments
+must review ordering requirements before upgrades. Do not copy a private deployment's migration
+count: Cloud-only statement-operation migrations are absent from the public tree.
+
+The public build includes receipt/statement verification but not Cloud statement issuance,
+proof-serving routes, invite operations, or hosted quotas. The local `dev:stack` setup is
+for development; it does not provision a production Supabase, SMTP, backups, or egress policy.
+Use **Node 22+**: the locked Wrangler requires it, while the locked Supabase client
+requires Node 20+. The CLI package's Node ≥18 declaration does not cover the full build stack.
+
+For custom upstreams, `PROVIDER_ENDPOINT_MODE` defaults off. A hostname list enables selected
+HTTPS/443 hosts; `selfhost` deliberately permits private HTTP destinations. DNS is not resolved
+or pinned by validation. Enforce network egress externally. Provider redirects are refused.
+Schedule reconcile reliably: it raises spend checkpoints and reports unresolved holds rather
+than releasing them. See [budget recovery](../budget-recovery.md).

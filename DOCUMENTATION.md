@@ -1,29 +1,16 @@
-# PassControl — API Documentation (website blueprint)
+# PassControl 0.9.0 — API and behavior reference
 
-> Source-of-truth draft for the public docs site. Audience: developers integrating
-> PassControl. This document describes the shipped self-hostable API surface; run the
-> local quickstart/tests in the repo to verify your deployment.
+This reference describes the 0.9.0 implementation. Start with [README](./README.md)
+or the [tutorial](./TUTORIAL.md). The public self-host tree contains the gateway,
+dashboard, authentication, control API, and artifact verifiers. Cloud's statement
+operation and hosted beta machinery are separate; see the statement section below.
 
----
-
-## What PassControl is
-
-PassControl is an identity + credential gateway for AI agents. Instead of putting your
-OpenAI, Anthropic, Groq, Mistral, Together, or DeepSeek API key inside an agent, the agent
-holds an **Ed25519 passport** (a private key that never leaves it), signs a challenge to
-mint a short-lived **work-visa**, and calls the model **through PassControl** — which
-injects your real provider key from an encrypted vault and proxies the request. You get:
-no raw provider keys in agent runtimes, instant
-revocation, per-agent budgets, and a per-passport audit trail.
-
-There are three surfaces:
-
-| Surface | For | Auth |
-|---|---|---|
-| **Data plane** — proxy your model calls | agents (runtime) | work-visa |
-| **Agent auth** — mint a visa | agents | Ed25519 signature |
-| **Control plane** — manage your fleet | developers / backends | API key |
-| **Verification** — check a receipt or token someone handed you | anyone, incl. people with no account | none |
+| Surface | Authentication |
+|---|---|
+| Data plane | Direct Agent Key or Passport-derived work-visa; request proof when required |
+| Passport mint | Ed25519 signed challenge; private key stays client-side |
+| Control plane | Workspace `pc_…` key with read/write scope |
+| Artifact verification | No account; explicitly trusted issuer and public keys |
 
 Base URL (self-host or hosted): `https://<your-gateway>`  ·  all paths below are relative to it.
 
@@ -45,6 +32,15 @@ Authorization: Bearer pc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   multiple per account.
 - **Never** put a key in a URL or commit it. Server-to-server only — don't ship it to a browser.
 
+### Direct Agent Keys (data plane)
+
+A `pc_agent_…` key is a named, reveal-once bearer credential for one agent. It has
+optional expiry and independent revocation; only its hash is stored. It is checked
+against durable credential/agent state on use, without a credential lookup cache.
+Unreadable credential state or its pre-auth protection fails closed. It cannot mint a
+visa or authenticate to `/api/control/v1`. Dashboard **Connect an agent** emits the
+matching provider-native configuration. DAK and Passport may coexist on one agent.
+
 ### Work-visas (data plane)
 
 Agents authenticate to the proxy with a short-lived (5 min) JWT "visa", minted from a signed
@@ -57,7 +53,7 @@ both `Authorization: Bearer <visa>` (OpenAI-style) and `x-api-key: <visa>` (Anth
 
 `POST /api/auth/challenge`
 
-The agent signs a canonical payload with its passport private key:
+The agent signs the exact serialized payload bytes with its passport private key:
 
 ```jsonc
 // body
@@ -73,7 +69,7 @@ The agent signs a canonical payload with its passport private key:
 ```
 
 Replay-protected (single-use nonce, ±90s clock window). Rate-limited per IP. Errors:
-`401 stale_timestamp | replay_detected | unknown_passport | bad_signature`, `403 agent_not_active`,
+`401 stale_timestamp | replay_detected | unknown_passport | bad_signature`, `403 agent_not_active | passport_expired`,
 `429 rate_limited`.
 
 **You don't normally call this by hand — use the SDK**, which mints, caches, and refreshes
@@ -84,24 +80,36 @@ visas for you.
 ## Data plane — proxy a model call
 
 `POST /api/v1/:provider/*path`  ·  `provider` ∈
-`openai | anthropic | groq | mistral | together | deepseek`
+`openai | anthropic | groq | mistral | together | deepseek | gemini`
 
-It's drop-in for allowlisted chat and model-listing endpoints only: point your existing SDK's
+It supports the allowlisted inference and model-listing endpoints below: point your existing SDK's
 `baseURL` at `…/api/v1/<provider>` and pass the visa as the API key. PassControl accepts the
 path shape real SDKs send, then forwards to the provider's canonical upstream path:
 
 | Provider | Accepted client paths | Canonical upstream path |
 |---|---|---|
-| `openai` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
+| `openai` | `POST /responses` or `/v1/responses`; `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/responses`; `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
 | `groq` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
 | `mistral` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
 | `together` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
 | `anthropic` | `POST /v1/messages`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/messages`; `/v1/models`; `/v1/models/{id}` |
-| `deepseek` | `POST /chat/completions` | `/chat/completions` |
+| `deepseek` | `POST /chat/completions` or `/v1/chat/completions` | `/chat/completions` |
+| `gemini` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/chat/completions`; `/models`; `/models/{id}`, appended to `https://generativelanguage.googleapis.com/v1beta/openai` |
+
+OpenAI Responses supports buffered and streaming POST requests. It uses `input` and
+`max_output_tokens`; terminal completion and valid usage determine whether accounting
+is complete. Retrieval/deletion of stored responses is not allowlisted. Gemini uses
+Google's OpenAI compatibility API, not native `generateContent`. DeepSeek model listing
+is not proxied even though credential setup may probe its upstream model endpoint.
+
+The packaged SDK uses `/api/v1/<provider>` as its base. For a static OpenAI-compatible
+client, use the exact URL printed by **Connect an agent** or `passcontrol env`; the
+accepted aliases above accommodate clients that append `/v1` and those that do not.
+
 
 `GET .../models` is **narrowed to the visa's scope**: PassControl forwards to the provider,
 then removes the entries this agent may not call. The rows that survive are the provider's own,
-byte for byte — nothing is added and no field is synthesised — and an unrecognised response shape
+with their fields preserved — the filtered JSON is reserialized — and an unrecognised response shape
 passes through untouched. Without it the listing answers with everything the *provider key* can
 reach, which is the tenant's whole account rather than the agent's capability, so an SDK's model
 picker offers choices guaranteed to be refused on first use. This is presentation of a boundary
@@ -124,10 +132,9 @@ runs no model and spends nothing, so being generous about how a client spells it
 being generous about how it spells inference would widen what actually bills.
 
 Endpoints outside that allowlist are denied by default. The gateway does **not** proxy
-embeddings, files, fine-tuning, batches, responses, or token-counting endpoints. PassControl
+embeddings, files, fine-tuning, batches, response retrieval/deletion, or token-counting endpoints. PassControl
 verifies the visa → checks kill switch → checks scope → checks endpoint allowlist → reserves
-budget → injects your real provider key → streams the response back, and logs the call. The
-provider key is never exposed.
+budget → injects your real provider key → streams the response back, and attempts to log the call. It does not return the injected provider key.
 
 Errors: `401 missing_visa | invalid_visa`, `402 blocked_budget`, `403 blocked_suspended |
 blocked_scope | blocked_endpoint`, `404 unknown_provider`, `413 payload_too_large`,
@@ -144,12 +151,12 @@ which one fired.
 ## SDK quickstart
 
 The client SDK hides visa minting/refresh so integration is re-pointing your SDK, not rewriting
-your agent. Today the SDK is vendored in this repo under `./sdk`; it is not a separately
-published npm package yet.
+your agent. The compiled ESM SDK ships in the `passcontrol` npm package at `passcontrol/sdk`.
+Its TypeScript source is in `sdk/`.
 
 ```ts
 import OpenAI from "openai";
-import { PassControl } from "./sdk";
+import { PassControl } from "passcontrol/sdk";
 
 const pc = new PassControl({
   gateway: process.env.PASSCONTROL_GATEWAY!,
@@ -162,7 +169,7 @@ await openai.chat.completions.create({ model: "gpt-4o-mini", messages: [{ role: 
 ```
 
 Anthropic is identical with `pc.clientOptions("anthropic")`. The SDK caches the visa, refreshes
-before expiry, single-flights concurrent mints, and retries once on a 401.
+before expiry, single-flights concurrent mints, and retries once on a 401 when the effective body is replayable. It does not generate sender proofs in 0.9.0.
 
 For third-party agents that expect a static key, run the visa sidecar and point the agent at
 `http://127.0.0.1:8788/api/v1/<provider>` with any API key value. CLI presets print the
@@ -193,8 +200,7 @@ passcontrol env open-webui
 passcontrol env librechat
 ```
 
-These print three fields to type into the app's settings form. The API-key field is required
-by the UI and ignored by the sidecar — that field is exactly where your real key used to go.
+These print configuration fields for the client; check the emitted provider-native URL. The placeholder API key is replaced by the sidecar.
 
 ### `configure` vs `env`
 
@@ -214,9 +220,11 @@ it is generated from the CLI's own preset table, so it cannot drift from what is
 For the MCP targets the two print different things: `configure` shows the client config file
 it would merge into, `env` prints just the `mcpServers` JSON.
 
-Continue-specific note: its OpenAI provider may default to `/responses` for o-series and
-gpt-5 models. PassControl intentionally does not proxy `/responses`; set
-`useResponsesApi: false` so Continue uses `/chat/completions`.
+Continue: OpenAI `/responses` is supported, so the old instruction to set
+`useResponsesApi: false` is no longer required. It remains a valid compatibility choice
+in your own Continue config — the CLI does not set it for you: `passcontrol env continue`
+prints only a base URL, an API key, and a model. Other provider IDs do not acquire
+Responses support.
 
 ---
 
@@ -260,7 +268,7 @@ includes tenant-scoped agent lifecycle, logs, audit, spend, and kill-switch endp
 | Method | Path | Scope | Description |
 |---|---|---|---|
 | GET | `/agents` | read | List agents (filter `?status=`). |
-| POST | `/agents` | write | Create. Body: `name`, `passportPubkey`, `scopes`, `budget_tokens?`, `budget_cents?`. **You generate the Ed25519 keypair and send only the public key.** |
+| POST | `/agents` | write | Create. Body: `name`, `passportPubkey`, `scopes`, `budget_tokens?`, `budget_cents?`, `expiresAt?`. **You generate the Ed25519 keypair and send only the public key.** |
 | GET | `/agents/{id}` | read | Fetch one. |
 | PATCH | `/agents/{id}` | write | Update name / scopes / budgets. |
 | POST | `/agents/{id}/suspend` · `/resume` | write | Per-agent kill toggle. |
@@ -279,11 +287,12 @@ one the gateway injects. The four operations, and when each is the right one:
 |---|---|---|
 | **Add a new key** | Stores another credential *alongside* the existing ones. Does **not** replace anything. The first key you store for a provider becomes the one in use; later ones do not. | You want a second account or environment available to switch between. |
 | **Replace secret** | Swaps the secret behind an existing nickname, in place. Which credential is in use does not change. | Your key expired or was rotated at the provider and you want the same slot to keep working. This is usually what you want. |
-| **Use this key** | Makes that credential the one the gateway injects, for every agent in the tenant. | You added a replacement as a new key and now want to cut over to it. |
+| **Use this key** | Makes that credential the one the gateway injects, for agents using the tenant default, subject to agent-specific routing. | You added a replacement as a new key and now want to cut over to it. |
 | **Delete** | Removes the credential row and its Vault secret. Refused for the credential currently in use — switch to another one first, so a delete can never quietly change which upstream account is billed. | You are retiring a credential you have already switched away from. |
 
-A switch or a replacement takes effect immediately: the gateway's 60-second provider-key cache
-is purged for the tenant's agents on every one of these writes.
+Writes attempt to purge the 60-second provider-key cache. A failed purge can leave the
+old cached credential usable until its cache expires. Agent-specific key routing can
+override the tenant default; changing that default does not override an agent selection.
 
 ### Kill switch
 | Method | Path | Scope | Description |
@@ -297,7 +306,7 @@ is purged for the tenant's agents on every one of these writes.
 | GET | `/logs` | read | Gateway calls; filter by `agent_id`, `status`, and `limit`. Returns each call's `id`. |
 | GET | `/audit` | read | Admin-action trail. |
 | GET | `/spend` | read | Per-agent + fleet totals (micro-cents; $ = µ¢ / 100,000,000). |
-| GET | `/receipts/{id}` | read | One call **plus its signed receipt**. See [Receipts](#receipts--portable-proof-a-call-happened). |
+| GET | `/receipts/{id}` | read | One call **plus its signed receipt**. See [Receipts](#receipts--signed-issuer-records). |
 
 `/receipts/{id}` takes a call `id` from `/logs`. Receipts are fetched one at a time rather
 than folded into `/logs`, because a receipt is ~700 bytes of JWS and would bloat every page
@@ -309,7 +318,9 @@ of results for the one caller in a hundred who wants a proof.
 ```
 
 If `receipt` is `null`, the response carries `"reason": "receipts_not_enabled"` — the
-deployment has no `INSTANCE_SIGNING_KEY`. That's a configuration answer, not missing data.
+row has no stored receipt. This reason is also emitted for a signing failure; it does
+not conclusively diagnose missing configuration. A row can also be absent or not yet visible
+because writes are asynchronous and best-effort.
 
 A 404 is returned for another tenant's call id rather than a 403, so the endpoint can't be
 used to discover which ids exist.
@@ -320,14 +331,14 @@ operated by X"*.
 
 **The binding is per tenant, not per agent.** There is no agent id in these paths: one owner
 applies to every passport under your account. `own` on a receipt therefore identifies the
-operator of the deployment, not one particular bot.
+owner of that workspace, not necessarily the operator of the gateway deployment.
 
 | Method | Path | Scope | Description |
 |---|---|---|---|
 | GET | `/owner` | read | The current binding, its tier, and whether it is published. |
-| PUT | `/owner` | write | Declare a claim. Body: `kind` (`self_attested` \| `domain`), `subject`, `published?`. **Always lands at tier `unverified`**, even for `kind: "domain"` — claiming a domain and proving control of it are different events. |
+| PUT | `/owner` | write | Declare a claim. Body: `kind` (`self_attested` \| `domain` \| `github`), `subject`, `published?`. **Always lands at tier `unverified`**, even for `kind: "domain"` — claiming a domain and proving control of it are different events. |
 | PATCH | `/owner` | write | Publish or unpublish an existing binding. Body: `published` (boolean). |
-| POST | `/owner/verify` | write | Run the domain check now. On success stamps tier `domain`. |
+| POST | `/owner/verify` | write | Run the declared domain or GitHub check. On success stamps that tier. |
 
 For `kind: "domain"`, `PUT` returns the instructions inline — where to publish the token and
 what to call next — rather than making you find them in docs.
@@ -340,7 +351,8 @@ are stored separately on purpose.
 |---|---|
 | `unverified` | Self-declared. Someone typed it. **Proves nothing** — render it as a claim, never as a fact. |
 | `domain` | Proven by publishing a token at a domain the claimant controls. |
-| `idv` | Proven by an identity check. |
+| `github` | A token was published under the named GitHub account. Not legal identity or an endorsement. |
+| `idv` | Reserved identity-verification tier; no issuing identity-check adapter ships in 0.9.0. |
 
 Only **published** bindings appear on the public verification pages or in a receipt's `own`
 claim.
@@ -350,14 +362,15 @@ self-attested claim renders as a verified one, which defeats the entire mechanis
 
 ---
 
-## Receipts — portable proof a call happened
+## Receipts — signed issuer records
 
 Your logs convince you. They don't convince a counterparty, because you control your own
 database. A **receipt** is a record of one call that a third party can check without an
 account, without your database, and without your cooperation.
 
 It's a compact JWS (`typ: passcontrol-receipt+jwt`) signed with your deployment's Ed25519
-key. Governed calls are receipted — **refusals as well as approvals.** "The gateway stopped
+key. Governed approvals and refusals can receive receipts. Early authentication failures
+may have no tenant log; signing and persistence are best-effort. "The gateway stopped
 this agent from touching that model, here is the proof" is often the more useful document.
 
 ### Enabling them
@@ -374,7 +387,7 @@ no key set.
 
 ### `GET /.well-known/jwks.json`
 
-Public, unauthenticated, no rate limit. The public halves of your signing keys — this is what
+Public and unauthenticated, with no route-specific limiter. The public halves of your signing keys — this is what
 anyone verifying a receipt fetches.
 
 ```json
@@ -397,23 +410,25 @@ Names are abbreviated deliberately — a receipt travels in URLs and QR codes.
 | Claim | Type | Meaning |
 |---|---|---|
 | `iss` | string | Issuing deployment's origin. Its JWKS is at `{iss}/.well-known/jwks.json`. |
-| `sub` | string | Agent passport id (its public key). |
+| `sub` | string | Passport public key, or agent UUID for a DAK receipt. Interpret with `auth`. |
 | `jti` | uuid | Receipt id — the same id as the call's log row. |
 | `iat` | int | Signed at (Unix seconds). |
 | `agid` | uuid | Agent id. |
-| `vjti` | uuid | The work-visa the call was made with. |
+| `auth` | object | DAK: `{kind:"direct_key",kid,use}`; enforced proof: `{kind:"passport_proof_per_request"}`. Omitted for bearer Passport receipts. |
+| `vjti` | uuid | Visa ID on Passport receipts; not a DAK claim. |
 | `prov` | string | Provider (`anthropic`, `openai`, …). |
 | `mdl` | string \| null | Model, when one was named. |
 | `mth` | string | HTTP method. |
 | `path` | string | Upstream path called. |
 | `use` | `{in,out}` | Input / output tokens. |
+| `unp` | boolean | True means unpriced. A numeric zero in `cost` then does not mean free. |
 | `cost` | int | **Micro-cents.** $ = `cost` / 100,000,000. `61` is $0.00000061, not $61. |
 | `res` | `{status,http}` | The gateway's verdict and the HTTP status. |
 | `t0` | int | Call start (Unix **milliseconds**). |
 | `lat` | int | **Total** elapsed ms for the whole request, measured at the gateway — pre-checks, the provider call, and post-response bookkeeping. **Not** the gateway's own overhead: on an approved call the provider dominates it. On a refusal nothing goes upstream, so it really is gateway time. |
 | `ver` | int | Receipt schema version. |
 | `req` | `{alg,dig,len}` | SHA-256 over the exact request bytes, and their length. **Omitted** when the gateway refused before reading the body — absent means "never read", whereas a digest of `""` would mean "the client sent nothing". |
-| `own` | `{kind,sub,tier,vat}` | Who operates this deployment, if a binding is published. **Per tenant, not per agent.** Read `tier`, not `kind`. Omitted when none is bound. |
+| `own` | `{kind,sub,tier,vat}` | The workspace owner claim, if published. **Per tenant, not per agent.** Read `tier`, not `kind`. Omitted when none is bound. |
 
 Versioning is additive: a verifier refuses a receipt **newer** than it understands, but
 ignores unknown claims within a supported version. That's what lets you add a field without
@@ -430,9 +445,8 @@ passcontrol verify receipt "<jws>" --issuer https://passcontrol.example.com
 
 ```js
 // 2. SDK — the same function the CLI and the web page call.
-//    Copied from the repo's sdk/ directory; it has no dependencies beyond
-//    @noble/curves and runs in Node, Deno, Bun, workers and the browser.
-import { verifyReceipt } from "./sdk/verify";
+//    Exported by the packaged SDK; also available as source in sdk/.
+import { verifyReceipt } from "passcontrol/sdk";
 const result = await verifyReceipt(jws, { trustedIssuers: ["https://passcontrol.example.com"] });
 // { ok: true, claims } | { ok: false, reason }
 ```
@@ -463,8 +477,9 @@ to sentences in `FAILURE_REASONS` (`cli/verify.mjs`). Two worth knowing:
 
 ### Rotating the signing key
 
-Receipts have **no expiry**. They're checked against the keys you publish *now*, so replacing
-your signing key retroactively invalidates every receipt you have ever signed.
+Receipts have **no expiry**. They're checked against the keys you publish *now*, so removing
+an old public key from JWKS prevents this live-key verifier from checking its receipts.
+The old signatures remain mathematically valid against a retained trusted public key.
 
 ```bash
 INSTANCE_SIGNING_KEY_PREV=<the old seed>   # move it here first
@@ -511,17 +526,18 @@ Unlike receipts, agent tokens **do** carry `exp` and are checked for expiry and 
   in source, URLs, or browsers. Rotate on suspicion; revoke instantly from the dashboard.
 - Each API key only ever touches **its owner's** data (tenant-isolated server-side). There is
   no cross-tenant access and no way to widen scope without a new key.
-- Raw provider secrets are entered only in the Control Tower and live encrypted in the vault —
-  they never traverse the public API.
+- Provider secrets enter through authenticated dashboard operations (and supported encrypted
+  workspace import), then live in Vault. They are not returned by the control-plane API.
+  The gateway handles plaintext during forwarding; the deployment operator is trusted.
 - Gateway call logs are append-only (DB-enforced; direct `UPDATE`, `DELETE`, and `TRUNCATE`
   are rejected). They are not a cryptographic hash chain.
 
 ## Limitations
 
-- A work-visa is a bearer token and is reusable until it expires (≤5 minutes). Keep it out of
-  logs and prompts; use suspend/kill switches to block future requests.
-- The data-plane proxy intentionally covers only chat and model-listing endpoints listed
-  above. It does not proxy embeddings, files, fine-tuning, batches, responses, or
+- A visa is reusable until expiry in off/observe mode (default 5 minutes, configurable
+  to 15). Required mode additionally enforces a fresh sender proof for every request.
+- The data-plane proxy covers the inference and model-listing endpoints listed
+  above. It does not proxy embeddings, files, fine-tuning, batches, response retrieval/deletion, or
   token-counting endpoints.
 - Pricing is a best-effort in-code table and can lag provider price changes. Use it for
   budgets and monitoring, not as billing reconciliation against provider invoices.
@@ -529,10 +545,176 @@ Unlike receipts, agent tokens **do** carry `exp` and are checked for expiry and 
   Redis evicts suspend/kill keys, enforcement falls back to short visa TTLs and durable agent
   status checks at the next mint.
 - Receipts are **best-effort**: signing failures never abort a call, so the absence of a receipt
-  is not evidence a call did not happen. They are proof of what did occur, not a complete ledger.
+  is not evidence a call did not happen. They are signed issuer records, not a complete ledger or independent evidence of provider execution.
 - A receipt covers the request and the gateway's decision. It does **not** record the provider's
   response body, so it cannot prove what a model replied.
 - Verifying a receipt proves the named issuer signed it. It says nothing about whether that
   issuer is honest — anyone can run PassControl, and deciding whom to trust stays with the reader.
-- Owner bindings at tier `unverified` are self-declared and prove nothing. Only `domain` and
-  `idv` reflect a completed check.
+- Owner bindings at tier `unverified` are self-declared and prove nothing. The `domain` and
+  `github` tiers describe specific control checks; `idv` issuance is not implemented.
+
+
+## Passport lifecycle and sender proof
+
+Newly issued/rotated Passports default to 365 days; an explicit null expiry means no
+expiry, including legacy rows. Expiry is checked at challenge and agent-token mint.
+Dashboard lifecycle controls manage expiry and sender-proof mode.
+`POST /api/control/v1/agents/{id}/rotate` takes `{passportPubkey, graceSeconds?, expiresAt?}`
+(write scope); default grace is 3600 seconds. Rotation takes a new public key and a grace period from zero through seven days; the
+previous key can mint until its grace deadline, subject to agent status and expiry.
+A second rotation during an open grace window is refused. Neither expiry nor grace
+retroactively expires a visa already minted; it can last another 300–900 seconds.
+Stop controls block subsequent admitted calls, not an already-dispatched provider stream.
+
+Sender proof is an agent setting (`off` / `observe` / `required`), enforced on Passport
+requests only. DAK authentication is not upgraded by enabling it.
+
+| Mode | Behavior | Logged authentication |
+|---|---|---|
+| `off` | Does not inspect a supplied proof | `passport` |
+| `observe` | Records pass/missing/invalid/clock_skew/replayed where available; does not refuse on proof failure | `passport` |
+| `required` | Refuses missing/invalid/stale/replayed proofs; replay-store failure is a 503 | `passport_proof_per_request` only after enforced success |
+
+Unreadable sender-mode state is `503 sender_constraint_state_unavailable`. In observe
+mode an unavailable replay store omits the observation rather than blocking or inventing
+one. Current v2 visas contain `cnf.jkt`, the Passport public-key thumbprint; this claim
+alone is not evidence that the gateway enforced a proof on any particular request.
+
+`x-passcontrol-proof` is `base64url(payloadBytes).base64url(Ed25519 signature)`.
+Its JSON fields are `htm` (uppercase method), `htu` (gateway origin + pathname, without
+query), `iat` (integer seconds, ±30 seconds), `jti` (fresh nonce), and `vh` (base64url
+SHA-256 of the exact visa). Successful verification consumes a replay nonce. It binds
+neither body nor query and is not hardware attestation or a complete HTTP signature.
+
+The 0.9.0 sidecar generates proofs. The direct CLI call, MCP chat, and TypeScript
+`PassControl` SDK paths only supply the visa: use off/observe or a correct proof-capable
+transport before requiring proofs. Plain `getVisa()` plus a provider SDK also lacks request proofs.
+
+CLI key custody: `passcontrol key status` reports storage; `passcontrol key migrate`
+moves a file key into macOS Keychain, Linux Secret Service (`secret-tool`), or Windows
+DPAPI-backed storage. `PASSPORT_KEY_STORAGE=os` marks that profile. Environment secrets
+win; an unavailable store can use an existing file fallback with a warning. OS-backed
+storage is still read into the signer process, not a non-exportable hardware key.
+A signed challenge can declare `key_storage`; attribution to the key holder proves
+only that it made the declaration. The gateway's custody evidence is DECLARED, not
+verified, and a custody expectation is advisory rather than a storage enforcement gate.
+
+## Public Passport revocation list
+
+`GET /.well-known/passport-revocations` publishes a signed `passcontrol-crl+jws`
+list using the instance signer. It includes revocations and recorded retired keys
+with `notValidAfter`; it excludes expiry, suspension, and kill switches. Older rotations
+without retained audit metadata may be absent. It is rate-limited and unavailable if
+it cannot build/sign the list; do not treat a failed fetch as an empty list.
+
+A consumer must verify issuer/key/type and apply its own freshness policy to signed
+`iat`. A saved list does not learn future revocations. Absence is not proof that a
+Passport is active; use public `/verify/<passportId>` or the corresponding verification
+API for current lifecycle status. Receipt signature verification does not automatically
+perform this lifecycle check or fetch this list.
+
+## Custom endpoints and egress
+
+Provider credentials can carry `endpoint_base_url`. Agent-specific provider-key routing
+can select that credential; an override does not add a provider ID or new API paths.
+`PROVIDER_ENDPOINT_MODE` is unset/off by default. `selfhost` accepts HTTP/HTTPS, arbitrary
+ports, IP literals and private addresses. A comma-separated list such as
+`models.example.com,proxy.example.com` permits exact listed public-style hostnames,
+HTTPS and port 443. Do not set the literal string `allowlist` expecting it to load hosts.
+
+All modes reject URL credentials, query/fragment, control characters, and invalid path
+shapes. Stored endpoints are revalidated on use. This does not resolve DNS or pin its
+answer: a hostname may resolve privately or change later. Use egress restrictions and
+trusted operators; a custom endpoint receives the injected credential and controls its
+response. The gateway's upstream fetch uses manual redirect handling and returns
+`502 upstream_redirect` for 3xx. This is separate from the SDK's initial-origin check:
+the TypeScript SDK uses fetch's redirect behavior and does not pin a redirect chain.
+
+## Accounting and recovery
+
+Admission uses atomic holds for each attempt. The estimate uses serialized prompt size
+and an output limit (`max_tokens`, `max_completion_tokens`, or `max_output_tokens`),
+with a default output estimate of 1024. It is not a tokenizer or a provider-enforced
+maximum. Actual settlement can exceed the estimate/cap; subsequent admission sees that
+spend. Anthropic cache read/write tokens are included in token accounting.
+
+Complete usage settles observed figures. Failed/broken streams, missing terminal usage,
+unreadable bodies, or ambiguous network failure settle as `usage_unknown`, charging at
+least the estimate or a higher observation in each dimension. Definitive upstream
+refusals have their own settlement classification; HTTP failure alone is not proof of
+zero billing. An abandoned attempt can remain an open, non-expiring hold.
+
+Prices on built-in endpoints use the in-code table and provider fallback for unknown
+models. Custom endpoints are unpriced: `cost_microcents: null`, `unpriced: true`, receipt
+`unp: true` with a placeholder numeric cost. Tokens still count. Cost-cap enforcement
+uses a provider-table reservation estimate even there, not an actual custom price.
+`enforced_*` accounting can differ from reported usage/cost. A spend figure must be read
+alongside unknown pricing, uncertain usage, and reserved headroom.
+
+Established budgets carry generations across Postgres and Redis. Missing counters or
+mismatched generations refuse with `503 blocked_budget_state`; cap exhaustion is
+`402 blocked_budget`. Cron reconciliation raises checkpoints/counters and reports open
+holds; it does not release them because they are old. Recovery endpoints are:
+
+- `GET /api/control/v1/agents/{id}/holds` (read).
+- `POST /api/control/v1/agents/{id}/holds/{attemptId}/resolve` (write).
+- `POST /api/control/v1/agents/{id}/budget/rebuild` (write).
+
+`may_have_dispatched: true` means the attempt claimed dispatch permission and might be
+billed; `not_spent` is refused. False permits that decision because this attempt did
+not claim dispatch permission. Rebuilds use retained logs/adjustments, not independent
+provider data. Review [the recovery runbook](./docs/budget-recovery.md) before acting.
+
+## Owner verification details
+
+For domains, publish the returned token at
+`https://<domain>/.well-known/passcontrol-owner.txt`. For GitHub, publish it in public
+repository `<login>/passcontrol-owner`, file `owner.txt` on its default branch; the
+checker fetches `https://raw.githubusercontent.com/<login>/passcontrol-owner/HEAD/owner.txt`.
+Both refuse redirects. These prove control of the publishing location at check time,
+not legal identity. Domain URL shape checks are not DNS-aware SSRF prevention.
+
+Rechecks preserve verification timestamps and can demote after three counted failures;
+GitHub network-unreachable results do not count as failed ownership evidence. Cached
+owner claims can lag changes. Registry/company lookup records separate evidence and
+never upgrades owner tier or proves the tenant represents that company.
+
+## Signed spend statements
+
+Cloud serves `GET /api/control/v1/statements` and `GET /api/control/v1/statements/{seq}`;
+`?receipt_id=<id>` requests an inclusion proof. These operating routes, their storage,
+and scheduler are not included in the public self-host tree. The packaged control SDK
+can call them on Cloud; it does not install them on a self-hosted gateway.
+
+```bash
+passcontrol statements
+passcontrol verify statement "<jws>" --issuer https://your-gateway.example
+```
+
+`/verify/statement`, `verifyStatement`, and `verifyInclusion` are public verifier
+surfaces. Verify the receipt and statement signatures against trusted keys before
+checking inclusion, then check workspace/window and chain links against the expected
+history. A single valid signature is not a whole-chain verification. `nr > n`, `unp`,
+and `unk` describe coverage/pricing gaps; surface them rather than displaying a clean
+bill. Commitment is not an independent audit of totals or completeness. Full wire
+format, Merkle construction and vectors: [statement format](./docs/statement-format.md).
+
+## Interactive CLI
+
+`passcontrol` (or `passcontrol menu`) opens the searchable command browser on a TTY,
+with grouped actions and recent commands. Noninteractive use prints static guidance;
+explicit subcommands and `--help` remain available for scripts. The browser is a CLI
+navigation surface, not an additional authentication method.
+
+
+Policy outage posture is separate from kill-state posture. `POLICY_FAIL_CLOSED=true`
+opts into blocking an unreadable policy; readable but malformed policy is denied.
+Other authentication/state gates may still refuse a request even when this policy
+check is configured fail-open. Shadow writes and observations are best-effort, so
+counts are a lower bound, not a complete traffic census.
+
+Passport receipt `use.cr` / `use.cw` carry Anthropic cache reads/writes where reported;
+`pol` identifies the effective policy revision. Failover receipts use `prev` / `why`
+to link attempts. Each receipt describes one attempt, not one complete multi-provider
+transaction. The gateway may reserialize client JSON or add stream usage options, so
+`req` is a digest of client bytes, not necessarily upstream wire bytes.

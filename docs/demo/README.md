@@ -6,8 +6,8 @@ what the dashboard looks like — it is what the gateway refuses to do.
 
 | Script | The claim |
 |---|---|
-| `kill-demo.sh` | A live agent is cut off mid-run and restored, without rotating a provider key. |
-| `budget-demo.sh` | The budget is part of the authorization decision, so a refused call costs nothing. |
+| `kill-demo.sh` | Subsequent calls from a running agent are blocked and restored, without rotating a provider key. |
+| `budget-demo.sh` | The budget is part of the authorization decision, so an admission refusal does not dispatch a provider call. |
 | `scope-demo.sh` | The agent's authority is narrower than the key it never holds. |
 | `receipt-demo.sh` | A receipt verifies for someone with no account and no credentials here. |
 | `portability-demo.sh` | Two unrelated clients, one identity, one policy, no SDK change. |
@@ -33,14 +33,12 @@ look good is not a demo.
 - **Everything except `receipt-demo.sh`** goes through the sidecar. Start it and
   leave it running: `passcontrol sidecar`. Override the address with `SIDECAR=…`.
 - **`budget-demo.sh`** needs an agent whose *remaining* budget is small enough to
-  exhaust in a handful of cheap calls, and the cap alone will not get you there:
-  `budget_cents` is an integer, so the smallest cap you can set is 1¢ — around
-  340 calls of the size this script makes, and it only tries 8. So set the 1¢ cap
-  in the dashboard **and** run the agent up near it first, or seed
-  `agents.spent_microcents` close to 1000000 (1¢ = 1,000,000 µc) if you have
-  database access. The spend the recording opens on was seeded that way; the
-  calls, the accounting and the refusal are real. If the budget is never reached
-  the script says so and stops rather than looping.
+  exhaust within its bounded call loop. Use a disposable agent with known usage and
+  a small remaining cap. Do not seed `agents.spent_microcents` alone: 0.9.0 admission
+  uses Redis counters, holds and durable generations, so editing one mirror column
+  does not establish a coherent budget. Prefer a token cap for a short demonstration.
+  The recorded example used seeded spend; it is not evidence of fresh-install defaults.
+  See [budget recovery](../budget-recovery.md) before changing accounting state.
 - **`scope-demo.sh`** needs the agent scoped to one model. It reads the scope and
   prints it first, so the refusal that follows is visibly a policy decision and
   not a typo. Override with `ALLOWED_MODEL=` / `DENIED_MODEL=`. That first line
@@ -63,3 +61,9 @@ the important one: a receipt attests what the enforcement layer observed and
 decided. It is not a claim about whether the model's answer was any good, and it
 carries no prompt or completion by design — the evidence should not become
 another copy of your sensitive content.
+
+`receipt-demo.sh` uses the direct CLI call path, so it needs sender-proof mode off/observe
+in 0.9.0. It samples the latest log row rather than correlating a request ID; use an
+isolated demo agent with no concurrent traffic and allow for asynchronous log writes.
+A failed/missing receipt can mean logging/signing failure, not just absent configuration.
+The scripts are demonstrations, not reliable billing or receipt-correlation clients.

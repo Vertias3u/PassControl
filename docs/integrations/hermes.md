@@ -18,7 +18,7 @@ happened, rotate the passport.
 
 ## PassControl Cloud — Direct Agent Key
 
-Choose an OpenAI-shaped provider (OpenAI, Groq, Mistral, Together, or DeepSeek) in
+Choose an OpenAI-shaped provider (OpenAI, Groq, Mistral, Together, DeepSeek, or Gemini) in
 **Connect an agent**. After the reveal-once key is issued, the dashboard prints the exact
 Hermes block:
 
@@ -68,7 +68,7 @@ model:
 ```
 
 The dummy key is stripped by the connector. The passport private key stays in the trusted local
-PassControl config and is never sent anywhere; a visa is refreshed automatically; and the real
+PassControl profile or OS credential store and is never sent to the gateway; a visa is refreshed automatically; and the real
 provider key stays in the Vault — PassControl Cloud's, or your own if you self-host.
 
 To point the connector at Cloud, set the gateway once (`passcontrol init --global`) to
@@ -76,9 +76,9 @@ To point the connector at Cloud, set the gateway once (`passcontrol init --globa
 
 ## Prove the route
 
-Run one small Hermes chat, then check Dashboard → Activity or `passcontrol logs`. A working
-configuration produces a durable row for the concrete model. That stored row—not the config
-screen and not a successful-looking local launch—is the proof that PassControl governed it.
+Run one small Hermes chat, then check Dashboard → Activity or `passcontrol logs`. A governed call attempts to persist a row for the concrete model. Inspect that row and
+its authentication method; logging is best-effort, so absence does not establish that
+no call ran. A signed receipt verifies the issuer's recorded assertion, not independent execution.
 
 Then exercise one refusal:
 
@@ -108,3 +108,12 @@ refusals use their own exact stored statuses.
 PassControl does not rewrite Hermes config automatically. `passcontrol env hermes` is
 read-only and prints the exact block so an existing YAML file is never overwritten or
 silently corrupted.
+
+
+In 0.9.0 the sidecar adds sender proofs, so it can be used with required sender-proof
+mode. A DAK remains a bearer credential and is not upgraded by that setting. Scope,
+budget and lifecycle limits are described in [the reference](../../DOCUMENTATION.md).
+For Gemini, use the printed `gemini` provider configuration with an OpenAI-compatible
+model endpoint. OpenAI POST Responses is supported; other providers remain on their
+allowlisted chat/messages paths. Custom endpoints require the gateway operator's
+endpoint policy and are not automatically priced.

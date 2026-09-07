@@ -8,8 +8,8 @@ your existing OpenAI/Anthropic SDK, **not rewriting the agent**.
 Install it beside the provider SDK used by your agent:
 
 ```bash
-npm install passcontrol@^0.6.0 openai
-# or: npm install passcontrol@^0.6.0 @anthropic-ai/sdk
+npm install passcontrol@0.9.1 openai
+# or: npm install passcontrol@0.9.1 @anthropic-ai/sdk
 ```
 
 Dependencies: only [`@noble/curves`](https://github.com/paulmillr/noble-curves) and the
@@ -39,7 +39,7 @@ That rejects two self-host shapes worth knowing about up front:
 - **A gateway served under a sub-path** (`https://example.com/passcontrol`). Give it its own
   origin or subdomain.
 
-The rule exists because the visa is a bearer credential: the SDK pins it to exactly this origin
+The rule limits the initial credential destination: the SDK pins it to exactly this origin
 and refuses to attach it anywhere else, so a gateway value that is loose about scheme or path
 would weaken the pin it is used to define.
 
@@ -145,9 +145,33 @@ The full reference lives in [the public OpenAPI document](https://github.com/Ver
   `refreshSkewSeconds` (default 30s) of expiry, then re-minted automatically.
 - **Single-flight.** Concurrent `getVisa()` calls share one challenge request.
 - **401 retry.** If a proxied call returns `401` (visa rejected/expired), the SDK
-  invalidates the cache, re-mints once, and retries.
+  invalidates the cache, re-mints once, and retries if the effective request body is replayable. Single-use init streams are not retried.
 - **Origin pinning.** A visa is attached only to `/api/v1/*` on the configured gateway origin.
   Any other origin, scheme, port or path — including the challenge endpoint and the control
   plane — is refused before the request leaves the process.
 - **No secret on the wire.** The passport private key only signs the challenge locally;
   the gateway only ever sees the public key and the signature.
+
+
+## 0.9.0 compatibility and assurance
+
+`clientOptions` accepts `openai`, `anthropic`, `groq`, `mistral`, `together`, `deepseek`,
+and `gemini`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
+Chat Completions. Gemini uses Google's OpenAI-compatible endpoint; native
+`generateContent` is not supported. See [accepted paths](https://github.com/Vertias3u/PassControl/blob/main/DOCUMENTATION.md#data-plane--proxy-a-model-call).
+
+The TypeScript SDK **does not attach sender proofs in 0.9.0**. Its provider requests use
+bearer visas: they work with sender-proof mode off/observe, but required mode refuses
+them without an additional correct proof implementation. The current sidecar attaches
+proofs. A valid mint signature is not a signature over each provider request.
+
+The wrapper validates the initial gateway origin/path. It does not override fetch's
+redirect policy, so it is not a complete redirect-chain credential boundary. Gateway
+upstream forwarding separately refuses provider redirects. Keep custom transports and
+the configured gateway trusted.
+
+The SDK takes a raw secret supplied by your application; it does not automatically read
+the CLI's OS credential store. The CLI's storage declarations are not storage attestation.
+Signed receipts are issuer assertions and best-effort, not proof of complete logging or
+provider billing. The SDK exports statement/inclusion verification; statement retrieval
+methods target Cloud's service and do not add it to a self-hosted installation.

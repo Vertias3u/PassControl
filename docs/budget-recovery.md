@@ -55,9 +55,9 @@ as fresh capacity. Refusing is loud, recoverable, and costs nothing but a pause.
 
 ### What to do
 
-Run a rebuild (below). It recomputes spend from `agent_logs` — the actual
-record — and points both stores at a new generation. Calls resume immediately
-afterwards.
+Review the retained evidence, then run a rebuild (below). It recomputes spend from
+logs and adjustments and points both stores at a new generation. Resume only after
+checking the response and unresolved holds; missing logs cannot be reconstructed.
 
 If the agent is **not** budgeted, it cannot hit this at all; the check only runs
 for agents with a token or cost cap.
@@ -90,8 +90,10 @@ includes spend from before that cap existed.
 
 Every attempt takes a **hold** before it dispatches: an estimate of what the
 call might cost, reserved against the cap so concurrent requests cannot
-collectively overspend it. Every ending — success, refusal, broken stream,
-thrown error — closes that hold and replaces the estimate with a real figure.
+collectively overspend it. An ending attempts to settle that hold. Complete usage settles observed figures;
+uncertain usage keeps at least the estimate or higher observed usage. A settlement
+failure can leave the hold open. Neither a broken stream nor a thrown error establishes
+a real final price.
 
 An **open hold** is an attempt where no ending ever ran. A worker was killed
 between dispatch and settlement. A response body was never consumed. The process
@@ -131,8 +133,8 @@ the estimate it is holding in both dimensions:
 }
 ```
 
-A hold a few seconds old is a call in flight. A hold hours old is one nobody
-finished.
+A recent hold may be in flight. An old hold warrants investigation; age alone
+does not establish whether a request is still running or was billed.
 
 `provider` and `model` come back `null` on holds opened before this surface
 existed. Everything else is always present.
@@ -232,7 +234,7 @@ The response includes:
 - `applied` — `false` means the hold had already reached a terminal state. The
   numbers beside it are the **first** resolution's, not this call's. This is not
   an error; it is a retried or duplicated resolve doing nothing, which is what
-  you want. Resolving is safe to repeat.
+  you want. Inspect the other response flags too: state-lost retries may write or correct the adjustment ledger.
 - `refused_dispatched` — `true` means the hold is **still open** and refused
   this particular outcome, because the attempt may really have reached the
   provider. It is the other reason `applied` can be `false`, and it means the
@@ -245,10 +247,10 @@ The response includes:
   was added to them. It is not about this attempt at all — it is the agent-wide
   loss of Situation 1 showing up while you were resolving a hold. The attempt
   needs nothing more from you; the agent needs a rebuild, and until it gets one
-  every call it makes returns `503 blocked_budget_state`. Your figure is not
-  lost: it is written to `agent_spend_adjustments`, which the rebuild reads.
-**A figure you got wrong is correctable: resolve the same hold again with the
-right amounts.** Until a rebuild runs, that row is the only record of what the
+  every call it makes returns `503 blocked_budget_state`. Check `ledger_recorded`: only a successful write to `agent_spend_adjustments`
+  makes the figure available to the rebuild.
+**For a state-lost hold with an adjustment row, a repeat can correct that ledger row.**
+An ordinary successful settlement is not rewritten by repeating resolve. Until a rebuild runs, that row is the only record of what the
 attempt cost, so a typo would otherwise be permanent — and the amounts this
 endpoint accepts go up to 100M tokens and 100 USD, which is plenty of room to
 mistype one by a factor of ten and be believed. A repeat writes the new figures
@@ -305,8 +307,7 @@ nightly fold charges only the amount by which that row exceeds the figure you
 supplied, so the same call is never counted twice, and a call that turned out to
 cost more than you recorded is topped up without another rebuild.
 
-Step 2's asymmetry is deliberate and is what makes this safe to run against an
-agent that is still serving traffic. `reserved:` moves exclusively through
+Step 2 preserves a live reservation counter across concurrent hold transitions. `reserved:` moves exclusively through
 atomic transitions, so a live counter is correct by construction and the rebuild
 leaves it alone; overwriting it with a summed read would let a hold that opened
 mid-rebuild lose its reservation and, on settling, drive the counter negative —
@@ -318,10 +319,10 @@ a disagreement is visible rather than quietly written away. They should be
 equal. If they are not, that is a finding, not something to re-run until it
 goes away.
 
-**It is safe to re-run.** It computes a total from history rather than applying
-a delta, so running it twice produces the same number twice. If it fails
-partway, run it again — the ordering is chosen so a half-finished rebuild leaves
-the agent refusing, never permitting.
+**A rebuild is not routine retry advice.** It recomputes from retained history rather
+than applying a delta, but concurrent or late writes can change that history. Review
+partial failures and the returned counters before repeating; each rebuild creates a
+new generation. A generation mismatch refuses admission.
 
 **Open holds survive a rebuild**, deliberately. A rebuild is not a decision
 about them; their estimates simply become the new `reserved:`. Resolve them
@@ -376,8 +377,10 @@ if it is **absent** — so if the reservation counter is the one that survived t
 loss, that estimate stays on the books as load against a request that finished.
 It is visible as `reserved_tokens` exceeding the sum of the open holds' own
 estimates, which the rebuild response prints side by side for this reason.
-Resolve it the same way as any other discrepancy: a second rebuild after the
-last open hold closes recomputes both dimensions from the ledger.
+Do not assume a second rebuild repairs this: existing reservation counters are
+preserved even when no open holds remain. The 0.9.0 recovery API does not provide
+a documented automatic repair for that disagreement. Preserve evidence and investigate
+the state with the maintainer before changing counters manually.
 
 Do not try to net it out during settlement instead. Partially repairing damaged
 counters — moving one because it exists, skipping another because it does not —
@@ -386,8 +389,8 @@ is the shape of the original defect, not the fix for it.
 ### What it cannot recover
 
 Spend that never reached `agent_logs` at all. The rebuild reads the record; it
-cannot reconstruct calls the record does not contain. It can only ever
-under-count by what is missing, never over-count.
+cannot reconstruct calls the record does not contain. Missing evidence can under-count. Conversely, retained conservative charges or
+incorrect operator adjustments can exceed actual billing; a rebuild is not an invoice audit.
 
 Two things are missing, and the second one is bigger than it looks:
 

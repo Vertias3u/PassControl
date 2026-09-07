@@ -10,7 +10,8 @@ set -u
 banner() { printf '\n\033[1;33m%s\033[0m\n' "$1"; }
 die() { printf '\n\033[1;31m%s\033[0m\n' "$1"; exit 1; }
 
-# Same config the CLI reads. `.passcontrol` is KEY=value, so sourcing it is enough.
+# This shell demo reads only this directory's .passcontrol plus exported variables.
+# Unlike the CLI, it does not search parent directories or resolve the global profile.
 [ -f .passcontrol ] && { set -a; . ./.passcontrol; set +a; }
 GATEWAY="${PASSCONTROL_GATEWAY:-http://localhost:3000}"
 [ -n "${PASSCONTROL_API_KEY:-}" ] || die "Set PASSCONTROL_API_KEY (or run this from a directory with a .passcontrol file)."
@@ -52,8 +53,8 @@ env -u PASSCONTROL_API_KEY -u PASSCONTROL_GATEWAY \
   passcontrol verify receipt "$FORGED" --issuer "$GATEWAY" 2>&1 | sed 's/^/  /'
 
 banner "what this does and does not prove"
-printf '  It proves what the enforcement layer observed: which agent, under what\n'
-printf '  authority, what was decided, and what it cost. It carries no prompt and\n'
-printf '  no completion — deliberately, so the evidence is not another copy of\n'
-printf '  your sensitive content.\n'
-printf '  \033[2mVerifiable without trusting the party that produced it.\033[0m\n'
+printf '  It verifies that the trusted issuer signed this record without alteration.\n'
+printf '  The record states identity, decision and reported usage/cost; it does not\n'
+printf '  independently prove provider execution, billing or complete logging.\n'
+printf '  It carries no prompt or completion body.\n'
+printf '  Trust in the issuer is separate from checking its signature.\n'

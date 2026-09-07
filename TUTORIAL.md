@@ -1,4 +1,4 @@
-# PassControl — Getting Started
+# PassControl 0.9.0 — Getting Started
 
 A hands-on walkthrough: from a fresh clone to a **real agent running through PassControl**,
 budgeted, scoped, and revocable — with its provider key never in its hands. About 15 minutes.
@@ -11,16 +11,18 @@ budgeted, scoped, and revocable — with its provider key never in its hands. Ab
 
 ## 1. The idea in 60 seconds
 
-You don't give the agent your OpenAI/Anthropic key. Instead:
+You do not give the agent your OpenAI, Anthropic, Gemini, or other supported provider key. Instead:
 
-- Each agent holds an Ed25519 **passport** — a private key that *only ever signs*, never travels.
+- In Passport mode, the trusted client holds an Ed25519 **Passport** — a private key that *only ever signs*, never travels.
 - To make a call, the agent signs a challenge and gets a short-lived (5-min) **work-visa**.
 - It sends the visa to the **gateway**, which verifies it, checks the kill switch, checks the
   agent's **scope** and **budget**, then pulls your *real* provider key from a vault, injects
   it, and forwards the call. The agent only ever sees the visa.
 
-So a leaked visa dies in minutes, every call is budgeted and audited, and you can cut any
-agent off instantly — all without the agent ever holding the key.
+A visa expires in minutes. The gateway checks subsequent calls against stop controls
+and budgets, and attempts to record them. A Direct Agent Key is the separate static-key
+option: a bearer credential bound to one agent, without the Passport mint step.
+Sender-constrained mode adds per-request proof; it requires a proof-capable client.
 
 Three nouns you'll use: **passport** (the agent's identity), **visa** (a short-lived token
 minted from it), **scope** (which provider/model/endpoints that agent may use).
@@ -30,23 +32,22 @@ minted from it), **scope** (which provider/model/endpoints that agent may use).
 ## 2. Get a working setup
 
 Two paths. **Take the first one unless you specifically want to operate the gateway yourself** —
-it is one command, it needs nothing else installed, and it ends with a governed call you can
-watch happen.
+it needs Node/npm and access to the Cloud private beta, and it attempts a governed
+demo call after approval. [Request access](https://passcontrol.vertias.eu/beta).
 
 ### The fast path — Cloud
 
 ```bash
-npm install -g passcontrol
+npm install -g passcontrol@0.9.0
 passcontrol login            # browser opens, you approve once, this machine is set up
 ```
 
 `login` prints an 8-character code, copies it to your clipboard, and opens the approval page.
 Paste it, press **Approve**. The CLI generates an Ed25519 keypair *on your machine* — only the
-public half is ever sent — creates your agent, and writes the config itself. Nothing is copied
-between a browser and a terminal, which is where the one real support incident in this project
-came from: a passport secret pasted into a provider `api_key` field.
+public half is ever sent — creates your agent, and writes the config itself. The private key never reaches Cloud. Browser approval grants this machine a workspace
+control key as well as enabling local agent setup. Only approve a code you initiated.
 
-Then it proves the setup works before it hands the terminal back:
+On a gateway with demo mode and signing configured, it attempts this proof (output varies):
 
 ```
 ✓ minted a visa with the passport this machine just created
@@ -57,8 +58,8 @@ Then it proves the setup works before it hands the terminal back:
   passcontrol verify receipt eyJhbGc… --issuer https://passcontrol.vertias.eu
 ```
 
-That is the whole governed loop — **passport → visa → scope + budget → call → signed receipt** —
-already done, in one command. §5 explains what that receipt is and why a stranger can check it.
+That tests **Passport → visa → scope + budget → synthetic call → receipt**. It does
+not test a real provider or billing; a setup can succeed while the demo/receipt leg is unavailable. §5 explains what that receipt is and why a stranger can check it.
 
 The code travels from your terminal **to** the browser, never the other way and never in a link.
 **We will never send you an approval URL with the code already filled in** — approving one of
@@ -72,17 +73,17 @@ credentials.
 ### The other path — run the gateway yourself
 
 Everything below is self-hosting: your own Postgres, your own Vault, your own signing key, and
-your instance signs its own receipts. It is the right choice if the data cannot leave your
-network, and it is more to operate.
+your instance signs its own receipts. You control where requests are processed, but calls still leave for the selected
+upstream unless you configure a local custom endpoint. It is more to operate.
 
 **Prerequisites:** [Docker Desktop](https://www.docker.com/) running, the
-[Supabase CLI](https://supabase.com/docs/guides/local-development), and Node 18+.
+[Supabase CLI](https://supabase.com/docs/guides/local-development), Git, and **Node 22+ with npm** for the full stack (the CLI alone declares ≥18).
 No hosted accounts needed — the whole stack runs locally. (No host `psql` required.)
 
 Install the CLI globally and let it fetch + boot the stack for you:
 
 ```bash
-npm install -g passcontrol
+npm install -g passcontrol@0.9.0
 passcontrol setup  # checks prereqs, clones the stack, starts services, migrates, seeds, opens dashboard
 ```
 
@@ -124,13 +125,15 @@ You should land on the **Control Tower** dashboard — empty fleet, no spend yet
 
 **a. Add a provider key.** In the Control Tower, open **Provider Keys** → add an
 **Anthropic** key (`sk-ant-…`). Use a **non-critical** key. It goes straight into the local
-Vault, encrypted — PassControl never stores it in plaintext.
-*(Supported providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek.)*
+Vault, encrypted — the gateway handles the plaintext secret during injection and forwarding.
+*(Supported providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek, Gemini.)*
 
 **b. Issue a passport.** Click **Issue passport** (or create an agent). The keypair is
 generated **in your browser**; you'll see the private key **once**. Copy both:
 - `PASSPORT_ID` (public key)
 - `PASSPORT_SECRET` (private key)
+
+New Passports default to a 365-day expiry. A null expiry is supported.
 
 Give it a **scope** of `anthropic` / `claude-*` so it can call any Claude model.
 
@@ -187,16 +190,24 @@ passcontrol configure aider --write # write it only if no .aider.conf.yml exists
 passcontrol configure claude-desktop --write # merge secret-free MCP config
 ```
 
-Run `passcontrol --help` for the complete command list. The CLI reads environment variables,
+Run `passcontrol` on an interactive terminal for the searchable command browser, or
+`passcontrol --help` for command usage. The CLI reads environment variables,
 then `.passcontrol`, then `~/.config/passcontrol/config`; keep passport secrets out of source
-control.
+control. `passcontrol key status` shows local custody; `passcontrol key migrate` moves a
+file key to macOS Keychain, Linux Secret Service, or Windows DPAPI-backed storage. An
+OS profile holds a marker rather than requiring the secret in `.passcontrol`. Existing
+file fallbacks can be used with a warning. Gateway custody labels are DECLARED evidence,
+not proof of storage; the signing process can still read the secret.
 
 ---
 
 ## 4. Govern it
 
 **Set a budget.** Edit the agent in the dashboard and set a **Token budget** and/or a
-**Cost budget (USD)**. Budgets are reserved *before* the call and reconciled after.
+**Cost budget (USD)**. Admission reserves an estimate before dispatch and settles after usage. Estimates
+are not hard provider output ceilings: actual use can exceed them. Unknown/broken
+stream usage keeps at least the estimate; abandoned holds do not expire. Lost established
+counters refuse with `503 blocked_budget_state`. See [recovery](./docs/budget-recovery.md).
 
 To watch a budget bite, set a tiny one — e.g. **Token budget = 50** — then run the agent
 again:
@@ -206,8 +217,10 @@ again:
 ```
 
 The gateway blocked it before spending a cent. Raise the budget back up and it works again.
-*(Cost budgets are whole cents — the smallest is $0.01. To trip a $0.01 cost cap you need a
-call estimated over 1¢, e.g. `max_tokens` ≥ 2000.)*
+Cost budgets use whole cents; whether an estimate exceeds a cap depends on the model,
+input, output limit, and remaining spend. Do not assume 2,000 tokens always costs 1¢.
+Custom endpoints are unpriced: token accounting continues, and the cost-cap estimate is
+not a claim about actual dollars. Built-in unknown models use provider fallback pricing.
 
 **Scope is capability, not just a model.** An agent scoped to chat can only reach the chat
 and model-listing endpoints — it **cannot** use your key for `/v1/files`, fine-tuning,
@@ -219,14 +232,9 @@ one thing."
 
 ## 5. Prove a call happened — signed receipts
 
-The audit log tells **you** what your agents did. It convinces nobody else.
-
-If a client asks *"prove that call really happened, and that you didn't edit the cost
-afterwards"*, a row in your own database is not an answer — you control that database.
-
-A **receipt** is an answer. A governed call is recorded in one — approvals and refusals
-alike — signed with your deployment's private key. Anyone can check it without an account, without
-your database, and without asking your permission.
+A receipt is an issuer-signed record of a gateway decision. Approvals and refusals can
+be signed, but signing and persistence are best-effort. Verification detects changes to
+that artifact; it does not independently prove provider execution or billing.
 
 ### a. Turn receipts on
 
@@ -324,8 +332,8 @@ model — and run it again:
 ✗ Not valid: signature does not verify against the issuer's published key
 ```
 
-That is the whole point. The numbers cannot be edited after the fact by you, by us, or by
-whoever you send it to.
+That is the whole point. Editing signed bytes invalidates their signature. An issuer holding the signing key
+can still issue a different signed statement; signatures do not make the issuer honest.
 
 You must pass `--issuer` yourself. If you omit it:
 
@@ -366,7 +374,8 @@ touching that model, here's the proof" is often the more useful document of the 
 
 Receipts **never expire**. They are checked by matching the key id in the receipt against the
 keys your deployment publishes right now. So regenerating your signing key doesn't just
-affect new receipts — **it silently invalidates every receipt you have ever signed.**
+affect new receipts — **live-JWKS verification can no longer find the old key.** The signatures themselves
+remain valid against a retained trusted public key.
 
 The safe rotation keeps the old public key published while you switch:
 
@@ -451,10 +460,12 @@ passcontrol env librechat
 Anything else that takes a custom base URL works through `passcontrol env generic`.
 `passcontrol env` with an unknown name prints the full, current list of presets.
 
-Compatibility rule of thumb: PassControl proxies chat completions/messages and model-listing
-only. If a client tries OpenAI's newer `/responses` endpoint, embeddings, files, or
-fine-tuning, the gateway correctly returns `403 blocked_endpoint`. In Continue, set
-`useResponsesApi: false` for OpenAI/gpt-5/o-series configs so it uses `/chat/completions`.
+Compatibility: OpenAI Chat Completions and POST `/responses` are supported, including
+streaming. Other providers support their documented chat/messages paths. Gemini uses
+the OpenAI-compatible API, not `generateContent`. Embeddings/files/fine-tuning remain
+blocked. `useResponsesApi: false` in your own Continue config is now just a compatibility
+choice, not a requirement — the CLI preset does not set it, and it never meant OpenAI
+Responses was unsupported.
 
 Quick sanity check that scoping works — a blocked endpoint returns `403 blocked_endpoint`:
 
@@ -486,15 +497,14 @@ kill-switch checks. Run without `--write` for a preview.
 
 ## 8. Revoke a running agent (the kill switch)
 
-This is the part a raw API key can't do. With an agent mid-task:
+With an agent making repeated requests:
 
 1. In the dashboard, **arm the kill switch** (the master kill), or suspend just that agent.
-2. Its very next call returns **`403 blocked_suspended`** — within ~100ms, checked *before*
-   the key is even touched.
+2. Its very next call returns **`403 blocked_suspended`** when stop state is readable, checked before provider dispatch.
 3. **Disarm**, and it runs again.
 
 No key rotation, no redeploy, no re-issuing the passport. One toggle severs a live agent and
-another restores it. (Note: instant in-flight revocation relies on Redis; see §9. A call
+another restores it. (Note: blocking already-issued visas relies on Redis; see §9. A call
 *already in flight* when you flip the switch completes — new calls are blocked immediately.)
 
 ---
@@ -514,7 +524,7 @@ Production checklist:
 - **Supabase specifically** (not vanilla Postgres) — the vault uses the `supabase_vault`
   extension. Use a Supabase project (hosted or self-hosted).
 - **Strong secrets:** `VISA_SECRET` and `CACHE_ENC_KEY` must be ≥32 bytes of real randomness
-  (`openssl rand -base64 32`). PassControl refuses to start with a short `VISA_SECRET`.
+  (`openssl rand -base64 32`). Visa mint/verification refuses an unusable `VISA_SECRET`; app startup alone is not a secret validation test.
 - **Redis with eviction disabled** (`maxmemory-policy noeviction`) — instant revocation
   relies on suspend/kill keys not being evicted under memory pressure.
 - **Behind a trusted proxy** — per-IP rate limits trust `X-Forwarded-For`; only real behind
@@ -522,7 +532,7 @@ Production checklist:
 - **Reconcile cron** — schedule `GET /api/cron/reconcile` (Bearer `$CRON_SECRET`) every few
   minutes to correct budget drift. On Vercel it's wired via `vercel.json`; elsewhere use
   system `cron` or a GitHub Action.
-- **Never deploy the seeded dev user** — real accounts sign up (gated by `INVITE_CODE`).
+- **Never deploy the seeded dev user** — configure production Auth/SMTP and `PASSCONTROL_SIGNUP_MODE` (`open`, `invite`, `closed`); invite mode uses `INVITE_CODE`.
 - **Kill switch fail mode** — reads fail *open* by default; set `KILL_SWITCH_FAIL_CLOSED=true`
   to make a Redis read failure block instead.
 
@@ -539,3 +549,33 @@ Production checklist:
 - **Security model + responsible disclosure** — [`SECURITY.md`](./SECURITY.md).
 
 Found a rough edge or a security issue? See `SECURITY.md` — we'd rather you tell us.
+
+
+## 0.9.0 features to configure deliberately
+
+**Sender proof:** enable `observe` first to inspect compatibility, then `required` when
+using the sidecar or another proof-capable implementation. The 0.9.0 direct CLI call,
+MCP chat, and TypeScript SDK do not attach proofs and are refused in required mode.
+Observed proof is not enforced proof. Proof binds method, origin/path, visa hash, time
+and a nonce, not body/query or hardware custody. Off mode uses the visa as a bearer.
+
+**Lifecycle:** rotation accepts a zero-to-seven-day grace period. Expiry and grace are
+mint boundaries; existing visas may continue until their own expiry unless stop controls
+block them. `/.well-known/passport-revocations` publishes signed revocation/rotation
+information, excluding expiry/suspend/kill. Offline copies need a freshness policy;
+receipt signature validity is not current Passport lifecycle validity.
+
+**Custom endpoints:** set a credential's base URL only on an operator-enabled deployment.
+`PROVIDER_ENDPOINT_MODE=selfhost` permits private HTTP services and custom ports;
+a hostname list restricts HTTPS/443 destinations. Validation is not DNS-aware SSRF
+prevention. Upstream redirects are refused. See [endpoint policy](./DOCUMENTATION.md#custom-endpoints-and-egress).
+
+**Owner binding:** a workspace can declare an owner, prove a domain token or GitHub
+repository token, and choose publication. These check control of identifiers, not legal
+identity. Company registry evidence does not establish representative authority.
+
+**Spend statements:** `passcontrol statements` reads Cloud's signed chain;
+`passcontrol verify statement "<jws>" --issuer <origin>` verifies an artifact. Public
+self-hosting includes verification, not issuance/proof-serving infrastructure. A Merkle
+proof checks inclusion in an issuer-committed set, not independently audited totals or
+complete provider billing. Read [the statement format](./docs/statement-format.md).

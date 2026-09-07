@@ -31,14 +31,14 @@ plain HTTP on a non-loopback host — a Compose service name such as `http://pas
 `http://host.docker.internal:3000`, or a LAN address — and rules out a gateway served under a
 sub-path. Front the deployment with TLS or reach it over a loopback port-forward.
 
-The visa is a bearer credential and the SDK pins it to exactly this origin, refusing to attach it
-to any other origin or to a non-`/api/v1/*` path. A gateway value that was loose about scheme or
+The SDK validates the initial request destination, refusing another origin or a
+non-`/api/v1/*` path. Redirect handling is a separate limitation described below. A gateway value that was loose about scheme or
 path would weaken the pin it defines.
 
 ## OpenAI and OpenAI-compatible providers
 
 ```bash
-npm install passcontrol@^0.6.0 openai
+npm install passcontrol@0.9.0 openai
 ```
 
 ```ts
@@ -64,7 +64,7 @@ passed to `clientOptions`. The request remains in the OpenAI chat-completions sh
 ## Anthropic
 
 ```bash
-npm install passcontrol@^0.6.0 @anthropic-ai/sdk
+npm install passcontrol@0.9.0 @anthropic-ai/sdk
 ```
 
 ```ts
@@ -93,8 +93,8 @@ ID covered by the passport's allowed patterns.
 
 ## Proof
 
-Configuration is not proof. A successful setup produces an immutable `agent_logs` row with
-`auth_method=passport` and `status=ok`. A receipt is called signed only when that stored row
+A successful call attempts to persist an append-only `agent_logs` row with
+`auth_method=passport` and `status=ok`; asynchronous logging can fail. A receipt is called signed only when that stored row
 contains the receipt. A failed challenge occurs before a tenant call row can be written.
 
 ### What that row proves, exactly
@@ -104,8 +104,8 @@ Authentication is two steps, and they are separate events:
 1. **Challenge / mint.** The passport private key signs a canonical payload; the gateway verifies
    that Ed25519 signature, burns a single-use nonce, and issues a short-lived HS256 work visa.
 2. **Provider call.** The request presents that visa. The gateway verifies the visa — a reusable
-   bearer token until it expires — and checks kill state, scope and budget. No Ed25519 signature
-   is carried or verified on this step.
+   bearer token until it expires — and checks kill state, scope and budget. This SDK does not attach an Ed25519 request proof on this step; the gateway can
+   enforce one when a proof-capable client supplies it.
 
 So a stored `auth_method=passport` row proves the call **used a passport-derived visa**, and
 therefore that a challenge signature was verified earlier when that visa was minted. It does not
@@ -117,3 +117,27 @@ matters when a passport is compromised — suspend the agent to cut an issued vi
 The **signed receipt** on the row is a third, different signature: the PassControl deployment
 signs the receipt over the decision it recorded. It is evidence about the gateway's record, not
 about the agent's passport, and the two must not be read as the same claim.
+
+
+## 0.9.0 compatibility and assurance
+
+`clientOptions` accepts `openai`, `anthropic`, `groq`, `mistral`, `together`, `deepseek`,
+and `gemini`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
+Chat Completions. Gemini uses Google's OpenAI-compatible endpoint; native
+`generateContent` is not supported. See [accepted paths](../../DOCUMENTATION.md#data-plane--proxy-a-model-call).
+
+The TypeScript SDK **does not attach sender proofs in 0.9.0**. Its provider requests use
+bearer visas: they work with sender-proof mode off/observe, but required mode refuses
+them without an additional correct proof implementation. The current sidecar attaches
+proofs. A valid mint signature is not a signature over each provider request.
+
+The wrapper validates the initial gateway origin/path. It does not override fetch's
+redirect policy, so it is not a complete redirect-chain credential boundary. Gateway
+upstream forwarding separately refuses provider redirects. Keep custom transports and
+the configured gateway trusted.
+
+The SDK takes a raw secret supplied by your application; it does not automatically read
+the CLI's OS credential store. The CLI's storage declarations are not storage attestation.
+Signed receipts are issuer assertions and best-effort, not proof of complete logging or
+provider billing. The SDK exports statement/inclusion verification; statement retrieval
+methods target Cloud's service and do not add it to a self-hosted installation.

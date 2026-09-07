@@ -1,12 +1,13 @@
 # PassControl spend statement format
 
-**Version 1.** This document is the contract. It is written so that someone with no access
+**Wire format version 1, shipped with PassControl 0.9.0.** It is written so that someone with no access
 to PassControl's source can implement a verifier, and check it against the recorded test
 vector at the bottom.
 
-A statement is a small signed document that commits to *every receipt a workspace issued in
-one window*, linked to the window before it. A receipt proves one call happened; a statement
-makes the record of all of them tamper-evident.
+A statement commits to a fixed covered set of receipt artifacts in a workspace window,
+linked to its predecessor. It does not prove that all calls or receipts were retained.
+Cloud operates this chain; the public self-host tree includes this format and verifiers,
+not issuance, scheduling or statement/proof-serving infrastructure.
 
 Producing statements is something a deployment does on a schedule. **Verifying one requires
 nothing but this document, a SHA-256, and an Ed25519 verify** — no account, no API key, and
@@ -20,12 +21,13 @@ Read this before implementing, because the easy mistake is to claim more.
 
 **It proves:** the statement was signed by the issuer it names, with a key that issuer
 publishes; the set of receipts it commits to was fixed at `iat` and cannot be changed
-afterwards; and, given a receipt plus an inclusion proof, that the specific call is inside
-that set.
+afterwards; and, given a receipt plus an inclusion proof, that the specific receipt artifact is inside
+that set. This is a commitment, not an independent audit.
 
 **It does not prove the totals are correct.** Recomputing `root` requires every receipt JWS
-in the window, which the holder of a statement does not have. A valid signature means the
-issuer cannot revise what it committed to — not that it added up right.
+in the window, which the holder of a statement does not have. A valid signature detects alteration of this artifact; the issuer could sign a
+conflicting artifact. Retained receipts/statements and trusted checkpoints are needed
+to detect conflicting histories. It does not show that the totals were added correctly.
 
 **It does not vouch for the issuer.** Anyone can run PassControl and sign statements about
 their own agents.
@@ -87,7 +89,7 @@ Base64url throughout is unpadded, per RFC 7515 Appendix C.
 | `per` | The window, epoch seconds, **half-open `[from, to)`**. A call at exactly `to` belongs to the next window. |
 | `n` | Calls the root covers. |
 | `nr` | Rows the window actually held. **May exceed `n`.** |
-| `cost` | Total for covered calls, in micro-cents (1 000 000 = $1). |
+| `cost` | Total for covered calls, in micro-cents (100 000 000 = $1). |
 | `unp` | Calls known to be unpriceable. |
 | `unk` | Calls with no recorded cost and no recorded reason. |
 | `root` | base64url SHA-256 Merkle root over the covered receipts, or `null` when nothing was covered. |

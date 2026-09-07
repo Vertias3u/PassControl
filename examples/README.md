@@ -1,6 +1,6 @@
 # Example agents for PassControl
 
-Zero-setup scripts to exercise PassControl end-to-end (you don't have to own a
+Configured example scripts to exercise PassControl end-to-end (you don't have to own a
 real agent — these *are* the example agents). Self-contained `.mjs`, run with plain
 `node`; they use the same flows the SDK wraps (`../sdk/`).
 
@@ -63,8 +63,8 @@ passcontrol configure claude-desktop --write   # use `cursor` for Cursor
 # `passcontrol configure claude-code` prints the command Claude Code owns
 ```
 
-Restart the client. Its config contains only absolute launch paths; the passport remains in
-the global owner-only profile, and model calls still traverse the gateway's scope, budget,
+Restart the client. Its config contains only absolute launch paths; the passport is resolved from
+the global profile or OS credential store, and model calls still traverse the gateway's scope, budget,
 audit, and kill-switch enforcement.
 
 ## Using PassControl with a third-party agent (the visa sidecar)
@@ -96,8 +96,8 @@ API key set to **anything** (it's replaced):
 - **Aider:** use the OpenAI-compatible preset (`OPENAI_API_BASE`, `OPENAI_API_KEY`,
   `AIDER_MODEL`) printed by `passcontrol env aider`.
 - **Cline / Continue:** use their OpenAI-compatible/custom provider UI with the sidecar base
-  URL and API key `sidecar`. For Continue, disable `/responses` for o-series/gpt-5 configs
-  (`useResponsesApi: false`) so it calls `/chat/completions`.
+  URL and API key `sidecar`. The Continue preset selects Chat Completions; OpenAI POST `/responses` is also
+  supported by the gateway.
 
 The agent never holds a real key *or* a visa — the sidecar owns the visa, the gateway owns
 the provider key. Make sure the passport's **scope** covers the model the agent calls and
@@ -139,3 +139,10 @@ passcontrol agent resume <agent-id>
 - Keys/secrets are read from env or `.passcontrol`. The real `.passcontrol` file is
   gitignored; only `.passcontrol.example` is meant to ship. These scripts are test tooling,
   not part of the app build or test suite.
+
+
+0.9.0: the sidecar attaches sender proofs; the minimal raw examples, direct CLI `call`,
+and MCP chat do not. Use off/observe with those bearer-visa clients, or a proof-capable
+client for required mode. Supported gateway providers include Gemini via its
+OpenAI-compatible API. Logs/receipts are best-effort and budgets reserve estimates;
+see [the behavior reference](../DOCUMENTATION.md) for uncertainty and recovery.

@@ -11,7 +11,7 @@ passcontrol init --global
 ```
 
 The client receives neither the provider key nor the short-lived work visa. The
-server mints the visa locally and sends every model call through the configured
+server signs locally and obtains the visa from the gateway and sends every model call through the configured
 PassControl gateway.
 
 ## Claude Desktop
@@ -52,3 +52,11 @@ Desktop/Cursor entries use absolute Node and `bin/passcontrol.mjs` paths because
 may not inherit shell `PATH`. Existing `mcpServers` entries are preserved, an existing file is
 backed up to `.bak`, and a different PassControl entry requires `--force`. No generated client
 config contains a passport secret or provider key.
+
+
+In 0.9.0 `chat` sends a bearer visa, without a sender proof. Required sender-proof mode
+therefore refuses it; use off/observe for this client. `list_models` reads model patterns
+from the visa scope, not a live upstream model catalog; a wildcard is not a callable model.
+Providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek, and Gemini (OpenAI-compatible).
+The global profile can use the CLI OS credential store (`passcontrol key status`) rather
+than containing the Passport secret. Custody declarations do not prove storage.

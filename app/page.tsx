@@ -20,7 +20,7 @@ const controls = [
   {
     number: "01",
     title: "Identify every caller",
-    copy: "Give each agent a short-lived passport tied to a tenant, environment, and workload instead of handing it a provider credential.",
+    copy: "Give an agent a Direct Agent Key or a signing Passport that mints short-lived visas, instead of a provider credential.",
   },
   {
     number: "02",
@@ -141,7 +141,7 @@ export default function SelfHostHome() {
               <h2>One boundary before every provider call.</h2>
               <p>
                 Agents carry identity, not long-lived secrets. PassControl evaluates the request,
-                retrieves the provider credential only after approval, and records the outcome.
+                retrieves the provider credential only after approval, and attempts to record the outcome.
               </p>
             </div>
             <div className={styles.decisionGrid}>

@@ -44,14 +44,26 @@ function launch(extraEnv = {}) {
   const collect = (chunk) => { output += String(chunk); };
   child.stdout.on("data", collect);
   child.stderr.on("data", collect);
-  const waitFor = (text, timeoutMs = 15_000) => new Promise((resolve, reject) => {
-    if (output.includes(text)) return resolve(output);
+  // `from` anchors the search past a slice of the transcript already read.
+  // Without it, waiting for a string the program has ALREADY printed is
+  // satisfied by that old occurrence and resolves without a byte of new input:
+  // `await` yields one microtask, and Node drains microtasks before it touches
+  // the event loop, so no stdout data can land in between. Such a wait is not
+  // slow or flaky — it is a no-op, every time.
+  //
+  // expect(1) has no such hazard: it matches a STREAM and consumes up to the
+  // match, so a second `expect "CONTROL"` waits for a new occurrence by
+  // construction. That asymmetry is the trap in this file — a step written the
+  // obvious way passes under the darwin scenarios and can never pass here.
+  const waitFor = (text, { from = 0, timeoutMs = 15_000 } = {}) => new Promise((resolve, reject) => {
+    const seen = () => output.indexOf(text, from) !== -1;
+    if (seen()) return resolve(output);
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error(`Timed out waiting for ${JSON.stringify(text)}. Output:\n${output}`));
+      reject(new Error(`Timed out waiting for ${JSON.stringify(text)} from ${from}. Output:\n${output}`));
     }, timeoutMs);
     const onData = () => {
-      if (!output.includes(text)) return;
+      if (!seen()) return;
       cleanup();
       resolve(output);
     };
@@ -118,7 +130,7 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
   it("waits for init's readline prompt before delivering provider input", async () => {
     if (process.platform === "darwin") {
       const output = await runDarwinScenario(`
-        expect "Choose a group"
+        expect "CONTROL"
         send "\\r"
         expect "Approve this machine"
         send "j"
@@ -134,7 +146,7 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
       return;
     }
     const pty = launch();
-    await pty.waitFor("Choose a group");
+    await pty.waitFor("CONTROL");
     pty.child.stdin.write("\r"); // Setup & config
     await pty.waitFor("Configure by hand, no browser");
     pty.child.stdin.write("\x1b[B\r");
@@ -147,8 +159,8 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
   it("cycles raw menu → read-only command → line prompt → raw menu", async () => {
     if (process.platform === "darwin") {
       const output = await runDarwinScenario(`
-        expect "Choose a group"
-        send "jjjjjj\\r"
+        expect "CONTROL"
+        send "jjjjjjj\\r"
         expect "Show local configuration"
         send "\\r"
         expect "Press Enter to return to Settings"
@@ -158,19 +170,19 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
         expect eof
         exit 0
       `);
-      expect(output.match(/Choose a group/g)?.length).toBeGreaterThanOrEqual(2);
+      expect(output.match(/CONTROL/g)?.length).toBeGreaterThanOrEqual(2);
       return;
     }
     const pty = launch();
-    await pty.waitFor("Choose a group");
-    pty.child.stdin.write("\x1b[B".repeat(6) + "\r"); // Status & tools
+    await pty.waitFor("CONTROL");
+    pty.child.stdin.write("\x1b[B".repeat(7) + "\r"); // Status & tools
     await pty.waitFor("Show cockpit status");
     pty.child.stdin.write("\r");
     await pty.waitFor("Press Enter to return to Settings, or q to quit:");
     pty.child.stdin.write("\r");
     await pty.waitFor("Recent");
     pty.child.stdin.write("q");
-    expect(pty.output().match(/Choose a group/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(pty.output().match(/CONTROL/g)?.length).toBeGreaterThanOrEqual(2);
   }, 25_000);
   it("hides the local-stack commands on an install with no checkout", async () => {
     // PASSCONTROL_FORCE_INSTALLED=1 is the CLI's own switch for "behave as if
@@ -179,13 +191,14 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
     // Without it the menu offers `setup`, which clones and runs the whole
     // server, as the fifth thing a brand-new user sees.
     //
-    // With the group gone the top level is seven rows, so Status & tools is
-    // index 5 rather than 6. That shift is the point of the test as much as the
+    // With the group gone the top level is eight rows, so Status & tools is
+    // index 6 rather than 7. That shift is the point of the test as much as the
     // absent title is: it is what proves the rows were removed from the
-    // navigable list and not merely painted out.
+    // navigable list and not merely painted out. (Both numbers went up by one
+    // in 0.9.1, when "Connect an agent" became the second group.)
     const scenario = `
-      expect "Choose a group"
-      send "jjjjj\r"
+      expect "CONTROL"
+      send "jjjjjj\r"
       expect "Diagnose setup"
       send "q"
       expect eof
@@ -195,8 +208,8 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
       ? await runDarwinScenario(scenario, { PASSCONTROL_FORCE_INSTALLED: "1" })
       : await (async () => {
         const pty = launch({ PASSCONTROL_FORCE_INSTALLED: "1" });
-        await pty.waitFor("Choose a group");
-        pty.child.stdin.write("\x1b[B".repeat(5) + "\r");
+        await pty.waitFor("CONTROL");
+        pty.child.stdin.write("\x1b[B".repeat(6) + "\r");
         await pty.waitFor("Diagnose setup");
         pty.child.stdin.write("q");
         return pty.output();
@@ -229,13 +242,13 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
     // so the scenario itself proves nothing either way — the JS assertion below
     // is the actual guard, and it fails with the whole transcript attached.
     const scenario = `
-      expect "Choose a group"
-      send "jjj\\r"
+      expect "CONTROL"
+      send "jjjj\\r"
       expect "Governed call logs"
       send "j\\r"
       expect "Press Enter to return to Settings"
       send "\\r"
-      expect "Choose a group"
+      expect "CONTROL"
       send "q"
       expect eof
       exit 0
@@ -244,19 +257,23 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
       ? await runDarwinScenario(scenario, UNREACHABLE)
       : await (async () => {
         const pty = launch(UNREACHABLE);
-        await pty.waitFor("Choose a group");
-        pty.child.stdin.write("\x1b[B".repeat(3) + "\r"); // Evidence
+        await pty.waitFor("CONTROL");
+        pty.child.stdin.write("\x1b[B".repeat(4) + "\r"); // Evidence
         await pty.waitFor("Governed call logs");
         pty.child.stdin.write("\x1b[B\r");
         await pty.waitFor("Press Enter to return to Settings, or q to quit:");
+        // The whole point of this step is a menu frame drawn AFTER the resume,
+        // so the wait has to be anchored past everything printed before it —
+        // the top level was already drawn once, at startup. See `waitFor`.
+        const resumeMark = pty.output().length;
         pty.child.stdin.write("\r");
-        await pty.waitFor("Choose a group");
+        await pty.waitFor("CONTROL", { from: resumeMark });
         pty.child.stdin.write("q");
         return pty.output();
       })();
 
     // Counting frames proves nothing: the top level is redrawn on every arrow
-    // key, so "Choose a group" already appears several times before the guide
+    // key, so "CONTROL" already appears several times before the guide
     // runs. What has to be true is the ORDER — the guide is reached, it reports
     // a failure, and a menu frame is drawn AFTER it. Before the fix the process
     // exited at the failure. The anchors are all strings PassControl itself
@@ -267,6 +284,6 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
     expect(reached, `the guide was never reached:\n${output}`).toBeGreaterThan(-1);
     expect(resumed, `the session ended instead of returning to the menu:\n${output}`).toBeGreaterThan(reached);
     expect(output.slice(reached, resumed), "the guide's read was expected to fail").toContain("✗ ");
-    expect(output.indexOf("Choose a group", resumed)).toBeGreaterThan(resumed);
+    expect(output.indexOf("CONTROL", resumed)).toBeGreaterThan(resumed);
   }, 25_000);
 });

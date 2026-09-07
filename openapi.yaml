@@ -1,12 +1,14 @@
 openapi: 3.1.0
 info:
   title: PassControl Control-Plane API
-  version: "1.0.0"
+  version: "0.9.0"
   description: >
     Developer API for managing a PassControl agent fleet. Authenticated with a
     `pc_` API key (Authorization: Bearer). All access is tenant-isolated to the
     key's owner. Reads need a `read` key; writes need a `write` key. Mutations
-    accept an `Idempotency-Key` header. See DOCUMENTATION.md for prose docs.
+    accept an `Idempotency-Key` header. This is a partial control-plane schema, not the
+    full product endpoint catalog. See DOCUMENTATION.md for authentication, owner, receipt,
+    budget-recovery and Cloud-only statement surfaces. The URI API version remains v1.
 servers:
   - url: "{gateway}/api/control/v1"
     variables:
@@ -129,7 +131,7 @@ paths:
               type: object
               required: [provider, model]
               properties:
-                provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini] }
+                provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, demo] }
                 model: { type: string, minLength: 1, maxLength: 200 }
                 timestamp:
                   type: string
@@ -353,14 +355,14 @@ components:
     Scope:
       type: object
       properties:
-        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini] }
+        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, demo] }
         models: { type: array, items: { type: string } }
     Agent:
       type: object
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
-        passport_pubkey: { type: string, description: base64url Ed25519 public key }
+        passport_pubkey: { type: [string, "null"], description: base64url Ed25519 public key; null for a DAK-only agent }
         status: { type: string, enum: [active, suspended, revoked] }
         budget_tokens: { type: [integer, "null"] }
         budget_cents: { type: [integer, "null"] }
@@ -404,7 +406,7 @@ components:
         evaluated_at: { type: string, format: date-time }
         policy_time: { type: string, format: date-time }
         agent_id: { type: string, format: uuid }
-        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini] }
+        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, demo] }
         model: { type: string }
         method: { type: string, const: POST }
         path: { type: array, items: { type: string } }

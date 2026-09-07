@@ -9,7 +9,10 @@ PASSCONTROL_GATEWAY=http://localhost:3000
 PASSPORT_ID=
 PASSPORT_SECRET=
 
-# From dashboard -> API keys. Needed only by examples/fleet-admin.mjs.
+# Optional OS-store marker: PASSPORT_KEY_STORAGE=os (use passcontrol key migrate).
+# In that mode the secret need not be in this file. An existing file fallback may be used.
+
+# From dashboard -> API keys. Needed for fleet/admin/log/spend commands, not model auth.
 PASSCONTROL_API_KEY=
 
 # Optional. Defaults: PROVIDER=anthropic, MODEL=claude-haiku-4-5
