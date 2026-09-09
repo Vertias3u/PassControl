@@ -368,3 +368,38 @@ describe("the application never touches the ledger", () => {
     expect(hits, `${LEDGER} is referenced by application code`).toEqual([]);
   });
 });
+
+// The runner owns the ledger. A migration must not write its own row.
+//
+// `scripts/migrate.sh` applies each file and records it in ONE transaction:
+//
+//     psql -1 -f "$f" -c "insert into public.schema_migrations (version, checksum) ..."
+//
+// so a file that inserts its own version row makes the runner's insert a
+// duplicate-key error, and `-1` rolls the WHOLE migration back. The migration
+// then cannot be applied at all — by this runner, on any database.
+//
+// Found the hard way on a hosted deploy: two new migrations ended with a
+// self-recording `insert ... on conflict do nothing`, which is harmless when the
+// file is piped through psql by hand (how they were developed) and fatal through
+// the runner. `on conflict` does not save it — the conflict is raised by the
+// runner's insert, not the file's.
+//
+// This also protects the checksum: the runner stamps one, and a row inserted by
+// the file has none.
+describe("no migration writes to the ledger itself", () => {
+  const MIGRATIONS = join(process.cwd(), "db", "migrations");
+
+  it.each(readdirSync(MIGRATIONS).filter((f) => f.endsWith(".sql")))(
+    "%s leaves public.schema_migrations to scripts/migrate.sh",
+    (file) => {
+      const sql = readFileSync(join(MIGRATIONS, file), "utf8");
+      // Comments legitimately mention the table (0036 reads it in a function),
+      // so this matches WRITES rather than any mention.
+      const writes = sql.match(
+        /\b(insert\s+into|update|delete\s+from|truncate)\s+(public\.)?schema_migrations\b/giu
+      );
+      expect(writes, `${file} writes to the migration ledger`).toBeNull();
+    }
+  );
+});

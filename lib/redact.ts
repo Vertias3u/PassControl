@@ -29,8 +29,51 @@ export const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
   /\bsk-(?:ant-)?[A-Za-z0-9._-]{6,}\b/g,
   /\bpc_[A-Za-z0-9._-]{6,}\b/g,
+  // Google/Gemini API keys are normally 39 characters, so the generic 40+
+  // catch-all below cannot protect them. Keep this provider-specific guard.
+  /\bAIza[A-Za-z0-9_-]{20,}/g,
   /\b[A-Za-z0-9_-]{40,}\b/g,
 ];
+
+/**
+ * Does this string contain something secret-shaped?
+ *
+ * Callers that want to REFUSE a value rather than scrub it need this, and the
+ * obvious spelling of it is a live bug:
+ *
+ *     SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(value))   // WRONG
+ *
+ * Every pattern above is `/g`, and `.test()` on a `/g` regex persists
+ * `lastIndex` on the shared regex object after a match. The array is module
+ * state: one per isolate, shared by every request and every operator. So a
+ * value that matches at offset 75 parks `lastIndex` at 114, and the NEXT value
+ * carrying the same class of credential is tested from offset 114 — it misses,
+ * returns false, and is accepted. The checks alternate: refuse, accept, refuse.
+ *
+ * That is not a theoretical hazard — it shipped, and every second value
+ * bearing a credential was accepted and stored verbatim. The exposure window is
+ * a credential long enough to match its own provider pattern but shorter than
+ * the 40-character catch-all that would otherwise catch it on a second pass —
+ * a 39-character Gemini key sits exactly there.
+ *
+ * `lastIndex` is therefore reset on both sides of every test, so the shared
+ * objects are left exactly as they were found. Use this instead of `.test()`;
+ * `.replace()` is already safe (it zeroes `lastIndex` itself) and needs no
+ * equivalent.
+ *
+ * NOT implemented as `redactSecrets(value) !== value`: that reports true for a
+ * value whose only change was the control-character strip, which would refuse
+ * an operator's reason for containing a tab.
+ */
+export function containsSecret(value: string): boolean {
+  for (const pattern of SECRET_VALUE_PATTERNS) {
+    pattern.lastIndex = 0;
+    const hit = pattern.test(value);
+    pattern.lastIndex = 0;
+    if (hit) return true;
+  }
+  return false;
+}
 
 /**
  * Replace every secret-shaped run with `[redacted]`, and strip control

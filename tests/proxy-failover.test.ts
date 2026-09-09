@@ -135,7 +135,7 @@ vi.mock("@/lib/state/fallbacks", () => ({
   readCurrentAgentFallbacks: (...args: unknown[]) => readFallbacksMock(...args),
 }));
 
-import { POST } from "@/app/api/v1/[provider]/[...path]/route";
+import { GET, POST } from "@/app/api/v1/[provider]/[...path]/route";
 
 const GROQ = { provider: "groq", model: "llama-3.3-70b" };
 
@@ -427,6 +427,7 @@ describe("policy rate limiting is charged per client request, not per attempt", 
     expect(hourly).toHaveLength(1);
   });
 });
+
 
 describe("the receipt chain", () => {
   it("gives each attempt its own receipt and returns the last one's id", async () => {

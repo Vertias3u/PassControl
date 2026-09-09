@@ -37,6 +37,9 @@ const {
 // passport apart from a tenant that holds a demo scope. That module is
 // `server-only`, which Next enforces at build time and vitest cannot resolve
 // at all — same stub tests/site-demo-routes.test.ts already uses.
+// The Cloud allowance resolver sits on the enforcement path and fails CLOSED, so
+// an unmocked one refuses every request here with a 503 instead of exercising
+// what this file is about.
 vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({
   waitUntil: (promise: Promise<unknown>) => pending.push(Promise.resolve(promise)),

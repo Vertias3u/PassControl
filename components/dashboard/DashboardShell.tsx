@@ -11,7 +11,6 @@ import {
   Network,
   Settings,
   Stethoscope,
-  UsersRound,
 } from "lucide-react";
 import { signOut } from "@/app/actions/auth";
 import { DashboardBrand } from "@/components/dashboard/DashboardBrand";
@@ -26,11 +25,14 @@ import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
 import { getCachedMigrationHealth } from "@/lib/system-health/cache";
 import { systemOperatorEmails } from "@/lib/system-health/operator";
+// `lib/operator-allowlist.ts` SHIPS — it was extracted so Core pages need not
+// import hosted beta code, and `showOperatorNav` below is computed in every build.
+import { operatorEmails } from "@/lib/operator-allowlist";
 import { MigrationBanner } from "@/components/dashboard/MigrationBanner";
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import type { SystemHealthSnapshot } from "@/lib/system-health";
 
-export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "statements" | "settings" | "beta" | "system" | "report";
+export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "statements" | "settings" | "beta" | "operator" | "system" | "report";
 
 const NAV: Array<{
   id: DashboardArea;
@@ -138,9 +140,42 @@ export async function DashboardShell({
     agentName: agentNames.get(grant.agent_id) ?? `Agent …${String(grant.agent_id).slice(-8)}`,
     expiresAt: grant.expires_at,
   }));
+  const hasVerifiedTotp = (mfa.ok ? mfa.user.factors ?? [] : []).some(
+    (factor) => factor.factor_type === "totp" && factor.status === "verified"
+  );
   const showSystemHealth = mfa.ok
     && systemOperatorEmails().has(mfa.user.email?.trim().toLowerCase() ?? "")
-    && (mfa.user.factors ?? []).some((factor) => factor.factor_type === "totp" && factor.status === "verified");
+    && hasVerifiedTotp;
+  /**
+   * The operator nav, decided HERE rather than trusted from the caller.
+   *
+   * The link used to appear on the strength of the email allowlist alone, while
+   * every destination behind it requires the full gate: signed AAL2, a verified
+   * TOTP factor, and the allowlist. So an allowlisted account without TOTP saw
+   * the link, clicked it, bounced through /login/verify and landed back on
+   * /dashboard. This makes the link agree with its destination — the same
+   * derivation `showSystemHealth` above already uses, off the same `mfa` result,
+   * with no second Auth request.
+   *
+   * The caller's `showBetaOperator` is kept and ANDed rather than removed, so it
+   * can only ever NARROW: a page that wants to hide the link still can, and a
+   * page that passes `true` cannot conjure one for an account that fails the
+   * gate. Widening was the bug; it is now unreachable by any caller.
+   *
+   * This is a usability fix, NOT an authorization fix (`admin_panel.md §8`).
+   * Every destination re-gates independently and always did — hiding a link has
+   * never been the control, and must never become one.
+   *
+   * Deliberately OUTSIDE the hosted-only markers, even though only hosted nav
+   * items read it: the two `<Navigation>` call sites below are shared lines, so
+   * a curated build that stripped this would reference an identifier it had just
+   * deleted and fail a self-hoster's build. Only the nav ITEM and its icons are
+   * hosted-only. Caught by building the curated tree, not by reading it.
+   */
+  const betaOperatorAuthorized = mfa.ok
+    && operatorEmails().has(mfa.user.email?.trim().toLowerCase() ?? "")
+    && hasVerifiedTotp;
+  const showOperatorNav = showBetaOperator && betaOperatorAuthorized;
 
   // Serial, and only for an operator. It cannot join the Promise.all above
   // because it depends on `auth` resolving first — which is the point: a tenant
@@ -173,7 +208,7 @@ export async function DashboardShell({
         <details className="pc-mobile-nav">
           <summary aria-label="Open navigation">Menu</summary>
           <div className="pc-mobile-nav__panel">
-            <Navigation active={active} mobile showBetaOperator={showBetaOperator} showSystemHealth={showSystemHealth} />
+            <Navigation active={active} mobile showBetaOperator={showOperatorNav} showSystemHealth={showSystemHealth} />
             <Link href="/dashboard/report" className="pc-nav-link">
               <MessageSquareWarning aria-hidden="true" />
               <span>Report a problem</span>
@@ -225,7 +260,7 @@ export async function DashboardShell({
             </span>
           </div>
 
-          <Navigation active={active} showBetaOperator={showBetaOperator} showSystemHealth={showSystemHealth} />
+          <Navigation active={active} showBetaOperator={showOperatorNav} showSystemHealth={showSystemHealth} />
 
           <div className="pc-sidebar__footer">
             {/*

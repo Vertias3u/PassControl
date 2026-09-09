@@ -181,3 +181,63 @@ describe("Core dashboard boundary", () => {
     expect(activation.match(/goes through this PassControl gateway/g)).toHaveLength(2);
   });
 });
+
+// A curated file must not reference something curation just deleted.
+//
+// Hit for real while adding the operator nav: the derivation lived inside the
+// hosted-only markers while the two `<Navigation>` call sites that read it are
+// shared lines, so the mirror built a shell referencing an identifier that was
+// no longer defined. Privately everything compiled, because privately the marked
+// lines are all still there — which is the whole reason this file exists.
+describe("curation never leaves a dangling reference behind", () => {
+  const SHARED_FILES = [
+    "components/dashboard/DashboardShell.tsx",
+    "app/api/v1/[provider]/[...path]/route.ts",
+  ];
+
+  /**
+   * Local `const` bindings declared INSIDE a private block.
+   *
+   * Deliberately just consts. Imports are the other half of this hazard, but a
+   * vanished import is caught by the per-symbol greps elsewhere in this file,
+   * and parsing import syntax well enough to avoid false positives here costs
+   * more than it earns — `cookies` is bound in a private block AND imported
+   * normally, and a looser matcher flagged it.
+   */
+  function privateConsts(source: string): string[] {
+    const names: string[] = [];
+    const blocks =
+      source.match(new RegExp(`${PRIVATE_START}[\\s\\S]*?${PRIVATE_END}`, "g")) ?? [];
+    for (const block of blocks) {
+      for (const m of block.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=/g)) names.push(m[1]!);
+    }
+    return [...new Set(names)];
+  }
+
+  /**
+   * Comments and strings are not uses.
+   *
+   * The first version of this matched bare words, so a `const allowance` inside
+   * a private block collided with the prose "the Cloud beta workspace allowance"
+   * in a surviving comment and reported a dangling reference that did not exist.
+   * A guard that cries wolf gets deleted, so it strips both before looking.
+   */
+  const codeOnly = (source: string): string =>
+    source
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ")
+      .replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g, '""');
+
+  it.each(SHARED_FILES)("%s defines everything the curated file still uses", (file) => {
+    const output = codeOnly(curated(file));
+    for (const name of privateConsts(source(file))) {
+      // A name may legitimately survive if it is ALSO bound outside the markers.
+      // What must never survive is a USE with no binding at all.
+      if (!new RegExp(`\\b${name}\\b`).test(output)) continue;
+      expect(
+        new RegExp(`(const|let|function|class)\\s+${name}\\b`).test(output),
+        `${file}: curated output uses "${name}" but curation removed its only binding`
+      ).toBe(true);
+    }
+  });
+});

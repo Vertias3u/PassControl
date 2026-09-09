@@ -61,6 +61,9 @@ const {
   fetchMock: vi.fn(),
 }));
 
+// The Cloud allowance resolver sits on the enforcement path and fails CLOSED, so
+// an unmocked one refuses every request here with a 503 instead of exercising
+// what this file is about.
 vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (promise: unknown) => promise }));
 vi.mock("@/lib/auth/visa", () => ({

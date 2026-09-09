@@ -128,7 +128,7 @@ vi.mock("@/lib/receipt", async (importOriginal) => ({
   signReceipt: (...args: unknown[]) => signReceiptMock(...args),
 }));
 
-import { POST } from "@/app/api/v1/[provider]/[...path]/route";
+import { GET, POST } from "@/app/api/v1/[provider]/[...path]/route";
 
 const DIRECT_KEY = `pc_agent_${"A".repeat(43)}`;
 const directPrincipal = {

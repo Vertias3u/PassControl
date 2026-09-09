@@ -1029,7 +1029,6 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     return errR(403, "blocked_suspended");
   }
 
-
   // ── Read body once (small); extract model + stream; mutate for usage ─────────
   // POST bodies must be JSON (the proxy parses + re-serializes them); reject other
   // declared content types rather than silently parsing.
@@ -1143,6 +1142,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // round trip and cannot race a concurrent flush.
   const budgeted = capTokens != null || capMicrocents != null;
   const budgetState = budgeted ? currentPolicyGate.budgetState : undefined;
+
 
   interface Settlement {
     /** The budget release alone. The loop AWAITS this before the next reserve. */
@@ -1788,6 +1788,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     for (const [h, v] of Object.entries(authHeaders(attemptProvider, providerKey))) {
       fwdHeaders.set(h, v);
     }
+
 
     // ── THE DISPATCH BOUNDARY ────────────────────────────────────────────────
     //
@@ -2558,7 +2559,6 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     return errR(403, "blocked_suspended");
   }
 
-
   // Parse body (model + stream).
   if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) {
     return err(413, "payload_too_large");
@@ -2719,6 +2719,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     logBlocked("blocked_budget", model, 402);
     return errR(402, "blocked_budget");
   }
+
 
   // 7. Synthesize the response in place of Vault-key resolution + upstream forward.
   const text = demoText(bodyObj);
