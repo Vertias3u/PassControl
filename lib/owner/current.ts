@@ -10,7 +10,7 @@
 import { waitUntil } from "@vercel/functions";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { getCachedOwner, setCachedOwner } from "../state/redis";
+import { getCachedOwner, readOwnerFence, setCachedOwner } from "../state/redis";
 import type { OwnerClaim } from "../receipt";
 
 const OWNER_CACHE_TTL_S = 300;
@@ -80,6 +80,16 @@ export async function readCurrentOwner(
     // A cache read failure falls through to the tenant-scoped source of truth.
   }
 
+  // Read BEFORE the row, so it predates the snapshot it will be quoted
+  // alongside. A withdrawn or demoted claim republished by an in-flight read
+  // does not merely serve stale data here — it gets SIGNED into a receipt.
+  let fence: string | null = null;
+  try {
+    fence = await readOwnerFence(userId);
+  } catch {
+    fence = null;
+  }
+
   try {
     const { data, error } = await db
       .from("agent_owners")
@@ -92,7 +102,7 @@ export async function readCurrentOwner(
 
     // Cache the miss too. A tenant with no owner is the common case, and it
     // should not cost a database read on every single proxied call.
-    waitUntil(setCachedOwner(userId, JSON.stringify(data ?? null), OWNER_CACHE_TTL_S));
+    waitUntil(setCachedOwner(userId, JSON.stringify(data ?? null), OWNER_CACHE_TTL_S, fence));
     return toClaim((data as Record<string, unknown>) ?? null);
   } catch {
     return null;

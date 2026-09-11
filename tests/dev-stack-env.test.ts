@@ -94,6 +94,14 @@ describe("the local stack's instance signing key", () => {
     expect(loadInstanceVerifiers()).toHaveLength(1);
   });
 
+  // _PREV is one slot. The key retired before it lives only in _HISTORY, so a
+  // regenerated .env.docker that drops the list un-publishes those keys — and
+  // the receipts signed under them stop verifying with nothing reporting why.
+  it("carries the retired-key history forward too, not just _PREV", () => {
+    expect(preserveBlock).toContain("INSTANCE_SIGNING_KEY_HISTORY");
+    expect(heredoc).toMatch(/^INSTANCE_SIGNING_KEY_HISTORY=/m);
+  });
+
   it("keeps the previous public key available so old receipts still verify", () => {
     // INSTANCE_SIGNING_KEY_PREV is what makes a rotation survivable: its public
     // half stays in the JWKS even though nothing signs with it any more. If the

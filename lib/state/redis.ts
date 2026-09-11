@@ -19,6 +19,13 @@ const k = {
   reservedCost: (agid: string) => `reserved_cost:${agid}`,
   spentCost: (agid: string) => `spent_cost:${agid}`,
   key: (agid: string, provider: string) => `key:${agid}:${provider}`,
+  // Credential-BOUND key material. Its own namespace, for the reason the
+  // `policy2:` comment below gives at length: the stored shape differs (a bundle
+  // naming the credential, not a bare sealed string), and an entry written by one
+  // path must never be readable as the other. A bare sealed string read as a
+  // bundle would fail to parse — recoverable — but a bundle read as a sealed
+  // string would be decrypted into nonsense and sent upstream as a credential.
+  credential: (agid: string, provider: string) => `cred:${agid}:${provider}`,
   // The endpoint a credential is sent to. Its own key rather than a field on the
   // sealed one above, because it is NOT a secret: it is an address, so it does
   // not go through lib/crypto/aesgcm.ts and a cache read of it decrypts nothing.
@@ -49,6 +56,27 @@ const k = {
   // credential id — only the provider list, used to say what an agent could fail
   // over to. Never a decrypt path.
   providerKeys: (uid: string) => `provkeys:${uid}`,
+  // ── Invalidation fences ────────────────────────────────────────────────────
+  //
+  // A fence is NOT a cached value. It is a token that changes every time the
+  // thing it guards is invalidated, and it lives in its OWN key so that filling
+  // the cache cannot erase it. That separation is the entire mechanism: the
+  // first version of this put the invalidation marker in the value key, so the
+  // first legitimate fill overwrote the marker and every later stale writer
+  // sailed through.
+  //
+  // A fence is never read on a cache HIT. It is read on the miss path, before
+  // the authoritative read, and quoted back at fill time — so the hot path pays
+  // nothing and the slow path pays one GET it was already going to beat with a
+  // database round trip.
+  policyFence: (uid: string, agid: string) => `polgen:${uid}:${agid}`,
+  credentialFence: (agid: string, provider: string) => `credgen:${agid}:${provider}`,
+  // The owner claim is the one whose staleness OUTLIVES the cache: it is copied
+  // into a receipt and signed, so a resurrected claim keeps being verifiable
+  // after the entry that produced it has expired.
+  ownerFence: (uid: string) => `ownergen:${uid}`,
+  fallbacksFence: (uid: string, agid: string) => `fbgen:${uid}:${agid}`,
+  providerKeysFence: (uid: string) => `pkgen:${uid}`,
   lastSeen: (agid: string) => `lastseen:${agid}`,
   keyImport: (uid: string, id: string) => `keyimport:${uid}:${id}`,
 };
@@ -150,6 +178,129 @@ export async function readBudgetSnapshot(agentId: string): Promise<BudgetSnapsho
   };
 }
 
+// ── Invalidation fences ──────────────────────────────────────────────────────
+/**
+ * How long a fence token is remembered.
+ *
+ * It has to outlive every cached value it guards, by a wide margin, because a
+ * fence that expires while a value is still live would let a pre-change reader's
+ * fill match "no fence" and publish. Values live 60 seconds; a day is not a
+ * tuning parameter, it is an assertion that this can never be close.
+ */
+const FENCE_TTL_S = 86_400;
+
+/**
+ * A token, not a counter.
+ *
+ * Nothing compares fences for ORDER — the only question a fill ever asks is
+ * "is this still the same one I saw?" — so distinctness is the whole
+ * requirement, and a counter would add a property that has to be maintained
+ * (INCR on an expired key restarts at 1 and can collide with a 1 observed
+ * before) in exchange for nothing.
+ */
+function newFenceToken(): string {
+  return crypto.randomUUID();
+}
+
+/**
+ * Publish a value only if the fence has not moved since the reader looked.
+ *
+ * KEYS[1] value · KEYS[2] fence · ARGV[1] value · ARGV[2] ttl · ARGV[3] the
+ * fence the reader observed BEFORE its authoritative read, or '' for "there was
+ * no fence".
+ *
+ * The empty-string case is not a wildcard. It asserts the fence was ABSENT, so
+ * a fence appearing between the read and the fill still rejects the fill. And a
+ * fence that has since vanished (expired, flushed) rejects too: `fence ~= observed`
+ * is true when `fence` is false. Both unknowns resolve to "do not publish",
+ * which costs one cache window and never costs correctness.
+ */
+const FENCED_FILL_LUA = `local fence = redis.call('GET', KEYS[2])
+local observed = ARGV[3]
+if observed == '' then
+  if fence then return 0 end
+else
+  if fence ~= observed then return 0 end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return 1`;
+
+/**
+ * Move the fence and drop the values it guards, in ONE script.
+ *
+ * Atomicity here is not decoration. If moving the fence and deleting the value
+ * were two round trips, a reader could slip between them, miss the value, read
+ * the OLD fence, and publish a stale fill that the fence check would then
+ * legitimately accept — the exact defect this exists to remove, reintroduced by
+ * operation order. One eval has no order to get wrong.
+ *
+ * KEYS comes in groups of four: fence, then the three value keys it guards.
+ * ARGV[1] is the fence TTL, ARGV[2..] are the new tokens, one per group.
+ */
+const ROTATE_FENCE_LUA = `local ttl = ARGV[1]
+local n = #KEYS / 4
+for i = 0, n - 1 do
+  redis.call('SET', KEYS[i * 4 + 1], ARGV[i + 2], 'EX', ttl)
+  redis.call('DEL', KEYS[i * 4 + 2], KEYS[i * 4 + 3], KEYS[i * 4 + 4])
+end
+return n`;
+
+/**
+ * The policy fence as it stands right now.
+ *
+ * Call this BEFORE the authoritative database read, never after: the point of
+ * the value is that it predates the snapshot it will be quoted alongside.
+ * Returns null when no invalidation has ever been recorded for this agent,
+ * which is the ordinary state and is a perfectly good thing to quote back.
+ */
+export async function readPolicyFence(userId: string, agentId: string): Promise<string | null> {
+  return asCachedString(await redis().get<unknown>(k.policyFence(userId, agentId)));
+}
+
+/** The owner-claim fence for one tenant. Same rule: read it before the row. */
+/**
+ * Rotate one fence and drop the single value it guards, in one eval.
+ *
+ * The three-slot padding is `ROTATE_FENCE_LUA` working in groups of four: these
+ * caches have one value key each, so the spare slots repeat it and the extra
+ * DELs are no-ops. One script shared with the credential caches beats four
+ * scripts that can drift apart.
+ */
+async function rotateFence(fenceKey: string, valueKey: string): Promise<boolean> {
+  try {
+    await redis().eval(
+      ROTATE_FENCE_LUA,
+      [fenceKey, valueKey, valueKey, valueKey],
+      [String(FENCE_TTL_S), newFenceToken()]
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readOwnerFence(userId: string): Promise<string | null> {
+  return asCachedString(await redis().get<unknown>(k.ownerFence(userId)));
+}
+
+/** The failover-list fence for one agent. Same rule: read it before the row. */
+export async function readFallbacksFence(userId: string, agentId: string): Promise<string | null> {
+  return asCachedString(await redis().get<unknown>(k.fallbacksFence(userId, agentId)));
+}
+
+/** The provider-list fence for one tenant. Same rule: read it before the row. */
+export async function readProviderKeysFence(userId: string): Promise<string | null> {
+  return asCachedString(await redis().get<unknown>(k.providerKeysFence(userId)));
+}
+
+/** The credential/endpoint fence for one (agent, provider). Same rule: read it first. */
+export async function readCredentialFence(
+  agentId: string,
+  provider: string
+): Promise<string | null> {
+  return asCachedString(await redis().get<unknown>(k.credentialFence(agentId, provider)));
+}
+
 // ── Provider-key cache (stores ciphertext only; see aesgcm.ts) ────────────────
 /**
  * The custom endpoint for this (agent, provider), or the empty string for "none".
@@ -165,26 +316,72 @@ export async function getCachedEndpoint(
   return asCachedString(await redis().get<unknown>(k.endpoint(agentId, provider)));
 }
 
+/**
+ * Publish the endpoint for this (agent, provider), unless the credential changed
+ * while this reader was reading it.
+ *
+ * `fence` is what `readCredentialFence` returned before the authoritative read.
+ * Without it a rotation or an endpoint reset could purge the cache and then be
+ * overwritten by an in-flight read that started earlier — the operator's change
+ * lands, the purge succeeds, and the retired address keeps deciding where a
+ * credential goes for a full TTL.
+ *
+ * Returns whether the value was actually published.
+ */
 export async function setCachedEndpoint(
   agentId: string,
   provider: string,
   endpoint: string,
-  ttlSeconds = 60
-): Promise<void> {
-  await redis().set(k.endpoint(agentId, provider), endpoint, { ex: ttlSeconds });
+  ttlSeconds = 60,
+  fence: string | null = null
+): Promise<boolean> {
+  const res = await redis().eval(
+    FENCED_FILL_LUA,
+    [k.endpoint(agentId, provider), k.credentialFence(agentId, provider)],
+    [endpoint, String(ttlSeconds), fence ?? ""]
+  );
+  return Number(res) === 1;
 }
 
-export async function getCachedKey(agentId: string, provider: string): Promise<string | null> {
-  return asCachedString(await redis().get<unknown>(k.key(agentId, provider)));
+/**
+ * Cached key material for this (agent, provider).
+ *
+ * With `credentialId`, this reads the BOUND namespace, whose value is a bundle
+ * naming the credential the secret belongs to. The caller checks that name — see
+ * the proxy's step 6 — because a cache entry that does not say which credential
+ * it came from is exactly how one credential's secret reached another's address.
+ */
+export async function getCachedKey(
+  agentId: string,
+  provider: string,
+  credentialId?: string
+): Promise<string | null> {
+  const cacheKey = credentialId ? k.credential(agentId, provider) : k.key(agentId, provider);
+  return asCachedString(await redis().get<unknown>(cacheKey));
 }
 
+/**
+ * Publish sealed key material, under the same fence as the endpoint above.
+ *
+ * The two are halves of one answer — which credential, sent where — so they are
+ * guarded by ONE fence per (agent, provider). A rotation that moves the fence
+ * therefore refuses the stale half of a pair as well as the stale whole.
+ */
 export async function setCachedKey(
   agentId: string,
   provider: string,
   sealed: string,
-  ttlSeconds = 60
-): Promise<void> {
-  await redis().set(k.key(agentId, provider), sealed, { ex: ttlSeconds });
+  ttlSeconds = 60,
+  credentialId?: string,
+  fence: string | null = null
+): Promise<boolean> {
+  const cacheKey = credentialId ? k.credential(agentId, provider) : k.key(agentId, provider);
+  const res = await redis().eval(
+    FENCED_FILL_LUA,
+    [cacheKey, k.credentialFence(agentId, provider)],
+    [sealed, String(ttlSeconds), fence ?? ""]
+  );
+  return Number(res) === 1;
 }
 
 // ── Agent-policy cache ───────────────────────────────────────────────────────
@@ -208,13 +405,43 @@ export async function getCachedAgentPolicy(
   return asCachedString(await redis().get<unknown>(k.policy(userId, agentId)));
 }
 
+/**
+ * Fill the policy cache — unless an invalidation happened after this read began.
+ *
+ * `fence` is what `readPolicyFence` returned BEFORE the caller took its database
+ * snapshot. A read that started before a mode change and finished after it is
+ * carrying a value that is already wrong, and a plain SET would publish it over
+ * the top of the invalidation for a full TTL.
+ *
+ * Two earlier attempts at this are worth naming, because both looked right:
+ *
+ *   * A plain DEL leaves nothing behind, so the stale fill lands afterwards and
+ *     is served. That is the defect, not the fix.
+ *   * A wall-clock TOMBSTONE **in the value key** fails twice over. The first
+ *     legitimate fill overwrites the tombstone, so every later stale writer
+ *     finds no marker and wins; and comparing `Date.now()` across two edge
+ *     invocations makes correctness depend on clock agreement it does not have.
+ *
+ * The fence is a token in its own key. Fills never write it, so it cannot be
+ * erased by the thing it guards, and equality needs no clock.
+ *
+ * Returns whether the value was published. A dropped fill is not an error: the
+ * reader still returns its own value to its own caller, it simply does not
+ * publish it, and the next request reads through to the database.
+ */
 export async function setCachedAgentPolicy(
   userId: string,
   agentId: string,
   serializedPolicy: string,
-  ttlSeconds = 60
-): Promise<void> {
-  await redis().set(k.policy(userId, agentId), serializedPolicy, { ex: ttlSeconds });
+  ttlSeconds = 60,
+  fence: string | null = null
+): Promise<boolean> {
+  const res = await redis().eval(
+    FENCED_FILL_LUA,
+    [k.policy(userId, agentId), k.policyFence(userId, agentId)],
+    [serializedPolicy, String(ttlSeconds), fence ?? ""]
+  );
+  return Number(res) === 1;
 }
 
 /**
@@ -227,8 +454,21 @@ export async function setCachedAgentPolicy(
  * call site: a failed purge costs one cache window, and must never be the
  * reason a save is reported as failed when the row was in fact written.
  */
-export async function purgeAgentPolicy(userId: string, agentId: string): Promise<void> {
-  await redis().del(k.policy(userId, agentId));
+/**
+ * Invalidate the policy cache, and say whether it worked.
+ *
+ * Moves the fence and drops the value in ONE eval. Both halves matter and
+ * neither is sufficient: dropping the value alone leaves an in-flight pre-change
+ * read free to republish it, and moving the fence alone leaves the current stale
+ * value being served until its TTL runs out.
+ *
+ * Returns false when the invalidation could not be recorded. Callers changing an
+ * AUTHENTICATION setting must not report success on a durable database write
+ * alone — until this returns true, the old value can still be deciding, and
+ * `lib/fleet.ts` turns exactly this boolean into what the operator is told.
+ */
+export async function purgeAgentPolicy(userId: string, agentId: string): Promise<boolean> {
+  return rotateFence(k.policyFence(userId, agentId), k.policy(userId, agentId));
 }
 
 export async function getCachedAgentFallbacks(
@@ -238,17 +478,29 @@ export async function getCachedAgentFallbacks(
   return asCachedString(await redis().get<unknown>(k.fallbacks(userId, agentId)));
 }
 
+/**
+ * Publish an agent's failover list, unless the operator changed it mid-read.
+ *
+ * Failover decides which provider a refused call is re-sent to, so a resurrected
+ * list routes traffic to a credential that was deliberately taken out of it.
+ */
 export async function setCachedAgentFallbacks(
   userId: string,
   agentId: string,
   serializedFallbacks: string,
-  ttlSeconds = 60
-): Promise<void> {
-  await redis().set(k.fallbacks(userId, agentId), serializedFallbacks, { ex: ttlSeconds });
+  ttlSeconds = 60,
+  fence: string | null = null
+): Promise<boolean> {
+  const res = await redis().eval(
+    FENCED_FILL_LUA,
+    [k.fallbacks(userId, agentId), k.fallbacksFence(userId, agentId)],
+    [serializedFallbacks, String(ttlSeconds), fence ?? ""]
+  );
+  return Number(res) === 1;
 }
 
-export async function purgeAgentFallbacks(userId: string, agentId: string): Promise<void> {
-  await redis().del(k.fallbacks(userId, agentId));
+export async function purgeAgentFallbacks(userId: string, agentId: string): Promise<boolean> {
+  return rotateFence(k.fallbacksFence(userId, agentId), k.fallbacks(userId, agentId));
 }
 
 // ── Owner-binding cache ──────────────────────────────────────────────────────
@@ -259,32 +511,58 @@ export async function getCachedOwner(userId: string): Promise<string | null> {
   return asCachedString(await redis().get<unknown>(k.owner(userId)));
 }
 
+/**
+ * Publish the tenant's owner claim, unless it changed while this read was in
+ * flight.
+ *
+ * THE MOST CONSEQUENTIAL OF THESE FENCES, and not because the data is more
+ * sensitive than a provider key — it is not secret at all. It is because this
+ * value gets SIGNED. `readCurrentOwner` feeds the proxy's `own` claim and
+ * `signReceipt` puts it in a receipt, so a claim republished after the operator
+ * withdrew or demoted it becomes a cryptographically valid assertion that
+ * outlives the cache entry entirely. Meanwhile the public `/verify` profile
+ * reads live Postgres. Without this, the product could issue two signed public
+ * statements that disagree about the same tenant.
+ */
 export async function setCachedOwner(
   userId: string,
   serializedOwner: string,
-  ttlSeconds = 300
-): Promise<void> {
-  await redis().set(k.owner(userId), serializedOwner, { ex: ttlSeconds });
+  ttlSeconds = 300,
+  fence: string | null = null
+): Promise<boolean> {
+  const res = await redis().eval(
+    FENCED_FILL_LUA,
+    [k.owner(userId), k.ownerFence(userId)],
+    [serializedOwner, String(ttlSeconds), fence ?? ""]
+  );
+  return Number(res) === 1;
 }
 
-export async function purgeOwnerCache(userId: string): Promise<void> {
-  await redis().del(k.owner(userId));
+export async function purgeOwnerCache(userId: string): Promise<boolean> {
+  return rotateFence(k.ownerFence(userId), k.owner(userId));
 }
 
 export async function getCachedProviderKeys(userId: string): Promise<string | null> {
   return asCachedString(await redis().get<unknown>(k.providerKeys(userId)));
 }
 
+/** Publish the tenant's provider list, unless a credential changed mid-read. */
 export async function setCachedProviderKeys(
   userId: string,
   serializedProviders: string,
-  ttlSeconds = 300
-): Promise<void> {
-  await redis().set(k.providerKeys(userId), serializedProviders, { ex: ttlSeconds });
+  ttlSeconds = 300,
+  fence: string | null = null
+): Promise<boolean> {
+  const res = await redis().eval(
+    FENCED_FILL_LUA,
+    [k.providerKeys(userId), k.providerKeysFence(userId)],
+    [serializedProviders, String(ttlSeconds), fence ?? ""]
+  );
+  return Number(res) === 1;
 }
 
-export async function purgeProviderKeysCache(userId: string): Promise<void> {
-  await redis().del(k.providerKeys(userId));
+export async function purgeProviderKeysCache(userId: string): Promise<boolean> {
+  return rotateFence(k.providerKeysFence(userId), k.providerKeys(userId));
 }
 
 /**
@@ -296,9 +574,28 @@ export async function purgeProviderKeysCache(userId: string): Promise<void> {
  * sender-proof mode write had: the write lands and the old value keeps being
  * used. Anything else cached per (agent, provider) belongs in this list too.
  */
-export async function purgeAgentCaches(agentId: string, providers: string[]): Promise<void> {
-  const keys = providers.flatMap((p) => [k.key(agentId, p), k.endpoint(agentId, p)]);
-  if (keys.length) await redis().del(...keys);
+export async function purgeAgentCaches(agentId: string, providers: string[]): Promise<boolean> {
+  if (!providers.length) return true;
+  // Groups of four, one per provider: the fence first, then the three value keys
+  // it guards. Moving the fence is what stops a read that began before this
+  // rotation from republishing the retired secret or the retired address after
+  // the delete has already succeeded.
+  const keys = providers.flatMap((p) => [
+    k.credentialFence(agentId, p),
+    k.key(agentId, p),
+    k.credential(agentId, p),
+    k.endpoint(agentId, p),
+  ]);
+  try {
+    await redis().eval(
+      ROTATE_FENCE_LUA,
+      keys,
+      [String(FENCE_TTL_S), ...providers.map(() => newFenceToken())]
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── Per-agent fast revocation ─────────────────────────────────────────────────

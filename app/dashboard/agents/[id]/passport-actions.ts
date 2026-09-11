@@ -31,6 +31,17 @@ export interface PassportActionState {
   error?: string;
   /** Echoed back by a mode change so the control can settle on the real value. */
   senderConstraintMode?: string;
+  /**
+   * Whether the new mode is DECIDING yet, not merely stored.
+   *
+   * The gateway reads this setting from a cache, so a saved change that could
+   * not invalidate that cache keeps the old mode in force for up to a minute.
+   * On a switch to `required` that minute is one in which outstanding bearer
+   * visas are still admitted, so the surface must not report it as done. False
+   * means saved-but-not-yet-live; the write itself is durable either way and
+   * must not be retried.
+   */
+  enforcementLive?: boolean;
   /** Set by a successful rotation, so the UI can state the deadline exactly. */
   previousValidUntil?: string;
   expiresAt?: string | null;
@@ -176,8 +187,20 @@ export async function setAgentSenderConstraint(
     action: "agent.update",
     targetType: "agent",
     targetId: agentId,
-    metadata: { fields: "sender_constraint_mode", via: "dashboard", to: result.value.mode },
+    metadata: {
+      fields: "sender_constraint_mode",
+      via: "dashboard",
+      to: result.value.mode,
+      // Recorded, because an operator reading the audit trail after an incident
+      // needs to know whether the change was in force from this moment or from
+      // up to a TTL later.
+      enforcement_live: result.value.enforcementLive,
+    },
   });
   revalidatePath(`/dashboard/agents/${agentId}`);
-  return { ok: true, senderConstraintMode: result.value.mode };
+  return {
+    ok: true,
+    senderConstraintMode: result.value.mode,
+    enforcementLive: result.value.enforcementLive,
+  };
 }

@@ -51,6 +51,9 @@ vi.mock("@/lib/state/killswitch", () => ({
 }));
 vi.mock("@/lib/state/redis", () => ({
   purgeAgentPolicy: vi.fn(),
+  // The proxy reads this before the endpoint row and again before dispatch.
+  // Omitted, it is undefined, the call throws, and the route 500s.
+  readCredentialFence: vi.fn(async () => null),
   claimNonce: (...args: unknown[]) => claimNonceMock(...args),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
   getCachedKey: vi.fn(async () => null),
@@ -193,6 +196,7 @@ beforeEach(() => {
     policy: {},
     shadow: null,
     senderConstraintMode: "required",
+    budget: { known: false },
   });
   claimNonceMock.mockResolvedValue(true);
   serviceClientMock.mockReturnValue({ rpc: vi.fn() });
@@ -227,6 +231,7 @@ describe("sender-constrained passport visas", () => {
       policy: {},
       shadow: null,
       senderConstraintMode: "off",
+      budget: { known: false },
     });
 
     // The caller still supplies a valid proof. Because the gateway did not
@@ -309,6 +314,7 @@ describe("sender-constrained passport visas", () => {
       policy: {},
       shadow: null,
       senderConstraintMode: "off",
+      budget: { known: false },
     });
 
     const res = await call("visa-a");
@@ -334,6 +340,7 @@ describe("observe mode", () => {
       policy: {},
       shadow: null,
       senderConstraintMode: "observe",
+      budget: { known: false },
     });
   });
 
@@ -430,6 +437,7 @@ describe("observe mode", () => {
       policy: {},
       shadow: null,
       senderConstraintMode: "required",
+      budget: { known: false },
     });
     const enforced = await call("visa-a", make());
     expect(enforced.status).toBe(401);
@@ -445,6 +453,7 @@ describe("observe mode", () => {
       policy: {},
       shadow: null,
       senderConstraintMode: "paranoid",
+      budget: { known: false },
     });
     const res = await call("visa-a");
     expect(res.status).toBe(200);
@@ -453,7 +462,7 @@ describe("observe mode", () => {
   });
 
   it("records nothing at all when the mode is off", async () => {
-    currentPolicyMock.mockResolvedValue({ policy: {}, shadow: null, senderConstraintMode: "off" });
+    currentPolicyMock.mockResolvedValue({ policy: {}, shadow: null, senderConstraintMode: "off", budget: { known: false } });
     await call("visa-a", proof({ visa: "visa-a" }));
     await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
     expect(writeLogMock.mock.calls.at(-1)?.[0]?.senderProofWould).toBeUndefined();

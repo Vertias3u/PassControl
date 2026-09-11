@@ -49,6 +49,7 @@ const html = (initialLogs: ReturnType<typeof log>[]) =>
       agents={agents}
       initialLogs={initialLogs}
       integrations={["generic"]}
+      logsAvailable
     />
   );
 
@@ -94,6 +95,7 @@ describe("first-call stepper markup", () => {
         agents={agents}
         initialLogs={[log("ok")]}
         integrations={["generic"]}
+        logsAvailable
       />
     );
     expect(out).toBe("");

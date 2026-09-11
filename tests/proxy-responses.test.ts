@@ -55,6 +55,9 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
 });
 vi.mock("@/lib/state/redis", () => ({
   purgeAgentPolicy: vi.fn(),
+  // The proxy reads this before the endpoint row and again before dispatch.
+  // Omitted, it is undefined, the call throws, and the route 500s.
+  readCredentialFence: vi.fn(async () => null),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: vi.fn(async () => undefined),
@@ -188,7 +191,14 @@ beforeEach(() => {
   getCachedKeyMock.mockResolvedValue("provider-key");
   readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
-  readPolicyMock.mockResolvedValue({ policy: {}, shadow: null });
+  readPolicyMock.mockResolvedValue({
+  policy: {},
+  shadow: null,
+  // `known: false` = "this read could not establish the caps", which is what
+  // every rung below the newest returns, and makes the proxy keep the visa's
+  // own claim — the behaviour that shipped before S3-04.
+  budget: { known: false },
+});
   writeLogMock.mockResolvedValue(undefined);
   mirrorSpendMock.mockResolvedValue(undefined);
   rateLimitMock.mockResolvedValue({ success: true, remaining: 1 });

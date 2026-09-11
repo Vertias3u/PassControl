@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error — plain .mjs CLI module, no types
@@ -94,5 +96,46 @@ describe.skipIf(process.platform === "win32")("runProcess, against a subprocess 
   it("never hands stderr itself back to a caller", () => {
     const result = stall("printf 'password data for new item: secret-leak' >&2");
     expect(JSON.stringify(result)).not.toContain("secret-leak");
+  });
+});
+
+/**
+ * The same round-trip, under a REAL CONTROLLING TERMINAL.
+ *
+ * Everything above this point passes on broken code, and did for months. Vitest,
+ * CI and every agent shell run without a controlling tty, and `security(1)` only
+ * reaches for one when it has one: given a tty it opens /dev/tty for its double
+ * prompt and IGNORES the stdin pipe entirely, so the write hangs until the helper
+ * timeout and the key never lands. Without a tty it falls back to stdin and the
+ * exact same code works. The feature was therefore green everywhere it was ever
+ * measured and broken in the only place it is ever used — a human's terminal.
+ *
+ * A pty is the only instrument that can tell those two apart, so the test owns
+ * one instead of inheriting whatever the runner happened to have.
+ */
+describe.skipIf(!onMac)("macOS Keychain, from a terminal that has a controlling tty", () => {
+  const ptyRunner = resolve(process.cwd(), "tests/fixtures/keychain-round-trip.mjs");
+
+  it("stores and reads back a key when a controlling tty is present", () => {
+    // python3 ships with the Xcode command line tools, which this project already
+    // requires to build. If it is genuinely absent, say so rather than skipping:
+    // a silent skip here restores the exact blind spot this block exists to close.
+    const havePython = spawnSync("python3", ["-c", "import pty"], { encoding: "utf8" });
+    expect(
+      havePython.status,
+      "python3 with the pty module is required to allocate a controlling terminal for this test"
+    ).toBe(0);
+
+    const result = spawnSync(
+      "python3",
+      ["-c", "import pty,sys; sys.exit(pty.spawn([sys.argv[1], sys.argv[2]]))", process.execPath, ptyRunner],
+      { encoding: "utf8", timeout: 60_000 }
+    );
+
+    const out = String(result.stdout ?? "").replace(/\r/gu, "");
+    // The failing shape is specific and worth asserting by name: security(1)
+    // printing its prompt is proof it went to the tty instead of stdin.
+    expect(out, out).not.toContain("password data for new item");
+    expect(out, out).toContain("ROUND_TRIP_OK");
   });
 });

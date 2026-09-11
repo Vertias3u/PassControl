@@ -28,6 +28,24 @@ export function generateInstanceKey() {
 }
 
 /**
+ * Turn a retiring SEED into the `<kid>:<x>` pair that goes in
+ * INSTANCE_SIGNING_KEY_HISTORY — public half only, so a retired key can never
+ * sign again.
+ *
+ * This exists because the operator cannot derive a public key by hand. Without
+ * it they would paste the seed, which is also 32 base64url bytes and would sail
+ * through any length check; the app rejects that pair because the kid does not
+ * recompute, but "rejected" only helps if there is a right value to type
+ * instead. Throws on anything that is not a 32-byte seed.
+ */
+export function retiredKeyEntry(seed) {
+  const bytes = fromB64url(seed);
+  if (bytes.length !== 32) throw new Error("A signing seed is 32 bytes, base64url-encoded.");
+  const x = b64url(ed25519.getPublicKey(bytes));
+  return { entry: `${instanceKidFromSeed(seed)}:${x}`, kid: instanceKidFromSeed(seed) };
+}
+
+/**
  * Verify that PASSCONTROL_ISSUER resolves to a deployment publishing OUR key.
  *
  * A missing signing key is loud — nothing gets signed. The quiet failure is an

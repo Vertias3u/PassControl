@@ -15,6 +15,10 @@ vi.mock('@/lib/state/redis', () => ({
  claimNonce: async () => true, touchLastSeen: async () => {}, redis: () => ({}),
  isSuspended: async () => false, getCachedAgentPolicy: async () => JSON.stringify({p:{},s:null}),
  setCachedAgentPolicy: async () => {}, purgeAgentPolicy: async () => {},
+ // Mocked explicitly. Left out it is undefined, the call throws, policy.ts
+ // catches it, and the fence silently becomes null in every assertion below.
+ readPolicyFence: async () => null,
+ readCredentialFence: async () => null,
  getCachedKey: async () => { throw new Error('demo must not resolve keys'); }, setCachedKey: async () => {},
 }));
 vi.mock('@/lib/state/holds', () => ({

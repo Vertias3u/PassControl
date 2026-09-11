@@ -14,7 +14,7 @@
 import { waitUntil } from "@vercel/functions";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { getCachedProviderKeys, setCachedProviderKeys } from "../state/redis";
+import { getCachedProviderKeys, readProviderKeysFence, setCachedProviderKeys } from "../state/redis";
 
 const PROVIDER_KEYS_CACHE_TTL_S = 300;
 
@@ -42,6 +42,16 @@ export async function readProvidersWithKeys(
     // A cache read failure falls through to the tenant-scoped source of truth.
   }
 
+  // Read before the row, for the same reason as everywhere else: a credential
+  // removed while this read was in flight must not come back as a failover
+  // target.
+  let fence: string | null = null;
+  try {
+    fence = await readProviderKeysFence(userId);
+  } catch {
+    fence = null;
+  }
+
   try {
     const { data, error } = await db
       .from("provider_credentials")
@@ -56,7 +66,7 @@ export async function readProvidersWithKeys(
     // Cache the empty result too: a tenant with one provider is the common case
     // and should not cost a database read on every exhausted call.
     waitUntil(
-      setCachedProviderKeys(userId, JSON.stringify(providers), PROVIDER_KEYS_CACHE_TTL_S)
+      setCachedProviderKeys(userId, JSON.stringify(providers), PROVIDER_KEYS_CACHE_TTL_S, fence)
     );
     return providers;
   } catch {

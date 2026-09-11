@@ -17,7 +17,7 @@ import { control } from "@/lib/control/handler";
 import { jsonResponse, errorResponse } from "@/lib/control/respond";
 import { readJsonBody } from "@/lib/control/body";
 import { recordAdminAction } from "@/lib/audit";
-import { planAgentImports, planOwnershipImport, summarizePlan } from "@/lib/workspace-import";
+import { planAgentImports, planOwnershipImport, readImportEnvelope, summarizePlan } from "@/lib/workspace-import";
 
 // The body cap in lib/control/body.ts is 64 KiB and is shared by every
 // control-plane route, so it is not raised for this one. The CLI therefore
@@ -44,12 +44,18 @@ const handler = control("write", async ({ req, userId, db, keyId, requestId }) =
   // route should not have to reshape it first. Only these two keys are ever
   // read; a provider credential or a break-glass grant sitting beside them in
   // the file is not addressed by any code below.
-  const body = parsed.body ?? {};
-  const source = body.workspace ?? body;
-  const agents = source.agents;
-  const ownership = source.ownership;
+  // Validated as an ENVELOPE first, independently of the CLI. A file that has
+  // lost its `agents` collection is corruption, and planning it produces an
+  // empty plan that reports a complete restore of nothing (T4-03). Refused
+  // before the availability RPC, before the collision read, and before any
+  // audit row: a damaged file must cost nothing and leave no trace of an import
+  // that did not happen.
+  const envelope = readImportEnvelope(parsed.body ?? {});
+  if (!envelope.ok) return errorResponse(400, "invalid_request", requestId);
+  const agents = envelope.agents;
+  const ownership = envelope.ownership;
 
-  if (Array.isArray(agents) && agents.length > MAX_IMPORT_AGENTS) {
+  if (agents.length > MAX_IMPORT_AGENTS) {
     return errorResponse(413, "payload_too_large", requestId);
   }
 

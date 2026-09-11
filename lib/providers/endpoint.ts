@@ -171,6 +171,41 @@ export function normalizeEndpoint(
  * `upstreamPath` comes from the client's own URL, and a segment carrying its own
  * `/` or a traversal would let a caller climb out of the base they were given.
  */
+/**
+ * The canonical path MINUS the version segment our own base would have supplied.
+ *
+ * A built-in base carries no version (`https://api.openai.com`) and the
+ * canonical path supplies it (`v1/chat/completions`). A custom base is written
+ * by an operator, and every OpenAI-shaped SDK spells `base_url` with the
+ * version already on it — `http://vllm.internal:8000/v1`, which is also the
+ * example 0050's own column comment advertises. Appending our version to theirs
+ * produced `/v1/v1/chat/completions`, which vLLM answers with a 404: the
+ * documented configuration could not work.
+ *
+ * So the rule is one sentence: **a custom base owns its version segment.** The
+ * gateway never invents one the operator did not write, and never repeats one
+ * they did. A base with no version gets a path with no version — LiteLLM serves
+ * that; an operator who needs `/v1` writes it in the endpoint, where they can
+ * see it.
+ *
+ * The strip is safe because it only ever runs on OUR canonical constants
+ * (lib/scope.ts maps every accepted client spelling onto one of them, and the
+ * only client-supplied segment — a model id on a listing route — is appended
+ * last, never first). It is deliberately not a general "normalise the path"
+ * helper: this file's whole argument is that silent rewriting of a
+ * credential-bearing URL is how a key reaches a place nobody named.
+ *
+ * The in-tree precedent is DEEPSEEK_CHAT_PATH / VERSIONLESS_MODELS_PATH in
+ * lib/scope.ts, which say the same thing for the two built-in providers whose
+ * base already carries a version. This is that idea where the base is not ours.
+ */
+const VERSION_SEGMENT = /^v[0-9]+[a-z0-9]*$/u;
+
+export function versionlessUpstreamPath(upstreamPath: readonly string[]): readonly string[] {
+  const [first, ...rest] = upstreamPath;
+  return first !== undefined && VERSION_SEGMENT.test(first) ? rest : upstreamPath;
+}
+
 export function joinUpstream(base: string, upstreamPath: readonly string[]): string {
   for (const segment of upstreamPath) {
     if (segment === "" || segment === "." || segment === "..") {

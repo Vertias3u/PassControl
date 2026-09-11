@@ -154,7 +154,7 @@ describe("buildProblemDiagnostics", () => {
     expect(artifact.bundle.agents[0]!.passport.public_key_suffix).toBe(AGENT_ROW.passport_pubkey.slice(-8));
     expect(artifact.bundle.agents[0]!.policy.deny_rule_count).toBe(1);
     expect(artifact.bundle.recent_failures).toHaveLength(1);
-    expect(artifact.bundle.recent_failures[0]!.code).toBe("blocked_budget");
+    expect(artifact.bundle.recent_failures![0]!.code).toBe("blocked_budget");
   });
 
   it("selects the columns the summarizers read, and not a wildcard", async () => {
@@ -203,7 +203,7 @@ describe("buildProblemDiagnostics", () => {
     expect(artifact.bundle).not.toHaveProperty("quota");
     expect(artifact.bundle.service_health).not.toHaveProperty("quota_counter");
     expect(artifact.bundle.agents[0]!.name).toBe("research-agent");
-    expect(artifact.bundle.recent_failures[0]!.code).toBe("blocked_budget");
+    expect(artifact.bundle.recent_failures![0]!.code).toBe("blocked_budget");
   });
 
 });

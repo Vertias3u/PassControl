@@ -34,7 +34,7 @@ look good is not a demo.
   leave it running: `passcontrol sidecar`. Override the address with `SIDECAR=…`.
 - **`budget-demo.sh`** needs an agent whose *remaining* budget is small enough to
   exhaust within its bounded call loop. Use a disposable agent with known usage and
-  a small remaining cap. Do not seed `agents.spent_microcents` alone: 0.9.0 admission
+  a small remaining cap. Do not seed `agents.spent_microcents` alone: admission
   uses Redis counters, holds and durable generations, so editing one mirror column
   does not establish a coherent budget. Prefer a token cap for a short demonstration.
   The recorded example used seeded spend; it is not evidence of fresh-install defaults.
@@ -63,7 +63,7 @@ carries no prompt or completion by design — the evidence should not become
 another copy of your sensitive content.
 
 `receipt-demo.sh` uses the direct CLI call path, so it needs sender-proof mode off/observe
-in 0.9.0. It samples the latest log row rather than correlating a request ID; use an
+today. It samples the latest log row rather than correlating a request ID; use an
 isolated demo agent with no concurrent traffic and allow for asynchronous log writes.
 A failed/missing receipt can mean logging/signing failure, not just absent configuration.
 The scripts are demonstrations, not reliable billing or receipt-correlation clients.

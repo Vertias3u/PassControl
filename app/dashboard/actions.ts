@@ -359,7 +359,16 @@ export async function updateAgentBudgets(
     action: "agent.update",
     targetType: "agent",
     targetId: agentId,
-    metadata: { fields: "budget_tokens,budget_cents" },
+    // `budgets_live` records whether the LIVE GATE had picked the new cap up by
+    // the time this action returned, which is a different question from whether
+    // the row was written. False means the policy-cache invalidation did not
+    // land, so the old cap can still admit calls for up to one cache window —
+    // worth having in the audit trail when someone asks why a lowered budget
+    // took a minute to bite.
+    metadata: {
+      fields: "budget_tokens,budget_cents",
+      budgets_live: r.value.budgetsLive ?? null,
+    },
   });
   revalidatePath("/");
 }

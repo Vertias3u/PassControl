@@ -132,11 +132,14 @@ const STATEMENT_FAILURES: Partial<Record<VerifyFailure, FailurePresentation>> = 
     body:
       "A statement has to say who issued it, as a plain https address. This one does not, so there is nowhere to fetch a key from.",
   },
+  // See the long note on the same reason in receipt-view.ts: a withdrawn key
+  // and a key that was never the issuer's are indistinguishable here, so the
+  // copy asserts neither. Statements share the JWKS and the same cutoff.
   unknown_key: {
     kind: "forged",
     title: "The issuer does not publish this signing key.",
     body:
-      "The statement names a key that this issuer does not list as one of theirs. A genuine statement is always signed by a key its issuer publishes, including old keys kept for exactly this reason.",
+      "The statement names a key this issuer does not currently list as one of theirs, so nothing in it has been checked. Either it was not signed by the issuer it names, or that key has been withdrawn — a PassControl deployment is expected to keep publishing retired keys precisely so old statements stay checkable. Ask the issuer before relying on it.",
   },
   // Deliberately NOT "forged". We are behind; the statement is not wrong.
   unsupported_version: {

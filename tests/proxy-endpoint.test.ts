@@ -19,6 +19,7 @@ const {
   writeLogMock,
   mirrorSpendMock,
   rateLimitMock,
+  readCredentialFenceMock,
   fetchMock,
 } = vi.hoisted(() => {
   return {
@@ -37,6 +38,7 @@ const {
     writeLogMock: vi.fn(),
     mirrorSpendMock: vi.fn(),
     rateLimitMock: vi.fn(),
+    readCredentialFenceMock: vi.fn(),
     fetchMock: vi.fn(),
   };
 });
@@ -63,6 +65,13 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
 });
 vi.mock("@/lib/state/redis", () => ({
   purgeAgentPolicy: vi.fn(),
+  // The proxy reads this before the endpoint row and again before dispatch.
+  // Omitted, it is undefined, the call throws, and the route 500s.
+  //
+  // Controllable per call, because the SECOND read is a decision point: equal
+  // means dispatch, different means the operator rotated, and UNREADABLE means
+  // neither has been established (T4-04).
+  readCredentialFence: (...args: unknown[]) => readCredentialFenceMock(...args),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   getCachedEndpoint: (...args: unknown[]) => getCachedEndpointMock(...args),
@@ -70,6 +79,9 @@ vi.mock("@/lib/state/redis", () => ({
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
+  // Mocked explicitly. Left out it is undefined, the call throws, policy.ts
+  // catches it, and the fence silently becomes null in every assertion below.
+  readPolicyFence: async () => null,
 }));
 /**
  * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
@@ -178,6 +190,8 @@ beforeEach(() => {
   writeLogMock.mockReset();
   mirrorSpendMock.mockReset();
   rateLimitMock.mockReset();
+  readCredentialFenceMock.mockReset();
+  readCredentialFenceMock.mockResolvedValue(null);
   fetchMock.mockReset();
 
   serviceClientMock.mockReturnValue({
@@ -513,7 +527,7 @@ describe("custom provider endpoints", () => {
   const target = () => String(fetchMock.mock.calls.at(-1)?.[0]);
 
   it("ignores a stored endpoint entirely while the gate is off", async () => {
-    getCachedEndpointMock.mockResolvedValue("http://10.1.2.3:8000/v1");
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
     const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
 
     expect(res.status).toBe(200);
@@ -524,19 +538,21 @@ describe("custom provider endpoints", () => {
 
   it("sends the call to a self-hosted endpoint, base path and all", async () => {
     process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
-    getCachedEndpointMock.mockResolvedValue("http://10.1.2.3:8000/openai/v1");
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/openai/v1");
     const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
 
     expect(res.status).toBe(200);
-    // The operator's `/openai/v1` survives. `new URL` would have eaten it.
-    expect(target()).toBe("http://10.1.2.3:8000/openai/v1/v1/chat/completions");
+    // The operator's `/openai/v1` survives — `new URL` would have eaten it — and
+    // it is NOT followed by a second `v1`. A custom base owns its own version
+    // segment, exactly as every OpenAI-shaped SDK's `base_url` does.
+    expect(target()).toBe("http://10.1.2.3:8000/openai/v1/chat/completions");
   });
 
   // Re-validated on read, not trusted from the row. An operator who narrows the
   // gate must not keep serving endpoints that were legal when they were stored.
   it("falls back to the built-in host when the stored value is no longer admitted", async () => {
     process.env.PROVIDER_ENDPOINT_MODE = "gateway.company.com";
-    getCachedEndpointMock.mockResolvedValue("http://10.1.2.3:8000/v1");
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
     const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
 
     expect(res.status).toBe(200);
@@ -545,7 +561,7 @@ describe("custom provider endpoints", () => {
 
   it("still speaks the credential's own protocol, not the endpoint's", async () => {
     process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
-    getCachedEndpointMock.mockResolvedValue("http://10.1.2.3:8000/v1");
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
     await callProxy("anthropic", ["v1", "messages"], "claude-3-5-haiku-20241022");
 
     // The endpoint moves; the wire format does not. An Anthropic credential
@@ -557,7 +573,7 @@ describe("custom provider endpoints", () => {
 
   it("logs the call as unpriced when it did not go to the provider's own host", async () => {
     process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
-    getCachedEndpointMock.mockResolvedValue("http://10.1.2.3:8000/v1");
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
     await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
 
     await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
@@ -568,6 +584,83 @@ describe("custom provider endpoints", () => {
     // proxy that may mark up, re-route or alias.
     expect(logged.costMicrocents).toBeNull();
     expect(Number(logged.inputTokens) + Number(logged.outputTokens)).toBeGreaterThan(0);
+  });
+
+  /**
+   * S3-03, AND A DELIBERATE BEHAVIOUR CHANGE — see TEAMSHARE and
+   * plans/updates-pending.md. A cost cap on a custom endpoint used to be
+   * enforced with the BUILT-IN PROVIDER'S RETAIL PRICE: `attemptWithHold`
+   * computes its estimate before the endpoint is resolved, so `costMicrocents`
+   * was called without one and selected the OpenAI/Anthropic table. Settlement
+   * then charged that estimate, because an unpriced call settles at zero and
+   * releasing the whole reservation meant a cost cap could never advance.
+   *
+   * Both halves were deliberate. Together they enforce a dollar limit with a
+   * number that has nothing to do with the bill: a gateway that marks up, or
+   * aliases `gpt-4o-mini` onto something expensive, spends past the cap while
+   * the counter reports the cheap retail figure. The audit row said `null` and
+   * `unpriced` the whole time — the enforcement and the reporting contradicted
+   * each other, and only the reporting half was honest.
+   *
+   * Unknown must stay unknown at an enforcement boundary, so the call is now
+   * refused. Token caps are unaffected: provider-reported token counts are real
+   * wherever the call went.
+   */
+  it("refuses a cost-capped call to a custom endpoint rather than pricing it from the retail table", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      scope: [{ provider: "openai", models: ["gpt-4o-mini"] }],
+      bc: 500,
+    });
+
+    const res = await POST(
+      req({ model: "gpt-4o-mini", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "unpriced_endpoint" });
+    // Never sent. The refusal is a configuration answer, not a spend answer.
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+    expect(writeLogMock.mock.calls.at(-1)?.[0]?.status).toBe("blocked_unpriced_endpoint");
+  });
+
+  it("still allows a TOKEN-capped call to a custom endpoint", async () => {
+    // Tokens are counted by the provider and are real wherever the call went.
+    // Only the money is unknowable, so only the money cap refuses.
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      scope: [{ provider: "openai", models: ["gpt-4o-mini"] }],
+      bt: 10_000,
+      bc: null,
+    });
+
+    const res = await POST(
+      req({ model: "gpt-4o-mini", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("still allows a cost-capped call to the provider's own host", async () => {
+    // The control. A cost cap is enforceable wherever PassControl knows the
+    // price, which is every built-in endpoint — this must not have become a
+    // blanket refusal of cost caps.
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      scope: [{ provider: "openai", models: ["gpt-4o-mini"] }],
+      bc: 500,
+    });
+    const res = await POST(
+      req({ model: "gpt-4o-mini", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(200);
   });
 
   it("still records a real number when the call went to the provider itself", async () => {
@@ -663,6 +756,8 @@ describe("when the endpoint read does not answer", () => {
     const chain: Record<string, unknown> = {};
     chain.select = () => chain;
     chain.eq = () => chain;
+    chain.order = () => chain;
+    chain.limit = () => chain;
     chain.maybeSingle = async () => result;
     return {
       rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
@@ -678,7 +773,304 @@ describe("when the endpoint read does not answer", () => {
     );
     await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
 
-    expect(target()).toBe("http://10.1.2.3:8000/v1/v1/chat/completions");
+    expect(target()).toBe("http://10.1.2.3:8000/v1/chat/completions");
+  });
+
+  // ── The key and the address must name the same credential (S-01) ──────────
+  //
+  // The endpoint is read BEFORE the budget reserve (a custom endpoint is
+  // unpriced, and the reconcile closure prices the call) and the secret AFTER it
+  // (the check order puts the decrypt last, so a call about to be refused is
+  // never decrypted for). Separated in time, deliberately. What they must not be
+  // is separated in IDENTITY: neither value used to name the credential it came
+  // from, so an activation landing in the gap sent secret B to endpoint A.
+
+  const CREDENTIAL_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const CREDENTIAL_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const ENDPOINT_A = "http://10.9.9.1:8000/v1";
+
+  /** Records which RPC the proxy reached for, and answers it by name. */
+  const dbPairing = (row: unknown, answers: Record<string, unknown>) => {
+    const rpc = vi.fn(async (name: string) => ({ data: answers[name] ?? null, error: null }));
+    const chain: Record<string, unknown> = {};
+    chain.select = () => chain;
+    chain.eq = () => chain;
+    chain.order = () => chain;
+    chain.limit = () => chain;
+    chain.maybeSingle = async () => ({ data: row, error: null });
+    return { rpc, from: () => chain };
+  };
+
+  it("asks for the key of the credential the endpoint came from", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    const db = dbPairing(
+      { id: CREDENTIAL_A, endpoint_base_url: ENDPOINT_A },
+      { get_provider_key_for_credential: "sk-real-a" }
+    );
+    serviceClientMock.mockReturnValue(db);
+    await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+    expect(db.rpc).toHaveBeenCalledWith(
+      "get_provider_key_for_credential",
+      expect.objectContaining({ p_credential_id: CREDENTIAL_A })
+    );
+    expect(target()).toBe(`${ENDPOINT_A}/chat/completions`);
+  });
+
+  it("refuses instead of pairing when that credential is no longer the selected one", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    // The bound RPC returns nothing: something was activated or rotated in the
+    // gap, so this id is not the agent's selected credential any more.
+    serviceClientMock.mockReturnValue(
+      dbPairing({ id: CREDENTIAL_A, endpoint_base_url: ENDPOINT_A }, {})
+    );
+    const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+    expect(res.status).toBe(409);
+    // Nothing was sent. The old behaviour paired the newly-selected credential's
+    // secret with the address already resolved from the old one.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // T4-04. The dispatch decision was right and the EVIDENCE it emitted was not.
+  //
+  // The second fence read has three possible outcomes and the route collapsed
+  // them into two: `let stillPaired = false` with `catch { stillPaired = false }`
+  // cannot tell "I read a different generation" from "I could not read one".
+  // Both answered 409 `credential_changed`, which is logged, rendered in seven
+  // places and SIGNED INTO A RECEIPT — so a Redis blip became a durable public
+  // statement that the operator rotated a credential mid-call, and sent whoever
+  // read it to look at a rotation that never happened.
+  describe("the second credential-fence read", () => {
+    /**
+     * The gap the pairing check exists to cover, driven at its real seam.
+     *
+     * The route reads this fence three times: once resolving the endpoint (that
+     * one becomes the value everything is compared against), once immediately
+     * before decrypting the key, and once before dispatch. `whenKeyFetched`
+     * changes what the fence answers DURING the key RPC — which is exactly when
+     * a rotation, or a Redis failure, would land in production. Driving it by
+     * call index instead would encode how many reads the route happens to make
+     * today and pass for the wrong reason the day that changes.
+     */
+    const dbBound = (whenKeyFetched?: () => void) => {
+      const db = dbPairing(
+        { id: CREDENTIAL_A, endpoint_base_url: ENDPOINT_A },
+        { get_provider_key_for_credential: "sk-real-a" }
+      );
+      const inner = db.rpc as (name: string, args?: unknown) => Promise<unknown>;
+      db.rpc = vi.fn(async (name: string, args?: unknown) => {
+        const out = await inner(name, args);
+        whenKeyFetched?.();
+        return out;
+      }) as typeof db.rpc;
+      return db;
+    };
+
+    it("dispatches when the generation is unchanged", async () => {
+      process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+      readCredentialFenceMock.mockResolvedValue("gen-a");
+      serviceClientMock.mockReturnValue(dbBound());
+      const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalled();
+    });
+
+    it("says the credential changed only when it actually observed a different one", async () => {
+      process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+      readCredentialFenceMock.mockResolvedValue("gen-a");
+      serviceClientMock.mockReturnValue(
+        dbBound(() => readCredentialFenceMock.mockResolvedValue("gen-b"))
+      );
+      const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "credential_changed" });
+      expect(writeLogMock.mock.calls.at(-1)?.[0]).toMatchObject({ status: "credential_changed" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("does not claim a rotation when it could not read the generation at all", async () => {
+      process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+      readCredentialFenceMock.mockResolvedValue("gen-a");
+      serviceClientMock.mockReturnValue(
+        dbBound(() => readCredentialFenceMock.mockRejectedValue(new Error("redis unavailable")))
+      );
+      const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+      // Still refuses, and still fails closed — that half was never wrong.
+      expect(fetchMock).not.toHaveBeenCalled();
+      // But it is a PassControl-side read failure, not a configuration event.
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ error: "credential_state_unavailable" });
+      expect(writeLogMock.mock.calls.at(-1)?.[0]).toMatchObject({
+        status: "credential_state_unavailable",
+      });
+    });
+
+    it("treats a null generation the same way — absent is not equal", async () => {
+      // `null` back from Redis is not evidence of the same generation either. It
+      // used to compare unequal and be reported as a rotation for the same
+      // reason a throw was.
+      process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+      readCredentialFenceMock.mockResolvedValue("gen-a");
+      serviceClientMock.mockReturnValue(
+        dbBound(() => readCredentialFenceMock.mockResolvedValue(null))
+      );
+      const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.status).toBe(503);
+    });
+  });
+
+  it("does not use a cached key that was sealed for a different credential", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    // A bundle left by the previously selected credential: same agent, same
+    // provider, same TTL window, wrong secret for this address.
+    getCachedKeyMock.mockResolvedValue(JSON.stringify({ c: CREDENTIAL_B, k: "sk-stale-b" }));
+    const db = dbPairing(
+      { id: CREDENTIAL_A, endpoint_base_url: ENDPOINT_A },
+      { get_provider_key_for_credential: "sk-real-a" }
+    );
+    serviceClientMock.mockReturnValue(db);
+    await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+    expect(db.rpc).toHaveBeenCalledWith(
+      "get_provider_key_for_credential",
+      expect.objectContaining({ p_credential_id: CREDENTIAL_A })
+    );
+    const init = JSON.stringify(fetchMock.mock.calls.at(-1)?.[1] ?? {});
+    const headers = JSON.stringify(
+      Object.fromEntries(new Headers((fetchMock.mock.calls.at(-1)?.[1] as RequestInit)?.headers))
+    );
+    expect(headers + init).toContain("sk-real-a");
+    expect(headers + init).not.toContain("sk-stale-b");
+  });
+
+  it("leaves the gate-off path on the unbound RPC, exactly as it was", async () => {
+    // No custom endpoints means no pairing to keep: the endpoint read does not
+    // happen at all, there is no id to bind to, and Cloud's hot path is untouched.
+    const db = dbPairing(null, { get_provider_key: "sk-plain" });
+    serviceClientMock.mockReturnValue(db);
+    await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+    expect(db.rpc).toHaveBeenCalledWith("get_provider_key", expect.anything());
+    expect(target()).toBe("https://api.openai.com/v1/chat/completions");
+  });
+
+  // ── The read has to be one PostgREST can actually plan ────────────────────
+  //
+  // The mock above answers whatever the test tells it to, whatever was asked —
+  // which is how an unplannable query stayed green for nine days. This asserts
+  // the SHAPE of the read instead of its result: `provider_credentials` and
+  // `agents` have no foreign key between them (both reference `users`), so a
+  // sibling-table embed is not something PostgREST can resolve. It answers
+  // PGRST200 / HTTP 400, the resolver correctly reads that as "unknown", and
+  // every call 502s. Tenant scope comes from the credential's own `user_id`.
+  //
+  // `.maybeSingle()` is safe here because of 0027's partial unique index on
+  // `(user_id, provider) where is_active` — at most one active credential per
+  // tenant per provider, guaranteed by the database rather than by hope.
+
+  it("reads the credential by its own tenant column, not a relationship that does not exist", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    // Every read is recorded separately: the handler makes several, and the one
+    // under test is the one that asks for the endpoint.
+    type Read = {
+      table: string;
+      columns: string;
+      filters: Array<[string, unknown]>;
+      order: string[];
+    };
+    const reads: Read[] = [];
+    serviceClientMock.mockReturnValue({
+      rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
+      from: (name: string) => {
+        const read: Read = { table: name, columns: "", filters: [], order: [] };
+        reads.push(read);
+        const chain: Record<string, unknown> = {};
+        chain.select = (cols: string) => {
+          read.columns = cols;
+          return chain;
+        };
+        chain.eq = (column: string, value: unknown) => {
+          read.filters.push([column, value]);
+          return chain;
+        };
+        chain.order = (column: string) => {
+          read.order.push(column);
+          return chain;
+        };
+        chain.limit = () => chain;
+        chain.maybeSingle = async () => ({ data: { endpoint_base_url: null }, error: null });
+        chain.single = async () => ({ data: null, error: null });
+        return chain;
+      },
+    });
+
+    await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+    const endpointRead = reads.find((read) => read.columns.includes("endpoint_base_url"));
+    if (!endpointRead) throw new Error("the endpoint read never happened");
+    const { table, columns, filters, order } = endpointRead;
+    expect(table).toBe("provider_credentials");
+    // One column, and no embed: nothing here may name another table.
+    expect(columns).toBe("id, endpoint_base_url");
+    expect(columns).not.toContain("!inner");
+    // Tenant scope and provider — both columns of this table.
+    expect(filters).toContainEqual(["user_id", "user-id"]);
+    expect(filters).toContainEqual(["provider", "openai"]);
+    // Selection is by the SAME ordering get_provider_key uses, not by an
+    // `is_active = true` filter, which disagrees with it on the legacy path.
+    expect(order).toEqual(["is_active", "created_at"]);
+    // A dotted filter is a filter on an embedded table, which is the shape that
+    // could not be planned. There must not be one.
+    expect(filters.filter(([column]) => column.includes("."))).toEqual([]);
+  });
+
+  // ── The version contract, stated once and tested from both ends ───────────
+  //
+  // A custom base carries its own version segment; the canonical upstream path
+  // contributes the rest. `http://vllm.internal:8000/v1` is the spelling every
+  // OpenAI-shaped SDK uses for `base_url` and the spelling 0050's own column
+  // comment advertises, so following the documentation has to produce a URL the
+  // upstream actually serves. It did not until this test existed: the composed
+  // path was `/v1/v1/chat/completions`, which vLLM answers with a 404.
+
+  it("does not double the version segment a custom base already carries", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    serviceClientMock.mockReturnValue(
+      dbReturning({ data: { endpoint_base_url: "http://10.1.2.3:8000/v1" }, error: null })
+    );
+    await callProxy("openai", ["chat", "completions"], "gpt-4o-mini");
+
+    // The versionless client spelling composes the same as the versioned one.
+    expect(target()).toBe("http://10.1.2.3:8000/v1/chat/completions");
+  });
+
+  it("appends the versionless path to a base that carries no version either", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    serviceClientMock.mockReturnValue(
+      dbReturning({ data: { endpoint_base_url: "http://10.1.2.3:4000" }, error: null })
+    );
+    await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+    // The base owns the version, so a base without one gets a URL without one.
+    // LiteLLM serves this; vLLM does not, and an operator who wants `/v1` says
+    // so in the endpoint. The rule is the same either way, which is the point:
+    // the gateway never invents a version segment the operator did not write.
+    expect(target()).toBe("http://10.1.2.3:4000/chat/completions");
+  });
+
+  it("applies the same contract to model listing and to anthropic", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    serviceClientMock.mockReturnValue(
+      dbReturning({ data: { endpoint_base_url: "http://10.1.2.3:8000/v1" }, error: null })
+    );
+    await getProxy("openai", ["v1", "models"]);
+    expect(target()).toBe("http://10.1.2.3:8000/v1/models");
   });
 
   it("still treats an empty result as a real answer meaning no endpoint", async () => {
@@ -691,7 +1083,12 @@ describe("when the endpoint read does not answer", () => {
     // common case off the database.
     expect(res.status).toBe(200);
     expect(target()).toBe("https://api.openai.com/v1/chat/completions");
-    expect(setCachedEndpointMock).toHaveBeenCalledWith("agent-id", "openai", "", 60);
+    // The cached value now names the credential it came from, before the `|`.
+    // No row means no credential and no endpoint, which is still a real answer
+    // and still worth caching — that is what keeps the common case off the DB.
+    // The fifth argument is the credential fence, read before the row. Null here
+    // because this mock records no invalidation — its PRESENCE is the assertion.
+    expect(setCachedEndpointMock).toHaveBeenCalledWith("agent-id", "openai", "|", 60, null);
   });
 
   it("refuses the call when the read fails, instead of re-aiming the credential", async () => {

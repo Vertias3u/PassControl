@@ -60,11 +60,17 @@ const FAILURES: Record<VerifyFailure, FailurePresentation> = {
     body:
       "The signature does not match the contents. Either something in the receipt was changed after it was signed, or it was never signed by the issuer it names. Do not rely on anything it says.",
   },
+  // Still "forged" — the reader's action is the same as for a bad signature:
+  // nothing here has been checked, so rely on none of it. But the WORDS must
+  // not convict. Two different things land on this reason: a receipt signed by
+  // someone who is not this issuer, and a genuine receipt whose signing key the
+  // issuer has withdrawn. Nothing available to a verifier tells them apart, so
+  // the copy says what is known and stops there.
   unknown_key: {
     kind: "forged",
     title: "The issuer does not publish this signing key.",
     body:
-      "The receipt names a key that this issuer does not list as one of theirs. A genuine receipt is always signed by a key its issuer publishes, including old keys kept for exactly this reason.",
+      "The receipt names a key this issuer does not currently list as one of theirs, so nothing in it has been checked. Either it was not signed by the issuer it names, or that key has been withdrawn — a PassControl deployment is expected to keep publishing retired keys precisely so old receipts stay checkable. Ask the issuer before relying on it.",
   },
   malformed: {
     kind: "forged",
@@ -439,6 +445,31 @@ const VERDICTS: Record<string, VerdictPresentation> = {
   // Also never forwarded, and deliberately worded so a reader cannot mistake it
   // for the line below: that one is a permission answer, this one is the gateway
   // admitting it did not know where the call was supposed to go.
+  // Adjacent to the line below and NOT the same admission. That one says the
+  // gateway never learned where the call was meant to go; this one says it did,
+  // and then the answer stopped being true before the call could be sent. A
+  // reader of someone else's receipt should be able to tell that nothing was
+  // misdelivered — which is the entire reason the call was refused.
+  // A refusal a reader of someone else's receipt must not mistake for "out of
+  // money". It says the opposite: the limit could not be applied at all.
+  blocked_unpriced_endpoint: {
+    label: "Refused — the spending limit could not be applied to this destination",
+    detail:
+      "This agent has a limit set in dollars, and the call was bound for a custom endpoint whose price the gateway cannot know. Rather than enforce that limit with a built-in provider's list price, which need not resemble the bill, the gateway refused the call. It was never sent and nothing was charged. This is not a statement that the agent had run out.",
+    tone: "held",
+  },
+  credential_changed: {
+    label: "Refused — the credential changed while the call was being assembled",
+    detail:
+      "The gateway resolves where a credential is sent and what the credential is as two separate steps. This provider credential was changed between them, so the destination and the secret no longer came from the same version of it. Rather than deliver a re-issued secret to an address that had already been replaced, the gateway refused. The provider never received this request.",
+    tone: "held",
+  },
+  credential_state_unavailable: {
+    label: "Refused — the gateway could not confirm the credential was unchanged",
+    detail:
+      "Before sending, the gateway re-checks that the destination and the secret still come from the same version of the credential. That check could not be completed — not because anything had changed, but because the gateway could not read its own record of it. It refused rather than send on an unchecked pair. The provider never received this request, and this says nothing about the credential itself.",
+    tone: "held",
+  },
   endpoint_unavailable: {
     label: "Refused — the destination could not be read",
     detail:

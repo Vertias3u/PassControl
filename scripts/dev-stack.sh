@@ -54,13 +54,17 @@ COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" PASSCONTROL_SRH_PORT="$SRH_PORT" do
 # with nothing anywhere reporting why. Carried forward deliberately.
 gen() { openssl rand -base64 32 | tr -d '\n'; }
 VISA_SECRET=""; CACHE_ENC_KEY=""; CRON_SECRET=""
-INSTANCE_SIGNING_KEY=""; INSTANCE_SIGNING_KEY_PREV=""
+INSTANCE_SIGNING_KEY=""; INSTANCE_SIGNING_KEY_PREV=""; INSTANCE_SIGNING_KEY_HISTORY=""
 if [[ -f "$ENVF" ]]; then
   VISA_SECRET=$(grep '^VISA_SECRET=' "$ENVF" | cut -d= -f2- || true)
   CACHE_ENC_KEY=$(grep '^CACHE_ENC_KEY=' "$ENVF" | cut -d= -f2- || true)
   CRON_SECRET=$(grep '^CRON_SECRET=' "$ENVF" | cut -d= -f2- || true)
   INSTANCE_SIGNING_KEY=$(grep '^INSTANCE_SIGNING_KEY=' "$ENVF" | cut -d= -f2- || true)
   INSTANCE_SIGNING_KEY_PREV=$(grep '^INSTANCE_SIGNING_KEY_PREV=' "$ENVF" | cut -d= -f2- || true)
+  # Append-only and permanent: it is the ONLY record of keys retired more than
+  # one rotation ago. Regenerating this file without it silently un-publishes
+  # them, which is the same mass-invalidation described above one step removed.
+  INSTANCE_SIGNING_KEY_HISTORY=$(grep '^INSTANCE_SIGNING_KEY_HISTORY=' "$ENVF" | cut -d= -f2- || true)
 fi
 VISA_SECRET=${VISA_SECRET:-$(gen)}
 CACHE_ENC_KEY=${CACHE_ENC_KEY:-$(gen)}
@@ -85,6 +89,7 @@ CACHE_ENC_KEY=$CACHE_ENC_KEY
 CRON_SECRET=$CRON_SECRET
 INSTANCE_SIGNING_KEY=$INSTANCE_SIGNING_KEY
 INSTANCE_SIGNING_KEY_PREV=$INSTANCE_SIGNING_KEY_PREV
+INSTANCE_SIGNING_KEY_HISTORY=$INSTANCE_SIGNING_KEY_HISTORY
 PASSCONTROL_ISSUER=http://localhost:${PORT:-3000}
 INVITE_CODE=local-dev
 PASSCONTROL_DEMO=${PASSCONTROL_DEMO:-0}

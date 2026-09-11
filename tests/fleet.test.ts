@@ -5,13 +5,20 @@ import { resolve } from "node:path";
 
 // Mock the side-effecting machinery; assert it's invoked. (vi.hoisted so the
 // fns exist before the hoisted vi.mock factories run.)
-const { suspendAgent, unsuspendAgent, purgeAgentCaches, armTenantKill } = vi.hoisted(() => ({
+const { suspendAgent, unsuspendAgent, purgeAgentCaches, purgeAgentPolicy, armTenantKill } = vi.hoisted(() => ({
   suspendAgent: vi.fn(async () => {}),
   unsuspendAgent: vi.fn(async () => {}),
-  purgeAgentCaches: vi.fn(async () => {}),
+  purgeAgentCaches: vi.fn(async () => true),
+  purgeAgentPolicy: vi.fn(async () => true),
   armTenantKill: vi.fn(async () => {}),
 }));
-vi.mock("@/lib/state/redis", () => ({ suspendAgent, unsuspendAgent, purgeAgentCaches }));
+vi.mock("@/lib/state/redis", () => ({
+  suspendAgent,
+  unsuspendAgent,
+  purgeAgentCaches,
+  // A budget edit invalidates the policy cache the live gate reads (S3-04).
+  purgeAgentPolicy,
+}));
 vi.mock("@/lib/state/killswitch", () => ({ armTenantKill }));
 
 import {
@@ -157,10 +164,31 @@ describe("updateAgent", () => {
   it("applies a tenant-scoped patch", async () => {
     const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
     const r = await updateAgent(db, "u1", "a1", { name: "renamed", budget_tokens: 500, budget_cents: null });
-    expect(r).toEqual({ ok: true, value: { id: "a1" } });
+    // `budgetsLive` says the live gate is already reading the new cap rather
+    // than the one cached from before this write (S3-04). A budget edit whose
+    // invalidation failed is a real, reportable outcome, not a silent one.
+    expect(r).toEqual({ ok: true, value: { id: "a1", budgetsLive: true } });
+    expect(purgeAgentPolicy).toHaveBeenCalledWith("u1", "a1");
     expect(calls.update).toEqual({ name: "renamed", budget_tokens: 500, budget_cents: null });
     expect(calls.eq).toContainEqual(["user_id", "u1"]);
     expect(calls.eq).toContainEqual(["id", "a1"]);
+  });
+
+  it("does not throw away a hot policy entry for a patch that cannot change the cap", async () => {
+    // Scopes and fallbacks are not in that cache. Purging on every update would
+    // cost a database read per agent per edit for a change the cache does not
+    // carry.
+    const { db } = makeDb({ data: { id: "a1" }, error: null });
+    const r = await updateAgent(db, "u1", "a1", { name: "renamed" });
+    expect(r).toEqual({ ok: true, value: { id: "a1" } });
+    expect(purgeAgentPolicy).not.toHaveBeenCalled();
+  });
+
+  it("reports budgetsLive false when the invalidation could not be recorded", async () => {
+    purgeAgentPolicy.mockResolvedValueOnce(false);
+    const { db } = makeDb({ data: { id: "a1" }, error: null });
+    const r = await updateAgent(db, "u1", "a1", { budget_tokens: 10 });
+    expect(r).toEqual({ ok: true, value: { id: "a1", budgetsLive: false } });
   });
   it("400 on an empty patch (no DB write)", async () => {
     const { db, calls } = makeDb({ data: null, error: null });

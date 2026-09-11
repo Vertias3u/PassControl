@@ -33,6 +33,14 @@ const CONFIG: Record<StatusType, { label: string; Icon: typeof CheckCircle2; ton
   // the allowed route set. This means we could not read WHERE this credential
   // goes, so the call was refused rather than aimed at a guess.
   endpoint_unavailable: { label: "Endpoint lookup failed", Icon: AlertCircle, tone: "warning" },
+  credential_state_unavailable: { label: "Credential check unavailable", Icon: AlertCircle, tone: "warning" },
+  // Warning, not danger. Nothing was refused on the agent's account and nothing
+  // failed: an operator changed the credential while this call was being
+  // assembled, and the retry will be fine.
+  credential_changed: { label: "Credential changed mid-call", Icon: AlertCircle, tone: "warning" },
+  // A configuration answer, not a spend answer — deliberately not the tone or
+  // the wording of a budget denial. The agent is not out of money.
+  blocked_unpriced_endpoint: { label: "Cost cap cannot be priced here", Icon: AlertCircle, tone: "warning" },
   upstream_error: { label: "Provider error", Icon: HelpCircle, tone: "warning" },
   // The call reached a provider and the accounting did not come back. Warning
   // rather than danger: nothing was refused and nothing necessarily failed.

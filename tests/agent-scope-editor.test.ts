@@ -7,13 +7,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const { suspendAgent, unsuspendAgent, purgeAgentCaches, armTenantKill } = vi.hoisted(() => ({
+const { suspendAgent, unsuspendAgent, purgeAgentCaches, purgeAgentPolicy, armTenantKill } = vi.hoisted(() => ({
   suspendAgent: vi.fn(async () => {}),
   unsuspendAgent: vi.fn(async () => {}),
-  purgeAgentCaches: vi.fn(async () => {}),
+  purgeAgentCaches: vi.fn(async () => true),
+  purgeAgentPolicy: vi.fn(async () => true),
   armTenantKill: vi.fn(async () => {}),
 }));
-vi.mock("@/lib/state/redis", () => ({ suspendAgent, unsuspendAgent, purgeAgentCaches }));
+vi.mock("@/lib/state/redis", () => ({ suspendAgent, unsuspendAgent, purgeAgentCaches, purgeAgentPolicy }));
 vi.mock("@/lib/state/killswitch", () => ({ armTenantKill }));
 
 import { updateAgent } from "@/lib/fleet";

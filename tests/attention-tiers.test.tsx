@@ -165,6 +165,7 @@ describe("the headline card describes what is actually in the queue", () => {
         blockedCalls={0}
         recentCalls={0}
         attention={summariseFleetAttention(hygieneOnly())}
+        logsAvailable
       />
     );
     expect(html).toContain("Missing expiries");

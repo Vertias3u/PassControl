@@ -104,6 +104,9 @@ const EVENT_ROUTE: Record<
   // call never reached a provider. The key exists here — where it should go is
   // what could not be read.
   endpoint_unavailable: { stop: "credential", tone: "warning", label: "Endpoint lookup failed" },
+  credential_changed: { stop: "credential", tone: "warning", label: "Credential changed mid-call" },
+  credential_state_unavailable: { stop: "credential", tone: "warning", label: "Credential check unavailable" },
+  blocked_unpriced_endpoint: { stop: "gate", tone: "warning", label: "Cost cap cannot be priced here" },
   blocked_scope: { stop: "gate", tone: "blocked", label: "Blocked by visa scope" },
   blocked_policy: { stop: "gate", tone: "blocked", label: "Blocked by live policy" },
   blocked_budget: { stop: "gate", tone: "blocked", label: "Blocked by PassControl budget" },
@@ -146,6 +149,9 @@ const PRESENTATION_OUTCOMES: Record<LogEntry["status"], string> = {
   blocked_endpoint: "ENDPOINT",
   no_provider_key: "NO KEY",
   endpoint_unavailable: "NO ROUTE",
+  credential_changed: "ROTATED",
+  credential_state_unavailable: "UNCHECKED",
+  blocked_unpriced_endpoint: "NO PRICE",
   upstream_error: "PROVIDER ERROR",
   provider_exhausted: "PROVIDER CREDIT",
   usage_unknown: "UNCONFIRMED",

@@ -20,7 +20,22 @@ interface Log {
   cost_microcents: number | null;
 }
 
-export function SpendChart({ userId, initialLogs }: { userId: string; initialLogs: Log[] }) {
+export function SpendChart({
+  userId,
+  initialLogs,
+  logsAvailable,
+}: {
+  userId: string;
+  initialLogs: Log[];
+  /**
+   * Whether the loaded window was read at all. REQUIRED: an unreadable read
+   * arrives as an empty array, and this chart's whole vocabulary ("in loaded
+   * window", "no agent calls") describes a window that in that case does not
+   * exist. Like the departures board it also subscribes, so the flag must
+   * survive realtime rows filling the gap with a handful of calls.
+   */
+  logsAvailable: boolean;
+}) {
   const [allLogs, setLogs] = useState<Log[]>(initialLogs);
   const [live, setLive] = useState(false);
   const { format, zoneLabel } = useDashboardTime();
@@ -84,6 +99,12 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
 
   return (
     <div className="pc-spend-view">
+      {logsAvailable ? null : (
+        <p className="pc-spend-view__unavailable" data-state="unavailable" role="status">
+          The call history could not be read, so there is no loaded window. Anything shown below
+          arrived since this page loaded.
+        </p>
+      )}
       <div className="pc-spend-view__summary">
         <div className="pc-spend-stat">
           <div>Tokens in loaded window</div>
@@ -108,9 +129,18 @@ export function SpendChart({ userId, initialLogs }: { userId: string; initialLog
 
       <div className="pc-spend-chart" aria-label="Token volume for the most recent 40 loaded calls">
         {bars.length === 0 ? (
-          <div className="pc-spend-chart__empty">
-            <span>No agent calls in this loaded window.</span>
-            <small>Once an agent routes a call through the gateway, token volume appears here.</small>
+          <div className="pc-spend-chart__empty" data-state={logsAvailable ? undefined : "unavailable"}>
+            {logsAvailable ? (
+              <>
+                <span>No agent calls in this loaded window.</span>
+                <small>Once an agent routes a call through the gateway, token volume appears here.</small>
+              </>
+            ) : (
+              <>
+                <span>Token volume is unavailable.</span>
+                <small>The call history could not be read. This is not a statement that no calls were made.</small>
+              </>
+            )}
           </div>
         ) : (
           <>

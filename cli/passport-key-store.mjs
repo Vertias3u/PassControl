@@ -22,7 +22,11 @@ const MACOS_PASSWORD_PROMPT = /password data for new item/iu;
  * exists for the same reason — so that check costs under a second instead of the
  * full helper timeout.
  */
-export function runProcess(command, args, { input = "", env = {}, timeoutMs = COMMAND_TIMEOUT_MS } = {}) {
+export function runProcess(
+  command,
+  args,
+  { input = "", env = {}, timeoutMs = COMMAND_TIMEOUT_MS, detached = false } = {}
+) {
   const result = spawnSync(command, args, {
     input,
     encoding: "utf8",
@@ -31,6 +35,11 @@ export function runProcess(command, args, { input = "", env = {}, timeoutMs = CO
     maxBuffer: 64 * 1024,
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
+    // `detached` puts the child in its own session (setsid), which leaves it with
+    // NO controlling terminal. Only one caller wants that and it is documented at
+    // that call site; it is off by default because on Windows the same flag opens
+    // a new console window, which no adapter here has any use for.
+    detached,
   });
   // Deliberately omit stderr and the native Error object. Helpers sometimes
   // repeat their input in diagnostics, and no caller may log that raw text.
@@ -159,10 +168,23 @@ export function createPassportCredentialStore({
         if (/[\r\n]/u.test(secret)) {
           return fixedFailure("macOS Keychain cannot store a key containing a newline");
         }
+        // `detached` is what makes the stdin above reachable, and without it none
+        // of the reasoning in the comment above holds. Given a controlling
+        // terminal, security(1) does not read the prompt from stdin at all — it
+        // opens /dev/tty and asks the human, so the pipe is ignored, the write
+        // stalls until the helper timeout, and the key never lands. Detaching the
+        // child into its own session removes the terminal it would have reached
+        // for, and it falls back to stdin, which is where the secret already is.
+        //
+        // The consequence of getting this wrong is not a flaky test: it is that
+        // the feature works in every context that has no tty — CI, an agent shell,
+        // a piped script — and fails in the ONLY context that has one, which is a
+        // person at a terminal. tests/passport-key-store-os.test.ts owns a pty for
+        // exactly this reason.
         const result = invoke(run,
           "security",
           ["add-generic-password", "-U", "-a", passportId, "-s", SERVICE, "-w"],
-          { input: `${secret}\n${secret}\n` }
+          { input: `${secret}\n${secret}\n`, detached: true }
         );
         if (result.timedOut) {
           // The one place the prompt bit earns its keep: `security` stalling

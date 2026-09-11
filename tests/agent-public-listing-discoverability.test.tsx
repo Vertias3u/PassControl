@@ -21,7 +21,7 @@ const agent = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const render = (row: ReturnType<typeof agent>) =>
-  renderToStaticMarkup(<AgentFleetTable agents={[row]} visaTtlSeconds={300} />);
+  renderToStaticMarkup(<AgentFleetTable agents={[row]} visaTtlSeconds={300} logsAvailable />);
 
 const occurrences = (value: string, fragment: string) => value.split(fragment).length - 1;
 

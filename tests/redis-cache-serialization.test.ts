@@ -58,6 +58,25 @@ const stubFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       store.delete(key as string);
       return { result: 1 };
     }
+    // The policy, endpoint and key caches all fill through a conditional Lua
+    // eval, because a plain SET republishes a snapshot taken before an
+    // invalidation (S3-01/S3-02). The wire shape is
+    // ["eval", script, numkeys, ...keys, ...argv] — two keys here, the value key
+    // and the fence key — so the value is args[5], not args[4].
+    //
+    // THIS STUB TAKES THE PUBLISH BRANCH UNCONDITIONALLY, AND THAT IS NOT A
+    // TEST OF THE FENCE. It models exactly one thing: the value that ends up
+    // stored is byte-for-byte the value that was sent, which is what this file
+    // is about. The condition itself runs as real Lua against a real Redis in
+    // `tests/cache-fence.redis.test.ts` — a file that exists because the last
+    // fence shipped broken behind a stub just like this one, and a comment here
+    // claiming coverage that lived nowhere is part of how that happened.
+    if (verb === "eval") {
+      const args = commands[0] as string[];
+      const [evalKey, evalValue] = [args[3] ?? "", args[5] ?? ""];
+      store.set(evalKey, evalValue);
+      return { result: 1 };
+    }
     throw new Error(`unstubbed Redis command: ${verb}`);
   });
   return new Response(JSON.stringify(batched ? results : results[0]), {
@@ -99,7 +118,9 @@ beforeEach(() => {
 describe("cache getters return the string they promise", () => {
   // Each case writes what its own setter writes in production, so the round
   // trip under test is the real one rather than a representative one.
-  const roundTrips: { name: string; write: () => Promise<void>; read: () => Promise<string | null> }[] = [
+  // `write` returns whatever its setter returns — the fenced fills answer with
+  // whether they published. Nothing here reads it; the round trip is the subject.
+  const roundTrips: { name: string; write: () => Promise<unknown>; read: () => Promise<string | null> }[] = [
     {
       name: "agent policy",
       write: () => setCachedAgentPolicy("u1", "a1", JSON.stringify({ p: {}, s: null })),

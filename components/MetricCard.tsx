@@ -10,6 +10,7 @@ export function MetricCard({
   note,
   href,
   tone = "neutral",
+  state,
 }: {
   label: string;
   value: string | number;
@@ -18,6 +19,12 @@ export function MetricCard({
   note?: string;
   href?: string;
   tone?: "neutral" | "signal" | "warning" | "danger";
+  /**
+   * "unavailable" when the figure could not be read at all — distinct from a
+   * measured zero, and machine-readable so a test can assert on the state
+   * rather than on the wording, which is the part that drifts.
+   */
+  state?: "unavailable";
 }) {
   const content = (
     <>
@@ -42,10 +49,12 @@ export function MetricCard({
 
   const className = `pc-metric-card pc-metric-card--${tone}`;
   return href ? (
-    <Link href={href} className={className}>
+    <Link href={href} className={className} data-state={state}>
       {content}
     </Link>
   ) : (
-    <div className={className}>{content}</div>
+    <div className={className} data-state={state}>
+      {content}
+    </div>
   );
 }

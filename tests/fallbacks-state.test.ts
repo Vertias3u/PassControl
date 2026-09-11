@@ -15,6 +15,8 @@ vi.mock("@vercel/functions", () => ({ waitUntil: (p: Promise<unknown>) => p }));
 vi.mock("@/lib/state/redis", () => ({
   getCachedAgentFallbacks: (u: string, a: string) => redisGet(`fallbacks:${u}:${a}`),
   setCachedAgentFallbacks: (u: string, a: string, v: string) => redisSet(`fallbacks:${u}:${a}`, v),
+  // Mocked explicitly; see the note in tests/owner-current-tier.test.ts.
+  readFallbacksFence: async () => null,
 }));
 
 import { readCurrentAgentFallbacks } from "@/lib/state/fallbacks";

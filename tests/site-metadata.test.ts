@@ -37,4 +37,47 @@ describe("advertised version", () => {
       expect((await source(path)).match(/\bv?\d+\.\d+\.[\dx]+\b/g)).toBeNull();
     }
   );
+
+  // The documentation half of the same rule, and it went wrong the way the code
+  // half already had: every public doc opened with "PassControl 0.9.0", pinned
+  // `npm install -g passcontrol@0.9.0`, and described behaviour "in 0.9.0" — three
+  // releases after 0.9.0. Markdown cannot import lib/version.ts, so the fix is to
+  // stop naming a version at all rather than to name a newer one: an unpinned
+  // install command and an unversioned title are true in every release.
+  //
+  // Only two shapes are pinned, deliberately. A blanket x.y.z sweep over these
+  // files would flag 127.0.0.1 and every image tag, and a guard that cries wolf
+  // gets deleted.
+  const VERSIONED_DOCS = [
+    "README.md",
+    "DOCUMENTATION.md",
+    "TUTORIAL.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "docs/budget-recovery.md",
+    "docs/integrations/hermes.md",
+    "docs/integrations/passport-sdk.md",
+    "docs/demo/README.md",
+    "docs/deployment/cloudflare.md",
+  ];
+
+  it.each(VERSIONED_DOCS)("pins no npm version in %s", async (path) => {
+    expect((await source(path)).match(/passcontrol@\d+\.\d+\.\d+/g)).toBeNull();
+  });
+
+  // `docs/statement-format.md` is deliberately absent from this list. Its
+  // "shipped with PassControl 0.9.0" records WHEN the wire format was introduced,
+  // which is a fact about the past and must not float forward with the version.
+  it.each(VERSIONED_DOCS)("does not stamp a version onto the product name in %s", async (path) => {
+    expect((await source(path)).match(/PassControl\s+\**v?\d+\.\d+\.[\dx]+/g)).toBeNull();
+  });
+
+  // A spec's info.version has to be a literal, so this is the one place a number
+  // is typed by hand — and therefore the one place that needs a test saying it
+  // still agrees with package.json. It had drifted three releases.
+  it("keeps openapi.yaml's info.version equal to the package version", async () => {
+    const declared = (await source("openapi.yaml")).match(/^\s+version:\s*"([^"]+)"/mu)?.[1];
+    expect(declared).toBe(await pkgVersion());
+  });
 });
+

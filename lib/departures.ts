@@ -77,6 +77,10 @@ export const DEPARTURE_VERDICT: Record<
   // NO ROUTE, which is blocked_endpoint below and means the requested path was
   // not permitted. Here the ADDRESS is what could not be read.
   endpoint_unavailable: { word: "NO ADDRESS", tone: "held" },
+  // Not "ROTATED". Nothing was observed to rotate — the check itself did not run.
+  credential_state_unavailable: { word: "UNCHECKED", tone: "held" },
+  credential_changed: { word: "ROTATED", tone: "held" },
+  blocked_unpriced_endpoint: { word: "NO PRICE", tone: "held" },
   blocked_scope: { word: "NO VISA", tone: "held" },
   blocked_endpoint: { word: "NO ROUTE", tone: "held" },
   blocked_policy: { word: "POLICY", tone: "held" },

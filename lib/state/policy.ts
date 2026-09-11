@@ -12,7 +12,7 @@ import { waitUntil } from "@vercel/functions";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { toSenderConstraintMode, type SenderConstraintMode } from "../sender-constraint";
 import { POLICY_UNREADABLE } from "../gate";
-import { getCachedAgentPolicy, setCachedAgentPolicy } from "./redis";
+import { getCachedAgentPolicy, readPolicyFence, setCachedAgentPolicy } from "./redis";
 
 const POLICY_CACHE_TTL_S = 60;
 
@@ -51,6 +51,26 @@ export interface CurrentPolicyRead {
    * exactly as it did before.
    */
   budgetState: { epoch: string | null; established: boolean };
+  /**
+   * The agent's CURRENT caps, as the row has them right now.
+   *
+   * A passport visa carries `bt`/`bc` claims minted when it was issued, and the
+   * proxy used to gate on those alone — so lowering a cap did nothing to an
+   * outstanding visa for up to its full 15-minute life, while `verifyVisa`
+   * authenticated the stale number perfectly and the atomic hold enforced it
+   * exactly. Atomicity protecting the wrong limit (S3-04).
+   *
+   * `known: false` means this read could not establish them: an older schema, a
+   * cache entry written before this field existed, or a failed read. The caller
+   * then keeps the visa claim, which is precisely what it did before — an
+   * unknown must not become a new denial path, and must not become "unlimited"
+   * either.
+   *
+   * `cents`, not microcents. The row's units, converted where they are enforced.
+   */
+  budget:
+    | { known: true; tokens: number | null; cents: number | null }
+    | { known: false };
 }
 
 /** Cached shape. Short keys because this is written on every cache miss. */
@@ -68,6 +88,25 @@ interface CachedPolicy {
   /** Budget epoch, and whether Postgres has recorded state as established. */
   be?: string | null;
   bs?: boolean;
+  /**
+   * The live caps, and a flag saying they were actually read.
+   *
+   * `bk` is load-bearing and not redundant. `bt: null` is a REAL value meaning
+   * "no token cap", and an entry written before this field existed also has no
+   * `bt` — so without the flag those two are the same bytes and mean opposite
+   * things: one says stop enforcing a cap, the other says fall back to the
+   * visa's. Reading a pre-existing entry as "unlimited" would hand every agent
+   * holding one an uncapped cache window.
+   *
+   * NO `policy5` BUMP. The rule this file already follows is: bump when the old
+   * value cannot be read at all, decode when it can. It can — an entry without
+   * `bk` decodes to `known: false`, which is exactly the behaviour that shipped
+   * before this field existed. The whole cost is that such entries keep gating
+   * on the visa claim until they expire, 60 seconds at most.
+   */
+  bk?: boolean;
+  bt?: number | null;
+  bc?: number | null;
 }
 
 /**
@@ -109,6 +148,15 @@ export async function readCurrentAgentPolicyAndShadow(
   agentId: string,
   options: CurrentPolicyReadOptions = {}
 ): Promise<CurrentPolicyRead> {
+  // The invalidation fence, read BEFORE the database and quoted back at fill
+  // time, so an invalidation that lands mid-read rejects this fill: publishing a
+  // snapshot taken before a mode change would keep the old mode deciding for a
+  // full TTL, which on `required` means admitting unproven calls after the
+  // operator was told the change had been made.
+  //
+  // Only assigned on the miss path below — a cache HIT returns before the fence
+  // is ever read, so the hot path pays nothing for this.
+  let fence: string | null = null;
   try {
     const cached = await getCachedAgentPolicy(userId, agentId);
     if (cached !== null) {
@@ -123,6 +171,10 @@ export async function readCurrentAgentPolicyAndShadow(
             shadow: parsed.s ?? null,
             senderConstraintMode: fromCachedMode(parsed.r),
             budgetState: { epoch: parsed.be ?? null, established: parsed.bs === true },
+            budget:
+              parsed.bk === true
+                ? { known: true, tokens: parsed.bt ?? null, cents: parsed.bc ?? null }
+                : { known: false },
           };
         }
       } catch {
@@ -133,6 +185,10 @@ export async function readCurrentAgentPolicyAndShadow(
           shadow: null,
           senderConstraintMode: "off",
           budgetState: { epoch: null, established: false },
+          // Unreadable, so the caller keeps the visa's claim. The same posture
+          // the rest of this branch takes: a malformed cache entry is malformed
+          // POLICY, and must not silently become an absent budget.
+          budget: { known: false },
         };
       }
     }
@@ -140,12 +196,28 @@ export async function readCurrentAgentPolicyAndShadow(
     // A cache read failure falls through to the tenant-scoped source of truth.
   }
 
+  // Before the authoritative read, never after. The value's whole job is to
+  // predate the snapshot it will be quoted alongside; reading it afterwards
+  // would make it agree with an invalidation it should have been refused by.
+  //
+  // Best-effort: a fence read that throws leaves this null, which the fill Lua
+  // reads as "there was no fence", and a fence that has since appeared will
+  // reject the fill anyway. Unavailable Redis costs a cache window, not
+  // correctness.
+  try {
+    fence = await readPolicyFence(userId, agentId);
+  } catch {
+    fence = null;
+  }
+
   // Selecting one column or three costs the same round trip. This is why shadow
   // mode and the sender-proof opt-in stay free on the hot path. The complete
   // read stays first: on a current schema nothing below it runs.
   const current = await db
     .from("agents")
-    .select("policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at")
+    .select(
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents"
+    )
     .eq("user_id", userId)
     .eq("id", agentId)
     .maybeSingle();
@@ -157,11 +229,19 @@ export async function readCurrentAgentPolicyAndShadow(
   // Narrow in deployment order: first drop the 0049 mode, then drop the 0020
   // shadow column. Current schemas still pay exactly one round trip.
   //
-  // 0046's boolean is deliberately NOT a rung of its own. It only ever existed
-  // between 0046 and 0049, nothing could write to it, so on every schema that
-  // lacks the mode column it was false anyway — and `off` is what the next rung
-  // already produces. A rung for it would be a round trip spent confirming a
-  // value that cannot differ.
+  // 0046's boolean IS read on the pre-0049 rung, and the reasoning that once
+  // said otherwise was wrong in a way worth recording. It ran: nothing in the
+  // product can write that column, so on any schema lacking the mode column it
+  // is false, so `off` is already the right answer. True of the PRODUCT, not of
+  // the DATABASE. Hand-editing the row was the only way to turn the control on
+  // between 0046 and 0049 — the feature shipped with no writer — and 0049's own
+  // backfill preserves `true` rows, which is an admission that they exist.
+  //
+  // The cache decoder below already honours a legacy `r: true` as `required`,
+  // added for exactly that case. Skipping the column here made the two halves
+  // disagree with each other: a legacy install enforced while its cache entry
+  // was warm and dropped to bearer-only the moment it expired. A code-before-
+  // migration window must not quietly retire an authentication control.
   //
   // Nothing else is retried. Any other error is an infrastructure fault, and
   // the documented fail-open (or POLICY_FAIL_CLOSED) posture handles it —
@@ -185,13 +265,25 @@ export async function readCurrentAgentPolicyAndShadow(
   const withoutSenderConstraint = isMissingColumn(withoutBudgetState?.error)
     ? await db
         .from("agents")
+        .select("policy, policy_shadow, require_sender_constrained_visa")
+        .eq("user_id", userId)
+        .eq("id", agentId)
+        .maybeSingle()
+    : null;
+
+  // Older than 0046: the boolean is not there either. Only reached by a schema
+  // that has already refused two newer column lists, so current deployments
+  // still pay exactly one round trip.
+  const withoutLegacyConstraint = isMissingColumn(withoutSenderConstraint?.error)
+    ? await db
+        .from("agents")
         .select("policy, policy_shadow")
         .eq("user_id", userId)
         .eq("id", agentId)
         .maybeSingle()
     : null;
 
-  const policyOnly = isMissingColumn(withoutSenderConstraint?.error)
+  const policyOnly = isMissingColumn(withoutLegacyConstraint?.error)
     ? await db
         .from("agents")
         .select("policy")
@@ -201,13 +293,14 @@ export async function readCurrentAgentPolicyAndShadow(
     : null;
 
   const { data, error } =
-    policyOnly ?? withoutSenderConstraint ?? withoutBudgetState ?? current;
+    policyOnly ?? withoutLegacyConstraint ?? withoutSenderConstraint ?? withoutBudgetState ?? current;
   if (error || !data || !("policy" in data)) {
     return {
       policy: POLICY_UNREADABLE,
       shadow: null,
       senderConstraintMode: null,
       budgetState: { epoch: null, established: false },
+      budget: { known: false },
     };
   }
 
@@ -217,13 +310,21 @@ export async function readCurrentAgentPolicyAndShadow(
   const shadow = "policy_shadow" in data
     ? ((data as { policy_shadow?: unknown }).policy_shadow ?? null)
     : null;
-  // On either fallback the mode column does not exist, which is "off" — see the
-  // note above about why 0046's boolean gets no rung of its own.
-  const senderConstraintMode = toSenderConstraintMode(
-    "sender_constraint_mode" in data
-      ? (data as { sender_constraint_mode?: unknown }).sender_constraint_mode
-      : "off"
-  );
+  // The modern column when it exists; otherwise 0046's boolean, where `true` is
+  // `required` and anything else is `off`. A schema with neither reads as `off`.
+  // Drift resolves DOWN for an unknown MODE (a value this build does not
+  // understand must not become enforcement) but a known legacy `true` is not
+  // drift — it is the operator's answer in the only vocabulary their schema had.
+  const legacyRequired =
+    "require_sender_constrained_visa" in data &&
+    (data as { require_sender_constrained_visa?: unknown }).require_sender_constrained_visa === true;
+  const senderConstraintMode = legacyRequired
+    ? "required"
+    : toSenderConstraintMode(
+        "sender_constraint_mode" in data
+          ? (data as { sender_constraint_mode?: unknown }).sender_constraint_mode
+          : "off"
+      );
   // On any fallback rung these columns do not exist, which reads as "this
   // database cannot record budget state" — so nothing is enforced, and the
   // gateway behaves exactly as it did before 0055.
@@ -237,6 +338,30 @@ export async function readCurrentAgentPolicyAndShadow(
     established: row.budget_state_established_at != null,
   };
 
+  // The caps as this row has them. `known` is false on any rung below the first,
+  // because those exist for schemas missing newer columns and the caller must
+  // then keep doing exactly what it did before rather than read an absence as
+  // "no cap". A number is taken only when it IS a number: a string or a NaN from
+  // a hand-edited row is not a limit, and must not be treated as one.
+  // `budget_tokens` is `bigint` (0001) and `budget_cents` is `integer`. Verified
+  // against the local stack that both arrive as JSON NUMBERS rather than strings
+  // — PostgREST builds its JSON in Postgres, and `row_to_json` on a real row
+  // gives `{"budget_tokens":250000,"budget_cents":500}`. That matters because
+  // the guard below turns anything non-numeric into null, and null here means
+  // NO CAP: a quoted bigint would silently uncap every agent for a cache window,
+  // which is the exact direction S3-04 exists to close.
+  const budgetNumber = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const budgetRow = row as { budget_tokens?: unknown; budget_cents?: unknown };
+  const budget: CurrentPolicyRead["budget"] =
+    "budget_tokens" in budgetRow || "budget_cents" in budgetRow
+      ? {
+          known: true,
+          tokens: budgetNumber(budgetRow.budget_tokens),
+          cents: budgetNumber(budgetRow.budget_cents),
+        }
+      : { known: false };
+
   if (options.cacheOnMiss !== false) {
     waitUntil(
       setCachedAgentPolicy(
@@ -248,12 +373,19 @@ export async function readCurrentAgentPolicyAndShadow(
           r: senderConstraintMode,
           be: budgetState.epoch,
           bs: budgetState.established,
+          ...(budget.known ? { bk: true, bt: budget.tokens, bc: budget.cents } : {}),
         } satisfies CachedPolicy),
-        POLICY_CACHE_TTL_S
+        POLICY_CACHE_TTL_S,
+        // THE ARGUMENT THAT WAS MISSING. The previous fence had a parameter for
+        // this, documented at length, and no call site ever passed it — so the
+        // comparison ran against the fill's own clock, always newer than the
+        // invalidation, and the fence could not reject anything. Nothing here
+        // may read the fence itself: it must be the one captured before the read.
+        fence
       )
     );
   }
-  return { policy, shadow, senderConstraintMode, budgetState };
+  return { policy, shadow, senderConstraintMode, budgetState, budget };
 }
 
 /**

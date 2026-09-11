@@ -36,12 +36,18 @@ vi.mock("@/lib/state/killswitch", () => ({
 }));
 vi.mock("@/lib/state/redis", () => ({
   purgeAgentPolicy: vi.fn(),
+  // The proxy reads this before the endpoint row and again before dispatch.
+  // Omitted, it is undefined, the call throws, and the route 500s.
+  readCredentialFence: vi.fn(async () => null),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
   readBudgetSnapshot: (...args: unknown[]) => readBudgetSnapshotMock(...args),
   claimNonce: (...args: unknown[]) => claimNonceMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
+  // Mocked explicitly. Left out it is undefined, the call throws, policy.ts
+  // catches it, and the fence silently becomes null in every assertion below.
+  readPolicyFence: async () => null,
 }));
 /**
  * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.

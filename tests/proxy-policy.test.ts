@@ -57,11 +57,17 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
 });
 vi.mock("@/lib/state/redis", () => ({
   purgeAgentPolicy: vi.fn(),
+  // The proxy reads this before the endpoint row and again before dispatch.
+  // Omitted, it is undefined, the call throws, and the route 500s.
+  readCredentialFence: vi.fn(async () => null),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
+  // Mocked explicitly. Left out it is undefined, the call throws, policy.ts
+  // catches it, and the fence silently becomes null in every assertion below.
+  readPolicyFence: async () => null,
 }));
 /**
  * The attempt-lifecycle boundary, mocked as a MODULE rather than re-implemented.
@@ -482,7 +488,7 @@ describe("proxy agent policy", () => {
     // 0055 added the budget-state pair to the SAME read, for the same reason:
     // the epoch check on the money path costs no round trip of its own.
     expect(builder.select).toHaveBeenCalledWith(
-      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at"
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents"
     );
 
     // Cached together for the same reason, so a cache HIT is also one round
@@ -491,7 +497,8 @@ describe("proxy agent policy", () => {
       "tenant-a",
       "agent-a",
       JSON.stringify({ p: null, s: null, r: "off", be: null, bs: false }),
-      60
+      60,
+      null
     );
   });
 
@@ -565,10 +572,17 @@ describe("proxy agent policy", () => {
     // paying for exactly one round trip. The narrowed retry is the fallback.
     // The full read still runs FIRST, so a current schema keeps paying for
     // exactly one round trip. Each narrower rung drops exactly one migration's
-    // columns, in deployment order — 0055, then 0049, then 0020.
+    // columns, in deployment order — 0055, then 0049, then 0046, then 0020.
+    //
+    // The 0046 rung asks for `require_sender_constrained_visa` rather than
+    // skipping past it (AUTH-03): that boolean was the ONLY way to turn the
+    // control on between 0046 and 0049, an operator could set it by hand, and
+    // discarding it here while the cache decoder honoured it made a legacy
+    // install enforce while warm and drop to bearer-only once the entry expired.
     expect(policySelects).toEqual([
-      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at",
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents",
       "policy, policy_shadow, sender_constraint_mode",
+      "policy, policy_shadow, require_sender_constrained_visa",
       "policy, policy_shadow",
       "policy",
     ]);
@@ -579,7 +593,12 @@ describe("proxy agent policy", () => {
       "tenant-a",
       "agent-a",
       JSON.stringify({ p: denyAll, s: null, r: "off", be: null, bs: false }),
-      60
+      60,
+      // The invalidation fence, read before the row and quoted back at fill
+      // time. Null here because this mock records no invalidation; the argument
+      // being PRESENT is the assertion — the previous fence had a parameter
+      // exactly like it that no call site ever passed.
+      null
     );
     expect(writeLogMock).toHaveBeenCalledWith(
       expect.not.objectContaining({ policyShadowWould: expect.anything() })
@@ -639,7 +658,7 @@ describe("proxy agent policy", () => {
     // in passport silently fall back to bearer, so the passport path fails closed.
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "sender_constraint_state_unavailable" });
-    expect(policySelects).toEqual(["policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at"]);
+    expect(policySelects).toEqual(["policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents"]);
     expect(setCachedAgentPolicyMock).not.toHaveBeenCalled();
   });
 
@@ -902,5 +921,70 @@ describe("policy shadow mode", () => {
     expect(writeLogMock).toHaveBeenCalledWith(
       expect.not.objectContaining({ policyShadowWould: expect.anything() })
     );
+  });
+});
+
+/**
+ * S3-04. A passport visa carries the caps as claims (`bt`/`bc`) minted when it
+ * was issued, and the proxy used to hand those straight to `openHold`. So an
+ * owner lowering a budget changed nothing for an agent already holding a visa,
+ * for up to that visa's full 15-minute life: `verifyVisa` authenticated the
+ * stale number, the atomic Lua enforced it exactly, and the dashboard showed the
+ * new one. Atomicity is not the problem — it was protecting the wrong limit.
+ *
+ * Direct Agent Keys never had this: their authentication RPC returns the current
+ * row on every request, which is the behaviour these tests bring the passport
+ * path in line with.
+ */
+describe("the cap that actually gates the call", () => {
+  const cached = (extra: Record<string, unknown>) =>
+    JSON.stringify({ p: {}, s: null, r: "off", be: null, bs: false, ...extra });
+
+  it("is the live row's, not the visa's, once the row can be read", async () => {
+    verifyVisaMock.mockResolvedValueOnce({ ...baseClaims, bt: 1_000 });
+    // What the owner just saved. `bk` is the flag that says these were actually
+    // read — without it, `bt: null` and "no such field" are the same bytes.
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ bk: true, bt: 50, bc: null }));
+
+    await POST(request("openai", "gpt-4.1"), {
+      params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
+    });
+
+    expect(openHoldMock).toHaveBeenCalledWith(
+      expect.objectContaining({ capTokens: 50, capMicrocents: null })
+    );
+  });
+
+  it("takes a cap the owner has REMOVED, not just one they lowered", async () => {
+    // The direction that needs the `bk` flag to be readable at all. A live null
+    // means "no token cap"; an entry that predates this field also has no `bt`,
+    // and reading that as unlimited would uncap every agent holding one.
+    verifyVisaMock.mockResolvedValueOnce({ ...baseClaims, bt: 1_000 });
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ bk: true, bt: null, bc: 250 }));
+
+    await POST(request("openai", "gpt-4.1"), {
+      params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
+    });
+
+    expect(openHoldMock).toHaveBeenCalledWith(
+      // 250 cents in microcents (1_000_000 per cent — see lib/pricing.ts). The
+      // row's units are cents; the conversion happens where the cap is
+      // enforced, not where it is stored.
+      expect.objectContaining({ capTokens: null, capMicrocents: 250 * 1_000_000 })
+    );
+  });
+
+  it("falls back to the visa's claim when the read could not establish one", async () => {
+    // An older schema, a cache entry written before this field existed, or a
+    // failed read. Every one of those must behave exactly as this did before —
+    // an unknown is not a new denial path, and it is certainly not "no cap".
+    verifyVisaMock.mockResolvedValueOnce({ ...baseClaims, bt: 1_000 });
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({}));
+
+    await POST(request("openai", "gpt-4.1"), {
+      params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
+    });
+
+    expect(openHoldMock).toHaveBeenCalledWith(expect.objectContaining({ capTokens: 1_000 }));
   });
 });

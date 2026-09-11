@@ -1,6 +1,6 @@
 # PassControl on Cloudflare Workers
 
-This is an **additive deployment path** for PassControl 0.9.0, including the public self-host tree. The committed Next.js source keeps
+This is an **additive deployment path** for PassControl, including the public self-host tree. The committed Next.js source keeps
 its explicit Edge runtime declarations for the existing Vercel path. `npm run build:cloudflare`
 copies only application source into an ignored, temporary directory, removes those runtime hints
 in that copy, builds with OpenNext, and writes the generated Worker to `.open-next/`. The source

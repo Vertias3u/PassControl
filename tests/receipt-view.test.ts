@@ -147,6 +147,22 @@ describe("failure copy", () => {
     expect(copy.title.toLowerCase()).toContain("altered");
   });
 
+  // Two unrelated things land on `unknown_key`, and no verifier can tell them
+  // apart: a receipt signed by someone who is not this issuer, and a genuine
+  // receipt whose key the issuer withdrew. "Do not rely on it" covers both, so
+  // the kind stays `forged` — but the wording must not convict, and it must not
+  // promise a property (retired keys stay published) an issuer can decline.
+  it("does not accuse a receipt of alteration when the key is merely not published", () => {
+    const copy = describeFailure("unknown_key");
+    const text = `${copy.title} ${copy.body}`.toLowerCase();
+    expect(text).not.toContain("altered");
+    expect(text).not.toContain("changed after it was signed");
+    expect(text).not.toMatch(/a genuine receipt is always/);
+    // It still has to say the thing the reader needs: nothing was checked.
+    expect(text).toContain("withdrawn");
+    expect(copy.kind).toBe("forged");
+  });
+
   it("keeps the signature wording when no step is supplied", () => {
     expect(describeFailure("bad_signature")).toEqual(describeFailure("bad_signature", "signature"));
   });

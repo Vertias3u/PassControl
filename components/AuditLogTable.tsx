@@ -7,7 +7,16 @@ import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 
 export type AuditLogRow = DepartureRow;
 
-export function AuditLogTable({ logs, callContext }: { logs: AuditLogRow[]; callContext: CallContext }) {
+export function AuditLogTable({
+  logs,
+  callContext,
+  logsAvailable,
+}: {
+  logs: AuditLogRow[];
+  callContext: CallContext;
+  /** Whether the history behind this table was read. REQUIRED — see FleetOverviewCards. */
+  logsAvailable: boolean;
+}) {
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<AuditLogRow | null>(null);
   const { format, zoneLabel } = useDashboardTime();
@@ -27,8 +36,14 @@ export function AuditLogTable({ logs, callContext }: { logs: AuditLogRow[]; call
         onChange={(e) => setFilter(e.target.value)}
       />
       {shown.length === 0 ? (
-        <div className="pc-table-empty" data-state="empty">
-          <span>{logs.length === 0 ? "No governed calls recorded yet." : "No calls match this filter."}</span>
+        <div className="pc-table-empty" data-state={logsAvailable ? "empty" : "unavailable"}>
+          <span>
+            {!logsAvailable
+              ? "The call history could not be read. This table is unavailable — it is not a record that nothing happened."
+              : logs.length === 0
+                ? "No governed calls recorded yet."
+                : "No calls match this filter."}
+          </span>
           {filter ? (
             <button type="button" className="ghost" onClick={() => setFilter("")}>
               Clear filter

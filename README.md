@@ -1,6 +1,6 @@
 # PassControl
 
-PassControl **0.9.0** is an identity and credential gateway for AI agents. It keeps
+PassControl is an identity and credential gateway for AI agents. It keeps
 provider API keys out of agent configuration and applies per-agent scopes, policies,
 budgets, and stop controls before forwarding model requests.
 
@@ -44,7 +44,7 @@ Passport sender-proof modes are **off**, **observe**, and **required**. Off igno
 proofs; observe records what would pass without enforcing it; required rejects missing,
 invalid, stale, or replayed proofs. Only enforced success is recorded as
 `passport_proof_per_request`; observing a valid proof does not upgrade authentication.
-The 0.9.0 sidecar supplies proofs; the direct CLI call, MCP chat, and TypeScript SDK
+The sidecar supplies proofs; the direct CLI call, MCP chat, and TypeScript SDK
 do not attach them and cannot use required mode without an additional proof implementation.
 Proofs do **not** bind the request body or query string and do not attest hardware or
 key storage. See [authentication and lifecycle](./DOCUMENTATION.md#passport-lifecycle-and-sender-proof).
@@ -164,7 +164,7 @@ output; it does not exercise a billed provider.
 With Node installed:
 
 ```bash
-npm install -g passcontrol@0.9.0
+npm install -g passcontrol
 passcontrol login
 ```
 

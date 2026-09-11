@@ -46,6 +46,18 @@ const COST_CONSUMERS = [
   "lib/dashboard-attention.ts",
   "lib/control-graph.ts",
   "lib/log.ts",
+  // Both of these present the AGGREGATE counter, `agents.spent_microcents`, and
+  // reason about `agent_logs.cost_microcents` only to say what that counter is
+  // NOT. The decision this list asks for is recorded there in full: the number
+  // is what was charged against the budget, which Postgres defines once in 0055
+  // as coalesce(enforced_microcents, coalesce(cost_microcents, 0)), so it equals
+  // observed cost everywhere PassControl can price and contains a conservative
+  // estimate where it cannot. Neither renders a null as $0.00 — neither ever
+  // sees a null. What they used to do was worse and subtler: present the total
+  // as observed money, which made the fleet card contradict a signed receipt
+  // for the same call (T4-02). Both now state the basis instead.
+  "app/api/control/v1/spend/route.ts",
+  "components/FleetOverviewCards.tsx",
   // WHERE THE NULL IS DECIDED IN THE FIRST PLACE. Every surface below is
   // reasoning about a value this file chose: the proxy writes
   // `cost_microcents: null` for a call nobody could price, and `unpriced: true`

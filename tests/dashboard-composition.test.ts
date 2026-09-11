@@ -81,7 +81,11 @@ describe("the first-call guide reuses the first-run provider read", () => {
     expect(dashboard).toContain('from("onboarding_state")');
     expect(dashboard).toContain('select("dismissed_at, completed_at")');
     expect(dashboard).toContain("onboardingStateHidden(onboardingState)");
-    expect(firstCall).toContain("if (hidden) return null;");
+    // The dismissal guard, now sharing its line with the unavailable-log guard
+    // (T4-06). Matched loosely on purpose: what this test cares about is that
+    // `hidden` still ends the render server-resolved, not the exact condition
+    // beside it — pinning the literal made an unrelated honest fix look broken.
+    expect(firstCall).toMatch(/if \([^)]*\bhidden\b[^)]*\) return null;/);
     expect(firstCall).toContain('.rpc("complete_onboarding")');
     expect(firstCall).toContain('.rpc("dismiss_onboarding")');
     expect(firstCall).not.toMatch(/localStorage\s*\.\s*(get|set|remove)Item|document\.cookie/);

@@ -19,7 +19,7 @@ documented in the README. Docker Desktop and the Supabase CLI are required; host
 not.
 
 For local synthetic calls, `PASSCONTROL_DEMO=1` enables the keyless demo provider.
-The removed `try` command is not part of 0.9.0. Use `passcontrol call` with a configured
+The `try` command has been removed. Use `passcontrol call` with a configured
 demo agent, or the login/doctor self-test on a demo-enabled gateway. The demo exercises
 governance and synthetic accounting, not a provider invoice. Keep local seeded accounts
 out of production.

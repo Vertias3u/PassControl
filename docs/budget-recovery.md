@@ -378,7 +378,7 @@ loss, that estimate stays on the books as load against a request that finished.
 It is visible as `reserved_tokens` exceeding the sum of the open holds' own
 estimates, which the rebuild response prints side by side for this reason.
 Do not assume a second rebuild repairs this: existing reservation counters are
-preserved even when no open holds remain. The 0.9.0 recovery API does not provide
+preserved even when no open holds remain. The recovery API does not provide
 a documented automatic repair for that disagreement. Preserve evidence and investigate
 the state with the maintainer before changing counters manually.
 

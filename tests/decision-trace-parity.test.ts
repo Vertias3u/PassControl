@@ -53,12 +53,18 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
 });
 vi.mock("@/lib/state/redis", () => ({
   purgeAgentPolicy: vi.fn(),
+  // The proxy reads this before the endpoint row and again before dispatch.
+  // Omitted, it is undefined, the call throws, and the route 500s.
+  readCredentialFence: vi.fn(async () => null),
   isSuspended: (...a: unknown[]) => h.isSuspendedMock(...a),
   readBudgetSnapshot: (...a: unknown[]) => h.readBudgetSnapshotMock(...a),
   getCachedKey: (...a: unknown[]) => h.getCachedKeyMock(...a),
   setCachedKey: (...a: unknown[]) => h.setCachedKeyMock(...a),
   getCachedAgentPolicy: (...a: unknown[]) => h.getCachedAgentPolicyMock(...a),
   setCachedAgentPolicy: (...a: unknown[]) => h.setCachedAgentPolicyMock(...a),
+  // Mocked explicitly. Left out it is undefined, the call throws, policy.ts
+  // catches it, and the fence silently becomes null in every assertion below.
+  readPolicyFence: async () => null,
   claimNonce: (...a: unknown[]) => h.claimNonceMock(...a),
 }));
 /**
@@ -110,6 +116,9 @@ vi.mock("@/lib/state/policy", () => ({
   readCurrentAgentPolicyAndShadow: async (...a: unknown[]) => ({
     policy: await h.readCurrentAgentPolicyMock(...a),
     shadow: null,
+    // Parity is about the VERDICT, so the caps stay the credential's own —
+    // `known: false` is the rung that says "keep using the visa claim".
+    budget: { known: false },
   }),
 }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => h.serviceClientMock() }));

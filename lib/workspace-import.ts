@@ -22,6 +22,40 @@ const AGENT_STATUSES = new Set(["active", "suspended", "revoked"]);
 // "unknown_kind", which reads as a corrupt export rather than a stale list.
 const OWNER_KINDS = new Set(["self_attested", "domain", "github", "idv"]);
 
+/**
+ * The ENVELOPE check: is this file shaped like an export at all, before any
+ * question about what is in it.
+ *
+ * It exists because two reasonable leniencies met on a path neither anticipated
+ * (T4-03). `planAgentImports` returns an empty plan for a non-array — right, for
+ * a planner whose contract is "decide per entry" — and the CLI defaulted a
+ * missing collection to `[]`. A truncated file therefore produced an empty plan,
+ * `every()` over an empty plan is true, and the API answered `complete: true`
+ * with zero creates, zero skips and zero rejections. That is a false completion
+ * report on the one surface whose whole job is stopping a partial restore from
+ * looking like a whole one.
+ *
+ * A MISSING `agents` collection is corruption. An EMPTY one is a workspace with
+ * no agents, which is a real thing to export and a real thing to restore, so it
+ * stays valid. Both halves are load-bearing.
+ */
+export type ImportEnvelope =
+  | { ok: true; agents: unknown[]; ownership: unknown }
+  | { ok: false; reason: "not_an_object" | "workspace_not_an_object" | "agents_missing" };
+
+export function readImportEnvelope(body: unknown): ImportEnvelope {
+  if (!isRecord(body)) return { ok: false, reason: "not_an_object" };
+  // The route accepts the slim payload the CLI sends AND, unchanged, the
+  // `workspace` block of a full export file. A `workspace` key that is present
+  // but not an object is a damaged file, not an invitation to fall back to the
+  // top level — falling back would read `agents` off the envelope of an export
+  // that has none and call the result a complete restore.
+  const source = "workspace" in body ? body.workspace : body;
+  if (!isRecord(source)) return { ok: false, reason: "workspace_not_an_object" };
+  if (!Array.isArray(source.agents)) return { ok: false, reason: "agents_missing" };
+  return { ok: true, agents: source.agents, ownership: source.ownership ?? null };
+}
+
 export type AgentImportPlan =
   | { action: "create"; name: string; passportPubkey: string; row: Record<string, unknown> }
   | { action: "skip"; name: string; passportPubkey: string; reason: "already_exists" }

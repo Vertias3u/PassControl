@@ -173,6 +173,31 @@ export function SenderProofPanel({
           {state.error}
         </p>
       ) : null}
+
+      {/*
+        Saved is not the same as in force. The gateway reads this setting from a
+        cache, and a change that could not clear that cache leaves the previous
+        mode deciding for up to a minute — on a switch to `required`, a minute in
+        which outstanding bearer visas are still admitted. Saying "saved" and
+        nothing else is what made that invisible, so the panel now states which
+        of the two happened rather than letting the operator assume.
+      */}
+      {state.ok && state.enforcementLive === false ? (
+        <p
+          className="mt-3 mb-0 text-sm"
+          data-enforcement="pending"
+          style={{ color: "var(--warning)" }}
+        >
+          Saved, but not in force yet. The gateway&rsquo;s cached copy of this setting could
+          not be cleared, so the previous mode keeps deciding for up to a minute. Nothing
+          needs re-saving — the change is stored.
+        </p>
+      ) : null}
+      {state.ok && state.enforcementLive === true ? (
+        <p className="mt-3 mb-0 text-sm" data-enforcement="live" style={{ color: "var(--success)" }}>
+          Saved, and in force now.
+        </p>
+      ) : null}
     </section>
   );
 }

@@ -59,10 +59,26 @@ describe("setting the sender-constraint mode", () => {
   // not report failure for a change that was applied — the caller would retry a
   // write that already succeeded, and the only real cost is a stale mode for the
   // rest of the TTL. Same trade lib/owner/manage.ts makes for the owner cache.
-  it("reports success when the write lands and only the purge fails", async () => {
+  // AUTH-02. This used to assert a flat `ok: true` and nothing else, which
+  // encoded the belief that a failed invalidation is a cosmetic delay. It is not,
+  // for THIS setting: until the cache is invalidated, outstanding bearer visas
+  // keep being admitted on an agent the operator has just switched to `required`.
+  // The write is still durable and still must not be retried, so the result stays
+  // ok — but it now says whether enforcement is actually live, so the surface
+  // above can stop claiming something it does not know.
+  it("keeps the durable write but does not claim enforcement when the purge fails", async () => {
     purgeMock.mockRejectedValueOnce(new Error("redis down"));
-    await expect(setSenderConstraintMode(db(), "u1", "a1", "observe")).resolves.toMatchObject({
+    await expect(setSenderConstraintMode(db(), "u1", "a1", "required")).resolves.toMatchObject({
       ok: true,
+      value: { mode: "required", enforcementLive: false },
+    });
+  });
+
+  it("says enforcement is live when the invalidation lands", async () => {
+    purgeMock.mockResolvedValueOnce(true);
+    await expect(setSenderConstraintMode(db(), "u1", "a1", "required")).resolves.toMatchObject({
+      ok: true,
+      value: { mode: "required", enforcementLive: true },
     });
   });
 

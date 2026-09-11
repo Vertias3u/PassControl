@@ -78,6 +78,7 @@ export function FirstCallActivation({
   initialLogs,
   integrations,
   defaultProvider,
+  logsAvailable,
 }: {
   userId: string;
   providerConfigured: boolean;
@@ -88,6 +89,18 @@ export function FirstCallActivation({
   initialLogs: FirstCallRow[];
   integrations: string[];
   defaultProvider?: ProviderId;
+  /**
+   * Whether the call log this rail reasons over was actually read. REQUIRED.
+   *
+   * `deriveFirstCallActivation` takes absent rows as proof that no call has been
+   * made — correctly, because that is what an empty log means. With the read
+   * FAILED it means nothing, and the rail would tell an established operator to
+   * make their first call in the middle of a database fault. That is the mirror
+   * of the rule `controlExerciseAt` already states in lib/first-call-activation.ts:
+   * absent evidence must not read as verified, and it must not read as unmet
+   * either.
+   */
+  logsAvailable: boolean;
 }) {
   const [logs, setLogs] = useState(initialLogs);
   const [live, setLive] = useState(false);
@@ -163,7 +176,17 @@ export function FirstCallActivation({
   // The row is resolved on the server, avoiding a hydration flash. Dismissal is
   // a durable preference, so it remains respected even if reality later moves
   // back to an earlier computed step.
-  if (hidden) return null;
+  // Not a stage, and not an empty rail. The activation guide is an onboarding
+  // aid; when the evidence it reads is unavailable the honest thing is to say
+  // nothing rather than to guess a stage — `deriveFirstCallActivation` would
+  // otherwise read the absent rows as proof no call has been made and tell an
+  // established operator to make their first one, mid-outage. The operations
+  // appendix on the same page reports the failed read, so the fact is not lost.
+  //
+  // BELOW the hooks, beside the `hidden` guard, and that placement is load-
+  // bearing: an early return above `useState` changes the hook count between
+  // renders the moment this prop flips, which React tears the tree down for.
+  if (!logsAvailable || hidden) return null;
 
   if (state.stage === "complete") {
     return (

@@ -63,7 +63,7 @@ nits without a concrete exploit. Self-hosters are responsible for their own depl
 secrets and infrastructure configuration.
 
 
-## Assurance limits in 0.9.0
+## Assurance limits
 
 Sender proofs bind method, gateway origin/path, timestamp, nonce and visa hash, not body
 or query. Only required mode enforces them; observed proofs are diagnostics. The sidecar

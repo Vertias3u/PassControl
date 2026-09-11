@@ -77,6 +77,7 @@ import {
   checkIssuerPublishesKey,
   generateInstanceKey,
   instanceKidFromSeed,
+  retiredKeyEntry,
 } from "../cli/instance-key.mjs";
 import { FAILURE_REASONS, verifyAgentToken, verifyReceipt, verifyStatement } from "../cli/verify.mjs";
 import { compareProtocolSets } from "../cli/protocols.mjs";
@@ -216,6 +217,9 @@ ${heading("Trust")}
   ${cmd} key status               show the local passport key storage tier
   ${cmd} key migrate              move a tier 0 file key into the OS credential store
   ${cmd} keygen instance          create the receipt-signing key
+  ${cmd} keygen instance --retire <seed>
+                                 print the public entry that keeps a rotated-out
+                                 key's receipts verifiable
   ${cmd} verify receipt <jws> --issuer <origin>
                                  verify a signed call receipt
   ${cmd} verify token <jwt> --audience <aud> --issuer <origin>
@@ -2379,10 +2383,33 @@ async function statementsCommand(opts) {
   );
 }
 
-async function keygenCommand(rest) {
+async function keygenCommand(rest, opts = {}) {
   const target = rest[0];
   if (target !== "instance") {
     throw new Error(`Usage: ${cliCommand("keygen instance")}`);
+  }
+
+  // `--retire <seed>` prints the public pair for a key being taken out of
+  // service. Nothing about it is secret, and that is the point: the operator
+  // has no other way to derive a public half, and the alternative they reach
+  // for — pasting the seed — is 32 base64url bytes too.
+  // From `opts`, not `rest`: parseArgv consumes every `--flag` and its value
+  // before the command ever sees the array, so scanning `rest` for "--retire"
+  // finds nothing and silently generates a NEW key instead — which, run against
+  // a live deployment's seed, looks like it worked.
+  if (opts.retire !== undefined) {
+    const seed = typeof opts.retire === "string" ? opts.retire : "";
+    if (!seed) throw new Error(`Usage: ${cliCommand("keygen instance --retire <seed>")}`);
+    const { entry, kid } = retiredKeyEntry(seed);
+    ok(`Retired key ${kid}.`);
+    step("Append this to INSTANCE_SIGNING_KEY_HISTORY (comma-separated) and leave it there");
+    step("forever — receipts carry no expiry, so this is what keeps old ones checkable:");
+    console.log(`  ${entry}`);
+    console.log("");
+    step("It is a PUBLIC key. It cannot sign, which is why history takes this and not the");
+    step("seed: a retired seed left in configuration can mint new receipts under the old kid.");
+    step("Delete the seed once this is in place.");
+    return;
   }
 
   const { seed, kid } = generateInstanceKey();
@@ -2394,10 +2421,14 @@ async function keygenCommand(rest) {
   step("Also set PASSCONTROL_ISSUER to this deployment's https origin — it becomes the");
   step("`iss` claim, and the origin other deployments use to find this one's JWKS.");
   step("");
-  step("Rotating? Move the current value to INSTANCE_SIGNING_KEY_PREV and keep it there.");
-  step("Unlike VISA_SECRET_PREV we never sign with it — its public key stays published so");
-  step("receipts signed before the rotation still verify. Publish the new key, wait one");
-  step("JWKS max-age window, then start signing with it.");
+  step("Rotating? Two steps, and the FIRST is the one that lasts:");
+  step(`  1. ${cliCommand("keygen instance --retire <the old seed>")} — append the pair it prints`);
+  step("     to INSTANCE_SIGNING_KEY_HISTORY. That list is permanent and public-only.");
+  step("  2. Move the old seed to INSTANCE_SIGNING_KEY_PREV for the changeover, then delete it.");
+  step("Unlike VISA_SECRET_PREV we never sign with either — their public keys stay published");
+  step("so receipts signed before the rotation still verify. _PREV holds ONE generation, so");
+  step("history is what keeps the receipts from the rotation before this one checkable.");
+  step("Publish the new key, wait one JWKS max-age window, then start signing with it.");
 }
 
 function passportFileForMigration() {
@@ -2570,11 +2601,32 @@ async function importCommand(rest = [], opts = {}) {
     );
   }
 
+  // The envelope, before anything is planned or sent.
+  //
+  // This used to be `snapshot.workspace?.agents ?? []`, which turns a truncated
+  // file into an empty fleet: the API plans nothing, `every()` over an empty
+  // plan is true, the report says `complete: true`, and the CLI prints "Nothing
+  // to create." and exits 0. A damaged snapshot restored no fleet at all and
+  // every surface reported success (T4-03). A MISSING agents collection is
+  // corruption; an EMPTY one is a workspace that genuinely has no agents and
+  // still imports fine.
+  //
+  // The server validates this independently — it has to, since anyone can curl
+  // it — but the operator holding the damaged file is here, so this is where the
+  // message can name the file and say what is wrong with it.
+  if (!Array.isArray(snapshot.workspace?.agents)) {
+    throw new Error(
+      `${file} has no "workspace.agents" array. That is a truncated or damaged export, ` +
+        `not an empty workspace — importing it would restore nothing and report success. ` +
+        `Re-export from the source deployment.`
+    );
+  }
+
   // Only what the import writes goes on the wire. Provider mappings, break-glass
   // grants, the exclusions prose and the display settings stay on disk — they
   // are not importable, so sending them would spend the size budget on bytes the
   // server ignores.
-  const agents = snapshot.workspace?.agents ?? [];
+  const agents = snapshot.workspace.agents;
   const payload = { agents, ownership: snapshot.workspace?.ownership ?? null };
   const size = Buffer.byteLength(JSON.stringify(payload));
   if (size > IMPORT_BODY_LIMIT) {
@@ -3165,7 +3217,7 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
       await openDashboard(opts);
       break;
     case "keygen":
-      await keygenCommand(commandRest);
+      await keygenCommand(commandRest, opts);
       break;
     case "key":
       await keyCommand(commandRest, opts);

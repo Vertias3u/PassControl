@@ -110,7 +110,43 @@ interface LogEntryBase {
     // counters there, this one attempt's dispatch record here — and it matters
     // because this one means another handler may hold this attempt's single
     // send and be inside the provider call right now.
-    | "dispatch_unavailable";
+    | "dispatch_unavailable"
+    // The credential changed between resolving WHERE it goes and decrypting WHAT
+    // goes there, so the attempt was holding an address from one generation and a
+    // secret from another. Never sent.
+    //
+    // A sibling of `endpoint_unavailable` — both are the gateway declining to
+    // deliver a credential it cannot place — but the cause is the opposite one:
+    // there the destination could not be read at all, here it was read
+    // successfully and then superseded. It answers 409 rather than 502 because
+    // nothing is broken: the operator rotated something, and the client's retry
+    // gets a coherent pair.
+    | "credential_changed"
+    // Refused before forwarding because the gateway could not READ the
+    // credential generation on the second look. Never sent.
+    //
+    // The sibling `credential_changed` above is an OBSERVATION: a different
+    // generation came back, so an operator rotated something and the client's
+    // retry gets a coherent pair. This one is the absence of an observation —
+    // Redis threw, or the fence's own 24h TTL had expired since the address was
+    // resolved. Both refuse, and the refusal is right either way; only one of
+    // them is entitled to say a credential changed. Collapsing them (T4-04) put
+    // an invented configuration event into an audit row and a SIGNED receipt,
+    // and pointed the reader at a rotation that never happened.
+    //
+    // 503, not 409: nothing about the tenant's configuration is wrong, and a
+    // retry once Redis answers will succeed.
+    | "credential_state_unavailable"
+    // Refused before forwarding because the agent has a DOLLAR cap and the call
+    // was bound for an endpoint PassControl cannot price. Never sent.
+    //
+    // NOT `blocked_budget`, and the difference is the whole point: that one
+    // means the agent is out of money, and raising the cap fixes it. This one
+    // means the cap cannot be enforced at all, and raising it changes nothing —
+    // the operator either removes the dollar cap, or stops routing that agent
+    // through an endpoint whose bill nobody here can compute. Token caps are
+    // unaffected: the provider's token counts are real wherever the call went.
+    | "blocked_unpriced_endpoint";
   /**
    * What the budget was actually CHARGED for this attempt, when that differs
    * from the observed figures above.

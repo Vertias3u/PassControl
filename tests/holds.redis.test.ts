@@ -645,9 +645,27 @@ describe.skipIf(!live)("budget state: first initialisation vs. loss", () => {
   // closes as soon as the establish write lands and the policy cache is purged.
   // That purge is not optional — without it this window is one full cache TTL
   // from whenever the entry was written, rather than from first-init.
+  //
+  // ONE CHANGE TO THIS TEST, MADE FOR S3-06 AND WORTH STATING. It used to build
+  // the state by hand — `SET epoch:<agid>` and nothing else — and that is a
+  // state production cannot produce: first-init mints the epoch, seeds all four
+  // counters and writes the format tag inside ONE script, so an epoch never
+  // exists alone. The only way to reach "epoch, no counters" is eviction, which
+  // is loss, and the branch now refuses it. The window this test pins is real;
+  // the shortcut used to enter it was not, so it now enters through a genuine
+  // first call. Every assertion below is the original one.
   it("Postgres not established + a live epoch present ADMITS, and does not refuse", async () => {
     const agentId = agent();
-    await redis().set(`epoch:${agentId}`, "minted-a-moment-ago");
+    const init = await openHold({
+      agentId,
+      attemptId: "w0",
+      estimate: 10,
+      capTokens: 1_000,
+      budgetState: { epoch: null, established: false },
+    });
+    expect(init.ok).toBe(true);
+    const minted = init.epochToPersist as string;
+    await settleKnown({ agentId, attemptId: "w0", tokens: 10, microcents: 0 });
 
     const r = await openHold({
       agentId,
@@ -662,11 +680,11 @@ describe.skipIf(!live)("budget state: first initialisation vs. loss", () => {
     expect(r.reason).toBeUndefined();
     // The existing epoch is left exactly as it was — a re-mint here would make
     // the value Postgres is about to record disagree with the live one forever.
-    expect(await readEpoch(agentId)).toBe("minted-a-moment-ago");
+    expect(await readEpoch(agentId)).toBe(minted);
     // AND the caller is told to persist THAT value, not a fresh one. This is the
     // assertion that would have caught the brick: before it, openHold reported a
     // newly generated uuid that had never been written to Redis at all.
-    expect(r.epochToPersist).toBe("minted-a-moment-ago");
+    expect(r.epochToPersist).toBe(minted);
     expect(await num(`reserved:${agentId}`)).toBe(10);
   });
 
@@ -1380,5 +1398,142 @@ describe.skipIf(!live)("Session 02 — operator overstatement reachability", () 
       .toMatchObject({ degraded: true, appliedTokens: 194120, appliedMicrocents: 21560000 });
     expect(await resolveHold({ agentId, attemptId, tokens: 19412, microcents: 2156000 }))
       .toMatchObject({ degraded: true, appliedTokens: 194120, appliedMicrocents: 21560000 });
+  });
+});
+
+/**
+ * S3-06. The establishment bit rides in the agent-policy CACHE, and a cache can
+ * be stale — its purge is a `waitUntil` whose result the route ignores.
+ *
+ * The `established: true` branch checks the format tag and all four counters
+ * before admitting, because an epoch agreeing proves the generation and not the
+ * counters. The `established: false` branch, reached with an epoch already live,
+ * did neither: it reported the live epoch and carried on. So one stale boolean
+ * turned partial Redis loss from a refusal into a silent re-seed, and an agent
+ * that had spent its cap got the difference back as spendable capacity.
+ *
+ * The state is reachable without any race at all — the first call's policy purge
+ * simply failing is enough — and S3-01's stale-fill window made it reachable
+ * even after a purge that succeeded.
+ */
+describe.skipIf(!live)("a stale 'not established' bit is not a licence to re-seed", () => {
+  async function spending(): Promise<{ agentId: string; epoch: string }> {
+    const agentId = agent();
+    const first = await openHold({
+      agentId,
+      attemptId: "mint",
+      estimate: 10,
+      capTokens: 1_000,
+      budgetState: { epoch: null, established: false },
+    });
+    expect(first.ok).toBe(true);
+    await settleKnown({ agentId, attemptId: "mint", tokens: 10, microcents: 0 });
+    const epoch = first.epochToPersist;
+    expect(epoch).toBeTruthy();
+    // History: this agent has spent nearly its whole cap.
+    await redis().set(`spent:${agentId}`, 900);
+    return { agentId, epoch: epoch as string };
+  }
+
+  it.each(["spent", "spent_cost", "reserved", "reserved_cost"])(
+    "refuses when %s is lost and an epoch is already live, whatever the cache bit says",
+    async (key) => {
+      const { agentId } = await spending();
+      await redis().del(`${key}:${agentId}`);
+
+      const out = await openHold({
+        agentId,
+        attemptId: `stale-${key}`,
+        estimate: 200,
+        capTokens: 1_000,
+        // The stale cache value. Postgres knows better by now; this does not.
+        budgetState: { epoch: null, established: false },
+      });
+
+      expect(out.ok).toBe(false);
+      expect(out.ok === false && out.reason).toBe("state");
+    }
+  );
+
+  it("does not treat a missing spend counter as a zero balance", async () => {
+    const { agentId } = await spending();
+    await redis().del(`spent:${agentId}`);
+
+    await openHold({
+      agentId,
+      attemptId: "stale-refund",
+      estimate: 200,
+      capTokens: 1_000,
+      budgetState: { epoch: null, established: false },
+    });
+
+    // The refusal has to happen BEFORE any arithmetic. A rejected admission that
+    // still recreated the counter would hand back the 900 it could not read.
+    expect(await redis().exists(`spent:${agentId}`)).toBe(0);
+    expect(await num(`reserved:${agentId}`)).toBe(0);
+  });
+
+  it("refuses the same loss when the cache bit is current, exactly as before", async () => {
+    // The control. This branch already refused, and the fix must not have
+    // changed it — if both sides now refuse for the same reason, the test above
+    // is proving nothing about the branch it names.
+    const { agentId, epoch } = await spending();
+    await redis().del(`spent:${agentId}`);
+
+    const out = await openHold({
+      agentId,
+      attemptId: "current",
+      estimate: 200,
+      capTokens: 1_000,
+      budgetState: { epoch, established: true },
+    });
+    expect(out.ok).toBe(false);
+    expect(out.ok === false && out.reason).toBe("state");
+  });
+
+  it("still initialises a genuinely new agent, which is what the branch is for", async () => {
+    // No epoch, no counters, `established: false` — the honest version of the
+    // state the stale bit imitates. Hardening the branch must not brick a first
+    // call, which is the only thing it legitimately serves.
+    const agentId = agent();
+    const out = await openHold({
+      agentId,
+      attemptId: "genuine-first",
+      estimate: 10,
+      capTokens: 1_000,
+      budgetState: { epoch: null, established: false },
+    });
+
+    expect(out.ok).toBe(true);
+    expect(out.epochToPersist).toBeTruthy();
+    for (const key of ["spent", "spent_cost", "reserved", "reserved_cost"]) {
+      expect(await redis().exists(`${key}:${agentId}`), `${key} was not seeded`).toBe(1);
+    }
+  });
+
+  it("still adopts a live epoch when Postgres has not read the mint back yet", async () => {
+    // The other legitimate visitor to this branch: the mint landed, the Postgres
+    // write did not. Counters and format ARE present, so it must still pass —
+    // the check being added is a presence check, not a ban on the branch.
+    const agentId = agent();
+    const first = await openHold({
+      agentId,
+      attemptId: "mint",
+      estimate: 10,
+      capTokens: 1_000,
+      budgetState: { epoch: null, established: false },
+    });
+    expect(first.ok).toBe(true);
+
+    const second = await openHold({
+      agentId,
+      attemptId: "again",
+      estimate: 10,
+      capTokens: 1_000,
+      budgetState: { epoch: null, established: false },
+    });
+    expect(second.ok).toBe(true);
+    // Reports what EXISTS, never a second mint.
+    expect(second.epochToPersist).toBe(first.epochToPersist);
   });
 });

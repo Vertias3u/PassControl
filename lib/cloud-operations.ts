@@ -213,7 +213,14 @@ export function buildCloudSupportBundle(input: BuildSupportBundleInput) {
     },
     emergency_controls: input.controls,
     agents: input.agents.map(summarizeAgent),
-    recent_failures: summarizeFailures(input.logs),
+    // OMITTED, not empty, when the log read failed — the same choice `quota`
+    // makes four fields up, and for a stronger reason. `recent_failures: []`
+    // sitting beside `activity_log: "unavailable"` gives a reader two answers
+    // at once, and they take the concrete one: a support engineer opening this
+    // bundle during an incident would conclude the gateway refused nothing.
+    ...(input.signals.activityLog === "unavailable"
+      ? { recent_failures_unavailable: true as const }
+      : { recent_failures: summarizeFailures(input.logs) }),
   };
 }
 

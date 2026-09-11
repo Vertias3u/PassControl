@@ -89,8 +89,37 @@ describe("GET /spend", () => {
     expect(res.status).toBe(200);
     expect(eqCalls).toContainEqual(["user_id", "u1"]);
     const body = await res.json();
-    expect(body.data.fleet).toEqual({ spent_tokens: 150, spent_microcents: 20000 });
+    expect(body.data.fleet).toMatchObject({ spent_tokens: 150, spent_microcents: 20000 });
     expect(body.data.agents).toHaveLength(2);
+  });
+
+  /**
+   * T4-02. This number is NOT observed provider cost, and returning it under a
+   * bare `spent_microcents` said that it was.
+   *
+   * Postgres defines spend once, in 0055, as
+   * `coalesce(enforced_microcents, coalesce(cost_microcents, 0))` — the amount
+   * charged against the budget. For a call the gateway cannot price those two
+   * differ: the audit row records `cost_microcents: null` and `unpriced: true`
+   * while the enforcement figure is a conservative estimate taken from the
+   * built-in provider's table. So the same call was reported as unknown on its
+   * receipt and as a precise dollar figure here.
+   *
+   * The counter is deliberately unchanged — it is what `reconcile_agent_spend`
+   * and `rebuild_agent_spend` both fold, and making this surface disagree with
+   * the database's own definition would be a worse bug than the one being
+   * fixed. What changes is the claim: the basis is now stated, so a consumer
+   * persisting this cannot mistake it for money a provider actually charged.
+   */
+  it("states the basis of the figure rather than implying it is observed cost", async () => {
+    dataset = {
+      data: [{ id: "a1", name: "x", spent_tokens: 100, spent_microcents: 15000 }],
+      error: null,
+    };
+    const body = await (await getSpend(req("https://x/api/control/v1/spend"))).json();
+
+    expect(body.data.fleet.basis).toBe("enforced");
+    expect(body.data.agents[0].basis).toBe("enforced");
   });
 });
 

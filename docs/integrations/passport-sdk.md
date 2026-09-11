@@ -38,7 +38,7 @@ path would weaken the pin it defines.
 ## OpenAI and OpenAI-compatible providers
 
 ```bash
-npm install passcontrol@0.9.0 openai
+npm install passcontrol openai
 ```
 
 ```ts
@@ -64,7 +64,7 @@ passed to `clientOptions`. The request remains in the OpenAI chat-completions sh
 ## Anthropic
 
 ```bash
-npm install passcontrol@0.9.0 @anthropic-ai/sdk
+npm install passcontrol @anthropic-ai/sdk
 ```
 
 ```ts
@@ -119,14 +119,14 @@ signs the receipt over the decision it recorded. It is evidence about the gatewa
 about the agent's passport, and the two must not be read as the same claim.
 
 
-## 0.9.0 compatibility and assurance
+## Compatibility and assurance
 
 `clientOptions` accepts `openai`, `anthropic`, `groq`, `mistral`, `together`, `deepseek`,
 and `gemini`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
 Chat Completions. Gemini uses Google's OpenAI-compatible endpoint; native
 `generateContent` is not supported. See [accepted paths](../../DOCUMENTATION.md#data-plane--proxy-a-model-call).
 
-The TypeScript SDK **does not attach sender proofs in 0.9.0**. Its provider requests use
+The TypeScript SDK **does not attach sender proofs**. Its provider requests use
 bearer visas: they work with sender-proof mode off/observe, but required mode refuses
 them without an additional correct proof implementation. The current sidecar attaches
 proofs. A valid mint signature is not a signature over each provider request.

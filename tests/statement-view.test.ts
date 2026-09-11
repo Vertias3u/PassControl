@@ -78,6 +78,16 @@ describe("the failure copy on the statement page", () => {
     }
   });
 
+  // Same rule as the receipt page, and it has to hold on both: a key the
+  // issuer no longer publishes is not evidence the statement was altered.
+  it("does not accuse a statement of alteration when the key is merely not published", () => {
+    const copy = describeStatementFailure("unknown_key");
+    const text = `${copy.title} ${copy.body}`.toLowerCase();
+    expect(text).not.toContain("altered");
+    expect(text).not.toMatch(/a genuine statement is always/);
+    expect(text).toContain("withdrawn");
+  });
+
   it("treats a version it does not understand as UNCHECKED, not as forgery", () => {
     // We are behind; the statement is not wrong. Calling this "forged" would
     // accuse an issuer of tampering for shipping an upgrade.

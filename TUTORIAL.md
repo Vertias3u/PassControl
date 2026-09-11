@@ -1,4 +1,4 @@
-# PassControl 0.9.0 — Getting Started
+# PassControl — Getting Started
 
 A hands-on walkthrough: from a fresh clone to a **real agent running through PassControl**,
 budgeted, scoped, and revocable — with its provider key never in its hands. About 15 minutes.
@@ -38,7 +38,7 @@ demo call after approval. [Request access](https://passcontrol.vertias.eu/beta).
 ### The fast path — Cloud
 
 ```bash
-npm install -g passcontrol@0.9.0
+npm install -g passcontrol
 passcontrol login            # browser opens, you approve once, this machine is set up
 ```
 
@@ -91,7 +91,7 @@ installed somewhere unusual, point at it with `PASSCONTROL_BASH=<path to bash.ex
 Install the CLI globally and let it fetch + boot the stack for you:
 
 ```bash
-npm install -g passcontrol@0.9.0
+npm install -g passcontrol
 passcontrol setup  # checks prereqs, clones the stack, starts services, migrates, seeds, opens dashboard
 ```
 
@@ -385,18 +385,34 @@ keys your deployment publishes right now. So regenerating your signing key doesn
 affect new receipts — **live-JWKS verification can no longer find the old key.** The signatures themselves
 remain valid against a retained trusted public key.
 
-The safe rotation keeps the old public key published while you switch:
+The safe rotation is two steps, and the first one is the one people skip:
 
 ```bash
-INSTANCE_SIGNING_KEY_PREV=<your current seed>   # move the old one here FIRST
+# 1. Record the key you are retiring, permanently. This prints a `<kid>:<public>` pair.
+passcontrol keygen instance --retire <your current seed>
+INSTANCE_SIGNING_KEY_HISTORY=<whatever is already there>,<the pair it printed>
+
+# 2. Now rotate. _PREV covers the changeover window.
+INSTANCE_SIGNING_KEY_PREV=<your current seed>
 INSTANCE_SIGNING_KEY=<the new seed>
 ```
 
 > Note this is **backwards from `VISA_SECRET_PREV`**, and getting them confused is the
 > expensive mistake. Nothing is ever *signed* with `INSTANCE_SIGNING_KEY_PREV` — it is there
 > purely so its **public** half stays in the JWKS and old receipts keep verifying. Publish
-> both, wait one JWKS `max-age` window (5 minutes) so caches catch up, then remove the old
-> one when you no longer care about receipts signed before the rotation.
+> both, wait one JWKS `max-age` window (5 minutes) so caches catch up.
+
+**Why step 1 exists.** `_PREV` holds exactly one key. Rotate a second time and it is needed
+for the key you are retiring *then* — so the first key silently drops out of your published
+key set, and every receipt signed under it stops verifying for everyone holding one. There
+is no way to undo that for a receipt already in someone else's hands. `INSTANCE_SIGNING_KEY_HISTORY`
+is append-only: entries go in and stay in.
+
+It takes **public** halves, which is why you generate the pair with the command rather than
+pasting the seed. A seed and a public key are both 32 base64url bytes and look identical in
+a `.env` file — but a retired seed left in configuration can still sign, and a public key
+cannot. PassControl recomputes the `kid` from each key and ignores any pair that disagrees,
+so a pasted seed is dropped rather than published as a key nothing ever signed with.
 
 ---
 
@@ -559,10 +575,10 @@ Production checklist:
 Found a rough edge or a security issue? See `SECURITY.md` — we'd rather you tell us.
 
 
-## 0.9.0 features to configure deliberately
+## Features to configure deliberately
 
 **Sender proof:** enable `observe` first to inspect compatibility, then `required` when
-using the sidecar or another proof-capable implementation. The 0.9.0 direct CLI call,
+using the sidecar or another proof-capable implementation. The direct CLI call,
 MCP chat, and TypeScript SDK do not attach proofs and are refused in required mode.
 Observed proof is not enforced proof. Proof binds method, origin/path, visa hash, time
 and a nonce, not body/query or hardware custody. Off mode uses the visa as a bearer.

@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const h = vi.hoisted(() => ({ getMock: vi.fn(), setMock: vi.fn() }));
+const h = vi.hoisted(() => ({ getMock: vi.fn(), setMock: vi.fn(), fenceMock: vi.fn() }));
 
 vi.mock("@vercel/functions", () => ({ waitUntil: (p: unknown) => p }));
 vi.mock("@/lib/state/redis", () => ({
   getCachedOwner: (...a: unknown[]) => h.getMock(...a),
   setCachedOwner: (...a: unknown[]) => h.setMock(...a),
+  // Mocked EXPLICITLY. Omitted, it is undefined, `readCurrentOwner` catches the
+  // throw and carries on with a null fence — so every assertion here would still
+  // pass while the mechanism was never exercised. That silence is precisely how
+  // the first version of this fence shipped broken.
+  readOwnerFence: (...a: unknown[]) => h.fenceMock(...a),
 }));
 
 import { readCurrentOwner } from "@/lib/owner/current";
@@ -75,5 +80,49 @@ describe("the tiers a receipt is allowed to carry", () => {
     );
     expect(JSON.stringify(claim)).not.toContain("IE6388047V");
     expect(JSON.stringify(claim)).not.toContain("ACME LIMITED");
+  });
+});
+
+
+/**
+ * T4-01. The owner claim is copied into `own` and SIGNED, so a claim
+ * republished after the operator withdrew it does not merely serve stale data —
+ * it becomes a cryptographically valid assertion that outlives the cache entry
+ * that produced it, while `/verify` reads live Postgres and disagrees.
+ *
+ * The one-line assertion is the important one: it fails the moment the fence
+ * stops being threaded, which is the exact way the first fence in this codebase
+ * shipped broken and green.
+ */
+describe("the fence the owner fill quotes", () => {
+  it("is read before the row, and reaches the fill", async () => {
+    h.getMock.mockResolvedValue(null);
+    h.fenceMock.mockResolvedValue("owner-fence-1");
+    const order: string[] = [];
+    h.fenceMock.mockImplementation(async () => {
+      order.push("fence");
+      return "owner-fence-1";
+    });
+    const client = db({ kind: "domain", subject: "x.example", tier: "domain", verified_at: null });
+    const inner = (client as any).from;
+    (client as any).from = (...a: unknown[]) => {
+      order.push("select");
+      return inner(...a);
+    };
+
+    await readCurrentOwner(client as never, "u1");
+
+    expect(order[0]).toBe("fence");
+    // Fourth argument. Not a fresh read, not a default.
+    expect(h.setMock).toHaveBeenCalledWith("u1", expect.any(String), expect.any(Number), "owner-fence-1");
+  });
+
+  it("does not read the fence on a cache hit", async () => {
+    h.getMock.mockResolvedValue(JSON.stringify({ kind: "domain", subject: "x.example", tier: "domain" }));
+    h.fenceMock.mockResolvedValue(null);
+
+    await readCurrentOwner(db(null) as never, "u1");
+
+    expect(h.fenceMock).not.toHaveBeenCalled();
   });
 });

@@ -26,6 +26,7 @@ import {
   isSuspended,
   getCachedEndpoint,
   getCachedKey,
+  readCredentialFence,
   setCachedEndpoint,
   setCachedKey,
   touchLastSeen,
@@ -88,8 +89,10 @@ import {
   endpointPolicy,
   isEndpointAllowed,
   joinUpstream,
+  versionlessUpstreamPath,
 } from "@/lib/providers/endpoint";
 import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
+import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 
 // Per-agent request-rate cap (independent of the token budget): bounds raw call
@@ -314,32 +317,95 @@ async function enforceSenderConstraint(
  * keeps the common case off the database.
  */
 type EndpointResolution =
-  /** A real answer: the endpoint to use, or null meaning the provider's own host. */
-  | { known: true; endpoint: string | null }
+  /**
+   * A real answer: the endpoint to use (null meaning the provider's own host),
+   * and WHICH credential said so. That id is what step 6 fetches the secret for,
+   * so the key and the address cannot come from two different rows. It is null
+   * when the gate is off (no read happened) or when the tenant has no credential
+   * for this provider at all.
+   */
+  | {
+      known: true;
+      endpoint: string | null;
+      credentialId: string | null;
+      /**
+       * The credential invalidation fence as it stood when this resolution
+       * began. Two jobs: it conditions the cache fill, and step 6 re-reads it
+       * before dispatch so a rotation landing between the address and the secret
+       * refuses the call instead of pairing them. Null when the gate is off,
+       * where there is no second address for a secret to reach.
+       */
+      fence: string | null;
+    }
   /** No answer at all. NOT the same thing as "no endpoint", and must not become it. */
   | { known: false };
 
+/**
+ * The sealed secret inside a credential-bound cache bundle, or null.
+ *
+ * Null on anything unexpected — a different credential, an unparseable value, a
+ * bare string left by a build that did not bind them. Every one of those is a
+ * cache MISS, which costs one RPC. The alternative is using key material whose
+ * origin cannot be established, next to an address that names a specific server.
+ */
+function unbindCachedKey(raw: string, credentialId: string): string | null {
+  try {
+    const parsed = JSON.parse(raw) as { c?: unknown; k?: unknown };
+    if (parsed?.c !== credentialId) return null;
+    return typeof parsed.k === "string" ? parsed.k : null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveEndpoint(
   db: ServiceDatabase,
+  userId: string,
   agentId: string,
   provider: string
 ): Promise<EndpointResolution> {
   const policy = endpointPolicy();
-  if (policy.kind === "off") return { known: true, endpoint: null };
+  if (policy.kind === "off") {
+    return { known: true, endpoint: null, credentialId: null, fence: null };
+  }
 
-  const admit = (value: string | null): EndpointResolution => ({
+  // Read FIRST, before the cache and before the row, because this value has to
+  // predate everything it will later be compared against. Taken on the hit path
+  // as well as the miss path: step 6 uses it to prove the address and the secret
+  // belong to the same generation, and an address served from cache is exactly
+  // the case where they can have drifted apart.
+  //
+  // One Redis GET, paid only by deployments that turned custom endpoints on.
+  let fence: string | null = null;
+  try {
+    fence = await readCredentialFence(agentId, provider);
+  } catch {
+    fence = null;
+  }
+
+  const admit = (value: string | null, credentialId: string | null): EndpointResolution => ({
     known: true,
     endpoint: value && isEndpointAllowed(value, policy) ? value : null,
+    credentialId,
+    fence,
   });
 
   try {
     const cached = await getCachedEndpoint(agentId, provider);
-    if (cached !== null) return admit(cached);
+    // A cached endpoint carries the credential it came from, after `|`. An entry
+    // without one is from a build that did not bind them and is treated as a
+    // miss: re-reading costs one query, and pairing a secret with an address
+    // whose origin is unknown is the defect this is here to prevent.
+    if (cached !== null && cached.includes("|")) {
+      const [id, ...rest] = cached.split("|");
+      return admit(rest.join("|") || null, id || null);
+    }
   } catch {
     // A cache read failure falls through to the source of truth.
   }
 
   let stored: string | null = null;
+  let credentialId: string | null = null;
   try {
     // `error` is read, and that is the whole point of this block.
     //
@@ -351,18 +417,48 @@ async function resolveEndpoint(
     // someone else's server (LiteLLM, vLLM, an internal gateway) that is the
     // wrong destination, not a safe default. It also CACHED the guess, so one
     // transient blip pinned the wrong host for the whole TTL.
+    // Scoped by the credential's OWN tenant column, and no embed.
+    //
+    // This read used to select `endpoint_base_url, agents!inner(id)` and filter
+    // `agents.id`, which PostgREST cannot plan: `provider_credentials` and
+    // `agents` have no foreign key between them — each references `users`. Real
+    // PostgREST answers PGRST200 / HTTP 400, the `error` branch below correctly
+    // reads that as "unknown", and the caller correctly refuses. All three of
+    // those behaved as designed; the query was simply impossible, so with the
+    // gate ON every call 502'd, for every provider, custom endpoint or not. The
+    // endpoint cache could never mask it either: setCachedEndpoint has exactly
+    // one call site, at the tail of this function, so a warm entry required a
+    // read that never once succeeded.
+    //
+    // `userId` is the agent's owner, re-derived from the agents row at issuance
+    // (mintVisa takes `agent.user_id`) or read live by the direct-key RPC — the
+    // same identity kill state, policy and allowance are already read with in
+    // this handler. `get_provider_key` re-derives ownership independently, so
+    // the key and this address are chosen by two different readings of the same
+    // fact; see S-01 in daybreakblue-1 for why that pairing is not yet bound.
+    //
+    // `.maybeSingle()` is a guarantee, not an assumption: 0027's partial unique
+    // index on `(user_id, provider) where is_active` allows at most one active
+    // credential per tenant per provider.
     const { data, error } = await db
       .from("provider_credentials")
-      .select("endpoint_base_url, agents!inner(id)")
-      .eq("agents.id", agentId)
+      .select("id, endpoint_base_url")
+      .eq("user_id", userId)
       .eq("provider", provider)
-      .eq("is_active", true)
+      // The SAME selection rule get_provider_key uses — the chosen credential,
+      // else the legacy oldest-first pick. This used to filter `is_active = true`
+      // instead, which disagrees with the decrypt path for a tenant that has
+      // never marked one active: the key came from the oldest row while this read
+      // found nothing and reported "no custom endpoint", sending that key to the
+      // provider's own host. One rule, or they drift apart again.
+      .order("is_active", { ascending: false })
+      .order("created_at", { ascending: true })
+      .limit(1)
       .maybeSingle();
     if (error) throw error;
-    stored =
-      typeof (data as { endpoint_base_url?: unknown } | null)?.endpoint_base_url === "string"
-        ? ((data as { endpoint_base_url: string }).endpoint_base_url)
-        : null;
+    const row = data as { id?: unknown; endpoint_base_url?: unknown } | null;
+    stored = typeof row?.endpoint_base_url === "string" ? row.endpoint_base_url : null;
+    credentialId = typeof row?.id === "string" ? row.id : null;
   } catch {
     // Not knowing where a credential goes is a reason to refuse the call, and
     // the caller does exactly that. Deliberately NOT cached: caching an unknown
@@ -377,8 +473,16 @@ async function resolveEndpoint(
 
   // An empty result with no error IS an answer: this credential has no endpoint.
   // Caching that absence is what keeps the common case off the database.
-  waitUntil(setCachedEndpoint(agentId, provider, stored ?? "", KEY_CACHE_TTL_S));
-  return admit(stored);
+  waitUntil(
+    setCachedEndpoint(
+      agentId,
+      provider,
+      `${credentialId ?? ""}|${stored ?? ""}`,
+      KEY_CACHE_TTL_S,
+      fence
+    )
+  );
+  return admit(stored, credentialId);
 }
 
 function clientIp(req: Request): string {
@@ -813,8 +917,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // and the signed receipt inside it — exists. The proof is built and signed
   // later, in waitUntil; the hot path costs one uuid and one header.
   const receiptId = crypto.randomUUID();
-  const capTokens: number | null = principal.budgetTokens;
-  const capMicrocents: number | null =
+  // The caps AS THE CREDENTIAL CARRIES THEM. For a passport visa these are `bt`
+  // and `bc`, minted when the visa was issued and authenticated ever since — so
+  // on their own they are a snapshot up to a full visa lifetime old. They are
+  // the fallback below, not the answer: see S3-04.
+  const visaCapTokens: number | null = principal.budgetTokens;
+  const visaCapMicrocents: number | null =
     principal.budgetCents == null
       ? null
       : Math.round(Number(principal.budgetCents) * MICROCENTS_PER_CENT);
@@ -877,28 +985,6 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           credentialUseId,
         } as const);
 
-  // ── Per-agent request-rate limit (call-volume DoS / abuse guard) ─────────────
-  const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
-  if (!rl.success) {
-    waitUntil(
-      captureSecurityEvent("proxy.rate_limited", {
-        route: "api.proxy",
-        method: req.method,
-        status: 429,
-        provider,
-        agentId,
-        jti,
-        code: "rate_limited",
-      })
-    );
-    // No receipt id: the rate limit fires before any gate runs and writes no
-    // row, so there would be nothing for the id to name.
-    return new Response(JSON.stringify({ error: "rate_limited" }), {
-      status: 429,
-      headers: { "content-type": "application/json", "retry-after": String(PROXY_RATE_WINDOW_S) },
-    });
-  }
-
   // Names the receipt for a GOVERNED decision — one where the gate ran and a row
   // is written. Used only on paths that also call logBlocked/reconcile, so the
   // id in the header always resolves at /api/control/v1/receipts/{id}.
@@ -942,6 +1028,31 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // sender proof is authentication. Direct keys retain the previous ordering.
   const policyFailClosed = process.env.POLICY_FAIL_CLOSED === "true";
   currentPolicySnapshot ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+
+  // ── The caps that actually gate this call ──────────────────────────────────
+  //
+  // The live row wins over the credential's snapshot. Lowering a budget used to
+  // do nothing to an outstanding passport visa for up to 15 minutes: `verifyVisa`
+  // authenticated the stale `bt` perfectly, the proxy passed it straight to
+  // `openHold`, and the atomic Lua enforced it exactly — atomicity protecting
+  // the wrong number. Direct Agent Keys never had this, because their
+  // authentication RPC returns the current row on every request.
+  //
+  // It rides the policy read that already happens on every call, so it costs no
+  // round trip; the same read's cache is invalidated by `updateAgentBudgets`, so
+  // the delay is bounded by that purge rather than by a visa lifetime.
+  //
+  // `known: false` — an older schema, an entry written before this field, a
+  // failed read — keeps the credential's claim, which is exactly what shipped
+  // before. An unknown must not become a new denial path, and must not become
+  // "no cap" either.
+  const liveBudget = currentPolicySnapshot.budget;
+  const capTokens: number | null = liveBudget.known ? liveBudget.tokens : visaCapTokens;
+  const capMicrocents: number | null = liveBudget.known
+    ? liveBudget.cents == null
+      ? null
+      : Math.round(Number(liveBudget.cents) * MICROCENTS_PER_CENT)
+    : visaCapMicrocents;
   const policyRevision = effectiveLivePolicyRevision(
     currentPolicySnapshot.policy,
     scopes,
@@ -1029,6 +1140,42 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     return errR(403, "blocked_suspended");
   }
 
+  // ── 3. Per-agent request-rate limit (call-volume DoS / abuse guard) ─────────
+  //
+  // AFTER the revocation gate, and that order is the control. `rateLimit`
+  // MUTATES a fixed-window counter — RATE_LIMIT_LUA increments and then decides
+  // — so taking it first meant every call from a killed tenant or a suspended
+  // agent spent the legitimate agent's allowance on its way to a 403. An
+  // attacker holding a stopped credential could hold the counter above its
+  // threshold for the length of an incident, so the moment the operator disarmed
+  // the kill switch the honest traffic met 429s, and continued attacker traffic
+  // kept it there. A kill switch you cannot cleanly come back from is not one.
+  //
+  // What must stay ABOVE it: the unauthenticated IP limiter (it protects the
+  // database lookup itself) and sender-proof verification (an unproven sender
+  // must not reach a counter keyed by the identity it has not proven).
+  const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
+  if (!rl.success) {
+    waitUntil(
+      captureSecurityEvent("proxy.rate_limited", {
+        route: "api.proxy",
+        method: req.method,
+        status: 429,
+        provider,
+        agentId,
+        jti,
+        code: "rate_limited",
+      })
+    );
+    // No receipt id: the rate limit writes no row, so there would be nothing for
+    // the id to name. (It no longer runs before every gate — revocation is
+    // above it now — but it still records nothing of its own.)
+    return new Response(JSON.stringify({ error: "rate_limited" }), {
+      status: 429,
+      headers: { "content-type": "application/json", "retry-after": String(PROXY_RATE_WINDOW_S) },
+    });
+  }
+
   // ── Read body once (small); extract model + stream; mutate for usage ─────────
   // POST bodies must be JSON (the proxy parses + re-serializes them); reject other
   // declared content types rather than silently parsing.
@@ -1036,16 +1183,18 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const ct = (req.headers.get("content-type") ?? "").toLowerCase();
     if (ct && !ct.includes("application/json")) return err(415, "unsupported_media_type");
   }
-  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) {
-    return err(413, "payload_too_large");
-  }
   let bodyObj: any = {};
-  const rawBody = await req.text();
+  // A real byte bound, applied while the bytes arrive (CP-02). The old shape —
+  // `await req.text()` then a `.length` check — drained an unknown-length upload
+  // in full before refusing it, and counted UTF-16 code units rather than bytes,
+  // so multi-byte JSON went through several megabytes over the cap.
+  const bounded = await readBoundedBody(req, MAX_BODY_BYTES);
+  if (!bounded.ok) return err(413, "payload_too_large");
+  const rawBody = bounded.text;
   // From here a receipt can bind what the client actually sent. Note this is
   // rawBody, never forwardBody: the proxy injects stream_options.include_usage
   // below and re-serialises, and the verifier holds the client's bytes.
   capturedBody = rawBody;
-  if (rawBody.length > MAX_BODY_BYTES) return err(413, "payload_too_large");
   if (rawBody) {
     try {
       bodyObj = JSON.parse(rawBody);
@@ -1429,7 +1578,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // which is the default — so on Cloud today this is one short-circuit and no
     // reads at all. It re-validates rather than trusting the row: a value stored
     // while the gate was wider must not be reached after an operator narrowed it.
-    const resolvedEndpoint = await resolveEndpoint(db, agentId, attemptProvider);
+    const resolvedEndpoint = await resolveEndpoint(db, userId, agentId, attemptProvider);
     // Null both when there is genuinely no endpoint and when the read failed —
     // the failure is refused below, and pricing an unsent call is moot either way.
     const custom = resolvedEndpoint.known ? resolvedEndpoint.endpoint : null;
@@ -1719,25 +1868,113 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       );
     }
 
+    // ── 5b. A dollar cap cannot be enforced against a price nobody knows ───────
+    //
+    // S3-03, and a DELIBERATE BEHAVIOUR CHANGE rather than a repair — this call
+    // used to be allowed. `estimateMicrocents` above is computed before the
+    // endpoint is resolved, so `costMicrocents` receives no endpoint and returns
+    // the BUILT-IN PROVIDER'S RETAIL price; `reconcile` then charges that
+    // estimate, because settling an unpriced call at zero released the whole
+    // reservation and a cost cap could never advance.
+    //
+    // Each half was deliberate and each is defensible alone. Together they
+    // enforce a dollar limit with a number that has nothing to do with the bill:
+    // a gateway you run may mark up, re-route, or answer to `gpt-4o-mini` with
+    // something far more expensive, and the agent keeps being admitted against
+    // the cheap retail figure long after the real spend passed the cap. The
+    // audit row said `null` and `unpriced` throughout — the reporting half was
+    // honest and the enforcing half was not, about the same money.
+    //
+    // So the unknown stays unknown at the enforcement boundary, which is the
+    // rule everywhere else in this file. The operator has two real answers:
+    // remove the dollar cap, or route this agent somewhere PassControl prices.
+    //
+    // TOKEN caps are untouched. The provider reports token counts and they are
+    // real wherever the call went; only the money is unknowable.
+    //
+    // Refused here rather than before the reserve, because the endpoint cannot
+    // be known any earlier without moving `resolveEndpoint` above `openHold` —
+    // and that ordering is load-bearing elsewhere. `not_dispatched` releases the
+    // reservation in full, so the momentary hold costs the agent nothing.
+    if (custom && capMicrocents != null) {
+      return terminal(
+        errR(409, "unpriced_endpoint"),
+        reconcile(NO_USAGE, "blocked_unpriced_endpoint", "not_dispatched", 409)
+      );
+    }
+
     // ── 6. Resolve provider key (encrypted cache, else Vault RPC) ──────────────
     //
-    // The endpoint is resolved alongside it and cached separately: it is an
-    // address, not a secret, so it never goes through lib/crypto/aesgcm.ts and
-    // is deliberately NOT returned by get_provider_key — leaving the only
-    // decrypt path in the product byte-unchanged (trust boundary #5).
+    // The endpoint was resolved just above, AFTER the budget reserve of step 5
+    // and before `reconcile` runs — that closure prices the call and a custom
+    // endpoint is unpriced. (An earlier version of this comment said "before the
+    // budget reserve", which was simply wrong about its own file: `openHold` is
+    // step 5 and `resolveEndpoint` comes after it. The real constraint is
+    // reconcile, from 0050's temporal-dead-zone fix.) The secret is resolved
+    // here, later still, because the check order puts the decrypt last — a call
+    // about to be refused is never decrypted for. Those two reads are separated
+    // in TIME on purpose and that is not the defect.
+    //
+    // The defect (S-01) was that they were separated in IDENTITY: neither value
+    // named the credential it came from, so an activation or rotation landing in
+    // the gap sent secret B to endpoint A — a real provider key delivered to a
+    // server that was never selected to receive it. So when a credential id came
+    // back with the address, the secret is fetched FOR THAT ID, and 0069 returns
+    // nothing if it is no longer the agent's selected credential. That refusal is
+    // the fix; there is deliberately no fallback to the unbound read, because a
+    // fallback is just the old pairing with an extra step.
+    //
+    // With the endpoint gate off there is no id, no second address to disagree
+    // with, and nothing to bind — so that path stays byte-for-byte what it was.
     let providerKey: string | null = null;
-    const cached = await getCachedKey(agentId, attemptProvider);
-    if (cached) providerKey = await open(cached);
+    const boundCredentialId = resolvedEndpoint.known ? resolvedEndpoint.credentialId : null;
+    const cached = await getCachedKey(agentId, attemptProvider, boundCredentialId ?? undefined);
+    if (cached) {
+      const sealed = boundCredentialId ? unbindCachedKey(cached, boundCredentialId) : cached;
+      if (sealed) providerKey = await open(sealed);
+    }
     if (!providerKey) {
-      const { data: keyData } = await db.rpc("get_provider_key", {
-        p_agent_id: agentId,
-        p_provider: attemptProvider,
-      });
+      // The fence for the FILL, read immediately before the authoritative
+      // decrypt so it predates the value it will publish. Deliberately a fresh
+      // read rather than the endpoint resolution's: that one is older, and the
+      // `key:` namespace is filled on deployments where the endpoint gate is off
+      // and no resolution fence was ever taken. Quoting a null there would make
+      // every fill fail the moment any credential mutation had ever rotated this
+      // fence — correct, and a permanent cache outage.
+      let fillFence: string | null = null;
+      try {
+        fillFence = await readCredentialFence(agentId, attemptProvider);
+      } catch {
+        // A synchronous throw is possible here, not merely a rejected promise:
+        // `Redis.fromEnv()` raises when the environment is incomplete. A bare
+        // `.catch()` would not see it.
+        fillFence = null;
+      }
+      const { data: keyData } = boundCredentialId
+        ? await db.rpc("get_provider_key_for_credential", {
+            p_agent_id: agentId,
+            p_provider: attemptProvider,
+            p_credential_id: boundCredentialId,
+          })
+        : await db.rpc("get_provider_key", {
+            p_agent_id: agentId,
+            p_provider: attemptProvider,
+          });
       providerKey = typeof keyData === "string" ? keyData : null;
       if (providerKey) {
-        // store ciphertext only
+        // store ciphertext only, and — when bound — the id it belongs to
+        const key = providerKey;
         waitUntil(
-          seal(providerKey).then((s) => setCachedKey(agentId, attemptProvider, s, KEY_CACHE_TTL_S))
+          seal(key).then((s) =>
+            setCachedKey(
+              agentId,
+              attemptProvider,
+              boundCredentialId ? JSON.stringify({ c: boundCredentialId, k: s }) : s,
+              KEY_CACHE_TTL_S,
+              boundCredentialId ?? undefined,
+              fillFence
+            )
+          )
         );
       }
     }
@@ -1757,6 +1994,64 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       return terminal(errR(409, "no_provider_key"), settle);
     }
 
+    // ── 6b. The address and the secret must belong to one generation ───────────
+    //
+    // 0069 bound them by credential ID, which stops one credential's key reaching
+    // another credential's address. It cannot stop a change BEHIND the same id:
+    // rotation replaces the Vault secret in place and an endpoint edit rewrites
+    // the same row, so a resolution that read the old address and a decrypt that
+    // returned the new secret both name the same credential and pair anyway.
+    //
+    // The fence closes that window, because every one of those mutations rotates
+    // it. If it has moved since the address was resolved, this attempt is holding
+    // two halves of different generations and must not send. Nothing is guessed
+    // and nothing is re-resolved mid-flight: refuse, and the client's retry gets
+    // a coherent pair.
+    //
+    // Only for a real custom address. With none there is no second destination a
+    // secret could be misdelivered to, and a rotation mid-request is then
+    // indistinguishable from one that landed a millisecond after dispatch —
+    // which no gateway can prevent and this must not pretend to.
+    if (custom) {
+      // Unreadable means unproven. This is the destination path, which fails
+      // CLOSED — the same rule `resolveEndpoint` states for itself, and the
+      // opposite of the kill switch, which has Redis suspend as its backstop.
+      // There is no backstop for a credential going to the wrong host.
+      //
+      // THREE outcomes, not two (T4-04). The refusal is the same for the last
+      // two and the STATEMENT is not: `credential_changed` is a claim that an
+      // operator rotated something, and it is logged, rendered in seven places
+      // and signed into a receipt. Emitting it for a read that never completed
+      // invents a configuration event out of a Redis fault and sends whoever
+      // reads the receipt to look for a rotation that did not happen.
+      let observed: string | null;
+      try {
+        observed = await readCredentialFence(agentId, attemptProvider);
+      } catch {
+        observed = undefined as never;
+      }
+      // `null` is not a third kind of match. `rotateFence` SETs a new token
+      // rather than deleting the key, so a rotation always shows up as a
+      // DIFFERENT non-null value; null after a non-null read is the 24h TTL
+      // expiring or an eviction — no observation either way. It refuses for the
+      // same reason a throw does, and says the same true thing about why.
+      const unreadable = observed === undefined || (observed === null && resolvedEndpoint.fence !== null);
+      if (unreadable) {
+        return terminal(
+          errR(503, "credential_state_unavailable"),
+          reconcile(NO_USAGE, "credential_state_unavailable", "not_dispatched", 503)
+        );
+      }
+      if (observed !== resolvedEndpoint.fence) {
+        return terminal(
+          errR(409, "credential_changed"),
+          // Refused before injection: nothing was sent and nothing can have been
+          // billed, so this is a full release.
+          reconcile(NO_USAGE, "credential_changed", "not_dispatched", 409)
+        );
+      }
+    }
+
     // ── 7. Inject + forward ────────────────────────────────────────────────────
     //
     const upstreamBase = custom ?? upstreamBaseUrl(attemptProvider);
@@ -1765,7 +2060,15 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // One canonical join. `new URL` silently discards part of an operator's
       // base path — see lib/providers/endpoint.ts — and a gateway that drops
       // `/openai/v1` sends a real credential to a path nobody named.
-      targetUrl = `${joinUpstream(upstreamBase, target.upstreamPath)}${new URL(req.url).search}`;
+      //
+      // A custom base owns its own version segment, so the canonical path
+      // contributes everything after it. Without this the documented
+      // `http://vllm.internal:8000/v1` composed to `/v1/v1/chat/completions`
+      // and the upstream 404'd — the feature's own example could not work.
+      const upstreamSuffix = custom
+        ? versionlessUpstreamPath(target.upstreamPath)
+        : target.upstreamPath;
+      targetUrl = `${joinUpstream(upstreamBase, upstreamSuffix)}${new URL(req.url).search}`;
     } catch {
       // The upstream URL could not even be constructed. Nothing was sent.
       const settle = reconcile(NO_USAGE, "blocked_endpoint", "not_dispatched", 400);
@@ -2372,8 +2675,12 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   // the one direction that matters — it is the only surface reachable without a
   // key, so for most people it is the only receipt they will ever see.
   const receiptId = crypto.randomUUID();
-  const capTokens: number | null = principal.budgetTokens;
-  const capMicrocents: number | null =
+  // The caps AS THE CREDENTIAL CARRIES THEM. For a passport visa these are `bt`
+  // and `bc`, minted when the visa was issued and authenticated ever since — so
+  // on their own they are a snapshot up to a full visa lifetime old. They are
+  // the fallback below, not the answer: see S3-04.
+  const visaCapTokens: number | null = principal.budgetTokens;
+  const visaCapMicrocents: number | null =
     principal.budgetCents == null
       ? null
       : Math.round(Number(principal.budgetCents) * MICROCENTS_PER_CENT);
@@ -2524,24 +2831,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       })
     );
 
-  // 2. Per-agent request-rate limit.
-  const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
-  if (!rl.success) {
-    return new Response(JSON.stringify({ error: "rate_limited" }), {
-      status: 429,
-      headers: { "content-type": "application/json", "retry-after": String(PROXY_RATE_WINDOW_S) },
-    });
-  }
-  // Direct keys reach the policy read only after their unchanged rate limiter.
-  currentPolicySnapshot ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
-  policyRevision = effectiveLivePolicyRevision(
-    currentPolicySnapshot.policy,
-    scopes,
-    { tokens: capTokens, microcents: capMicrocents },
-    policyFailClosed
-  );
-
-  // 3. Kill switch (platform + tenant + denylist; per-agent suspend).
+  // 2. Kill switch (platform + tenant + denylist; per-agent suspend).
   const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
   const revocationGate = evaluateGate({
     agentId,
@@ -2559,13 +2849,59 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     return errR(403, "blocked_suspended");
   }
 
-  // Parse body (model + stream).
-  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) {
-    return err(413, "payload_too_large");
+  // 3. Per-agent request-rate limit — AFTER the revocation gate, for the reason
+  // spelt out on the real path: this counter mutates, so a refused call must not
+  // spend the allowance the agent needs once the control is lifted.
+  const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
+  if (!rl.success) {
+    return new Response(JSON.stringify({ error: "rate_limited" }), {
+      status: 429,
+      headers: { "content-type": "application/json", "retry-after": String(PROXY_RATE_WINDOW_S) },
+    });
   }
+  // Direct keys reach the policy read only after their unchanged rate limiter.
+  currentPolicySnapshot ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+
+  // ── The caps that actually gate this call ──────────────────────────────────
+  //
+  // The live row wins over the credential's snapshot. Lowering a budget used to
+  // do nothing to an outstanding passport visa for up to 15 minutes: `verifyVisa`
+  // authenticated the stale `bt` perfectly, the proxy passed it straight to
+  // `openHold`, and the atomic Lua enforced it exactly — atomicity protecting
+  // the wrong number. Direct Agent Keys never had this, because their
+  // authentication RPC returns the current row on every request.
+  //
+  // It rides the policy read that already happens on every call, so it costs no
+  // round trip; the same read's cache is invalidated by `updateAgentBudgets`, so
+  // the delay is bounded by that purge rather than by a visa lifetime.
+  //
+  // `known: false` — an older schema, an entry written before this field, a
+  // failed read — keeps the credential's claim, which is exactly what shipped
+  // before. An unknown must not become a new denial path, and must not become
+  // "no cap" either.
+  const liveBudget = currentPolicySnapshot.budget;
+  const capTokens: number | null = liveBudget.known ? liveBudget.tokens : visaCapTokens;
+  const capMicrocents: number | null = liveBudget.known
+    ? liveBudget.cents == null
+      ? null
+      : Math.round(Number(liveBudget.cents) * MICROCENTS_PER_CENT)
+    : visaCapMicrocents;
+  policyRevision = effectiveLivePolicyRevision(
+    currentPolicySnapshot.policy,
+    scopes,
+    { tokens: capTokens, microcents: capMicrocents },
+    policyFailClosed
+  );
+
+  // Parse body (model + stream).
+  // Same bound as the real path, and for the same reasons (CP-02). The demo is
+  // keyless and synthesised, so there is no credential at stake here — but it is
+  // the most reachable endpoint in the product, and an unbounded read is an
+  // unbounded read.
+  const bounded = await readBoundedBody(req, MAX_BODY_BYTES);
+  if (!bounded.ok) return err(413, "payload_too_large");
   let bodyObj: any = {};
-  const rawBody = await req.text();
-  if (rawBody.length > MAX_BODY_BYTES) return err(413, "payload_too_large");
+  const rawBody = bounded.text;
   // Digest the bytes the client actually sent. From here on a receipt can bind
   // the request; before it, `capturedBody` stays null and the digest is omitted.
   capturedBody = rawBody;

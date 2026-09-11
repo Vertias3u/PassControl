@@ -50,10 +50,22 @@ export function DeparturesBoard({
   userId,
   initialRows,
   callContext,
+  logsAvailable,
 }: {
   userId: string;
   initialRows: DepartureRow[];
   callContext: CallContext;
+  /**
+   * Whether the initial window was actually read. REQUIRED — a default would
+   * let a caller publish an empty board as a fact about the workspace.
+   *
+   * This board also SUBSCRIBES, so the flag has to outlive the empty state it
+   * starts in: once a realtime row lands, `rows.length === 0` stops being true
+   * while the missing history is exactly as missing as it was. A board showing
+   * one call because one call happened to arrive after the failure is a more
+   * convincing lie than the empty one it replaced.
+   */
+  logsAvailable: boolean;
 }) {
   const [rows, setRows] = useState<DepartureRow[]>(() => initialRows.slice(0, MAX_ROWS));
   const [live, setLive] = useState(false);
@@ -143,6 +155,8 @@ export function DeparturesBoard({
     housekeeping === rows.length && !showHousekeeping
       ? `Only SDK housekeeping has arrived — ${housekeeping} capability probe${housekeeping === 1 ? "" : "s"}, recorded but not counted as agent activity. Show them above.`
       : "No loaded calls match these filters.";
+  const unavailableCopy =
+    "The call history could not be read, so this window is unavailable. Any rows below arrived since this page loaded and are not the full picture.";
 
   const resume = () => {
     setRows((current) =>
@@ -168,8 +182,11 @@ export function DeparturesBoard({
           </span>
         </div>
         <div className="pc-live-calls__signals">
-          <span className="is-clear">{cleared} cleared</span>
-          <span className="is-refused">{refused} refused</span>
+          {/* "since load" is not decoration. With the initial read failed these
+              two numbers count only what realtime has delivered, and "0 refused"
+              on its own is a measurement nobody took. */}
+          <span className="is-clear">{cleared} cleared{logsAvailable ? "" : " since load"}</span>
+          <span className="is-refused">{refused} refused{logsAvailable ? "" : " since load"}</span>
           {housekeeping ? (
             <span className="is-housekeeping" data-board-signal="housekeeping">
               {housekeeping} SDK probe{housekeeping === 1 ? "" : "s"}
@@ -181,6 +198,15 @@ export function DeparturesBoard({
           </span>
         </div>
       </div>
+
+      {logsAvailable ? null : (
+        // Above the table and outside the empty branch on purpose: the empty
+        // branch stops rendering the moment one realtime row arrives, and that
+        // is precisely when a partial board is most convincing.
+        <p className="pc-live-calls__unavailable" data-state="unavailable" role="status">
+          {unavailableCopy}
+        </p>
+      )}
 
       <div className="pc-live-calls__controls">
         <label className="pc-search-field">
@@ -249,10 +275,16 @@ export function DeparturesBoard({
           <tbody>
             {visibleGroups.length === 0 ? (
               <tr>
-                <td colSpan={7} className="pc-live-calls__empty">
-                  {rows.length === 0
-                    ? "No governed calls yet. Route a call through the gateway and it will appear here."
-                    : emptyReason}
+                <td
+                  colSpan={7}
+                  className="pc-live-calls__empty"
+                  data-state={logsAvailable ? undefined : "unavailable"}
+                >
+                  {!logsAvailable
+                    ? unavailableCopy
+                    : rows.length === 0
+                      ? "No governed calls yet. Route a call through the gateway and it will appear here."
+                      : emptyReason}
                 </td>
               </tr>
             ) : (
@@ -342,10 +374,12 @@ export function DeparturesBoard({
 
       <ol className="pc-live-calls__cards" aria-label="Calls handled by the gateway">
         {visibleGroups.length === 0 ? (
-          <li className="pc-live-calls__empty">
-            {rows.length === 0
-              ? "No governed calls yet. Route a call through the gateway and it will appear here."
-              : emptyReason}
+          <li className="pc-live-calls__empty" data-state={logsAvailable ? undefined : "unavailable"}>
+            {!logsAvailable
+              ? unavailableCopy
+              : rows.length === 0
+                ? "No governed calls yet. Route a call through the gateway and it will appear here."
+                : emptyReason}
           </li>
         ) : (
           visibleGroups.map((group) => {

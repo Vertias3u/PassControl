@@ -323,6 +323,26 @@ if dbEstablished ~= '-' then
     -- Report the LIVE value so the caller persists what actually exists. Minting
     -- a second one here, or reporting the one this call offered, is what bricks
     -- the agent.
+    --
+    -- BUT AN EPOCH BEING HERE MEANS INITIALISATION ALREADY HAPPENED, so this is
+    -- no longer a first call and the counters are no longer worthless. The
+    -- caller's established flag rides in the agent-policy CACHE, whose purge
+    -- after the first call is a fire-and-forget whose result the route ignores —
+    -- so a stale 'false' can arrive here for an agent that has been spending for
+    -- days. Without the checks below, one evicted counter then read as a zero
+    -- balance and the agent got its whole spend back as capacity.
+    --
+    -- Identical to the established == '1' branch above, deliberately: which
+    -- state is protected must not depend on how fresh a cache entry happens to
+    -- be. The ONLY thing that decides whether counters are protected is whether
+    -- an epoch exists, and it does.
+    if redis.call('GET', KEYS[8]) ~= fmtVersion then
+      return {-3, 0, 0, ''}
+    end
+    if redis.call('EXISTS', KEYS[1]) == 0 or redis.call('EXISTS', KEYS[2]) == 0
+       or redis.call('EXISTS', KEYS[3]) == 0 or redis.call('EXISTS', KEYS[4]) == 0 then
+      return {-3, 0, 0, ''}
+    end
     epochOut = liveEpoch
     holdEpoch = liveEpoch
   end

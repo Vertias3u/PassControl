@@ -49,6 +49,7 @@ function render(
       visaTtlSeconds={900}
       keyCustody={keyCustody}
       keyCustodyExpectation={expectation}
+      logsAvailable
     />
   );
 }

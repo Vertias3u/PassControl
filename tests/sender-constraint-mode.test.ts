@@ -1,24 +1,36 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const h = vi.hoisted(() => ({ getMock: vi.fn(), setMock: vi.fn() }));
+const h = vi.hoisted(() => ({ getMock: vi.fn(), setMock: vi.fn(), fenceMock: vi.fn() }));
 
 vi.mock("@vercel/functions", () => ({ waitUntil: (p: unknown) => p }));
 vi.mock("@/lib/state/redis", () => ({
   getCachedAgentPolicy: (...a: unknown[]) => h.getMock(...a),
   setCachedAgentPolicy: (...a: unknown[]) => h.setMock(...a),
+  // Mocked EXPLICITLY, and the omission would have been silent. Leaving it out
+  // makes the import undefined, the call throws, policy.ts catches it and
+  // carries on with a null fence — so every assertion below would still pass
+  // while the mechanism under test was never exercised.
+  readPolicyFence: (...a: unknown[]) => h.fenceMock(...a),
 }));
 
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 
 const MISSING_COLUMN = { code: "42703", message: 'column agents.sender_constraint_mode does not exist' };
 
-/** Every column the newest rung asks for. 0055 added the last two. */
+/**
+ * Every column the newest rung asks for. 0055 added the budget-state pair; the
+ * caps came with S3-04, on the same read for the same reason — one round trip
+ * already happens on every call, so gating on the CURRENT cap rather than the
+ * visa's minted snapshot costs nothing extra.
+ */
 const CURRENT_SCHEMA = [
   "policy",
   "policy_shadow",
   "sender_constraint_mode",
   "budget_epoch",
   "budget_state_established_at",
+  "budget_tokens",
+  "budget_cents",
 ];
 
 /**
@@ -49,6 +61,58 @@ function db(schema: { has: string[]; row: Record<string, unknown> }) {
 beforeEach(() => {
   vi.clearAllMocks();
   h.getMock.mockResolvedValue(null);
+  h.fenceMock.mockResolvedValue(null);
+});
+
+describe("the pre-0049 schema, where the control is a boolean", () => {
+  /**
+   * 0046 shipped `require_sender_constrained_visa` and 0049 replaced it with the
+   * three-state mode. The reader's fallback rung used to skip straight past the
+   * boolean on the reasoning that nothing in the product could ever write it —
+   * true of the product, not of the database. An operator could set that column
+   * by hand, and it was the ONLY way to turn the control on between 0046 and
+   * 0049; 0049's own backfill preserves `true` rows, which is an admission that
+   * they exist. The cache decoder already honours a legacy `r: true` for exactly
+   * this reason, so skipping it here made the two halves disagree: enforcing
+   * while warm, bearer-only once the entry expired.
+   */
+  const LEGACY_SCHEMA = ["policy", "policy_shadow", "require_sender_constrained_visa"];
+
+  it("keeps an explicitly enabled legacy constraint as required", async () => {
+    const { client } = db({
+      has: LEGACY_SCHEMA,
+      row: { policy: "allow", policy_shadow: null, require_sender_constrained_visa: true },
+    });
+    const read = await readCurrentAgentPolicyAndShadow(client, "u1", "a1");
+
+    // A code-before-migration window must not quietly retire an authentication
+    // control the operator turned on.
+    expect(read.senderConstraintMode).toBe("required");
+  });
+
+  it("reads an unset legacy constraint as off, without an extra round trip", async () => {
+    const { client, selects } = db({
+      has: LEGACY_SCHEMA,
+      row: { policy: "allow", policy_shadow: null, require_sender_constrained_visa: false },
+    });
+    const read = await readCurrentAgentPolicyAndShadow(client, "u1", "a1");
+
+    expect(read.senderConstraintMode).toBe("off");
+    // Current schemas still pay one query; this rung is only reached after the
+    // newer ones have already been refused by 42703.
+    expect(selects.length).toBeLessThanOrEqual(3);
+  });
+
+  it("still falls through to policy-only on a schema older than 0046", async () => {
+    const { client } = db({
+      has: ["policy", "policy_shadow"],
+      row: { policy: "allow", policy_shadow: null },
+    });
+    const read = await readCurrentAgentPolicyAndShadow(client, "u1", "a1");
+
+    expect(read.policy).toBe("allow");
+    expect(read.senderConstraintMode).toBe("off");
+  });
 });
 
 describe("reading the sender-constraint mode", () => {
@@ -123,9 +187,11 @@ describe("reading the sender-constraint mode", () => {
 
     expect(read.policy).toEqual({ live: true });
     expect(read.shadow).toEqual({ draft: true });
-    // No mode column means nothing has ever been configured on this schema.
+    // No mode column AND no 0046 boolean means nothing was ever configured here.
     expect(read.senderConstraintMode).toBe("off");
-    expect(selects).toHaveLength(3);
+    // Four, not three: a schema this old refuses the legacy-boolean rung too.
+    // A real pre-0049 install HAS that column and still pays three.
+    expect(selects).toHaveLength(4);
   });
 
   it("narrows all the way to a pre-0020 schema", async () => {
@@ -135,7 +201,7 @@ describe("reading the sender-constraint mode", () => {
     expect(read.policy).toEqual({ live: true });
     expect(read.shadow).toBeNull();
     expect(read.senderConstraintMode).toBe("off");
-    expect(selects).toHaveLength(4);
+    expect(selects).toHaveLength(5);
   });
 
   // An infrastructure fault is not a configuration. The proxy refuses passport
@@ -200,5 +266,64 @@ describe("reading the sender-constraint mode", () => {
     await expect(
       readCurrentAgentPolicyAndShadow(client, "u1", "a1")
     ).resolves.toMatchObject({ senderConstraintMode: "off" });
+  });
+});
+
+/**
+ * THE ONE-LINE TEST THAT WOULD HAVE CAUGHT THE LAST FENCE.
+ *
+ * The previous mechanism had a parameter for the reader's snapshot time, a long
+ * comment explaining why it mattered, and no call site that passed it. Every
+ * behavioural test still passed, because the argument's absence is invisible
+ * from outside: the setter simply defaulted it to its own clock. An assertion on
+ * what the call site actually hands over is cheap, and it is the assertion that
+ * fails when the wiring comes apart.
+ */
+describe("the fence the policy fill quotes", () => {
+  it("is the one read BEFORE the database, and it reaches the fill", async () => {
+    h.fenceMock.mockResolvedValue("fence-token-abc");
+    const { client } = db({ has: CURRENT_SCHEMA, row: { policy: {}, sender_constraint_mode: "required" } });
+
+    await readCurrentAgentPolicyAndShadow(client, "u1", "a1");
+
+    expect(h.fenceMock).toHaveBeenCalledWith("u1", "a1");
+    // Fifth argument. Not a fresh read, not a default, not undefined — the value
+    // observed before the snapshot this fill is about to publish.
+    expect(h.setMock).toHaveBeenCalledWith("u1", "a1", expect.any(String), expect.any(Number), "fence-token-abc");
+  });
+
+  it("is read before the row, not after it", async () => {
+    // Ordering is the whole property. A fence read after the authoritative read
+    // agrees with any invalidation that landed during it, which is precisely the
+    // fill that must be rejected.
+    const order: string[] = [];
+    h.fenceMock.mockImplementation(async () => {
+      order.push("fence");
+      return "f1";
+    });
+    const { client } = db({ has: CURRENT_SCHEMA, row: { policy: {}, sender_constraint_mode: "off" } });
+    const builder = (client as unknown as { from: () => { select: (c: string) => unknown } }).from();
+    const inner = builder.select.bind(builder);
+    builder.select = (cols: string) => {
+      order.push("select");
+      return inner(cols);
+    };
+
+    await readCurrentAgentPolicyAndShadow(client, "u1", "a1");
+
+    expect(order[0]).toBe("fence");
+    expect(order).toContain("select");
+  });
+
+  it("does not read the fence at all on a cache hit", async () => {
+    // The hot path must not pay for this. A hit answers from Redis and returns
+    // before any of it.
+    h.getMock.mockResolvedValue(JSON.stringify({ p: {}, s: null, r: "required" }));
+    const { client } = db({ has: CURRENT_SCHEMA, row: { policy: {} } });
+
+    const out = await readCurrentAgentPolicyAndShadow(client, "u1", "a1");
+
+    expect(out.senderConstraintMode).toBe("required");
+    expect(h.fenceMock).not.toHaveBeenCalled();
   });
 });

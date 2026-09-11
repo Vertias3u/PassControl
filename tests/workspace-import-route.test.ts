@@ -152,6 +152,66 @@ beforeEach(() => {
   authMock.mockResolvedValue({ ok: true, userId: "u1", scope: "write", keyId: "k1" });
 });
 
+// T4-03. A restore that reconstructs nothing must not report completion.
+//
+// The planner treats a non-array as an empty plan and the CLI defaults a missing
+// collection to `[]`; both are deliberate leniencies that only meet on a
+// truncated file. `every()` over an empty plan is true, so a damaged export
+// answered 200 with `complete: true`, zero creates, zero skips and zero
+// rejections — on the one surface whose entire job is stopping a partial
+// restore from looking like a whole one.
+describe("POST /workspace/import — the envelope, before any planning", () => {
+  const envelopeCases: [string, unknown][] = [
+    ["no agents key at all", { workspace: { ownership: null } }],
+    ["a null agents collection", { agents: null }],
+    ["a non-array agents collection", { agents: { "0": {} } }],
+    ["an agents string", { agents: "" }],
+    ["a full export whose workspace lost its agents", { format: "passcontrol-export", version: 1, workspace: {} }],
+    ["a workspace that is not an object", { workspace: 7 }],
+  ];
+
+  it.each(envelopeCases)("refuses %s", async (_label, body) => {
+    const res = await post(body);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: { code: "invalid_request" } });
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("never reports a truncated file as a complete restore", async () => {
+    // The exact claim the finding is about, asserted on the body rather than
+    // only on the status: a future refactor that answered 200 here would have
+    // to say `complete: true` again to pass, which is the bug.
+    const res = await post({ workspace: { ownership: null } }, "?dry_run=true");
+    expect(res.status).toBe(400);
+    expect(await res.json()).not.toMatchObject({ data: { complete: true } });
+  });
+
+  it("writes nothing and reads nothing for a refused envelope", async () => {
+    // Refused BEFORE the availability RPC and before the collision read: a
+    // malformed file must not cost a database round trip, and must not appear
+    // in the audit log as an import that happened.
+    await post({ agents: "nope" });
+    expect(rpcCalls).toHaveLength(0);
+    expect(inserts).toHaveLength(0);
+  });
+
+  it("still accepts a genuinely empty fleet", async () => {
+    // The control. An export from a workspace with no agents is a valid file and
+    // restoring it is a no-op that legitimately completes.
+    const res = await post({ agents: [] });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ data: { complete: true } });
+  });
+
+  it("still accepts the full-export shape the route documents", async () => {
+    const res = await post(
+      { format: "passcontrol-export", version: 1, workspace: { agents: [agent()], ownership: null } },
+      "?dry_run=true"
+    );
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("POST /workspace/import", () => {
   it("requires write scope — a read key writes nothing", async () => {
     authMock.mockResolvedValue({ ok: true, userId: "u1", scope: "read", keyId: "k1" });

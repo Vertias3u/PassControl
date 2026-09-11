@@ -10,10 +10,13 @@ export function ActivityWorkspace({
   logs,
   adminRows,
   callContext,
+  logsAvailable,
 }: {
   logs: AuditLogRow[];
   adminRows: AdminAuditRow[];
   callContext: CallContext;
+  /** Passed straight through to the calls table. Operator rows are a separate read. */
+  logsAvailable: boolean;
 }) {
   const [tab, setTab] = useState<"calls" | "operator">("calls");
   const baseId = useId();
@@ -93,7 +96,7 @@ export function ActivityWorkspace({
       <div className="pc-activity-panel">
         {tab === "calls" ? (
           <div id={callsId} role="tabpanel" aria-labelledby={`${callsId}-tab`}>
-            <AuditLogTable logs={logs} callContext={callContext} />
+            <AuditLogTable logs={logs} callContext={callContext} logsAvailable={logsAvailable} />
           </div>
         ) : (
           <div id={operatorId} role="tabpanel" aria-labelledby={`${operatorId}-tab`}>

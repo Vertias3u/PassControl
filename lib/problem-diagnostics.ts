@@ -77,7 +77,14 @@ export interface ProblemSupportBundle {
     platformKillArmed: boolean;
   };
   agents: ReturnType<typeof summarizeAgent>[];
-  recent_failures: ReturnType<typeof summarizeFailures>;
+  // Exactly one of these two is present. An empty list beside
+  // `service_health.activity_log: "unavailable"` reads as "the gateway refused
+  // nothing", which is the opposite of what an unreadable log establishes — so
+  // the field is omitted and the absence is named instead. Matches
+  // buildCloudSupportBundle; two bundles disagreeing about how this is spelled
+  // is how a reader concludes one of them is broken.
+  recent_failures?: ReturnType<typeof summarizeFailures>;
+  recent_failures_unavailable?: true;
 }
 
 export interface ProblemBundleInput {
@@ -229,7 +236,9 @@ function buildGenericSupportBundle(input: ProblemBundleInput): ProblemSupportBun
     },
     emergency_controls: input.controls,
     agents: input.agents.map(summarizeAgent),
-    recent_failures: summarizeFailures(input.logs),
+    ...(input.signals.activityLog === "unavailable"
+      ? { recent_failures_unavailable: true as const }
+      : { recent_failures: summarizeFailures(input.logs) }),
   };
 }
 

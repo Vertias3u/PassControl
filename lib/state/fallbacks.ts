@@ -18,7 +18,7 @@ import { waitUntil } from "@vercel/functions";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { parseFallbacks, type FallbackEntry } from "../providers/fallbacks";
-import { getCachedAgentFallbacks, setCachedAgentFallbacks } from "./redis";
+import { getCachedAgentFallbacks, readFallbacksFence, setCachedAgentFallbacks } from "./redis";
 
 const FALLBACKS_CACHE_TTL_S = 60;
 
@@ -42,6 +42,15 @@ export async function readCurrentAgentFallbacks(
     // A cache read failure falls through to the tenant-scoped source of truth.
   }
 
+  // Read before the row: an in-flight read that republishes a list the operator
+  // has just edited sends a refused call to a provider they took out of it.
+  let fence: string | null = null;
+  try {
+    fence = await readFallbacksFence(userId, agentId);
+  } catch {
+    fence = null;
+  }
+
   try {
     const { data, error } = await db
       .from("agents")
@@ -58,7 +67,7 @@ export async function readCurrentAgentFallbacks(
     // Cache the empty result too: an agent with no fallbacks is the common case
     // and should not cost a database read on every failed upstream call.
     waitUntil(
-      setCachedAgentFallbacks(userId, agentId, JSON.stringify(raw), FALLBACKS_CACHE_TTL_S)
+      setCachedAgentFallbacks(userId, agentId, JSON.stringify(raw), FALLBACKS_CACHE_TTL_S, fence)
     );
     return parseFallbacks(raw);
   } catch {

@@ -1,6 +1,6 @@
-# PassControl 0.9.0 — API and behavior reference
+# PassControl — API and behavior reference
 
-This reference describes the 0.9.0 implementation. Start with [README](./README.md)
+This reference describes the current implementation. Start with [README](./README.md)
 or the [tutorial](./TUTORIAL.md). The public self-host tree contains the gateway,
 dashboard, authentication, control API, and artifact verifiers. Cloud's statement
 operation and hosted beta machinery are separate; see the statement section below.
@@ -169,7 +169,7 @@ await openai.chat.completions.create({ model: "gpt-4o-mini", messages: [{ role: 
 ```
 
 Anthropic is identical with `pc.clientOptions("anthropic")`. The SDK caches the visa, refreshes
-before expiry, single-flights concurrent mints, and retries once on a 401 when the effective body is replayable. It does not generate sender proofs in 0.9.0.
+before expiry, single-flights concurrent mints, and retries once on a 401 when the effective body is replayable. It does not generate sender proofs.
 
 For third-party agents that expect a static key, run the visa sidecar and point the agent at
 `http://127.0.0.1:8788/api/v1/<provider>` with any API key value. CLI presets print the
@@ -352,7 +352,7 @@ are stored separately on purpose.
 | `unverified` | Self-declared. Someone typed it. **Proves nothing** — render it as a claim, never as a fact. |
 | `domain` | Proven by publishing a token at a domain the claimant controls. |
 | `github` | A token was published under the named GitHub account. Not legal identity or an endorsement. |
-| `idv` | Reserved identity-verification tier; no issuing identity-check adapter ships in 0.9.0. |
+| `idv` | Reserved identity-verification tier; no issuing identity-check adapter ships yet. |
 
 Only **published** bindings appear on the public verification pages or in a receipt's `own`
 claim.
@@ -378,7 +378,8 @@ this agent from touching that model, here is the proof" is often the more useful
 | Variable | Purpose |
 |---|---|
 | `INSTANCE_SIGNING_KEY` | 32-byte base64url seed. Signs receipts and agent tokens. `passcontrol keygen instance` generates one. |
-| `INSTANCE_SIGNING_KEY_PREV` | **Never signs anything.** Its public half stays published so receipts signed before a rotation still verify. |
+| `INSTANCE_SIGNING_KEY_PREV` | **Never signs anything.** Its public half stays published so receipts signed before a rotation still verify. Holds one generation. |
+| `INSTANCE_SIGNING_KEY_HISTORY` | Every key retired before that one, as comma-separated `<kid>:<public>` pairs. Public halves only, appended and never removed. |
 | `PASSCONTROL_ISSUER` | This deployment's https origin. Becomes the `iss` claim and the address others fetch your keys from. |
 
 Without both `INSTANCE_SIGNING_KEY` and `PASSCONTROL_ISSUER`, no receipt is signed — an
@@ -482,14 +483,31 @@ an old public key from JWKS prevents this live-key verifier from checking its re
 The old signatures remain mathematically valid against a retained trusted public key.
 
 ```bash
-INSTANCE_SIGNING_KEY_PREV=<the old seed>   # move it here first
+# 1. Record the retiring key permanently. Prints a `<kid>:<public>` pair.
+passcontrol keygen instance --retire <the old seed>
+INSTANCE_SIGNING_KEY_HISTORY=<existing entries>,<the pair it printed>
+
+# 2. Then rotate.
+INSTANCE_SIGNING_KEY_PREV=<the old seed>   # the changeover window
 INSTANCE_SIGNING_KEY=<the new seed>
 ```
 
 This is **inverted relative to `VISA_SECRET_PREV`.** Nothing is ever signed with
 `INSTANCE_SIGNING_KEY_PREV`; it exists only so its public half remains in the JWKS. Publish
 both, wait one `max-age` window (5 minutes) for caches, then start signing with the new key.
-Drop the old one only when receipts predating the rotation no longer matter.
+
+**Step 1 is the one that lasts, and skipping it is a one-way mistake.** `_PREV` is a single
+slot: your *next* rotation needs it for the key you are retiring today, and the key you
+retired before that has nowhere to go. It disappears from the JWKS, and because receipts
+have no expiry, every receipt ever signed under it stops verifying — permanently, for
+everyone you ever gave one to. `_HISTORY` is append-only for the same reason. Remove an
+entry only when you intend to withdraw trust in that key, which is a decision about those
+receipts, not about the key.
+
+History takes **public** halves, never seeds. A retired seed sitting in configuration can
+mint new receipts backdated under the old `kid`; a public key cannot sign anything. The app
+recomputes each `kid` from its key and ignores any pair that does not match, so a pasted
+seed is discarded rather than published as a key nothing ever signed with.
 
 ---
 
@@ -586,7 +604,7 @@ query), `iat` (integer seconds, ±30 seconds), `jti` (fresh nonce), and `vh` (ba
 SHA-256 of the exact visa). Successful verification consumes a replay nonce. It binds
 neither body nor query and is not hardware attestation or a complete HTTP signature.
 
-The 0.9.0 sidecar generates proofs. The direct CLI call, MCP chat, and TypeScript
+The sidecar generates proofs. The direct CLI call, MCP chat, and TypeScript
 `PassControl` SDK paths only supply the visa: use off/observe or a correct proof-capable
 transport before requiring proofs. Plain `getVisa()` plus a provider SDK also lacks request proofs.
 

@@ -150,6 +150,22 @@ export default async function ControlTowerPage() {
   ]);
 
   const agentList = agents ?? [];
+  // ONE read, fanned out to seven consumers — so its failure has to travel with
+  // it. `logs ?? []` used to hand every one of them an empty array that reads
+  // exactly like a quiet workspace, while the operations appendix on this same
+  // page correctly said the read was unavailable. The page gave both answers at
+  // once and the confident one won: 0 refused calls, an empty departures board,
+  // no recent spend, no call history, and no recent failures in the support
+  // bundle — during the exact fault that makes audit evidence least reliable.
+  //
+  // A required `logsAvailable` prop on every consumer, not an optional one: a
+  // default would let the next surface to read these rows re-introduce the same
+  // claim by not thinking about it.
+  //
+  // Deliberately NOT a retry or a fallback query. An unreadable log is an
+  // operational fact and the operator needs to see it, not a second attempt
+  // that turns a database fault into a slower page.
+  const logsAvailable = !logsError;
   const attentionLogRows = logs ?? [];
   // Resolved against the log scan for the FLEET TABLE only.
   //
@@ -256,6 +272,7 @@ export default async function ControlTowerPage() {
           }))}
           integrations={SIDECAR_PRESETS.map(String)}
           defaultProvider={firstStoredProvider}
+          logsAvailable={logsAvailable}
         />
 
         <FleetOverviewCards
@@ -266,6 +283,7 @@ export default async function ControlTowerPage() {
           recentCalls={inferenceLogs.length}
           housekeepingCalls={housekeepingLogs.length}
           attention={summariseFleetAttention(attentionQueue)}
+          logsAvailable={logsAvailable}
         />
 
         {/* Directly under the kill switch on purpose: arming it and watching the
@@ -278,7 +296,7 @@ export default async function ControlTowerPage() {
             description="Newest governed calls first. This view is a live 40-row operational window, not complete history."
           />
           <div className="pc-section__body p-0!">
-        <DeparturesBoard userId={user.id} initialRows={displayLogs} callContext={callContext} />
+        <DeparturesBoard userId={user.id} initialRows={displayLogs} callContext={callContext} logsAvailable={logsAvailable} />
           </div>
         </section>
 
@@ -286,10 +304,10 @@ export default async function ControlTowerPage() {
           <SectionHeader
             eyebrow="Recent usage"
             title="Spend and tokens"
-            description="A live window of up to 200 loaded call records. Aggregate agent counters remain the source for tracked total spend."
+            description="A live window of up to 200 loaded call records. The figure charged against each agent's cap comes from its own counter, and includes a conservative estimate for any call PassControl could not price."
           />
           <div className="pc-section__body">
-          <SpendChart userId={user.id} initialLogs={displayLogs} />
+          <SpendChart userId={user.id} initialLogs={displayLogs} logsAvailable={logsAvailable} />
           </div>
         </section>
 
@@ -306,6 +324,7 @@ export default async function ControlTowerPage() {
               visaTtlSeconds={visaTtlSeconds()}
               keyCustody={keyCustody}
               keyCustodyExpectation={keyCustodyExpectation.expectation}
+              logsAvailable={logsAvailable}
             />
           </div>
         </section>
@@ -317,7 +336,7 @@ export default async function ControlTowerPage() {
             description="Latest 100 call rows and operator actions. Filters apply only to rows currently loaded on this page."
           />
           <div className="pc-section__body">
-            <ActivityWorkspace logs={displayLogs} adminRows={adminAudit ?? []} callContext={callContext} />
+            <ActivityWorkspace logs={displayLogs} adminRows={adminAudit ?? []} callContext={callContext} logsAvailable={logsAvailable} />
           </div>
         </section>
 

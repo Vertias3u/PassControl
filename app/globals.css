@@ -4014,6 +4014,38 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .pc-control-graph-unavailable strong { color: var(--warning); font-size: .75rem; }
 .pc-control-graph-unavailable span { color: var(--pc-quiet); font-size: .63rem; }
 
+/* ── "We could not read this" — the Control Tower's unavailable states ────────
+   T4-06. A panel that could not read its data must LOOK different from one that
+   read successfully and found nothing; the whole fix is wasted if both render as
+   the same quiet grey sentence. Same amber vocabulary as
+   .pc-control-graph-unavailable above and the operations signals, which is what
+   this deployment already means by "a read did not complete".
+   NOTE these states are driven by [data-state="unavailable"] rather than a
+   modifier class, so a test can assert the state and the styling together. */
+.pc-live-calls__unavailable,
+.pc-spend-view__unavailable {
+  margin: 0 1rem 0.75rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 0.6rem;
+  background: rgba(245, 158, 11, 0.035);
+  color: var(--warning);
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+.pc-table-empty[data-state="unavailable"],
+.pc-live-calls__empty[data-state="unavailable"],
+.pc-spend-chart__empty[data-state="unavailable"] {
+  color: var(--warning);
+}
+.pc-spend-chart__empty[data-state="unavailable"] small { color: var(--pc-quiet); }
+/* The card keeps its shape and changes its edge: the value is a dash, and a
+   plain grey dash reads as "nothing here" rather than "not measured". */
+.pc-metric-card[data-state="unavailable"] { border-color: rgba(245, 158, 11, 0.26); }
+.pc-metric-card[data-state="unavailable"] .pc-metric-card__value,
+.pc-metric-card[data-state="unavailable"] .pc-metric-card__footer span { color: var(--warning); }
+.pc-last-seen[data-state="unavailable"] { color: var(--warning) !important; }
+
 @media (max-width: 1080px) {
   .pc-control-graph__layout { grid-template-columns: minmax(0,1fr) 18rem; }
 }

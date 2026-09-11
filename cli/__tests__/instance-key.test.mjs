@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 
-import { checkIssuerPublishesKey, generateInstanceKey, instanceKidFromSeed } from "../instance-key.mjs";
+import {
+  checkIssuerPublishesKey,
+  generateInstanceKey,
+  instanceKidFromSeed,
+  retiredKeyEntry,
+} from "../instance-key.mjs";
 
 const b64url = (bytes) =>
   Buffer.from(bytes).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -40,6 +45,37 @@ describe("generating an instance signing key", () => {
     const publicKey = ed25519.getPublicKey(Buffer.from(SEED, "base64url"));
     expect(instanceKidFromSeed(SEED)).toBe(instanceKidFromSeed(b64url(Buffer.from(SEED, "base64url"))));
     expect(publicKey).toHaveLength(32);
+  });
+});
+
+describe("retiring a key into the published history", () => {
+  // THE cross-runtime guard. The CLI writes this value in plain ESM and the app
+  // parses it in TypeScript, recomputing the kid from the key and rejecting the
+  // entry when they disagree. If these two ever drift, the operator follows the
+  // rotation instructions exactly, the app silently discards the entry, and the
+  // receipts this whole mechanism exists to preserve fail as `unknown_key`.
+  it("produces a kid:x pair the app's loader accepts", async () => {
+    const { entry, kid } = retiredKeyEntry(SEED);
+    const [entryKid, x] = entry.split(":");
+    expect(entryKid).toBe(kid);
+    expect(kid).toBe(instanceKidFromSeed(SEED));
+
+    const { loadInstanceVerifiers } = await import("../../lib/crypto/instanceKey.ts");
+    const current = generateInstanceKey();
+    process.env.INSTANCE_SIGNING_KEY = current.seed;
+    process.env.INSTANCE_SIGNING_KEY_HISTORY = entry;
+    delete process.env.INSTANCE_SIGNING_KEY_PREV;
+    expect(loadInstanceVerifiers().map((v) => v.kid)).toEqual([current.kid, kid]);
+
+    // And it is the PUBLIC half: the seed must not appear in what gets published.
+    expect(x).not.toBe(SEED);
+    expect(entry).not.toContain(SEED);
+  });
+
+  it("refuses anything that is not a 32-byte seed rather than emitting a wrong pair", () => {
+    expect(() => retiredKeyEntry("")).toThrow();
+    expect(() => retiredKeyEntry(b64url(new Uint8Array(16)))).toThrow();
+    expect(() => retiredKeyEntry("!!! not base64 !!!")).toThrow();
   });
 });
 

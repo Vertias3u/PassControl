@@ -63,11 +63,17 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => ({
 }));
 vi.mock("@/lib/state/redis", () => ({
   purgeAgentPolicy: vi.fn(),
+  // The proxy reads this before the endpoint row and again before dispatch.
+  // Omitted, it is undefined, the call throws, and the route 500s.
+  readCredentialFence: vi.fn(async () => null),
   isSuspended: (...args: unknown[]) => isSuspendedMock(...args),
   getCachedKey: (...args: unknown[]) => getCachedKeyMock(...args),
   setCachedKey: (...args: unknown[]) => setCachedKeyMock(...args),
   getCachedAgentPolicy: (...args: unknown[]) => getCachedAgentPolicyMock(...args),
   setCachedAgentPolicy: (...args: unknown[]) => setCachedAgentPolicyMock(...args),
+  // Mocked explicitly. Left out it is undefined, the call throws, policy.ts
+  // catches it, and the fence silently becomes null in every assertion below.
+  readPolicyFence: async () => null,
   touchLastSeen: (...args: unknown[]) => touchLastSeenMock(...args),
 }));
 /**
@@ -269,6 +275,61 @@ describe("Direct Agent Key gateway authentication", () => {
     readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
     isSuspendedMock.mockResolvedValue(true);
     expect((await call()).status).toBe(403);
+  });
+
+  /**
+   * S3-05. The test above proves all three controls stop the call before later
+   * work. It says nothing about the order AMONG them, and its title reads as
+   * though it does — which is how this survived.
+   *
+   * `rateLimit` MUTATES a fixed-window counter: `RATE_LIMIT_LUA` increments
+   * first and decides afterwards. Running it before the revocation gate meant
+   * every refused call from a killed tenant or a suspended agent still spent the
+   * legitimate agent's allowance. An attacker holding a stopped credential could
+   * hold the counter above its threshold for the whole incident, so the moment
+   * the operator disarmed the kill switch the honest traffic met 429s — and
+   * continued attacker traffic kept it there. That turns a kill switch into
+   * something you cannot cleanly come back from.
+   */
+  it("does not spend the rate-limit allowance on a call revocation has already refused", async () => {
+    for (const state of [
+      { platformKill: true, userKill: false, denylist: [] as string[], suspended: false },
+      { platformKill: false, userKill: true, denylist: [] as string[], suspended: false },
+      { platformKill: false, userKill: false, denylist: [] as string[], suspended: true },
+    ]) {
+      vi.clearAllMocks();
+      rateLimitFailClosedMock.mockResolvedValue({ success: true, remaining: 9 });
+      rateLimitMock.mockResolvedValue({ success: true, remaining: 599 });
+      authenticateDirectAgentKeyMock.mockResolvedValue(directPrincipal);
+      readKillStateMock.mockResolvedValue({
+        platformKill: state.platformKill,
+        userKill: state.userKill,
+        denylist: state.denylist,
+      });
+      isSuspendedMock.mockResolvedValue(state.suspended);
+
+      expect((await call()).status).toBe(403);
+      // Never touched. Not "called and ignored" — the counter must not move.
+      expect(rateLimitMock).not.toHaveBeenCalled();
+    }
+  });
+
+  it("still takes the rate limit for a call revocation permits", async () => {
+    // The counter has to keep working. A reorder that quietly stopped taking it
+    // would pass the assertion above and delete the DoS guard.
+    vi.clearAllMocks();
+    rateLimitFailClosedMock.mockResolvedValue({ success: true, remaining: 9 });
+    rateLimitMock.mockResolvedValue({ success: false, remaining: 0 });
+    authenticateDirectAgentKeyMock.mockResolvedValue(directPrincipal);
+    readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
+    isSuspendedMock.mockResolvedValue(false);
+
+    expect((await call()).status).toBe(429);
+    expect(rateLimitMock).toHaveBeenCalledWith(
+      expect.stringContaining("proxy:"),
+      expect.any(Number),
+      expect.any(Number)
+    );
   });
 
 

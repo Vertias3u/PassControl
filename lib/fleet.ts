@@ -294,7 +294,7 @@ export async function updateAgent(
   userId: string,
   agentId: string,
   patch: unknown
-): Promise<FleetResult<{ id: string }>> {
+): Promise<FleetResult<{ id: string; budgetsLive?: boolean }>> {
   let clean;
   try {
     clean = validateAgentUpdate(patch as any);
@@ -313,7 +313,19 @@ export async function updateAgent(
     .maybeSingle();
   if (error) return { ok: false, status: 500, code: "query_failed" };
   if (!data) return { ok: false, status: 404, code: "not_found" };
-  return { ok: true, value: { id: agentId } };
+
+  // A budget edit changes what the LIVE GATE enforces, and the live gate reads
+  // the agent-policy cache (S3-04). Without this the row changes and the proxy
+  // keeps admitting against the old cap until the entry expires — the same shape
+  // as the sender-proof write, and the same fix.
+  //
+  // Only for the fields that are actually in that cache. Scopes and fallbacks
+  // are not, and purging on every update would throw away a hot entry for a
+  // change it does not carry.
+  const touchesBudget = "budget_tokens" in clean || "budget_cents" in clean;
+  if (!touchesBudget) return { ok: true, value: { id: agentId } };
+  const budgetsLive = await purgeAgentPolicy(userId, agentId).catch(() => false);
+  return { ok: true, value: { id: agentId, budgetsLive } };
 }
 
 /** Suspend or resume an agent. Only active agents can be suspended, and only
@@ -664,7 +676,7 @@ export async function setSenderConstraintMode(
   userId: string,
   agentId: string,
   mode: string
-): Promise<FleetResult<{ id: string; mode: SenderConstraintMode }>> {
+): Promise<FleetResult<{ id: string; mode: SenderConstraintMode; enforcementLive: boolean }>> {
   if (!SENDER_CONSTRAINT_MODES.includes(mode as SenderConstraintMode)) {
     return {
       ok: false,
@@ -712,17 +724,18 @@ export async function setSenderConstraintMode(
   //
   // It lives here rather than in the server action, following lib/owner/manage.ts
   // rather than shadow-actions.ts, because a second caller — the control API is
-  // the obvious one — would otherwise have to remember. Best-effort, and for the
-  // same reason the owner cache is: the database write is the durable thing, and
-  // returning failure for a change that was applied would have the caller retry
-  // a write that already succeeded. The only real cost of a missed purge is a
-  // stale mode until the TTL.
-  try {
-    await purgeAgentPolicy(userId, agentId);
-  } catch {
-    // Falls back to the TTL.
-  }
-  return { ok: true, value: { id: agentId, mode: value } };
+  // the obvious one — would otherwise have to remember.
+  //
+  // What changed after AUTH-02: this used to swallow the failure and report a
+  // flat success, on the reasoning that "the only real cost of a missed purge is
+  // a stale mode until the TTL". That reasoning is fine for metadata and wrong
+  // for an authentication control. Switching to `required` and being told it
+  // worked, while outstanding bearer visas keep being admitted for another
+  // minute, is not a cosmetic delay — it is the window an attacker with a stolen
+  // visa is in. The write is still durable and still not retried; the caller is
+  // simply told whether enforcement is LIVE yet, so the UI can say so.
+  const invalidated = await purgeAgentPolicy(userId, agentId).catch(() => false);
+  return { ok: true, value: { id: agentId, mode: value, enforcementLive: invalidated } };
 }
 
 /**

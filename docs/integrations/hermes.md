@@ -110,7 +110,7 @@ read-only and prints the exact block so an existing YAML file is never overwritt
 silently corrupted.
 
 
-In 0.9.0 the sidecar adds sender proofs, so it can be used with required sender-proof
+The sidecar adds sender proofs, so it can be used with required sender-proof
 mode. A DAK remains a bearer credential and is not upgraded by that setting. Scope,
 budget and lifecycle limits are described in [the reference](../../DOCUMENTATION.md).
 For Gemini, use the printed `gemini` provider configuration with an OpenAI-compatible

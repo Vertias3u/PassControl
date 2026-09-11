@@ -122,6 +122,7 @@ export function AgentFleetTable({
   visaTtlSeconds,
   keyCustody = {},
   keyCustodyExpectation = null,
+  logsAvailable,
 }: {
   agents: Agent[];
   // Server-side env value; this is a client component. See ScopeEditor.
@@ -133,6 +134,17 @@ export function AgentFleetTable({
   keyCustody?: Record<string, DeclaredKeyStorageView>;
   // Stated by the operator, enforced by nothing. See lib/key-custody-expectation.
   keyCustodyExpectation?: string | null;
+  /**
+   * Whether the call scan behind `last_seen_at` ran. REQUIRED.
+   *
+   * `last_seen_at` is a maximum over two sources: the stored column and the
+   * bounded log scan (`withLastSeenFromLogs`). "never" is a real answer and
+   * lib/dashboard-attention.ts is right to refuse to invent it away — but it is
+   * only a real answer when the scan that could have contradicted it actually
+   * ran. Column NULL plus a failed scan is no evidence at all, and "never" is
+   * then a claim about an agent nobody looked at.
+   */
+  logsAvailable: boolean;
 }) {
   const [pending, start] = useTransition();
   const [editing, setEditing] = useState<{ id: string; kind: EditorKind } | null>(null);
@@ -271,8 +283,12 @@ export function AgentFleetTable({
                     `format` already appends it (`timeZoneName: "short"`) — so
                     nothing is added here. Appending `zoneLabel` as well shipped
                     "06:42:12 EEST · Europe/Sofia" to production for one deploy. */}
-                <td className="pc-last-seen" title={a.last_seen_at ? format(a.last_seen_at) : undefined}>
-                  {relativeTime(a.last_seen_at)}
+                <td
+                  className="pc-last-seen"
+                  title={a.last_seen_at ? format(a.last_seen_at) : undefined}
+                  data-state={logsAvailable || a.last_seen_at ? undefined : "unavailable"}
+                >
+                  {relativeTime(a.last_seen_at, logsAvailable)}
                 </td>
                 <td>
                   <div className="pc-fleet-actions">
@@ -341,7 +357,7 @@ export function AgentFleetTable({
                   Key custody (declared):{" "}
                   <KeyCustody view={custodyOf(agent)} expectation={keyCustodyExpectation} />
                 </p>
-                <p title={agent.last_seen_at ? format(agent.last_seen_at) : undefined}>Last activity: {relativeTime(agent.last_seen_at)}</p>
+                <p title={agent.last_seen_at ? format(agent.last_seen_at) : undefined}>Last activity: {relativeTime(agent.last_seen_at, logsAvailable)}</p>
                 <div className="pc-fleet-card__actions">
                   <Link href={`/dashboard/agents/${agent.id}`} className="pc-open-agent">
                     Open agent <ArrowUpRight aria-hidden="true" />
@@ -388,8 +404,8 @@ export function AgentFleetTable({
   );
 }
 
-function relativeTime(value: string | null): string {
-  if (!value) return "never";
+function relativeTime(value: string | null, scanned = true): string {
+  if (!value) return scanned ? "never" : "unknown";
   const elapsed = Date.now() - Date.parse(value);
   if (!Number.isFinite(elapsed)) return "unknown";
   const minutes = Math.max(0, Math.floor(elapsed / 60_000));
