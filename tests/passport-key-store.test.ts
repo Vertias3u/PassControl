@@ -4,7 +4,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 // @ts-expect-error — plain .mjs CLI module, no types
-import { createPassportCredentialStore, migratePassportKey, resolvePassportKey } from "../cli/passport-key-store.mjs";
+import { createPassportCredentialStore, importPassportKey, migratePassportKey, resolvePassportKey } from "../cli/passport-key-store.mjs";
 // @ts-expect-error — plain .mjs CLI module, no types
 import { mergeConfigFile, writeConfigFile } from "../cli/config.mjs";
 
@@ -320,5 +320,268 @@ describe("a credential helper that stops answering", () => {
     expect(result.message).toMatch(/left untouched/iu);
     expect(JSON.stringify(result)).not.toContain(SECRET);
     expect(removeFileSecret).not.toHaveBeenCalled();
+  });
+});
+
+// `passport import` writes a key into the OS store, then commits the config that
+// points at it. Both of those can fail, and the rollback for both is a delete.
+//
+// The bug these pin: `--replace` permits re-importing the SAME passport id, and
+// OS storage is keyed by that id — macOS `add-generic-password -U` updates in
+// place, and the DPAPI blob path is derived from the id. So the "new item" the
+// rollback removes is, in that one case, a key that existed BEFORE the command
+// ran. An Ed25519 secret is unrecoverable, and the config left behind still
+// claims it is in the store.
+//
+// The invariant, and the only thing that makes the rollback safe: this function
+// may only delete an item that it created.
+describe("importPassportKey", () => {
+  const OTHER_ID = "other-passport-public-id";
+
+  /** A store that behaves, plus the call order and the items it is holding. */
+  function osStore(initial: Record<string, string> = {}) {
+    const order: string[] = [];
+    const items = new Map(Object.entries(initial));
+    return {
+      order,
+      items,
+      store: {
+        name: "mock OS store",
+        write(id: string, secret: string) {
+          order.push(`write:${id}`);
+          items.set(id, secret);
+          return { ok: true as const };
+        },
+        read(id: string) {
+          order.push(`read:${id}`);
+          return items.has(id)
+            ? { ok: true as const, secret: items.get(id) as string }
+            : { ok: false as const, reason: "mock OS store item unavailable" };
+        },
+        delete(id: string) {
+          order.push(`delete:${id}`);
+          items.delete(id);
+          return { ok: true as const };
+        },
+      },
+    };
+  }
+
+  it("keeps a pre-existing same-id key when the config commit fails", () => {
+    const fake = osStore({ [PASSPORT_ID]: SECRET });
+
+    const result = importPassportKey({
+      passportId: PASSPORT_ID,
+      secret: SECRET,
+      store: fake.store,
+      oldId: PASSPORT_ID,
+      oldStorage: "os",
+      commitConfig: () => {
+        throw new Error("EACCES: permission denied, open '/config'");
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    // The whole point: the operator's key is still there to be used.
+    expect(fake.items.get(PASSPORT_ID)).toBe(SECRET);
+    // main() prints error.message and nothing else, so the filesystem reason
+    // has to be inside it or the failure becomes undiagnosable.
+    expect(result.message).toContain("EACCES");
+    expect(result.message).toMatch(/left in place/iu);
+    // And it is not enough to put it back — it must never have been removed.
+    expect(fake.order.filter((call) => call.startsWith("delete"))).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
+
+  it("does not rewrite a same-id key that the store already holds", () => {
+    const fake = osStore({ [PASSPORT_ID]: SECRET });
+
+    const result = importPassportKey({
+      passportId: PASSPORT_ID,
+      secret: SECRET,
+      store: fake.store,
+      oldId: PASSPORT_ID,
+      oldStorage: "os",
+      commitConfig: () => {},
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    // The caller proved the secret derives the passport id before calling, so a
+    // same-id import is provably the same key. Writing it gains nothing and
+    // creates a window in which a rollback could remove it.
+    expect(fake.order.filter((call) => call.startsWith("write"))).toEqual([]);
+    expect(fake.items.get(PASSPORT_ID)).toBe(SECRET);
+  });
+
+  it("never deletes a pre-existing same-id item, even when the readback disagrees", () => {
+    const order: string[] = [];
+    const store = {
+      name: "mock OS store",
+      write: (id: string) => {
+        order.push(`write:${id}`);
+        return { ok: true as const };
+      },
+      // A store that pre-holds something else and keeps returning it: the
+      // readback fails, but what is in there is still not ours to destroy.
+      read: (id: string) => {
+        order.push(`read:${id}`);
+        return { ok: true as const, secret: "a-different-key-already-in-the-store" };
+      },
+      delete: (id: string) => {
+        order.push(`delete:${id}`);
+        return { ok: true as const };
+      },
+    };
+
+    const result = importPassportKey({
+      passportId: PASSPORT_ID,
+      secret: SECRET,
+      store,
+      oldId: PASSPORT_ID,
+      oldStorage: "os",
+      commitConfig: () => {},
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(order.filter((call) => call.startsWith("delete"))).toEqual([]);
+  });
+
+  it("still removes an item it created when the readback disagrees", () => {
+    const order: string[] = [];
+    let written = false;
+    const store = {
+      name: "mock OS store",
+      write: (id: string) => {
+        order.push(`write:${id}`);
+        written = true;
+        return { ok: true as const };
+      },
+      // Empty until this command writes, then wrong: the item under this id is
+      // one this command created, so cleaning it up is exactly right.
+      read: (id: string) => {
+        order.push(`read:${id}`);
+        return written
+          ? { ok: true as const, secret: "not-what-was-just-written" }
+          : { ok: false as const, reason: "mock OS store item unavailable" };
+      },
+      delete: (id: string) => {
+        order.push(`delete:${id}`);
+        return { ok: true as const };
+      },
+    };
+
+    const result = importPassportKey({
+      passportId: PASSPORT_ID,
+      secret: SECRET,
+      store,
+      oldId: "",
+      oldStorage: "",
+      commitConfig: () => {},
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.message).toMatch(/did not return the key/iu);
+    // Nothing existed here before, so the half-written item is ours to clean up.
+    expect(order).toContain(`delete:${PASSPORT_ID}`);
+  });
+
+  it("still removes an item it created when the config commit fails", () => {
+    const fake = osStore();
+
+    const result = importPassportKey({
+      passportId: PASSPORT_ID,
+      secret: SECRET,
+      store: fake.store,
+      oldId: "",
+      oldStorage: "",
+      commitConfig: () => {
+        throw new Error("EACCES: permission denied, open '/config'");
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(fake.order).toContain(`delete:${PASSPORT_ID}`);
+    expect(fake.items.has(PASSPORT_ID)).toBe(false);
+  });
+
+  it("retires the previous key when the passport id actually changes", () => {
+    const fake = osStore({ [OTHER_ID]: "the-previous-passport-secret" });
+
+    const result = importPassportKey({
+      passportId: PASSPORT_ID,
+      secret: SECRET,
+      store: fake.store,
+      oldId: OTHER_ID,
+      oldStorage: "os",
+      commitConfig: () => {},
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(fake.items.get(PASSPORT_ID)).toBe(SECRET);
+    // The old identity is a different item, and retiring it is the point of --replace.
+    expect(fake.order).toContain(`delete:${OTHER_ID}`);
+    expect(fake.items.has(OTHER_ID)).toBe(false);
+  });
+
+  it("writes nothing to the config and removes nothing when the store refuses the write", () => {
+    const commitConfig = vi.fn();
+    const order: string[] = [];
+    const result = importPassportKey({
+      passportId: PASSPORT_ID,
+      secret: SECRET,
+      store: {
+        name: "mock OS store",
+        write: () => {
+          order.push("write");
+          return { ok: false as const, reason: "mock OS store write failed" };
+        },
+        read: () => ({ ok: false as const, reason: "mock OS store item unavailable" }),
+        delete: (id: string) => {
+          order.push(`delete:${id}`);
+          return { ok: true as const };
+        },
+      },
+      oldId: "",
+      oldStorage: "",
+      commitConfig,
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.message).toMatch(/write failed/iu);
+    // A refused write created nothing, so there is nothing to roll back.
+    expect(order.filter((call) => call.startsWith("delete"))).toEqual([]);
+    expect(commitConfig).not.toHaveBeenCalled();
+  });
+
+  // The module can be perfect while the CLI still holds the old inline version.
+  it("is what the CLI's passport import actually calls", () => {
+    const cli = fs.readFileSync(path.join(process.cwd(), "bin/passcontrol.mjs"), "utf8");
+    const from = cli.indexOf("async function passportCommand");
+    const body = cli.slice(from, cli.indexOf("\nasync function ", from + 1));
+    expect(body).toContain("importPassportKey({");
+    // The rollback lives in the module now. An inline delete here is the bug.
+    expect(body).not.toContain("store.delete(");
+  });
+
+  it("reports an old key it could not confirm removed without failing the import", () => {
+    const result = importPassportKey({
+      passportId: PASSPORT_ID,
+      secret: SECRET,
+      store: {
+        name: "mock OS store",
+        write: () => ({ ok: true as const }),
+        read: () => ({ ok: true as const, secret: SECRET }),
+        delete: () => ({ ok: false as const, reason: "mock OS store did not confirm the removal" }),
+      },
+      oldId: OTHER_ID,
+      oldStorage: "os",
+      commitConfig: () => {},
+    });
+
+    // The new key is in and the config points at it: that is a successful import.
+    // The stale item is a cleanup task, not a reason to fail.
+    expect(result).toMatchObject({ ok: true });
+    expect(result.warning).toMatch(/needs manual cleanup/iu);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 });

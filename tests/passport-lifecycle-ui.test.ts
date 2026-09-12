@@ -304,6 +304,27 @@ describe("new passport issuance reveal-once handoff", () => {
     expect(store).toMatch(/next\.created_at\s*>\s*issuedAt/);
   });
 
+  // The count test in tests/key-import-snippet.test.ts proves the two builders
+  // ask for one import between them. That only means anything while the flow is
+  // still built from exactly these two pieces: the import command on its own
+  // step, and the configure snippet on the next. If a later edit inlines the
+  // import back into step 3, the count test keeps passing on strings nobody
+  // renders. This pins the structure it assumes.
+  it("gives the passport import its own step and does not repeat it in the sidecar snippet", () => {
+    const store = read("components/PassportStoreAndConnect.tsx");
+    expect(store).toMatch(/const importCommand = buildPassportImportCommand\(/);
+    expect(store).toMatch(/\{importCommand\}/);
+    expect(store).toMatch(/\{sidecarSnippet\}/);
+    // buildConfigureSnippet is the snippet rendered at step 3; the import
+    // command must be composed here, beside it, and not from inside it.
+    const snippet = read("app/dashboard/key-import-snippet.ts");
+    const builder = snippet.slice(
+      snippet.indexOf("export function buildConfigureSnippet"),
+      snippet.indexOf("export function buildPassportImportCommand")
+    );
+    expect(builder).not.toContain("buildPassportImportCommand");
+  });
+
   it("takes the floor from the server row, not the browser clock", () => {
     // agent_logs.created_at and agents.created_at are stamped by the same database
     // clock. A Date.now() taken in the browser is a different clock, and skew either

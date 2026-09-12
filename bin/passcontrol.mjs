@@ -86,6 +86,7 @@ import { defaultAllowedModelForProvider } from "../cli/integration-defaults.mjs"
 import {
   PASSPORT_KEY_STORAGE_OS,
   createPassportCredentialStore,
+  importPassportKey,
   keyStorageDeclaration,
   migratePassportKey,
 } from "../cli/passport-key-store.mjs";
@@ -2771,34 +2772,30 @@ async function passportCommand(rest, opts = {}) {
     throw new Error("Passport secret does not match the supplied Passport ID. Nothing was stored.");
   }
 
+  // The write/readback/commit sequence and its rollbacks live in
+  // importPassportKey, which is where they can be tested: nothing in this file
+  // is exported, and the store is built here with no seam, so a test of the
+  // rollback would have to reach the operator's real Keychain.
   const store = createPassportCredentialStore();
-  const written = store.write(passportId, secret);
-  if (!written.ok) throw new Error(`${written.reason}. Nothing was written to the PassControl config.`);
-  const readback = store.read(passportId);
-  if (!readback.ok || readback.secret !== secret) {
-    store.delete(passportId);
-    throw new Error(`${store.name} did not return the key that was just stored. The new item was removed and config was not changed.`);
-  }
-
-  try {
-    mergeConfigFileAtomic(target, {
+  const result = importPassportKey({
+    passportId,
+    secret,
+    store,
+    oldId,
+    oldStorage,
+    commitConfig: () => mergeConfigFileAtomic(target, {
       PASSCONTROL_GATEWAY: gateway,
       PASSPORT_ID: passportId,
       PASSPORT_SECRET: "",
       PASSPORT_KEY_STORAGE: PASSPORT_KEY_STORAGE_OS,
-    });
-  } catch (error) {
-    store.delete(passportId);
-    throw error;
-  }
+    }),
+  });
+  // The message already carries the filesystem detail: main()'s handler prints
+  // `error.message` and nothing else, so a bare `cause` would never be seen.
+  if (!result.ok) throw new Error(result.message, { cause: result.cause });
+  if (result.warning) warn(result.warning);
 
-  if (oldStorage === PASSPORT_KEY_STORAGE_OS && oldId && oldId !== passportId) {
-    const removed = store.delete(oldId);
-    if (!removed.ok) {
-      warn(`The previous Passport key could not be confirmed removed from ${store.name}; the new import is active, but the old OS item needs manual cleanup.`);
-    }
-  }
-  ok(`Passport ${passportId} imported into ${store.name}.`);
+  ok(result.message);
   step(`Global gateway: ${gateway}`);
   step("The private key was verified and never written to the config file or command line.");
 }

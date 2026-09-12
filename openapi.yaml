@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PassControl Control-Plane API
-  version: "0.9.3"
+  version: "0.9.4"
   description: >
     Developer API for managing a PassControl agent fleet. Authenticated with a
     `pc_` API key (Authorization: Bearer). All access is tenant-isolated to the

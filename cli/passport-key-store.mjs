@@ -433,3 +433,109 @@ export function migratePassportKey({ passportId, secret, store, removeFileSecret
     message: `Migrated to tier 1 — ${store.name}; verified readback before removing the file key.`,
   };
 }
+
+/**
+ * Move a verified passport secret into the OS store and commit the config that
+ * points at it, with one invariant holding the rollbacks together:
+ *
+ *   **this function may only delete an item that it created.**
+ *
+ * Both failure paths below used to end in `store.delete(passportId)`, on the
+ * reasoning that the item under that id was the one just written. That is true
+ * exactly until `--replace` is used to re-import the SAME passport id, which it
+ * permits. OS storage is keyed by the id — macOS `add-generic-password -U`
+ * updates in place, and the DPAPI blob path is derived from the id — so in that
+ * one case the item removed is the operator's existing key, and the config left
+ * behind still points at a store that no longer has it.
+ *
+ * The pre-existence probe is UNCONDITIONAL, and not gated on the config saying
+ * `PASSPORT_KEY_STORAGE=os` for this id. The config is not authoritative about
+ * what the store contains: `cli/logout.mjs` blanks that marker in the same write
+ * that asks the store to delete, and the store is allowed to report that it
+ * could not confirm the removal — so an item can outlive the marker. The store
+ * is the only authority on its own contents. The cost is one extra read per
+ * import, which on a locked Keychain may mean one extra unlock prompt.
+ *
+ * The honest limit, and it is the same one `confirmGone` states above: a failed
+ * `read()` does not prove absence. A locked store reads as empty, so a rollback
+ * can still remove a real item. This narrows the window to that case; it does
+ * not close it, because the store cannot give positive evidence of absence.
+ *
+ * `commitConfig` is injected rather than called directly for the same reason
+ * `migratePassportKey` takes `removeFileSecret`: the rollback is the behaviour
+ * worth testing, and it is only reachable if the commit can be made to fail.
+ */
+export function importPassportKey({
+  passportId,
+  secret,
+  store,
+  oldId = "",
+  oldStorage = "",
+  commitConfig,
+}) {
+  if (!passportId || !secret) {
+    return { ok: false, message: "A Passport ID and secret are required." };
+  }
+
+  const existing = store.read(passportId);
+  const preExisting = existing.ok && typeof existing.secret === "string" && existing.secret.length > 0;
+  // The caller proves `secret` derives `passportId` before reaching here, so a
+  // same-id import is provably the same key the store already holds. Writing it
+  // changes nothing and only opens a window in which a rollback could take it.
+  const alreadyStored = preExisting && sameSecret(secret, existing.secret);
+
+  if (!alreadyStored) {
+    const written = store.write(passportId, secret);
+    if (!written.ok) {
+      // Nothing was created, so there is nothing to roll back.
+      return { ok: false, message: `${written.reason}. Nothing was written to the PassControl config.` };
+    }
+
+    const readback = store.read(passportId);
+    if (!readback.ok || !sameSecret(secret, readback.secret)) {
+      if (!preExisting) store.delete(passportId);
+      return {
+        ok: false,
+        message: preExisting
+          ? `${store.name} did not return the key that was just stored. The item already under this Passport ID was left in place, and config was not changed.`
+          : `${store.name} did not return the key that was just stored. The new item was removed and config was not changed.`,
+      };
+    }
+  }
+
+  try {
+    commitConfig();
+  } catch (error) {
+    if (!preExisting) store.delete(passportId);
+    // The CLI's top-level handler prints `error.message` and nothing else, so
+    // the filesystem detail has to travel inside the message or the operator
+    // loses the only line that says which path failed. An fs error names a
+    // path, not a key — the collapse-to-fixed-text rule above is about
+    // subprocess stderr, which can echo the secret back.
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      cause: error,
+      message: preExisting
+        ? `The PassControl config could not be written; the key already in ${store.name} was left in place. ${detail}`
+        : `The PassControl config could not be written; the new item was removed from ${store.name}. ${detail}`,
+    };
+  }
+
+  let warning = null;
+  if (oldStorage === PASSPORT_KEY_STORAGE_OS && oldId && oldId !== passportId) {
+    const removed = store.delete(oldId);
+    if (!removed.ok) {
+      warning = `The previous Passport key could not be confirmed removed from ${store.name}; the new import is active, but the old OS item needs manual cleanup.`;
+    }
+  }
+
+  return {
+    ok: true,
+    alreadyStored,
+    warning,
+    message: alreadyStored
+      ? `${store.name} already held this Passport key; it was verified and left in place.`
+      : `Passport ${passportId} imported into ${store.name}.`,
+  };
+}

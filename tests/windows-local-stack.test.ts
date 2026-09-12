@@ -63,10 +63,16 @@ describe("the dev server the CLI starts", () => {
     expect(pkg.scripts["dev:docker"]).not.toContain("'");
   });
 
-  // stopDashboard signals a single pid on Windows, not a process group. If the
-  // recorded pid were an npm/cmd wrapper, `passcontrol stop` would kill the
-  // wrapper and leave Next holding the port.
-  it("is spawned directly so the recorded pid is the server itself", () => {
+  // The recorded pid is Next's SUPERVISOR, not the HTTP worker it forks, and
+  // that is deliberate: stopDashboard takes the whole tree from it — a process
+  // group on Unix, `taskkill /PID <pid> /T` on Windows. Stopping is therefore
+  // only correct if the pid sits ABOVE everything that needs to die.
+  //
+  // What must not creep back in is an npm/cmd wrapper above the supervisor.
+  // Node refuses to spawn a .cmd without a shell (see above), and the wrapper
+  // would add a layer that owns the port through two intermediaries rather than
+  // one — so the CLI spawns the launcher script directly with process.execPath.
+  it("is spawned directly so the recorded pid is Next's supervisor, not a wrapper", () => {
     const from = cli.indexOf("async function startDashboard");
     const body = cli.slice(from, cli.indexOf("\nasync function ", from + 1));
     expect(body).toContain("dev-docker.mjs");
