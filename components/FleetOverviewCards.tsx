@@ -64,7 +64,7 @@ export function FleetOverviewCards(props: {
         // call it cannot price it contains a conservative estimate while the
         // receipt for that same call says the cost is unknown. Labelling it
         // "Tracked spend" made this card contradict a signed receipt.
-        label="Charged to budgets"
+        label="Settled budget charges"
         value={`$${(props.spentMicrocents / 1e8).toFixed(2)}`}
         icon={<DollarSign className="h-5 w-5" />}
         note="What was counted against caps"

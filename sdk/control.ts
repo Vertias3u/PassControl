@@ -46,6 +46,39 @@ export interface ControlAccount {
   control_key_scope: "read" | "write";
 }
 
+export interface SpendReconciliation {
+  state: "reconciled" | "pending" | "unavailable";
+  settled_tokens: number;
+  settled_microcents: number;
+  log_attributed_tokens: number | null;
+  log_attributed_microcents: number | null;
+  adjustment_tokens: number | null;
+  adjustment_microcents: number | null;
+  attributable_tokens: number | null;
+  attributable_microcents: number | null;
+  difference_tokens: number | null;
+  difference_microcents: number | null;
+  contributing_logs: number | null;
+  contributing_adjustments: number | null;
+  last_reconciled_at: string | null;
+  holds_state: "available" | "unavailable";
+  open_reserved_tokens: number | null;
+  open_reserved_microcents: number | null;
+  open_holds: number | null;
+}
+
+export interface SpendResponse {
+  fleet: { spent_tokens: number; spent_microcents: number; basis: "enforced" };
+  agents: Array<{
+    id: string;
+    name: string;
+    spent_tokens: number;
+    spent_microcents: number;
+    basis: "enforced";
+  }>;
+  reconciliation: SpendReconciliation;
+}
+
 type Query = Record<string, string | number | undefined>;
 
 export class ControlClient {
@@ -79,11 +112,11 @@ export class ControlClient {
     this.transport = (...a: Parameters<typeof fetch>) => f(...a);
   }
 
-  private async req<T = unknown>(
+  private async request(
     method: string,
     path: string,
     opts: { query?: Query; body?: unknown; idempotencyKey?: string } = {}
-  ): Promise<T> {
+  ): Promise<any> {
     const url = new URL(this.base + path);
     for (const [k, v] of Object.entries(opts.query ?? {})) {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -103,7 +136,15 @@ export class ControlClient {
       const e = (json?.error ?? {}) as { code?: string; message?: string; request_id?: string };
       throw new ControlApiError(res.status, e.code ?? "error", e.message ?? res.statusText, e.request_id);
     }
-    return json.data as T;
+    return json;
+  }
+
+  private async req<T = unknown>(
+    method: string,
+    path: string,
+    opts: { query?: Query; body?: unknown; idempotencyKey?: string } = {}
+  ): Promise<T> {
+    return (await this.request(method, path, opts)).data as T;
   }
 
   readonly agents = {
@@ -143,7 +184,18 @@ export class ControlClient {
       status?: string;
       class?: "inference" | "housekeeping";
       limit?: number;
+      cursor?: string;
     }) => this.req<any[]>("GET", "/logs", { query: params }),
+    page: (params?: {
+      agent_id?: string;
+      status?: string;
+      class?: "inference" | "housekeeping";
+      limit?: number;
+      cursor?: string;
+    }) => this.request("GET", "/logs", { query: params }) as Promise<{
+      data: any[];
+      next_cursor: string | null;
+    }>,
   };
 
   readonly audit = {
@@ -184,7 +236,7 @@ export class ControlClient {
   };
 
   readonly spend = {
-    get: () => this.req<{ fleet: { spent_tokens: number; spent_microcents: number }; agents: any[] }>("GET", "/spend"),
+    get: () => this.req<SpendResponse>("GET", "/spend"),
   };
 
   readonly killSwitch = {

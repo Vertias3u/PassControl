@@ -33,6 +33,7 @@ declare
   t0 constant timestamptz := now() - interval '3 hours';
 
   definition record;
+  explanation record;
   folded record;
   rebuilt record;
   watermark timestamptz;
@@ -81,6 +82,16 @@ begin
   end if;
   if not has_function_privilege('service_role', 'public.rebuild_agent_spend(uuid)', 'execute') then
     raise exception 'service_role must execute rebuild_agent_spend';
+  end if;
+  if to_regprocedure('public.explain_workspace_spend(uuid)') is null then
+    raise exception 'explain_workspace_spend is missing — migration 0070 has not been applied';
+  end if;
+  if has_function_privilege('anon', 'public.explain_workspace_spend(uuid)', 'execute')
+     or has_function_privilege('authenticated', 'public.explain_workspace_spend(uuid)', 'execute') then
+    raise exception 'explain_workspace_spend must be service_role only';
+  end if;
+  if not has_function_privilege('service_role', 'public.explain_workspace_spend(uuid)', 'execute') then
+    raise exception 'service_role must execute explain_workspace_spend';
   end if;
   if has_function_privilege('anon', 'public.reconcile_agent_spend(int)', 'execute')
      or has_function_privilege('authenticated', 'public.reconcile_agent_spend(int)', 'execute') then
@@ -518,6 +529,51 @@ begin
         folded.spent_tokens, folded.spent_microcents;
     end if;
   end;
+
+  -- ── 12. The read-only explanation is exactly the rebuild ledger ──────────
+  -- This spans the fixtures above: confirmed calls, conservative unknown
+  -- usage, excluded statuses, an orphan adjustment, and adjustments shadowed
+  -- by a durable row. The public function must expose their arithmetic without
+  -- widening the spend statuses or counting an attempt twice.
+  select * into explanation from public.explain_workspace_spend(test_user);
+  if explanation.log_tokens <> (
+       select coalesce(sum(r.spend_tokens), 0)::bigint
+         from public.agent_log_spend_rows r
+         join public.agents a on a.id = r.agent_id
+        where a.user_id = test_user
+     )
+     or explanation.log_microcents <> (
+       select coalesce(sum(r.spend_microcents), 0)::bigint
+         from public.agent_log_spend_rows r
+         join public.agents a on a.id = r.agent_id
+        where a.user_id = test_user
+     ) then
+    raise exception 'workspace explanation log arithmetic diverged from agent_log_spend_rows';
+  end if;
+  if explanation.adjustment_tokens <> (
+       select coalesce(sum(x.tokens), 0)::bigint
+         from public.agent_spend_adjustments x
+         join public.agents a on a.id = x.agent_id
+        where a.user_id = test_user
+          and not exists (
+            select 1 from public.agent_log_spend_rows r where r.attempt_id = x.attempt_id
+          )
+     )
+     or explanation.adjustment_microcents <> (
+       select coalesce(sum(x.microcents), 0)::bigint
+         from public.agent_spend_adjustments x
+         join public.agents a on a.id = x.agent_id
+        where a.user_id = test_user
+          and not exists (
+            select 1 from public.agent_log_spend_rows r where r.attempt_id = x.attempt_id
+          )
+     ) then
+    raise exception 'workspace explanation adjustment precedence diverged from rebuild_agent_spend';
+  end if;
+  if explanation.attributable_tokens <> explanation.log_tokens + explanation.adjustment_tokens
+     or explanation.attributable_microcents <> explanation.log_microcents + explanation.adjustment_microcents then
+    raise exception 'workspace explanation equation does not add up';
+  end if;
 
   raise notice 'Budget accounting invariants: PASS';
 end;

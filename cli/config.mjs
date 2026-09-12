@@ -8,6 +8,7 @@ import {
   keyStorageDeclaration,
   resolvePassportKey,
 } from "./passport-key-store.mjs";
+import { defaultClientModelForProvider } from "./integration-defaults.mjs";
 
 export const CONFIG_FILE = ".passcontrol";
 
@@ -84,23 +85,7 @@ function paint(code, value) {
 }
 
 export function defaultModelForProvider(provider) {
-  switch (provider) {
-    case "openai":
-      return "gpt-4o-mini";
-    case "groq":
-      return "llama-3.1-8b-instant";
-    case "mistral":
-      return "mistral-small-latest";
-    case "together":
-      return "openai/gpt-oss-20b";
-    case "deepseek":
-      return "deepseek-chat";
-    case "gemini":
-      return "gemini-2.5-flash";
-    case "anthropic":
-    default:
-      return "claude-haiku-4-5";
-  }
+  return defaultClientModelForProvider(provider);
 }
 
 function unquote(value) {
@@ -330,6 +315,36 @@ export function mergeConfigFile(file, patch) {
     // patch alone is exactly right — there is nothing to preserve.
   }
   writeConfigFile(file, { ...existing, ...patch });
+}
+
+/** Merge a partial config through a same-directory temporary file and rename.
+ * Credential/gateway transitions use this so interruption cannot leave a
+ * half-written dotenv file that points a credential at the wrong origin. */
+export function mergeConfigFileAtomic(file, patch) {
+  let existing = {};
+  try {
+    existing = readConfigFile(file);
+  } catch {
+    // First global configuration: the patch is the complete known state.
+  }
+  const directory = path.dirname(file);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = path.join(
+    directory,
+    `.config-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`
+  );
+  try {
+    writeConfigFile(temporary, { ...existing, ...patch });
+    fs.renameSync(temporary, file);
+    try {
+      fs.chmodSync(file, 0o600);
+      fs.chmodSync(directory, 0o700);
+    } catch {
+      // Same portability rule as writeConfigFile.
+    }
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
 }
 
 export function heading(message = "") {

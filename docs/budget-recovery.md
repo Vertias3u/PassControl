@@ -27,6 +27,13 @@ and it leaves a row in `admin_audit`.
 
 ## Situation 1 — `503 blocked_budget_state`
 
+The Control Tower's **Settled budget charges** card is the all-time admission counter. Its Spend
+section explains that counter as durable call-attributed charges plus separate operator
+adjustments plus any visible difference. Open Redis reservations are displayed alongside as
+**not yet charged** and are never added to settled spend. A failed durable or Redis read is shown
+as unavailable, not zero; Departures can load older call rows without pretending adjustments are
+gateway calls.
+
 ### What the agent sees
 
 ```json

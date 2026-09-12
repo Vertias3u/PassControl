@@ -10,6 +10,7 @@ import { DeparturesBoard } from "@/components/DeparturesBoard";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { redirect } from "next/navigation";
 import { SpendChart } from "@/components/SpendChart";
+import { SpendReconciliation } from "@/components/SpendReconciliation";
 import { PassportIssuanceModal } from "@/components/PassportIssuanceModal";
 import { DirectAgentConnect } from "@/components/DirectAgentConnect";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
@@ -38,6 +39,8 @@ import {
   type DeclaredKeyStorageView,
 } from "@/lib/passport-key-storage";
 import { readKeyCustodyExpectation } from "@/lib/key-custody-expectation";
+import { serviceClient } from "@/lib/supabase";
+import { buildSpendReconciliation } from "@/lib/spend-reconciliation";
 // The shipped CLI is plain ESM and intentionally has no TypeScript declaration.
 // @ts-expect-error Import the preset source of truth on the server only.
 import { SIDECAR_PRESETS } from "@/cli/presets.mjs";
@@ -188,7 +191,13 @@ export default async function ControlTowerPage() {
   // Passport agents only: a Direct Agent Key has no passport private key, so
   // asking where it keeps one would turn a question nobody asked into an
   // unanswered one. Those rows are told apart in the table by passport_pubkey.
-  const keyCustody = await buildKeyCustodyViews(fleetAgents);
+  const [keyCustody, spendReconciliation] = await Promise.all([
+    buildKeyCustodyViews(fleetAgents),
+    // `serviceClient` uncalled on purpose: the builder constructs it inside its
+    // own failure domain, so an absent service-role env reads as unavailable
+    // instead of throwing this page away. See lib/spend-reconciliation.ts.
+    buildSpendReconciliation(serviceClient, user.id, agentList),
+  ]);
   const displayLogs = attentionLogRows.slice(0, 100);
   const attentionQueue = buildFleetAttention(agentList, attentionLogRows);
   const blockedCalls = displayLogs.filter((l) => l.status.startsWith("blocked")).length;
@@ -307,6 +316,7 @@ export default async function ControlTowerPage() {
             description="A live window of up to 200 loaded call records. The figure charged against each agent's cap comes from its own counter, and includes a conservative estimate for any call PassControl could not price."
           />
           <div className="pc-section__body">
+          <SpendReconciliation value={spendReconciliation} />
           <SpendChart userId={user.id} initialLogs={displayLogs} logsAvailable={logsAvailable} />
           </div>
         </section>

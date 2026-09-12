@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PassControl Control-Plane API
-  version: "0.9.2"
+  version: "0.9.3"
   description: >
     Developer API for managing a PassControl agent fleet. Authenticated with a
     `pc_` API key (Authorization: Bearer). All access is tenant-isolated to the
@@ -172,6 +172,7 @@ paths:
         - { $ref: "#/components/parameters/Status" }
         - { $ref: "#/components/parameters/CallClass" }
         - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
         "200":
           description: Recent gateway calls.
@@ -179,7 +180,9 @@ paths:
             application/json:
               schema:
                 type: object
-                properties: { data: { type: array, items: { $ref: "#/components/schemas/Log" } } }
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/Log" } }
+                  next_cursor: { type: [string, "null"] }
 
   /audit:
     get:
@@ -317,6 +320,11 @@ components:
         Applied to the query before any `class` filter, so a filtered page can
         return fewer rows than the limit.
       schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque keyset cursor returned as next_cursor by the previous page.
+      schema: { type: string }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -430,6 +438,8 @@ components:
         input_tokens: { type: [integer, "null"] }
         output_tokens: { type: [integer, "null"] }
         cost_microcents: { type: [integer, "null"] }
+        enforced_tokens: { type: [integer, "null"] }
+        enforced_microcents: { type: [integer, "null"] }
         status: { type: string }
         latency_ms: { type: [integer, "null"] }
         created_at: { type: string, format: date-time }
@@ -447,7 +457,10 @@ components:
       properties:
         fleet:
           type: object
-          properties: { spent_tokens: { type: integer }, spent_microcents: { type: integer } }
+          properties:
+            spent_tokens: { type: integer }
+            spent_microcents: { type: integer }
+            basis: { type: string, const: enforced }
         agents:
           type: array
           items:
@@ -457,6 +470,30 @@ components:
               name: { type: string }
               spent_tokens: { type: integer }
               spent_microcents: { type: integer }
+              basis: { type: string, const: enforced }
+        reconciliation:
+          $ref: "#/components/schemas/SpendReconciliation"
+    SpendReconciliation:
+      type: object
+      properties:
+        state: { type: string, enum: [reconciled, pending, unavailable] }
+        settled_tokens: { type: integer }
+        settled_microcents: { type: integer }
+        log_attributed_tokens: { type: [integer, "null"] }
+        log_attributed_microcents: { type: [integer, "null"] }
+        adjustment_tokens: { type: [integer, "null"] }
+        adjustment_microcents: { type: [integer, "null"] }
+        attributable_tokens: { type: [integer, "null"] }
+        attributable_microcents: { type: [integer, "null"] }
+        difference_tokens: { type: [integer, "null"] }
+        difference_microcents: { type: [integer, "null"] }
+        contributing_logs: { type: [integer, "null"] }
+        contributing_adjustments: { type: [integer, "null"] }
+        last_reconciled_at: { type: [string, "null"], format: date-time }
+        holds_state: { type: string, enum: [available, unavailable] }
+        open_reserved_tokens: { type: [integer, "null"] }
+        open_reserved_microcents: { type: [integer, "null"] }
+        open_holds: { type: [integer, "null"] }
     KillState:
       type: object
       properties:

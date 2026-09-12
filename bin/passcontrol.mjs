@@ -36,6 +36,7 @@ import {
   formatProxyError,
   globalConfigPath,
   mergeConfigFile,
+  mergeConfigFileAtomic,
   muted,
   heading,
   ok,
@@ -81,6 +82,7 @@ import {
 } from "../cli/instance-key.mjs";
 import { FAILURE_REASONS, verifyAgentToken, verifyReceipt, verifyStatement } from "../cli/verify.mjs";
 import { compareProtocolSets } from "../cli/protocols.mjs";
+import { defaultAllowedModelForProvider } from "../cli/integration-defaults.mjs";
 import {
   PASSPORT_KEY_STORAGE_OS,
   createPassportCredentialStore,
@@ -114,6 +116,7 @@ const PUBLIC_REPO_URL = "https://github.com/Vertias3u/PassControl.git";
 // origin, and keeping two copies is how they stop being the same origin.
 const HOSTED_DEMO_URL = CLOUD_GATEWAY;
 const LOCAL_DASHBOARD_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const LOCAL_DASHBOARD_ORIGIN = "http://localhost:3000";
 const LOCAL_STACK_PORTS = [54321, 54322, 54324, 54327, 8079];
 // The local stack (Supabase + Redis + dashboard) lives in a PassControl repo
 // checkout — NOT in the installed CLI package (which ships only bin/ + cli/).
@@ -185,6 +188,8 @@ ${heading("Operate")}
   ${cmd} open                     open the Control Tower in a browser
   ${cmd} logout [--revoke-agent]  revoke this machine's key and clear its credentials
   ${cmd} init [--global]          configure by hand, without a browser
+  ${cmd} passport import --global --gateway <origin> --id <passport-id> [--replace]
+                                 securely import a dashboard-issued passport
 
 ${heading("Manage")}
   ${cmd} agent list [--json]      list agents
@@ -228,11 +233,13 @@ ${heading("Trust")}
 ${heading("Self-host — run your own gateway")}
   Clones the app and runs Docker + Supabase + Redis here. You operate it, and
   your instance signs its own receipts — they verify against your JWKS, not ours.
-  ${cmd} setup [--no-open] [--port-offset N] [--app-dir DIR]
+  ${cmd} setup [--no-open] [--port-offset N] [--app-dir DIR] [--forget-active-credentials]
                                  clone the app, start Docker + Supabase + Redis
-  ${cmd} start [--dashboard-only] start the whole local stack (clones the app if missing)
+  ${cmd} start [--dashboard-only] [--forget-active-credentials]
+                                 start the whole local stack (clones the app if missing)
   ${cmd} stop [--dashboard-only]  stop the whole local stack (dashboard + Supabase + Redis)
-  ${cmd} restart                  restart the CLI-managed local dashboard
+  ${cmd} restart [--forget-active-credentials]
+                                 restart the CLI-managed local dashboard
   ${cmd} local-logs [--follow]    show local dashboard logs
   ${cmd} reset --local --confirm RESET
                                  destroy and recreate the local stack
@@ -297,13 +304,21 @@ async function fetchWithTimeout(url, init = {}, timeoutMs = 1200) {
   }
 }
 
-async function gatewayStatus(noNetwork = false) {
+async function gatewayStatus(noNetwork = false, gateway = config.gateway) {
   if (noNetwork) return { label: "not checked", ok: null };
-  const origin = probeGatewayOrigin(config);
+  const origin = probeGatewayOrigin({ gateway });
   if (!origin) return { label: "invalid configuration", ok: false };
   try {
-    const res = await fetchWithTimeout(origin, { method: "GET" });
-    return { label: res.ok ? `online (${res.status})` : `unhealthy (${res.status})`, ok: res.ok };
+    const res = await fetchWithTimeout(`${origin}/api/version`, {
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    if (!res.ok) return { label: `unhealthy (${res.status})`, ok: false };
+    const body = await res.json().catch(() => null);
+    const version = typeof body?.version === "string" && body.version.trim() ? body.version.trim() : null;
+    return version
+      ? { label: `online (${res.status}, PassControl ${version})`, ok: true, version }
+      : { label: "unhealthy (not a PassControl version response)", ok: false };
   } catch {
     return { label: "offline or unreachable", ok: false };
   }
@@ -311,11 +326,13 @@ async function gatewayStatus(noNetwork = false) {
 
 async function printCockpit({ noNetwork = false, json = false } = {}) {
   const gateway = await gatewayStatus(noNetwork);
+  const local = managedDashboardTarget();
+  const localGateway = await gatewayStatus(noNetwork, local.url);
   const passportSecret = config.passportSecret;
   const passportStorage = config.passportStorage;
   const passportConfigured = Boolean(config.passportId && passportSecret);
   const adminConfigured = Boolean(config.apiKey);
-  const dashboard = dashboardStatusLabel(gateway, noNetwork);
+  const dashboard = dashboardStatusLabel(localGateway, noNetwork, local);
   const app = appRootLabel();
   const configFile = configPathLabel(config.sources);
   // This is deliberately credential-gated. Status remains useful to an agent
@@ -327,7 +344,7 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
     console.log(JSON.stringify({
       version: CLI_VERSION,
       gateway: { url: config.gateway, state: gateway.label, healthy: gateway.ok },
-      dashboard: { state: dashboard },
+      dashboard: { url: local.url, state: dashboard, healthy: localGateway.ok },
       app: { state: app },
       config: {
         source: configFile,
@@ -346,7 +363,7 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
 
   console.log(`${heading("PassControl")}\n`);
   console.log(formatLabel("Gateway", `${gateway.label}  ${config.gateway}`));
-  console.log(formatLabel("Dashboard", dashboard));
+  console.log(formatLabel("Dashboard", `${dashboard}  ${local.url}`));
   console.log(formatLabel("App", app));
   console.log(formatLabel("Config", configFile));
   console.log(formatLabel("Provider", config.provider));
@@ -653,6 +670,40 @@ async function promptLine(question, fallback) {
   }
 }
 
+async function readHiddenLine(question) {
+  if (!process.stdin.isTTY) {
+    let value = "";
+    for await (const chunk of process.stdin) value += chunk;
+    return value.replace(/\r?\n$/u, "").trim();
+  }
+  if (typeof process.stdin.setRawMode !== "function") {
+    throw new Error("This terminal cannot hide secret input. Redirect the secret on stdin from a private file or secret manager.");
+  }
+  process.stdout.write(question);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  return await new Promise((resolve, reject) => {
+    let value = "";
+    const finish = (error = null) => {
+      process.stdin.off("data", onData);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write("\n");
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const onData = (chunk) => {
+      for (const byte of Buffer.from(chunk)) {
+        if (byte === 3) return finish(new Error("Passport import cancelled."));
+        if (byte === 10 || byte === 13) return finish();
+        if (byte === 8 || byte === 127) value = value.slice(0, -1);
+        else value += String.fromCharCode(byte);
+      }
+    };
+    process.stdin.on("data", onData);
+  });
+}
+
 /**
  * Yes/no prompt. Enter means YES unless `{ default: false }` is passed.
  *
@@ -665,6 +716,123 @@ async function confirmYes(question, { default: fallback = true } = {}) {
   const answer = (await promptLine(question, "")).toLowerCase();
   if (answer === "") return fallback;
   return answer === "y" || answer === "yes";
+}
+
+const GATEWAY_BOUND_CONFIG_KEYS = [
+  "PASSCONTROL_GATEWAY",
+  "PASSPORT_ID",
+  "PASSPORT_SECRET",
+  "PASSPORT_KEY_STORAGE",
+  "PASSCONTROL_API_KEY",
+];
+
+function sameOrigin(left, right) {
+  try {
+    return bareGatewayOrigin(left) === bareGatewayOrigin(right);
+  } catch {
+    return false;
+  }
+}
+
+/** Decide a local-mode transition before starting any service. The decision is
+ * committed only after the local PassControl endpoint is healthy. */
+async function prepareLocalActivation(target, opts = {}) {
+  const shellOverride = GATEWAY_BOUND_CONFIG_KEYS.find((key) => operatorEnv(key) !== undefined);
+  if (shellOverride) {
+    throw new Error(
+      `${shellOverride} comes from the operator environment, so a global self-host configuration cannot replace it. Unset it before running this command.`
+    );
+  }
+
+  const project = config.sources.find((source) =>
+    source.type === "project" && GATEWAY_BOUND_CONFIG_KEYS.some((key) => Object.hasOwn(source.values, key))
+  );
+  if (project) {
+    throw new Error(
+      `${project.path} overrides gateway-bound configuration. PassControl will not rewrite a project file during a machine-wide self-host switch. Remove those lines or run the command outside that project.`
+    );
+  }
+
+  const global = config.sources.find((source) => source.type === "global");
+  const values = global?.values ?? {};
+  const switching = !sameOrigin(config.gateway, target.url);
+  const passportId = String(values.PASSPORT_ID ?? "").trim();
+  const storageMarker = String(values.PASSPORT_KEY_STORAGE ?? "").trim();
+  const hasCredentials = switching && Boolean(
+    passportId ||
+    String(values.PASSPORT_SECRET ?? "").trim() ||
+    storageMarker ||
+    String(values.PASSCONTROL_API_KEY ?? "").trim()
+  );
+
+  if (hasCredentials && opts.forgetActiveCredentials !== true) {
+    const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+    if (!interactive) {
+      throw new Error(
+        "Switching this machine to self-host would forget gateway-bound credentials. Re-run interactively to confirm, or pass --forget-active-credentials. --yes never authorises credential deletion."
+      );
+    }
+    warn(`The current credentials are bound to ${config.gateway}.`);
+    warn("Forgetting them locally does not revoke the remote control key or Passport agent.");
+    const confirmed = await confirmYes(
+      `Forget the local credentials and switch this machine to ${target.url}? [y/N] `,
+      { default: false }
+    );
+    if (!confirmed) throw new Error("Self-host switch cancelled; no services or credentials were changed.");
+  }
+
+  return {
+    target,
+    switching,
+    hasCredentials,
+    passportId,
+    storageMarker,
+    previousGateway: config.gateway,
+    globalPath: globalConfigPath(),
+  };
+}
+
+function restoreFileAtomically(file, contents) {
+  const directory = path.dirname(file);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = path.join(directory, `.restore-${process.pid}-${Date.now()}.tmp`);
+  try {
+    fs.writeFileSync(temporary, contents, { mode: 0o600 });
+    fs.renameSync(temporary, file);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+function commitLocalActivation(prepared) {
+  if (!prepared.switching) return;
+  const existed = fs.existsSync(prepared.globalPath);
+  const previous = existed ? fs.readFileSync(prepared.globalPath, "utf8") : null;
+  mergeConfigFileAtomic(prepared.globalPath, {
+    PASSCONTROL_GATEWAY: prepared.target.url,
+    PASSPORT_ID: "",
+    PASSPORT_SECRET: "",
+    PASSPORT_KEY_STORAGE: "",
+    PASSCONTROL_API_KEY: "",
+  });
+
+  if (prepared.storageMarker === PASSPORT_KEY_STORAGE_OS && prepared.passportId) {
+    const removed = createPassportCredentialStore().delete(prepared.passportId);
+    if (!removed.ok) {
+      if (previous === null) fs.rmSync(prepared.globalPath, { force: true });
+      else restoreFileAtomically(prepared.globalPath, previous);
+      throw new Error(
+        `${removed.message}. The gateway switch was rolled back because the old Passport key could not be removed from the OS credential store.`
+      );
+    }
+  }
+
+  ok(`active gateway set to ${prepared.target.url}`);
+  if (prepared.hasCredentials) {
+    warn(`Credentials for ${prepared.previousGateway} were forgotten locally, not revoked remotely.`);
+    if (prepared.passportId) warn(`Remote Passport ID that may still need cleanup: ${prepared.passportId}`);
+    warn("Return to the previous gateway with an authorised machine to revoke any remaining remote identity.");
+  }
 }
 
 // Resolve the stack checkout, cloning the public repo on demand when the CLI is
@@ -830,25 +998,62 @@ async function startLocalServices() {
   }
 }
 
-function localDashboard() {
+function parseLocalDashboard(value, label = "PASSCONTROL_GATEWAY") {
   let url;
   try {
-    url = new URL(config.gateway);
+    url = new URL(value);
   } catch {
-    throw new Error(`Invalid PASSCONTROL_GATEWAY URL: ${config.gateway}`);
+    throw new Error(`Invalid ${label} URL.`);
   }
 
   if (url.protocol !== "http:" || !LOCAL_DASHBOARD_HOSTS.has(url.hostname)) {
     throw new Error(
-      `passcontrol only manages local gateways (http://localhost or 127.0.0.1); configured gateway is ${config.gateway}.`
+      `passcontrol only manages local HTTP gateways on localhost, 127.0.0.1 or [::1].`
     );
   }
-
-  const port = Number(url.port || 80);
+  if (!url.port) {
+    throw new Error(
+      `${label} is a local URL without an explicit port. Use ${LOCAL_DASHBOARD_ORIGIN}, or specify the port of the local dashboard you intend PassControl to manage.`
+    );
+  }
+  const port = Number(url.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid local dashboard port in PASSCONTROL_GATEWAY: ${config.gateway}`);
+    throw new Error(`Invalid local dashboard port in ${label}.`);
   }
   return { url: url.toString().replace(/\/$/, ""), port };
+}
+
+function canonicalLocalDashboard() {
+  return parseLocalDashboard(LOCAL_DASHBOARD_ORIGIN, "the canonical local dashboard");
+}
+
+/** Resolve the local process target independently from the active Cloud/API
+ * gateway. A running state file wins, then an explicit valid local gateway;
+ * remote active config falls back to the canonical local dashboard. */
+function managedDashboardTarget({ forceCanonical = false } = {}) {
+  if (!forceCanonical) {
+    const state = readDashboardState();
+    if (state?.gateway) {
+      try {
+        return { ...parseLocalDashboard(state.gateway, "saved dashboard state"), state };
+      } catch {
+        removeDashboardState();
+      }
+    }
+    let parsed = null;
+    try {
+      parsed = new URL(config.gateway);
+    } catch {
+      // The active gateway is reported separately; local management still has
+      // a deterministic target.
+    }
+    if (parsed?.protocol === "http:" && LOCAL_DASHBOARD_HOSTS.has(parsed.hostname)) {
+      // Deliberately outside the URL parse catch: a local URL without a port is
+      // a configuration error, not a reason to silently choose another port.
+      return parseLocalDashboard(config.gateway);
+    }
+  }
+  return canonicalLocalDashboard();
 }
 
 function readDashboardState() {
@@ -878,16 +1083,11 @@ function runningManagedDashboard() {
   }
 }
 
-function dashboardStatusLabel(gateway, noNetwork) {
-  try {
-    localDashboard();
-  } catch {
-    return "remote gateway (not managed locally)";
-  }
+function dashboardStatusLabel(gateway, noNetwork, target = managedDashboardTarget()) {
   if (noNetwork) return "local server not checked";
   const managed = runningManagedDashboard();
   if (managed) return gateway.ok ? `CLI-managed (PID ${managed.pid})` : `CLI-managed, unhealthy (PID ${managed.pid})`;
-  return gateway.ok ? "online (not managed by CLI)" : "stopped";
+  return gateway.ok ? `online at ${target.url} (not managed by CLI)` : `stopped (${target.url})`;
 }
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -921,9 +1121,9 @@ async function waitForPortRelease(port, timeoutMs = 5000) {
  * caller (an already-running dashboard we did not spawn) knows the pid but the
  * budget logic is the same either way.
  */
-async function waitForGateway({ port = null, pid = null } = {}) {
+async function waitForGateway({ gateway = LOCAL_DASHBOARD_ORIGIN, port = null, pid = null } = {}) {
   return awaitGateway({
-    probeGateway: async () => (await gatewayStatus(false)).ok,
+    probeGateway: async () => (await gatewayStatus(false, gateway)).ok,
     probePort: port ? () => portIsListening(port) : null,
     processAlive: pid
       ? () => {
@@ -1014,7 +1214,7 @@ async function runLocalPrerequisiteChecks({ offset = 0, report = false, enforce 
 // a Control Tower talking to a stopped database.
 async function startDashboard(opts = {}) {
   await ensureAppRoot({ clone: true, appDir: opts.appDir, yes: opts.yes });
-  const dashboard = localDashboard();
+  const dashboard = opts.dashboardTarget ?? managedDashboardTarget({ forceCanonical: opts.forceCanonical === true });
 
   const envFile = path.join(appRoot, ".env.docker");
   if (!fs.existsSync(envFile)) {
@@ -1024,7 +1224,7 @@ async function startDashboard(opts = {}) {
   if (opts.dashboardOnly) step("Leaving Supabase and Redis alone (--dashboard-only).");
   else await startLocalServices();
 
-  if ((await gatewayStatus(false)).ok) {
+  if ((await gatewayStatus(false, dashboard.url)).ok) {
     ok(`dashboard already online at ${dashboard.url}`);
     return dashboard;
   }
@@ -1032,7 +1232,7 @@ async function startDashboard(opts = {}) {
   const running = runningManagedDashboard();
   if (running) {
     step(`dashboard is still starting (PID ${running.pid}); waiting for ${dashboard.url}…`);
-    if (await waitForGateway({ port: dashboard.port, pid: running.pid })) {
+    if (await waitForGateway({ gateway: dashboard.url, port: dashboard.port, pid: running.pid })) {
       ok(`dashboard online at ${dashboard.url}`);
       return dashboard;
     }
@@ -1044,12 +1244,9 @@ async function startDashboard(opts = {}) {
   fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
   const logFd = fs.openSync(logPath, "a", 0o600);
   // `node scripts/dev-docker.mjs` rather than `npm run dev:docker`: identical
-  // work (that is all the npm script is now), minus two wrapper processes. The
-  // pid recorded below is then the dev server itself, which matters because
-  // stopDashboard signals a single pid on Windows rather than a process group —
-  // through npm.cmd it would kill the wrapper and leave the server holding the
-  // port. It also keeps the one path that runs daily clear of the Windows
-  // batch-file spawn restriction that batchFileShell exists to work around.
+  // work (that is all the npm script is now), minus npm/cmd wrappers. Next's CLI
+  // still forks its HTTP worker, so this pid is deliberately the SUPERVISOR.
+  // Unix stops its process group; Windows uses taskkill /T for the whole tree.
   const devServer = path.join(appRoot, "scripts", "dev-docker.mjs");
   if (!fs.existsSync(devServer)) {
     throw new Error(`${devServer} is missing — this checkout is incomplete or predates the local-stack launcher. Re-clone, or run \`npm run dev:docker\` from ${appRoot} by hand.`);
@@ -1069,7 +1266,8 @@ async function startDashboard(opts = {}) {
   );
 
   step(`starting local dashboard at ${dashboard.url}…`);
-  if (!await waitForGateway({ port: dashboard.port, pid: child.pid })) {
+  if (!await waitForGateway({ gateway: dashboard.url, port: dashboard.port, pid: child.pid })) {
+    removeDashboardState();
     throw new Error(`Dashboard did not become ready. See ${logPath}.`);
   }
   ok(`dashboard online at ${dashboard.url}`);
@@ -1084,8 +1282,13 @@ async function stopDashboard() {
   }
 
   try {
-    if (process.platform === "win32") process.kill(state.pid, "SIGTERM");
-    else process.kill(-state.pid, "SIGTERM");
+    if (process.platform === "win32") {
+      execFileSync("taskkill.exe", ["/PID", String(state.pid), "/T"], {
+        encoding: "utf8",
+        timeout: 10_000,
+        windowsHide: true,
+      });
+    } else process.kill(-state.pid, "SIGTERM");
   } catch (error) {
     if (error.code === "ESRCH") {
       removeDashboardState();
@@ -1096,7 +1299,13 @@ async function stopDashboard() {
   }
 
   if (!await waitForPortRelease(state.port)) {
-    if (process.platform === "win32") process.kill(state.pid, "SIGKILL");
+    if (process.platform === "win32") {
+      execFileSync("taskkill.exe", ["/PID", String(state.pid), "/T", "/F"], {
+        encoding: "utf8",
+        timeout: 10_000,
+        windowsHide: true,
+      });
+    }
     else process.kill(-state.pid, "SIGKILL");
     if (!await waitForPortRelease(state.port)) {
       throw new Error(`Dashboard process group ${state.pid} did not release port ${state.port}.`);
@@ -1169,16 +1378,32 @@ async function stopLocalService(label, command, args, cwd, env = process.env) {
 }
 
 async function restartDashboard(opts = {}) {
-  localDashboard();
+  const target = opts.dashboardTarget ?? managedDashboardTarget();
   const managed = runningManagedDashboard();
   if (!managed) {
-    if ((await gatewayStatus(false)).ok) {
+    if ((await gatewayStatus(false, target.url)).ok) {
       throw new Error("Dashboard is online but was not started by passcontrol; stop it manually before restarting.");
     }
-    return startDashboard(opts);
+    return startDashboard({ ...opts, dashboardTarget: target });
   }
   await stopDashboard();
-  return startDashboard(opts);
+  return startDashboard({ ...opts, dashboardTarget: target });
+}
+
+async function startLocalCommand(opts = {}) {
+  const target = managedDashboardTarget();
+  const activation = await prepareLocalActivation(target, opts);
+  const dashboard = await startDashboard({ ...opts, dashboardTarget: target });
+  commitLocalActivation(activation);
+  return dashboard;
+}
+
+async function restartLocalCommand(opts = {}) {
+  const target = managedDashboardTarget();
+  const activation = await prepareLocalActivation(target, opts);
+  const dashboard = await restartDashboard({ ...opts, dashboardTarget: target });
+  commitLocalActivation(activation);
+  return dashboard;
 }
 
 async function localLogsCommand(opts = {}) {
@@ -1260,7 +1485,7 @@ async function resetLocalStack(opts = {}) {
   if (opts.local !== true) {
     throw new Error("Usage: passcontrol reset --local --confirm RESET");
   }
-  localDashboard();
+  managedDashboardTarget();
   if (opts.confirm !== "RESET") {
     throw new Error("reset refuses to delete local data without `--confirm RESET`.");
   }
@@ -1279,7 +1504,8 @@ async function resetLocalStack(opts = {}) {
 }
 
 async function setupLocal(opts = {}) {
-  const dashboard = localDashboard();
+  const dashboard = canonicalLocalDashboard();
+  const activation = await prepareLocalActivation(dashboard, opts);
   const offset = opts.portOffset === undefined ? 0 : Number(opts.portOffset);
   if (!Number.isInteger(offset) || offset < 0 || offset > 10000) {
     throw new Error("--port-offset must be an integer from 0 to 10000.");
@@ -1294,8 +1520,9 @@ async function setupLocal(opts = {}) {
   // dev:stack has just brought Supabase and Redis up (and would have exited
   // non-zero if it hadn't), so skip start's own service pass rather than print
   // two "already running" lines under a banner that just said the stack is up.
-  await startDashboard({ ...opts, dashboardOnly: true });
-  if (!opts.noOpen) await openDashboard(opts);
+  await startDashboard({ ...opts, dashboardOnly: true, dashboardTarget: dashboard });
+  commitLocalActivation(activation);
+  if (!opts.noOpen) openUrl(dashboard.url);
   console.log(`\n${formatLabel("Local dashboard", dashboard.url, 19)}`);
   console.log(formatLabel("Login", "the account you created during setup", 19));
   step("Add a non-critical provider key, issue a passport, then run `passcontrol doctor --deep`.");
@@ -1549,7 +1776,7 @@ async function agentCommand(rest, opts) {
       if (!name) throw new Error("Usage: passcontrol agent create <name>");
       const provider = String(opts.provider || config.provider);
       assertProvider(provider);
-      const scopeModel = String(opts.scope || (provider === "anthropic" ? "claude-*" : activeModel(provider, opts)));
+      const scopeModel = String(opts.scope || defaultAllowedModelForProvider(provider));
       const priv = ed25519.utils.randomPrivateKey();
       const pub = ed25519.getPublicKey(priv);
       const passportId = b64url(pub);
@@ -2153,7 +2380,7 @@ async function doctorCommand(opts = {}) {
     console.log("");
     let dashboard;
     try {
-      dashboard = localDashboard();
+      dashboard = managedDashboardTarget();
     } catch {
       step("--fix manages only a local dashboard; remote gateways are not changed.");
     }
@@ -2491,6 +2718,91 @@ async function keyCommand(rest, opts = {}) {
   step(`Removed PASSPORT_SECRET from ${file.path} only after verified readback.`);
 }
 
+function isEncodedEd25519Key(value) {
+  return /^[A-Za-z0-9_-]{43}$/u.test(value) && fromB64url(value).length === 32;
+}
+
+async function passportCommand(rest, opts = {}) {
+  const subcommand = rest[0];
+  if (subcommand !== "import" || rest.length !== 1) {
+    throw new Error(
+      `Usage: ${cliCommand("passport import --global --gateway <origin> --id <passport-id> [--replace]")}`
+    );
+  }
+  if (opts.global !== true) {
+    throw new Error("Passport import is machine-wide for sidecar and MCP use; pass --global explicitly.");
+  }
+  if (typeof opts.gateway !== "string" || typeof opts.id !== "string") {
+    throw new Error(
+      `Usage: ${cliCommand("passport import --global --gateway <origin> --id <passport-id> [--replace]")}`
+    );
+  }
+
+  const gateway = bareGatewayOrigin(opts.gateway, "--gateway");
+  const passportId = opts.id.trim();
+  if (!isEncodedEd25519Key(passportId)) {
+    throw new Error("--id must be a 32-byte Ed25519 public key encoded as unpadded base64url.");
+  }
+
+  const project = config.sources.find((source) =>
+    source.type === "project" && GATEWAY_BOUND_CONFIG_KEYS.some((key) => Object.hasOwn(source.values, key))
+  );
+  const shellOverride = GATEWAY_BOUND_CONFIG_KEYS.find((key) => operatorEnv(key) !== undefined);
+  if (project) warn(`${project.path} contains gateway-bound values and will shadow this global import.`);
+  if (shellOverride) warn(`${shellOverride} comes from the shell and will shadow this global import.`);
+
+  const target = globalConfigPath();
+  const global = config.sources.find((source) => source.type === "global");
+  const oldId = String(global?.values?.PASSPORT_ID ?? "").trim();
+  const oldSecret = String(global?.values?.PASSPORT_SECRET ?? "").trim();
+  const oldStorage = String(global?.values?.PASSPORT_KEY_STORAGE ?? "").trim();
+  if ((oldId || oldSecret || oldStorage) && opts.replace !== true) {
+    throw new Error(
+      `A global Passport is already configured. Refusing to replace an unrecoverable key; re-run with --replace after verifying the old identity can be retired.`
+    );
+  }
+
+  const secret = await readHiddenLine("Paste the Passport secret (input hidden): ");
+  if (!isEncodedEd25519Key(secret)) {
+    throw new Error("Passport secret must be a 32-byte Ed25519 private key encoded as unpadded base64url.");
+  }
+  const derived = b64url(ed25519.getPublicKey(fromB64url(secret)));
+  if (derived !== passportId) {
+    throw new Error("Passport secret does not match the supplied Passport ID. Nothing was stored.");
+  }
+
+  const store = createPassportCredentialStore();
+  const written = store.write(passportId, secret);
+  if (!written.ok) throw new Error(`${written.reason}. Nothing was written to the PassControl config.`);
+  const readback = store.read(passportId);
+  if (!readback.ok || readback.secret !== secret) {
+    store.delete(passportId);
+    throw new Error(`${store.name} did not return the key that was just stored. The new item was removed and config was not changed.`);
+  }
+
+  try {
+    mergeConfigFileAtomic(target, {
+      PASSCONTROL_GATEWAY: gateway,
+      PASSPORT_ID: passportId,
+      PASSPORT_SECRET: "",
+      PASSPORT_KEY_STORAGE: PASSPORT_KEY_STORAGE_OS,
+    });
+  } catch (error) {
+    store.delete(passportId);
+    throw error;
+  }
+
+  if (oldStorage === PASSPORT_KEY_STORAGE_OS && oldId && oldId !== passportId) {
+    const removed = store.delete(oldId);
+    if (!removed.ok) {
+      warn(`The previous Passport key could not be confirmed removed from ${store.name}; the new import is active, but the old OS item needs manual cleanup.`);
+    }
+  }
+  ok(`Passport ${passportId} imported into ${store.name}.`);
+  step(`Global gateway: ${gateway}`);
+  step("The private key was verified and never written to the config file or command line.");
+}
+
 async function openDashboard(opts = {}) {
   let parsed;
   try {
@@ -2499,7 +2811,7 @@ async function openDashboard(opts = {}) {
     throw new Error(`Invalid PASSCONTROL_GATEWAY URL: ${config.gateway}`);
   }
   const url = parsed.protocol === "http:" && LOCAL_DASHBOARD_HOSTS.has(parsed.hostname)
-    ? (await startDashboard(opts)).url
+    ? (await startDashboard({ ...opts, dashboardTarget: parseLocalDashboard(config.gateway) })).url
     : config.gateway;
   openUrl(url);
 }
@@ -3140,13 +3452,13 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
       await doctorCommand(opts);
       break;
     case "start":
-      await startDashboard(opts);
+      await startLocalCommand(opts);
       break;
     case "stop":
       await stopCommand(opts);
       break;
     case "restart":
-      await restartDashboard(opts);
+      await restartLocalCommand(opts);
       break;
     case "local-logs":
       await localLogsCommand(opts);
@@ -3218,6 +3530,9 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
       break;
     case "keygen":
       await keygenCommand(commandRest, opts);
+      break;
+    case "passport":
+      await passportCommand(commandRest, opts);
       break;
     case "key":
       await keyCommand(commandRest, opts);

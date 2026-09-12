@@ -3,7 +3,13 @@
 import { useState } from "react";
 import { Check, Copy, FileClock, ShieldCheck } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
-import { departureDestination, type DepartureRow } from "@/lib/departures";
+import {
+  budgetChargeMicrocents,
+  budgetChargeTokens,
+  departureDestination,
+  usageStatusLabel,
+  type DepartureRow,
+} from "@/lib/departures";
 import { isHousekeeping } from "@/lib/call-class";
 import type { LogEntry } from "@/lib/log";
 import { parseShadowVerdict } from "@/lib/policy-shadow";
@@ -95,9 +101,8 @@ export function CallDetailDrawer({
   // So the observed figures are labelled unconfirmed, and the enforced pair is
   // shown beside them whenever it exists.
   const unconfirmedUsage = row?.status === "usage_unknown";
-  const enforcedTokens = row?.enforced_tokens ?? null;
-  const enforcedMicrocents = row?.enforced_microcents ?? null;
-  const hasEnforced = enforcedTokens != null || enforcedMicrocents != null;
+  const budgetTokens = row ? budgetChargeTokens(row) : 0;
+  const budgetMicrocents = row ? budgetChargeMicrocents(row) : 0;
   const observed = (value: number | null | undefined): string =>
     value == null
       ? "Not recorded"
@@ -180,35 +185,26 @@ export function CallDetailDrawer({
           <div><dt>Output tokens</dt><dd>{observed(row.output_tokens)}</dd></div>
           <div><dt>Total tokens</dt><dd>{observed(tokens)}</dd></div>
           <div>
-            <dt>Cost</dt>
+            <dt>Observed cost</dt>
             <dd>
               {row.cost_microcents == null
                 ? "Not recorded"
                 : `$${(row.cost_microcents / 100_000_000).toFixed(6)}${unconfirmedUsage ? " (unconfirmed)" : ""}`}
             </dd>
           </div>
-          {hasEnforced ? (
-            <>
-              <div>
-                <dt>Tokens charged to the budget</dt>
-                <dd>
-                  {enforcedTokens == null ? "Not recorded" : enforcedTokens.toLocaleString()}
-                  <small className="pc-call-detail__hint">
-                    What this attempt actually consumed of the cap, as opposed to what was
-                    measured. Uncertainty is charged, not forgiven.
-                  </small>
-                </dd>
-              </div>
-              <div>
-                <dt>Cost charged to the budget</dt>
-                <dd>
-                  {enforcedMicrocents == null
-                    ? "Not recorded"
-                    : `$${(enforcedMicrocents / 100_000_000).toFixed(6)}`}
-                </dd>
-              </div>
-            </>
-          ) : null}
+          <div>
+            <dt>Budget charge</dt>
+            <dd>
+              {`$${(budgetMicrocents / 100_000_000).toFixed(6)}`}
+              <small className="pc-call-detail__hint">
+                {row.status === "usage_unknown"
+                  ? "Usage was not confirmed, so the greater observed-or-reserved amount was charged."
+                  : "Only allowed or usage-unconfirmed calls contribute to settled budget spend."}
+              </small>
+            </dd>
+          </div>
+          <div><dt>Budget tokens</dt><dd>{budgetTokens.toLocaleString()}</dd></div>
+          <div><dt>Usage status</dt><dd>{usageStatusLabel(row)}</dd></div>
           <div><dt>Latency</dt><dd>{row.latency_ms == null ? "Not recorded" : `${row.latency_ms.toLocaleString()} ms`}</dd></div>
         </dl>
 

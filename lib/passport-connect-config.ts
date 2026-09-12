@@ -1,4 +1,5 @@
 import { requestShapeFamily, type ProviderId } from "@/lib/providers";
+import { RELEASE_VERSION } from "@/lib/version";
 
 export type PassportIntegration = "openai-js" | "anthropic-js";
 
@@ -43,7 +44,7 @@ export function buildPassportConnectSetup(input: {
     return {
       integration: "anthropic-js",
       integrationLabel: "Anthropic JavaScript SDK",
-      installCommand: "npm install passcontrol@^0.6.0 @anthropic-ai/sdk",
+      installCommand: `npm install passcontrol@^${RELEASE_VERSION} @anthropic-ai/sdk`,
       envBlock,
       clientFilename: "passcontrol-client.mjs",
       clientCode: `import Anthropic from "@anthropic-ai/sdk";
@@ -73,7 +74,7 @@ console.log(response.content);`,
   return {
     integration: "openai-js",
     integrationLabel: "OpenAI JavaScript SDK",
-    installCommand: "npm install passcontrol@^0.6.0 openai",
+    installCommand: `npm install passcontrol@^${RELEASE_VERSION} openai`,
     envBlock,
     clientFilename: "passcontrol-client.mjs",
     clientCode: `import OpenAI from "openai";

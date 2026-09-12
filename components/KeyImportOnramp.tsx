@@ -350,6 +350,7 @@ export function KeyImportOnramp({
           model={clientModel.trim()}
           passportId={passportId}
           passportSecret={passportSecret}
+          initialMode="sidecar"
           integrations={integrations}
           stored={stored}
           onStoredChange={setStored}

@@ -52,7 +52,9 @@ that keeps the passport in PassControl's local config and mints and refreshes sh
 against whichever gateway you configured, Cloud included. Hermes receives only a placeholder key:
 
 ```bash
-passcontrol init --global
+passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST --id PUBLIC_PASSPORT_ID
+# paste the one-time secret at the hidden prompt; it never appears in argv
+passcontrol configure hermes --provider openai --model gpt-5-mini
 passcontrol sidecar
 passcontrol env hermes --provider openai --model gpt-5-mini
 ```
@@ -71,8 +73,11 @@ The dummy key is stripped by the connector. The passport private key stays in th
 PassControl profile or OS credential store and is never sent to the gateway; a visa is refreshed automatically; and the real
 provider key stays in the Vault — PassControl Cloud's, or your own if you self-host.
 
-To point the connector at Cloud, set the gateway once (`passcontrol init --global`) to
-`https://passcontrol.vertias.eu`. The base URL Hermes uses stays `http://127.0.0.1:8788/...`.
+To point the connector at Cloud, import with gateway `https://passcontrol.vertias.eu`. The CLI
+validates that the 32-byte secret derives the supplied public ID, stores it in the OS credential
+store, verifies readback, then atomically writes the global profile. Replacement requires
+`--replace`; a project or shell override is reported because it will shadow that profile. The
+base URL Hermes uses stays `http://127.0.0.1:8788/...`.
 
 ## Prove the route
 

@@ -101,6 +101,10 @@ const securityHeaders = [
 const noStore = { key: "Cache-Control", value: "private, no-store, max-age=0, must-revalidate" };
 
 const nextConfig = {
+  // Pin Next's workspace to this checkout. Without this, a stray lockfile in a
+  // parent directory can make Next trace and report the wrong root — especially
+  // common for a Windows checkout under C:\\Users\\NAME.
+  outputFileTracingRoot: repoRoot,
   env: {
     PASSCONTROL_INTERNAL_MIGRATION_MANIFEST: migrationManifest,
   },

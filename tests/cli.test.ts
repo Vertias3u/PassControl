@@ -211,10 +211,18 @@ describe("passcontrol CLI", () => {
     }
   }, 10000);
 
-  // Opts out of the force-installed default so `start` gets past ensureAppRoot and
-  // reaches the gateway check it is actually asserting on. Safe: a remote gateway
-  // throws before any local service is touched.
-  it("does not manage a remote gateway as a local dashboard", async () => {
+  // This used to assert "only manages local gateways", from a guard that read the
+  // ACTIVE gateway and refused when it was remote. That guard is gone, and its
+  // removal is the design: local lifecycle commands now resolve their own target
+  // (managedDashboardTarget) independently of the active API gateway, so there is
+  // no longer a remote gateway for them to mistake for a local dashboard.
+  //
+  // What replaced it is narrower and asserted here — a gateway-bound value coming
+  // from the SHELL is refused before any service starts, because `start` would
+  // otherwise write a machine-wide config the environment then silently shadows.
+  // The positive half of the new contract (a remote gateway in the config FILE is
+  // simply ignored by local commands) is the test below this one.
+  it("refuses a shell-supplied gateway override before touching services", async () => {
     await expect(
       runCli(["start"], {
         env: {
@@ -223,9 +231,30 @@ describe("passcontrol CLI", () => {
         },
       })
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining("only manages local gateways"),
+      stderr: expect.stringMatching(/PASSCONTROL_GATEWAY[\s\S]*operator environment/i),
     });
   }, 10000);
+
+  // The intent the deleted guard was protecting, restated for the design that
+  // replaced it: a remote ACTIVE gateway must never become the thing `start`
+  // manages. It is no longer refused — it is ignored. Reaching "Local stack is
+  // not configured" for the local checkout proves the local target was resolved
+  // from the checkout and not from the remote gateway in the config file.
+  it("ignores a remote gateway in the config file and still targets the local checkout", async () => {
+    const checkout = await makeCheckout(path.join(tmp, "remote-active"));
+    const configDir = path.join(tmp, "home", ".config", "passcontrol");
+    await fs.mkdir(configDir, { recursive: true });
+    await fs.writeFile(
+      path.join(configDir, ".passcontrol"),
+      "PASSCONTROL_GATEWAY=https://passcontrol.example.com\n"
+    );
+
+    await expect(
+      runCli(["start", "--yes", "--app-dir", checkout], { env: { NO_COLOR: "1" } })
+    ).rejects.toMatchObject({
+      stderr: expect.stringMatching(/not configured[\s\S]*passcontrol setup/i),
+    });
+  }, 15000);
 
   // When the CLI is installed globally (no surrounding repo checkout), the local
   // stack lives in a cloned app dir. PASSCONTROL_FORCE_INSTALLED=1 simulates that.
@@ -348,23 +377,28 @@ describe("passcontrol CLI", () => {
   // Regression: a saved ~/.config/passcontrol/app.json used to short-circuit
   // ensureAppRoot before it ever looked at appDir, so `setup --app-dir NEW`
   // silently kept using the old checkout — the documented way to repoint the CLI
-  // did nothing. A remote gateway makes localDashboard() throw immediately after
-  // the app root is resolved, so this asserts the save without touching Docker.
+  // did nothing. The assertion that matters is the app.json write at the end.
+  //
+  // These two used to force the run to stop with a remote PASSCONTROL_GATEWAY.
+  // That no longer works, and not because the message changed: the shell-override
+  // refusal now fires BEFORE ensureAppRoot, so the save never happened and the
+  // side-effect assertion below stopped being reached. `makeCheckout` writes no
+  // .env.docker, so an unconfigured checkout stops startDashboard immediately
+  // after the app root is resolved — same "no Docker touched" property, and with
+  // no dependence on what is or is not listening on port 3000.
   it("lets --app-dir repoint the CLI away from a saved checkout", async () => {
     const stale = await makeCheckout(path.join(tmp, "stale-checkout"));
     const fresh = await makeCheckout(path.join(tmp, "fresh-checkout"));
     await saveAppRoot(stale);
 
     await expect(
-      runCli(["start", "--yes", "--app-dir", fresh], {
-        env: { PASSCONTROL_GATEWAY: "https://passcontrol.example.com" },
-      })
+      runCli(["start", "--yes", "--app-dir", fresh], { env: { NO_COLOR: "1" } })
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining("only manages local gateways"),
+      stderr: expect.stringMatching(/not configured[\s\S]*passcontrol setup/i),
     });
 
     expect(JSON.parse(await fs.readFile(appStatePath(), "utf8")).path).toBe(fresh);
-  }, 10000);
+  }, 15000);
 
   it("prefers an explicit --app-dir over PASSCONTROL_APP_ROOT", async () => {
     const envRoot = await makeCheckout(path.join(tmp, "env-checkout"));
@@ -372,17 +406,14 @@ describe("passcontrol CLI", () => {
 
     await expect(
       runCli(["start", "--yes", "--app-dir", flagRoot], {
-        env: {
-          PASSCONTROL_APP_ROOT: envRoot,
-          PASSCONTROL_GATEWAY: "https://passcontrol.example.com",
-        },
+        env: { NO_COLOR: "1", PASSCONTROL_APP_ROOT: envRoot },
       })
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining("only manages local gateways"),
+      stderr: expect.stringMatching(/not configured[\s\S]*passcontrol setup/i),
     });
 
     expect(JSON.parse(await fs.readFile(appStatePath(), "utf8")).path).toBe(flagRoot);
-  }, 10000);
+  }, 15000);
 
   it("rejects an --app-dir that is not a checkout instead of falling back to the saved one", async () => {
     const stale = await makeCheckout(path.join(tmp, "stale-checkout"));
@@ -460,11 +491,14 @@ describe("passcontrol CLI", () => {
     expect(stdout).toContain("PASSCONTROL_APP_ROOT");
   }, 10000);
 
-  it("does not run local setup against a remote gateway", async () => {
+  // `setup`'s half of the same contract change as `start` above: the active-gateway
+  // guard was replaced by a refusal of gateway-bound values supplied by the shell,
+  // and it fires before the prerequisite checks so nothing is cloned or started.
+  it("refuses a shell-supplied gateway override before local setup runs", async () => {
     await expect(
       runCli(["setup", "--no-open"], { env: { PASSCONTROL_GATEWAY: "https://passcontrol.example.com" } })
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining("only manages local gateways"),
+      stderr: expect.stringMatching(/PASSCONTROL_GATEWAY[\s\S]*operator environment/i),
     });
   }, 10000);
 
@@ -492,9 +526,15 @@ describe("passcontrol CLI", () => {
 
     it("documents start as covering the stack", async () => {
       const { stdout } = await runCli(["help"], { env: { NO_COLOR: "1" } });
-      const line = stdout.split("\n").find((l) => /^\s*passcontrol start\b/.test(l)) ?? "";
-      expect(line).toMatch(/stack|everything/i);
-      expect(line).toContain("--dashboard-only");
+      const lines = stdout.split("\n");
+      const at = lines.findIndex((l) => /^\s*passcontrol start\b/.test(l));
+      expect(at, "help should document `passcontrol start`").toBeGreaterThan(-1);
+      // The entry, not one line of it: `start` grew a third flag and its usage
+      // now wraps onto a continuation row, which put the flags and the sentence
+      // describing them on separate lines. Both still have to be there.
+      const entry = lines.slice(at, at + 2).join("\n");
+      expect(entry).toMatch(/stack|everything/i);
+      expect(entry).toContain("--dashboard-only");
     }, 10000);
 
     it("brings Supabase and Redis up before spawning the dev server", async () => {
@@ -559,11 +599,12 @@ describe("passcontrol CLI", () => {
     it("tells an unconfigured checkout to run setup instead of starting containers", async () => {
       const checkout = await makeCheckout(path.join(tmp, "unconfigured"));
       await expect(
-        // A port nothing is listening on, so the result does not depend on
-        // whether the developer running the suite has a dev server up.
-        runCli(["start", "--yes", "--app-dir", checkout], {
-          env: { NO_COLOR: "1", PASSCONTROL_GATEWAY: "http://localhost:3987" },
-        })
+        // No PASSCONTROL_GATEWAY: a shell-supplied one is now refused outright,
+        // which would pass this test for the wrong reason. The missing
+        // .env.docker stops `start` before any container command runs, and that
+        // is checked before the dashboard is probed — so the result still does
+        // not depend on whether the developer running the suite has a server up.
+        runCli(["start", "--yes", "--app-dir", checkout], { env: { NO_COLOR: "1" } })
       ).rejects.toMatchObject({
         stderr: expect.stringMatching(/not configured[\s\S]*passcontrol setup/i),
       });

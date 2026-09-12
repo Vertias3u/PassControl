@@ -93,6 +93,11 @@ provider fallback rate. **Custom endpoints are unpriced**, even when the model n
 matches: logs mark cost unknown, receipts carry `unp`, and token accounting continues.
 The cost budget retains a proxy estimate; it does not become knowledge of actual dollars.
 Known/table-priced cost, conservative enforced spend, and open holds are different figures.
+The dashboard therefore labels the all-time counter **Settled budget charges** and shows its
+durable call-attributed charges, separate operator adjustments, any visible difference, and
+live open reservations marked **not yet charged**. The call table keeps observed cost and budget
+charge in separate columns and can load older durable rows on demand. An unavailable database or
+Redis explanation is shown as unavailable, never as zero.
 
 ## Supported providers and endpoints
 
@@ -194,6 +199,19 @@ can use an existing file fallback with a warning. Custody shown by the gateway i
 **DECLARED evidence**, not proof of storage. The signer still reads key material into
 process memory; this is not a non-exportable hardware key.
 
+For a Passport issued in the dashboard for Sidecar or MCP, import it without putting the
+one-time secret in shell history:
+
+```bash
+passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST \
+  --id PUBLIC_PASSPORT_ID
+# paste the secret at the hidden prompt, or provide it on raw stdin
+```
+
+The CLI proves the 32-byte Ed25519 secret matches the public ID, stores it in macOS Keychain,
+Linux Secret Service, or Windows DPAPI, verifies readback, and only then atomically updates the
+global profile. Replacement requires `--replace`. The public command contains no secret.
+
 ## Connect a real agent
 
 For example, the direct OpenAI configuration has this shape:
@@ -216,6 +234,11 @@ its scope and suitable budgets. Choose by what your client supports:
 | Your JS/TS code | `PassControl` from `passcontrol/sdk`; [SDK guide](./docs/integrations/passport-sdk.md) |
 | Static-key client needing Passport | `passcontrol sidecar`, then `passcontrol env <integration>` |
 | MCP client | `passcontrol mcp`; configure as below |
+
+Direct Agent Keys point the client at the PassControl gateway origin. Passport Sidecar clients
+point at loopback (default `http://127.0.0.1:8788`) and the sidecar forwards to the gateway.
+The sidecar adds per-request sender proof; the current SDK and MCP paths use bearer visas and are
+refused when sender proof is required.
 
 ```bash
 # Passport bridge: talks to Cloud or your self-hosted gateway
@@ -259,6 +282,20 @@ applies migrations, and seeds a local account. It writes `.env.docker`; use
 `npm run dev:docker` to load it. This is development setup, not a production deployment.
 There are no shared default credentials. `passcontrol setup --app-dir <path>` selects a
 checkout; `passcontrol unlink` forgets a remembered one.
+
+Local lifecycle commands manage `http://localhost:3000` independently from the active Cloud API
+gateway. `setup`, `start`, and `restart` verify PassControl at `/api/version` and require the
+launcher to remain alive before switching the global active gateway. `status` reports the active
+API gateway and CLI-managed local dashboard separately; `open` opens the active gateway. Explicit
+loopback ports remain supported, but a portless local URL is rejected instead of becoming port 80.
+`--port-offset` moves Supabase and Redis ports only; the dashboard remains on port 3000.
+
+Switching from a credentialed remote gateway clears gateway-bound local credentials only—it does
+not revoke the remote key or Passport. Interactive use requires a separate confirmation;
+noninteractive use requires `--forget-active-credentials`, and `--yes` is not a substitute.
+Shell or project-file gateway overrides are refused and named before services start, because a
+global write could not override them safely. Clean up any still-active remote identity at its
+original gateway.
 
 For production, configure [`.env.example`](./.env.example), use Supabase (plain Postgres
 is insufficient), apply the public migrations with `DATABASE_URL=… npm run migrate`,

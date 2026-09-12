@@ -7,8 +7,14 @@ passport in the global profile so clients can launch from any working directory 
 embedding a secret:
 
 ```sh
-passcontrol init --global
+passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST --id PUBLIC_PASSPORT_ID
+# paste the one-time secret at the hidden prompt
 ```
+
+The import command contains public values only. The CLI proves the Ed25519 secret matches the
+ID, writes it to Keychain, Secret Service, or DPAPI, verifies readback, and atomically updates the
+global profile. Existing global Passports require `--replace`; project and shell overrides are
+reported because they shadow the global profile.
 
 The client receives neither the provider key nor the short-lived work visa. The
 server signs locally and obtains the visa from the gateway and sends every model call through the configured
@@ -54,7 +60,7 @@ backed up to `.bak`, and a different PassControl entry requires `--force`. No ge
 config contains a passport secret or provider key.
 
 
-In 0.9.0 `chat` sends a bearer visa, without a sender proof. Required sender-proof mode
+`chat` sends a bearer visa, without a sender proof. Required sender-proof mode
 therefore refuses it; use off/observe for this client. `list_models` reads model patterns
 from the visa scope, not a live upstream model catalog; a wildcard is not a callable model.
 Providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek, and Gemini (OpenAI-compatible).

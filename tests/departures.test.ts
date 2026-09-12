@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  budgetChargeMicrocents,
+  budgetChargeTokens,
   DEPARTURE_VERDICT,
   departureCounts,
   departureDestination,
@@ -14,6 +16,7 @@ import {
   flightCode,
   mergeDeparture,
   totalTokens,
+  usageStatusLabel,
   verdictFor,
   visibleDepartures,
   type DepartureRow,
@@ -35,6 +38,27 @@ function row(overrides: Partial<DepartureRow> = {}): DepartureRow {
     ...overrides,
   };
 }
+
+describe("durable budget-charge presentation", () => {
+  it("uses the migration 0056 greatest-of-observed-and-enforced arithmetic", () => {
+    const uncertain = row({
+      status: "usage_unknown",
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_microcents: 3_093_700,
+      enforced_tokens: 2_000,
+      enforced_microcents: 8_000_000,
+    });
+    expect(budgetChargeMicrocents(uncertain)).toBe(8_000_000);
+    expect(budgetChargeTokens(uncertain)).toBe(2_000);
+    expect(usageStatusLabel(uncertain)).toContain("Unconfirmed");
+  });
+
+  it("does not charge a blocked or provider-error row", () => {
+    expect(budgetChargeMicrocents(row({ status: "blocked_budget", enforced_microcents: 9_000 }))).toBe(0);
+    expect(budgetChargeMicrocents(row({ status: "upstream_error", cost_microcents: 9_000 }))).toBe(0);
+  });
+});
 
 describe("verdict vocabulary", () => {
   it("gives every audit status its own word", () => {

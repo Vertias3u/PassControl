@@ -32,7 +32,7 @@ export function PassportIssuanceModal({
   const [provider, setProvider] = useState<ProviderId>("anthropic");
   const [models, setModels] = useState(DEFAULT_ALLOWED_MODELS.anthropic);
   const [clientModel, setClientModel] = useState(DEFAULT_CLIENT_MODELS.anthropic);
-  const [runtime, setRuntime] = useState<"sdk" | "static">("sdk");
+  const [runtime, setRuntime] = useState<"sdk" | "sidecar" | "mcp">("sdk");
   const [tokenBudget, setTokenBudget] = useState("");
   const [costBudgetUsd, setCostBudgetUsd] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
@@ -78,7 +78,6 @@ export function PassportIssuanceModal({
       const budget_cents = parseUsdBudgetToCents(costBudgetUsd);
       const allowedModels = models.split(",").map((m) => m.trim()).filter(Boolean);
       const concreteModel = clientModel.trim();
-      if (runtime !== "sdk") throw new Error("Use a Direct Agent Key for an application that accepts only a static API key.");
       if (!clientModelIsUsable(concreteModel) || !scopeAllows([{ provider, models: allowedModels }], provider, concreteModel)) {
         throw new Error("Model to call must be a concrete provider model id covered by the allowed patterns.");
       }
@@ -191,9 +190,14 @@ export function PassportIssuanceModal({
                 <span className="mt-1 block text-muted-foreground">Recommended. The SDK signs locally and routes every provider call through PassControl Cloud.</span>
               </label>
               <label className="rounded-md border border-border bg-secondary/30 p-3 text-sm">
-                <input type="radio" className="mr-2 w-auto" checked={runtime === "static"} onChange={() => setRuntime("static")} />
-                <strong>Application accepts only a base URL and API key</strong>
-                <span className="mt-1 block text-muted-foreground">This application cannot sign passport challenges or refresh visas. Use a Direct Agent Key for PassControl Cloud today.</span>
+                <input type="radio" className="mr-2 w-auto" checked={runtime === "sidecar"} onChange={() => setRuntime("sidecar")} />
+                <strong>Static-key application · local Passport sidecar</strong>
+                <span className="mt-1 block text-muted-foreground">The CLI stores this Passport locally and the sidecar attaches per-request sender proof at http://127.0.0.1:8788.</span>
+              </label>
+              <label className="rounded-md border border-border bg-secondary/30 p-3 text-sm">
+                <input type="radio" className="mr-2 w-auto" checked={runtime === "mcp"} onChange={() => setRuntime("mcp")} />
+                <strong>MCP client · Passport visa</strong>
+                <span className="mt-1 block text-muted-foreground">Import into the CLI, then configure the MCP client. Current MCP uses a bearer visa and does not satisfy required sender-proof mode.</span>
               </label>
             </fieldset>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -227,7 +231,7 @@ export function PassportIssuanceModal({
                 Cancel
               </button>
               <button
-                disabled={runtime !== "sdk" || !name.trim() || !models.split(",").some((model) => model.trim()) || !clientModelIsUsable(clientModel) || busy}
+                disabled={!name.trim() || !models.split(",").some((model) => model.trim()) || !clientModelIsUsable(clientModel) || busy}
                 onClick={issue}
                 className={buttonVariants({ size: "lg" })}
               >
@@ -252,6 +256,7 @@ export function PassportIssuanceModal({
               model={clientModel.trim()}
               passportId={pubkey}
               passportSecret={secret}
+              initialMode={runtime}
               integrations={integrations}
               stored={stored}
               onStoredChange={setStored}

@@ -60,6 +60,15 @@ describe("self-host landing replacement", () => {
     expect(page).toContain("Node 18+");
   });
 
+  it("offers the authenticated product routes without requiring route knowledge", async () => {
+    const page = await source();
+
+    expect(page).toContain('href="/dashboard"');
+    expect(page).toContain("Open Control Tower");
+    expect(page).toContain('href="/login"');
+    expect(page).toContain("Log in");
+  });
+
   it("allows exactly one absolute hosted alternative without becoming a signup funnel", async () => {
     const page = (await source()).toLowerCase();
     const hostedOrigin = "https://passcontrol.vertias.eu";

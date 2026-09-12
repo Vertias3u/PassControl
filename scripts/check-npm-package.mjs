@@ -35,6 +35,8 @@ const allowed = new Set([
   "package.json",
   "bin/passcontrol.mjs",
   "cli/config.mjs",
+  "cli/integration-defaults.mjs",
+  "cli/integration-defaults.d.mts",
   // Tier 1 passport custody is part of the executable's startup graph. It uses
   // only OS-shipped commands and Node built-ins; omitting it makes every
   // installed CLI fail before dispatch rather than merely disabling migration.

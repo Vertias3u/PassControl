@@ -60,9 +60,10 @@ export default function SelfHostHome() {
             <a href="#how-it-works">How it works</a>
             <a href="#quickstart">Quickstart</a>
             <a href="#trust">Trust model</a>
+            <a href="/login">Log in</a>
           </div>
-          <a className={styles.navCta} href="#quickstart">
-            Install and run <ArrowDown aria-hidden="true" />
+          <a className={styles.navCta} href="/dashboard">
+            Open Control Tower <ArrowRight aria-hidden="true" />
           </a>
         </nav>
       </header>
@@ -81,11 +82,11 @@ export default function SelfHostHome() {
                 operate.
               </p>
               <div className={styles.heroActions}>
-                <a className={styles.primaryButton} href="#quickstart">
-                  Start the local stack <ArrowRight aria-hidden="true" />
+                <a className={styles.primaryButton} href="/dashboard">
+                  Open Control Tower <ArrowRight aria-hidden="true" />
                 </a>
-                <a className={styles.textLink} href="#how-it-works">
-                  Inspect the control path <ArrowDown aria-hidden="true" />
+                <a className={styles.textLink} href="/login">
+                  Log in
                 </a>
               </div>
               <p className={styles.availability}>

@@ -1,6 +1,6 @@
 interface ConfigureSnippetInput {
+  gateway: string;
   passportId: string;
-  passportSecret: string;
   provider: string;
   model: string;
   integration: string;
@@ -24,10 +24,15 @@ export function buildConfigureSnippet(input: ConfigureSnippetInput): string {
     throw new Error("Sidecar setup requires a supported provider and a concrete model id.");
   }
   return [
-    `export PASSPORT_ID=${shellQuote(input.passportId)}`,
-    `export PASSPORT_SECRET=${shellQuote(input.passportSecret)}`,
+    buildPassportImportCommand({ gateway: input.gateway, passportId: input.passportId }),
     `passcontrol configure ${input.integration} --provider ${input.provider} --model ${shellQuote(input.model)}`,
+    "passcontrol sidecar",
   ].join("\n");
+}
+
+export function buildPassportImportCommand(input: { gateway: string; passportId: string }): string {
+  const origin = new URL(input.gateway).origin;
+  return `passcontrol passport import --global --gateway ${shellQuote(origin)} --id ${shellQuote(input.passportId)}`;
 }
 import { clientModelIsUsable } from "@/lib/agent-connect";
 import { isProvider } from "@/lib/providers";

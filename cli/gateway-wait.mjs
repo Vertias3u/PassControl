@@ -57,7 +57,14 @@ export async function waitForGateway({
   let announced = false;
 
   while (now() < deadline) {
-    if (await probeGateway()) return true;
+    if (await probeGateway()) {
+      // A response from the target is not proof that the process we launched
+      // owns it. In particular, a port conflict can leave an unrelated server
+      // answering while the launcher exits. The managed path requires both
+      // facts on the same poll.
+      if (processAlive && !processAlive()) return false;
+      return true;
+    }
 
     // Checked AFTER the gateway probe, never before: a process that exits the
     // instant it finishes handing off would otherwise be declared dead on the

@@ -1,4 +1,4 @@
-# Cloud Passport SDK
+# Passport SDK
 
 Use this path when you control JavaScript or TypeScript application code — it needs no local
 process at all.
@@ -16,6 +16,11 @@ Cloud path only because it needs none.
 - Cloud receives a public Passport ID, signed challenge and short-lived visa. It never receives
   the private passport key.
 - Every provider call still goes to `https://passcontrol.vertias.eu/api/v1/<provider>/...`.
+
+For self-hosting, replace that origin with your own PassControl gateway. The dashboard asks you
+to choose SDK, Sidecar/static-key tool, or MCP before issuance and shows only that path's setup.
+Its generated SDK install command derives `passcontrol@^<current release>` from the application
+version, so the instructions and shipped package do not carry separate version literals.
 
 Do not put `PASSPORT_SECRET` in source control, logs, browser bundles or public environment
 variables such as `NEXT_PUBLIC_*` or `VITE_*`.
@@ -130,6 +135,12 @@ The TypeScript SDK **does not attach sender proofs**. Its provider requests use
 bearer visas: they work with sender-proof mode off/observe, but required mode refuses
 them without an additional correct proof implementation. The current sidecar attaches
 proofs. A valid mint signature is not a signature over each provider request.
+
+Do not use the CLI Passport import command for an SDK runtime that stores the secret itself.
+Sidecar and MCP use `passcontrol passport import --global --gateway <origin> --id <public-id>`:
+the public command has no private key, and the secret is read hidden or from raw stdin into the
+OS credential store. Sidecar clients then target `http://127.0.0.1:8788`; Direct Agent Keys and
+SDK provider clients target the PassControl gateway.
 
 The wrapper validates the initial gateway origin/path. It does not override fetch's
 redirect policy, so it is not a complete redirect-chain credential boundary. Gateway

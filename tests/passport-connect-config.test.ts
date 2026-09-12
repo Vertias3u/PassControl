@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { clientModelIsUsable, DEFAULT_ALLOWED_MODELS, DEFAULT_CLIENT_MODELS } from "@/lib/agent-connect";
 import { buildPassportConnectSetup, passportIntegrationForProvider } from "@/lib/passport-connect-config";
+import pkg from "@/package.json";
 
 const common = {
   origin: "https://passcontrol.vertias.eu/",
@@ -10,6 +11,11 @@ const common = {
 };
 
 describe("Cloud Passport setup generation", () => {
+  it("installs the current PassControl release rather than a stale literal", () => {
+    const setup = buildPassportConnectSetup({ ...common, provider: "anthropic", model: "claude-haiku-4-5" });
+    expect(setup.installCommand).toContain(`passcontrol@^${pkg.version}`);
+    expect(setup.installCommand).not.toContain("0.6.0");
+  });
   it("builds an Anthropic SDK setup with the secret only in the environment block", () => {
     const setup = buildPassportConnectSetup({ ...common, provider: "anthropic", model: "claude-haiku-4-5" });
     expect(setup.integration).toBe("anthropic-js");

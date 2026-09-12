@@ -32,6 +32,7 @@ export const runtime = "edge";
 
 import { control } from "@/lib/control/handler";
 import { jsonResponse, errorResponse } from "@/lib/control/respond";
+import { buildSpendReconciliation } from "@/lib/spend-reconciliation";
 
 /**
  * What the figure is measured on. `enforced` = charged against the budget, which
@@ -66,7 +67,12 @@ const handler = control("read", async ({ userId, db, requestId }) => {
     { spent_tokens: 0, spent_microcents: 0 }
   );
 
-  return jsonResponse({ data: { fleet: { ...fleet, basis: SPEND_BASIS }, agents } }, requestId);
+  // Wrapped because the builder defers client construction on purpose (see
+  // lib/spend-reconciliation.ts). Here the client already exists — the control
+  // handler built it before this body ran — so the thunk just hands it over.
+  const reconciliation = await buildSpendReconciliation(() => db, userId, agents);
+
+  return jsonResponse({ data: { fleet: { ...fleet, basis: SPEND_BASIS }, agents, reconciliation } }, requestId);
 });
 
 export function GET(req: Request): Promise<Response> {

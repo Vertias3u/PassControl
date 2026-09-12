@@ -18,6 +18,18 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PROVIDERS, usesOpenAiUsageShape } from "../lib/providers";
+import { scopeAllows } from "../lib/scope";
+import {
+  DEFAULT_ALLOWED_MODELS as SHARED_ALLOWED_MODELS,
+  DEFAULT_CLIENT_MODELS as SHARED_CLIENT_MODELS,
+  defaultAllowedModelForProvider,
+} from "../cli/integration-defaults.mjs";
+// @ts-expect-error — plain .mjs CLI module, no types
+import { defaultModelForProvider } from "../cli/config.mjs";
+import {
+  DEFAULT_ALLOWED_MODELS as DASHBOARD_ALLOWED_MODELS,
+  DEFAULT_CLIENT_MODELS as DASHBOARD_CLIENT_MODELS,
+} from "../lib/agent-connect";
 
 const repo = process.cwd();
 
@@ -54,18 +66,16 @@ describe("the CLI's provider list", () => {
     expect(cliOpenAiShapeProviders().sort()).toEqual([...expected]);
   });
 
-  it("has a default model for every provider", () => {
-    // cli/config.mjs's defaultModelForProvider is a switch with a `default:`
-    // arm returning a Claude model — so a missing case does not throw, it
-    // silently sends a Claude model name to a non-Anthropic provider.
-    const source = cliSource();
-    const body = /function defaultModelForProvider\([^)]*\) \{([\s\S]*?)\n\}/u.exec(source);
-    if (!body) throw new Error("defaultModelForProvider is no longer declared where this test looks");
-    const cased = [...body[1]!.matchAll(/case "([a-z0-9-]+)":/gu)].map((m) => m[1]!);
-    const missing = PROVIDERS.filter((p) => !cased.includes(p));
-    expect(
-      missing,
-      `defaultModelForProvider in cli/config.mjs falls through to the default arm for: ${missing.join(", ")}`
-    ).toEqual([]);
+  it.each(PROVIDERS)("authorises the concrete %s default through the real scope matcher", (provider) => {
+    const allowed = defaultAllowedModelForProvider(provider);
+    const model = defaultModelForProvider(provider);
+    expect(model).toBe(SHARED_CLIENT_MODELS[provider]);
+    expect(allowed).toBe(SHARED_ALLOWED_MODELS[provider]);
+    expect(scopeAllows([{ provider, models: [allowed] }], provider, model)).toBe(true);
+  });
+
+  it("exports the exact same maps to dashboard issuance and Direct Agent Key creation", () => {
+    expect(DASHBOARD_ALLOWED_MODELS).toBe(SHARED_ALLOWED_MODELS);
+    expect(DASHBOARD_CLIENT_MODELS).toBe(SHARED_CLIENT_MODELS);
   });
 });

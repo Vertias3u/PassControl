@@ -51,6 +51,7 @@ import {
   step,
   warn,
 } from "./config.mjs";
+import { defaultAllowedModelForProvider } from "./integration-defaults.mjs";
 import { proveItWorks } from "./selftest.mjs";
 
 export { CLOUD_GATEWAY };
@@ -516,7 +517,7 @@ export async function loginCommand(opts = {}, deps = {}) {
       // every agent able to self-test forever, which `doctor` can lean on.
       scopes: [
         { provider: "demo", models: ["*"] },
-        { provider: "anthropic", models: ["claude-*"] },
+        { provider: "anthropic", models: [defaultAllowedModelForProvider("anthropic")] },
       ],
     }, fetchImpl);
     agentId = created?.id ?? null;

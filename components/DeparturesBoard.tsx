@@ -12,9 +12,10 @@
 // so every column is treated as nullable regardless of what the initial
 // server-side fetch looked like.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pause, Play, Search, Radio, WifiOff } from "lucide-react";
+import { ChevronDown, Pause, Play, Search, Radio, WifiOff } from "lucide-react";
 import { browserClient } from "@/lib/supabase/client";
 import {
+  budgetChargeMicrocents,
   departureCounts,
   departureDestination,
   groupDepartures,
@@ -26,6 +27,7 @@ import {
   flightCode,
   mergeDeparture,
   totalTokens,
+  usageStatusLabel,
   verdictFor,
   visibleDepartures,
   type DepartureRow,
@@ -39,6 +41,8 @@ import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 export type { DepartureRow };
 
 const MAX_ROWS = 40;
+const PAGE_ROWS = 40;
+const DEPARTURE_COLUMNS = "id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would";
 
 const TONE_CLASS: Record<DepartureTone, string> = {
   clear: "text-emerald-400",
@@ -68,6 +72,9 @@ export function DeparturesBoard({
   logsAvailable: boolean;
 }) {
   const [rows, setRows] = useState<DepartureRow[]>(() => initialRows.slice(0, MAX_ROWS));
+  const [hasOlder, setHasOlder] = useState(logsAvailable && initialRows.length >= MAX_ROWS);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderError, setOlderError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
   const [paused, setPaused] = useState(false);
   const [queued, setQueued] = useState(0);
@@ -93,6 +100,7 @@ export function DeparturesBoard({
   // Rows that arrived after mount, so only genuinely new ones animate. Without
   // this the whole board flaps on first paint and the movement means nothing.
   const arrived = useRef<Set<string>>(new Set());
+  const historyLoaded = useRef(false);
 
   useEffect(() => {
     pausedRef.current = paused;
@@ -114,7 +122,11 @@ export function DeparturesBoard({
             setQueued(queuedRows.current.length);
             return;
           }
-          setRows((prev) => mergeDeparture(prev, row, MAX_ROWS));
+          setRows((prev) => mergeDeparture(
+            prev,
+            row,
+            historyLoaded.current ? Number.MAX_SAFE_INTEGER : MAX_ROWS
+          ));
         }
       )
       .subscribe((status) => setLive(status === "SUBSCRIBED"));
@@ -161,13 +173,47 @@ export function DeparturesBoard({
   const resume = () => {
     setRows((current) =>
       queuedRows.current.reduce(
-        (next, row) => mergeDeparture(next, row, MAX_ROWS),
+        (next, row) => mergeDeparture(
+          next,
+          row,
+          historyLoaded.current ? Number.MAX_SAFE_INTEGER : MAX_ROWS
+        ),
         current
       )
     );
     queuedRows.current = [];
     setQueued(0);
     setPaused(false);
+  };
+
+  const loadOlder = async () => {
+    const cursor = rows.at(-1);
+    if (!cursor?.created_at || !cursor.id || loadingOlder) return;
+    setLoadingOlder(true);
+    setOlderError(null);
+    try {
+      const db = browserClient();
+      const { data, error } = await db
+        .from("agent_logs")
+        .select(DEPARTURE_COLUMNS)
+        .eq("user_id", userId)
+        .or(`created_at.lt.${cursor.created_at},and(created_at.eq.${cursor.created_at},id.lt.${cursor.id})`)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(PAGE_ROWS + 1);
+      if (error) throw error;
+      const page = (data ?? []).slice(0, PAGE_ROWS) as unknown as DepartureRow[];
+      historyLoaded.current = true;
+      setRows((current) => {
+        const known = new Set(current.map((row) => row.id));
+        return [...current, ...page.filter((row) => row.id && !known.has(row.id))];
+      });
+      setHasOlder((data?.length ?? 0) > PAGE_ROWS);
+    } catch {
+      setOlderError("Older calls could not be loaded. The rows already shown are unchanged.");
+    } finally {
+      setLoadingOlder(false);
+    }
   };
 
   return (
@@ -178,7 +224,7 @@ export function DeparturesBoard({
             Departures
           </span>
           <span className="pc-live-calls__window">
-            newest first · {zoneLabel} · up to {MAX_ROWS} rows
+            newest first · {zoneLabel} · {rows.length} loaded
           </span>
         </div>
         <div className="pc-live-calls__signals">
@@ -267,16 +313,18 @@ export function DeparturesBoard({
                 Tokens
               </th>
               <th scope="col" className="text-right">
-                Fare
+                Observed cost
               </th>
-              <th scope="col">Status</th>
+              <th scope="col" className="text-right">Budget charge</th>
+              <th scope="col">Usage status</th>
+              <th scope="col">Outcome</th>
             </tr>
           </thead>
           <tbody>
             {visibleGroups.length === 0 ? (
               <tr>
                 <td
-                  colSpan={7}
+                  colSpan={9}
                   className="pc-live-calls__empty"
                   data-state={logsAvailable ? undefined : "unavailable"}
                 >
@@ -335,6 +383,12 @@ export function DeparturesBoard({
                     </td>
                     <td className="pc-live-calls__number">
                       {fare(row.cost_microcents)}
+                    </td>
+                    <td className="pc-live-calls__number">
+                      {fare(budgetChargeMicrocents(row))}
+                    </td>
+                    <td className="pc-live-calls__usage" data-state={row.status === "usage_unknown" ? "unconfirmed" : undefined}>
+                      {usageStatusLabel(row)}
                     </td>
                     <td className={`pc-live-calls__verdict ${TONE_CLASS[verdict.tone]}`}>
                       {verdict.word}
@@ -433,13 +487,25 @@ export function DeparturesBoard({
                   <div><dt>{zoneLabel}</dt><dd>{format(row.created_at, "time")}</dd></div>
                   <div><dt>Identity</dt><dd>{row.passport_id ? row.passport_id.slice(0, 10) : row.auth_method === "direct_key" ? "Direct key" : "—"}</dd></div>
                   <div><dt>Tokens</dt><dd>{totalTokens(row) || "—"}</dd></div>
-                  <div><dt>Cost</dt><dd>{fare(row.cost_microcents)}</dd></div>
+                  <div><dt>Observed cost</dt><dd>{fare(row.cost_microcents)}</dd></div>
+                  <div><dt>Budget charge</dt><dd>{fare(budgetChargeMicrocents(row))}</dd></div>
+                  <div><dt>Usage status</dt><dd>{usageStatusLabel(row)}</dd></div>
                 </dl>
               </li>
             );
           })
         )}
       </ol>
+      {olderError ? <p className="pc-live-calls__pagination-error" role="status">{olderError}</p> : null}
+      {hasOlder ? (
+        <div className="pc-live-calls__pagination">
+          <button type="button" className="ghost" onClick={loadOlder} disabled={loadingOlder || !logsAvailable}>
+            <ChevronDown aria-hidden="true" />
+            {loadingOlder ? "Loading older calls…" : "Load older calls"}
+          </button>
+          <span>Loads the next {PAGE_ROWS} durable rows; adjustments remain in the ledger summary above.</span>
+        </div>
+      ) : null}
       <CallDetailDrawer
         row={selected}
         open={Boolean(selected)}

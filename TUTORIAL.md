@@ -113,7 +113,20 @@ local Vault, so pick a real one. Open **http://localhost:3000** and log in with 
 > Use `passcontrol setup --no-open` to suppress browser launch. If another local
 > Supabase/Redis project owns the default service ports, use `passcontrol setup --no-open
 > --port-offset 100`. This offsets those local service ports together; the dashboard keeps its
-> configured gateway port (3000 by default).
+> canonical port 3000. The offset never moves the dashboard.
+>
+> Setup verifies `http://localhost:3000/api/version` before making that origin the active global
+> gateway. Existing explicit loopback ports remain valid for advanced local use; a portless
+> loopback URL is rejected rather than interpreted as port 80. `passcontrol status` reports the
+> active API gateway and the CLI-managed local dashboard separately, while `passcontrol open`
+> opens the active gateway.
+>
+> Switching from Cloud or another remote gateway forgets its credentials on this machine only;
+> it does not revoke them remotely. Interactive setup asks separately. Automation must pass
+> `--forget-active-credentials` (`--yes` does not authorise deletion). A shell or nearest
+> `.passcontrol` gateway/credential override is named and refused before services start, because
+> changing the global file could not override it. Revoke any remaining remote identity at the
+> original gateway when you still intend to retire it.
 >
 > The seeded dev user is **local-only** (created by `scripts/seed.mjs`) — never deploy it.
 > To reset to a truly clean slate: `passcontrol reset --local --confirm RESET`.
@@ -184,6 +197,7 @@ passcontrol doctor --fix           # recover a stopped local dashboard
 passcontrol start                  # dashboard + Supabase + Redis (--dashboard-only for just the app)
 passcontrol restart                # replace the CLI-managed dashboard process
 passcontrol local-logs --follow    # stream local dashboard output
+passcontrol passport import --global --gateway <origin> --id <public-id> # hidden secret prompt
 passcontrol mcp                    # local stdio MCP server (chat + list_models)
 passcontrol sidecar                # local bridge for Hermes/OpenHands/Aider/Cline/etc.
 passcontrol agent list             # managed passports
@@ -207,6 +221,12 @@ OS profile holds a marker rather than requiring the secret in `.passcontrol`. Ex
 file fallbacks can be used with a warning. Gateway custody labels are DECLARED evidence,
 not proof of storage; the signing process can still read the secret.
 
+For a Passport created in the dashboard, choose SDK, Sidecar/static-key tool, or MCP before
+issuance. Sidecar and MCP lead with `passport import`: the public command contains only the
+gateway origin and Passport ID, while the 32-byte secret is read hidden or from raw stdin,
+matched cryptographically to that ID, written to the OS store, verified, and then recorded in
+the global profile. Existing global Passports require `--replace`.
+
 ---
 
 ## 4. Govern it
@@ -229,6 +249,14 @@ Cost budgets use whole cents; whether an estimate exceeds a cap depends on the m
 input, output limit, and remaining spend. Do not assume 2,000 tokens always costs 1¢.
 Custom endpoints are unpriced: token accounting continues, and the cost-cap estimate is
 not a claim about actual dollars. Built-in unknown models use provider fallback pricing.
+
+The dashboard's **Settled budget charges** is the all-time admission counter, not the sum of
+the first 40 visible rows. Its Spend equation shows durable charge-contributing calls plus
+separate operator adjustments plus any visible counter difference. Open reservations sit beside
+that equation as **not yet charged**. In Departures, **Observed cost** is what provider usage
+reported; **Budget charge** uses the conservative greater-of-observed-and-enforced amount for
+`ok` and `usage_unknown` rows. Older rows load on demand. If Postgres or Redis cannot explain a
+part, the UI says unavailable rather than showing zero.
 
 **Scope is capability, not just a model.** An agent scoped to chat can only reach the chat
 and model-listing endpoints — it **cannot** use your key for `/v1/files`, fine-tuning,

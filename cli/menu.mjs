@@ -194,6 +194,13 @@ export const GROUPS = [
     items: [
       command({ id: "key-status", label: "Show the local key storage tier", run: ["key", "status"], detail: "key status", description: "Report where this machine resolves its passport private key.", current: currentFrom("key") }),
       command({ id: "key-migrate", label: "Move a file key into the OS store", run: ["key", "migrate"], detail: "key migrate", description: "Store the passport in the OS credential store, verify it, then remove the file copy.", effect: "local_write", guide: "key-migrate", current: currentFrom("key") }),
+      // Sits with `key migrate` rather than under Setup & config because what it
+      // decides is where a passport private key ends up living, which is this
+      // group's question. `needsArgs` for the usual reason plus one of its own:
+      // the gateway and passport ID have to come from the operator, and the
+      // secret is read from a hidden prompt that the command owns — it must
+      // never be reachable as a bare selection that then asks for a key.
+      command({ id: "passport-import", label: "Import an issued passport", run: ["passport", "import"], detail: "passport import --global", description: "Prove a passport secret against its public ID, then store it in the OS store.", effect: "local_write", network: "none", needsArgs: true, current: currentFrom("key") }),
     ],
   },
   {

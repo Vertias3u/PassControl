@@ -46,7 +46,7 @@ import { serviceClient } from "../supabase";
  * contract honest rather than having one function in the module quietly reach
  * for a different connection than the one it was given.
  */
-type Client = Pick<Redis, "eval" | "zcard" | "mget">;
+type Client = Pick<Redis, "eval" | "zcard" | "mget" | "pipeline">;
 const on = (client?: Client): Client => client ?? redis();
 
 /**
@@ -959,6 +959,40 @@ export async function readReserved(
     k.reservedCost(agentId)
   );
   return { tokens: Number(t) || 0, microcents: Number(c) || 0 };
+}
+
+export interface ReservedBudgetSummary {
+  tokens: number;
+  microcents: number;
+  openHolds: number;
+}
+
+/** Read a fleet's live reservations in bounded Redis pipelines. This is a
+ * presentation read only; admission and settlement continue to use the atomic
+ * scripts above. */
+export async function readReservedMany(
+  agentIds: readonly string[],
+  client?: Client
+): Promise<Map<string, ReservedBudgetSummary>> {
+  const out = new Map<string, ReservedBudgetSummary>();
+  const source = on(client);
+  for (let offset = 0; offset < agentIds.length; offset += 200) {
+    const ids = agentIds.slice(offset, offset + 200);
+    if (!ids.length) continue;
+    const pipe = source.pipeline();
+    pipe.mget(...ids.flatMap((id) => [k.reserved(id), k.reservedCost(id)]));
+    for (const id of ids) pipe.zcard(k.holds(id));
+    const replies = await pipe.exec() as unknown[];
+    const counters = Array.isArray(replies[0]) ? replies[0] as unknown[] : [];
+    ids.forEach((id, index) => {
+      out.set(id, {
+        tokens: Number(counters[index * 2]) || 0,
+        microcents: Number(counters[index * 2 + 1]) || 0,
+        openHolds: Number(replies[index + 1]) || 0,
+      });
+    });
+  }
+  return out;
 }
 
 /**

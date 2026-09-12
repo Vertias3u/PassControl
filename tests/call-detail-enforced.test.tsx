@@ -53,20 +53,22 @@ describe("what a usage_unknown row is allowed to claim", () => {
       enforced_tokens: 3400,
       enforced_microcents: 9100,
     });
-    expect(html).toContain("<dt>Tokens charged to the budget</dt>");
+    expect(html).toContain("<dt>Budget tokens</dt>");
     expect(html).toContain("3,400");
-    expect(html).toContain("<dt>Cost charged to the budget</dt>");
+    expect(html).toContain("<dt>Budget charge</dt>");
     expect(html).toContain("$0.000091");
   });
 
   // The prose in STATUS used to promise "the enforced figures" while the drawer
   // rendered none of them — a sentence pointing at a number that is not on the
   // page, which is worse than no sentence. It is hedged now ("where the row
-  // records them"), and a row that records neither must render neither field.
-  it("renders no charged field on a row that has none", () => {
+  // records them"), and a row that records neither must still render the zero
+  // budget result rather than omitting the accounting dimension.
+  it("renders an explicit zero budget charge when no enforced amount exists", () => {
     const html = render({ ...base, status: "usage_unknown" });
-    expect(html).not.toContain("<dt>Tokens charged to the budget</dt>");
-    expect(html).not.toContain("<dt>Cost charged to the budget</dt>");
+    expect(html).toContain("<dt>Budget tokens</dt><dd>0</dd>");
+    expect(html).toContain("<dt>Budget charge</dt>");
+    expect(html).toContain("$0.000000");
   });
 
   // An ordinary row is an observation. Nothing about it is hedged, and the
@@ -75,7 +77,7 @@ describe("what a usage_unknown row is allowed to claim", () => {
   it("leaves an ordinary allowed call completely alone", () => {
     const html = render({ ...base, input_tokens: 120, output_tokens: 300, cost_microcents: 4200 });
     expect(html).not.toContain("(unconfirmed)");
-    expect(html).not.toContain("<dt>Tokens charged to the budget</dt>");
+    expect(html).toContain("<dt>Budget tokens</dt><dd>420</dd>");
     expect(html).toContain("420");
   });
 
@@ -84,8 +86,8 @@ describe("what a usage_unknown row is allowed to claim", () => {
   // must still be shown rather than suppressed with its missing partner.
   it("shows the dimension it has when only one was enforced", () => {
     const html = render({ ...base, status: "usage_unknown", enforced_tokens: 3400 });
-    expect(html).toContain("<dt>Tokens charged to the budget</dt>");
+    expect(html).toContain("<dt>Budget tokens</dt>");
     expect(html).toContain("3,400");
-    expect(html).toContain("<dt>Cost charged to the budget</dt>");
+    expect(html).toContain("<dt>Budget charge</dt>");
   });
 });

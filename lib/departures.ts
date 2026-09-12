@@ -161,6 +161,32 @@ export function fare(costMicrocents: number | null): string {
   return `$${(cents / 100).toFixed(4)}`;
 }
 
+/** The exact durable budget arithmetic introduced by migration 0056. */
+export function budgetChargeMicrocents(
+  row: Pick<DepartureRow, "status" | "cost_microcents" | "enforced_microcents">
+): number {
+  if (row.status !== "ok" && row.status !== "usage_unknown") return 0;
+  return Math.max(0, row.cost_microcents ?? 0, row.enforced_microcents ?? 0);
+}
+
+/** Token equivalent of budgetChargeMicrocents, from the same spend view. */
+export function budgetChargeTokens(
+  row: Pick<DepartureRow, "status" | "input_tokens" | "output_tokens" | "enforced_tokens">
+): number {
+  if (row.status !== "ok" && row.status !== "usage_unknown") return 0;
+  return Math.max(
+    0,
+    (row.input_tokens ?? 0) + (row.output_tokens ?? 0),
+    row.enforced_tokens ?? 0
+  );
+}
+
+export function usageStatusLabel(row: Pick<DepartureRow, "status">): string {
+  if (row.status === "usage_unknown") return "Unconfirmed · reserve charged";
+  if (row.status === "ok") return "Confirmed";
+  return "Not charged";
+}
+
 export function totalTokens(row: Pick<DepartureRow, "input_tokens" | "output_tokens">): number {
   return (row.input_tokens ?? 0) + (row.output_tokens ?? 0);
 }

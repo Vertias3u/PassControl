@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, Radio, ShieldAlert, ShieldCheck } from "lucide-react";
 
-import { buildConfigureSnippet } from "@/app/dashboard/key-import-snippet";
+import { buildConfigureSnippet, buildPassportImportCommand } from "@/app/dashboard/key-import-snippet";
 import { buttonVariants } from "@/components/ui/button";
 import {
   activationDiagnosis,
@@ -14,7 +14,8 @@ import { buildPassportConnectSetup } from "@/lib/passport-connect-config";
 import type { ProviderId } from "@/lib/providers";
 import { browserClient } from "@/lib/supabase/client";
 
-type CopyKind = "env" | "install" | "client" | "smoke" | "sidecar";
+type CopyKind = "secret" | "env" | "install" | "client" | "smoke" | "sidecar" | "import" | "mcp";
+type ConnectMode = "sdk" | "sidecar" | "mcp";
 const PASSPORT_AUTH_METHODS = ["passport", "passport_proof_per_request"] as const;
 
 function isPassportAuthMethod(value: FirstCallRow["auth_method"]): boolean {
@@ -33,6 +34,7 @@ export function PassportStoreAndConnect({
   model,
   passportId,
   passportSecret,
+  initialMode,
   integrations,
   stored,
   onStoredChange,
@@ -49,6 +51,7 @@ export function PassportStoreAndConnect({
   model: string;
   passportId: string;
   passportSecret: string;
+  initialMode: ConnectMode;
   integrations: readonly string[];
   stored: boolean;
   onStoredChange: (stored: boolean) => void;
@@ -61,6 +64,7 @@ export function PassportStoreAndConnect({
   const [sidecarIntegration, setSidecarIntegration] = useState(
     integrations.includes("generic") ? "generic" : integrations[0] ?? ""
   );
+  const [mode, setMode] = useState<ConnectMode>(initialMode);
 
   useEffect(() => setOrigin(window.location.origin), []);
 
@@ -133,14 +137,15 @@ export function PassportStoreAndConnect({
   );
   const sidecarSnippet = sidecarIntegration
     ? buildConfigureSnippet({
+        gateway: origin,
         passportId,
-        passportSecret,
         provider,
         model,
         integration: sidecarIntegration,
         allowedIntegrations: integrations,
       })
     : "";
+  const importCommand = buildPassportImportCommand({ gateway: origin, passportId });
   const diagnosis = row && row.status !== "ok" ? activationDiagnosis(row) : null;
   const verified = row?.status === "ok" && isPassportAuthMethod(row.auth_method);
   const proofedPerRequest = row?.auth_method === "passport_proof_per_request";
@@ -172,43 +177,99 @@ export function PassportStoreAndConnect({
         </span>
       </div>
 
-      <div className="pc-boundary-note">
-        <ShieldCheck aria-hidden="true" />
-        <span><strong>{setup.integrationLabel}.</strong> The private key signs locally. Cloud receives the public Passport ID and signatures, never the secret.</span>
+      <div className="pc-segmented" aria-label="Passport connection method">
+        {(["sdk", "sidecar", "mcp"] as const).map((option) => (
+          <button key={option} type="button" aria-pressed={mode === option} onClick={() => setMode(option)}>
+            {option === "sdk" ? "SDK" : option === "sidecar" ? "Sidecar / static-key tool" : "MCP"}
+          </button>
+        ))}
       </div>
 
-      <section className="grid gap-2" aria-labelledby="passport-env-heading">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div><strong id="passport-env-heading">1. Store in the private runtime</strong><small className="block text-muted-foreground">This is the only block containing the secret.</small></div>
-          {copyButton("env", "Copy private environment", setup.envBlock)}
-        </div>
-        <pre className="pc-secret-block is-secret">{setup.envBlock}</pre>
-      </section>
+      <div className="pc-boundary-note">
+        <ShieldCheck aria-hidden="true" />
+        <span>
+          <strong>{mode === "sdk" ? setup.integrationLabel : mode === "sidecar" ? "Local Passport sidecar" : "Passport MCP"}.</strong>{" "}
+          {mode === "sidecar"
+            ? "The sidecar listens on http://127.0.0.1:8788 and attaches per-request sender proof before forwarding to the PassControl gateway."
+            : "The private key signs locally. PassControl receives the public Passport ID and signatures, never the secret."}
+        </span>
+      </div>
 
-      <section className="grid gap-2" aria-labelledby="passport-install-heading">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <strong id="passport-install-heading">2. Install the SDK</strong>
-          {copyButton("install", "Copy install command", setup.installCommand)}
-        </div>
-        <pre className="pc-secret-block is-public">{setup.installCommand}</pre>
-      </section>
+      {mode === "sdk" ? (
+        <>
+          <section className="grid gap-2" aria-labelledby="passport-env-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><strong id="passport-env-heading">1. Store in the private runtime</strong><small className="block text-muted-foreground">This is the only block containing the secret.</small></div>
+              {copyButton("env", "Copy private environment", setup.envBlock)}
+            </div>
+            <pre className="pc-secret-block is-secret">{setup.envBlock}</pre>
+          </section>
 
-      <section className="grid gap-2" aria-labelledby="passport-client-heading">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div><strong id="passport-client-heading">3. Connect the provider SDK</strong><small className="block text-muted-foreground">Save as <code>{setup.clientFilename}</code>. This code contains no private key.</small></div>
-          {copyButton("client", "Copy application code", setup.clientCode)}
-        </div>
-        <pre className="pc-secret-block is-public overflow-x-auto">{setup.clientCode}</pre>
-      </section>
+          <section className="grid gap-2" aria-labelledby="passport-install-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <strong id="passport-install-heading">2. Install the SDK</strong>
+              {copyButton("install", "Copy install command", setup.installCommand)}
+            </div>
+            <pre className="pc-secret-block is-public">{setup.installCommand}</pre>
+          </section>
 
-      <section className="grid gap-2" aria-labelledby="passport-smoke-heading">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div><strong id="passport-smoke-heading">4. Run one smoke call</strong><small className="block text-muted-foreground">Save as <code>{setup.smokeFilename}</code>, then run <code>{setup.smokeCommand}</code>.</small></div>
-          {copyButton("smoke", "Copy smoke-test code", setup.smokeCode)}
-        </div>
-        <pre className="pc-secret-block is-public overflow-x-auto">{setup.smokeCode}</pre>
-        <p className="pc-field-note">Running this makes one real provider call and may use provider credits. PassControl will not mark setup complete until the resulting call is stored.</p>
-      </section>
+          <section className="grid gap-2" aria-labelledby="passport-client-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><strong id="passport-client-heading">3. Connect the provider SDK</strong><small className="block text-muted-foreground">Save as <code>{setup.clientFilename}</code>. This code contains no private key.</small></div>
+              {copyButton("client", "Copy application code", setup.clientCode)}
+            </div>
+            <pre className="pc-secret-block is-public overflow-x-auto">{setup.clientCode}</pre>
+          </section>
+
+          <section className="grid gap-2" aria-labelledby="passport-smoke-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><strong id="passport-smoke-heading">4. Run one smoke call</strong><small className="block text-muted-foreground">Save as <code>{setup.smokeFilename}</code>, then run <code>{setup.smokeCommand}</code>.</small></div>
+              {copyButton("smoke", "Copy smoke-test code", setup.smokeCode)}
+            </div>
+            <pre className="pc-secret-block is-public overflow-x-auto">{setup.smokeCode}</pre>
+            <p className="pc-field-note">SDK and MCP calls present bearer visas. They do not satisfy required per-request sender-proof mode.</p>
+          </section>
+        </>
+      ) : (
+        <>
+          <section className="grid gap-2" aria-labelledby="passport-secret-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><strong id="passport-secret-heading">1. Copy the one-time Passport secret</strong><small className="block text-muted-foreground">The CLI asks for this with hidden input. It is never part of the command.</small></div>
+              {copyButton("secret", "Copy Passport secret", passportSecret)}
+            </div>
+            <pre className="pc-secret-block is-secret whitespace-pre-wrap break-all">{passportSecret}</pre>
+          </section>
+          <section className="grid gap-2" aria-labelledby="passport-import-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><strong id="passport-import-heading">2. Import into the OS credential store</strong><small className="block text-muted-foreground">This command contains only the public gateway and Passport ID.</small></div>
+              {copyButton("import", "Copy import command", importCommand)}
+            </div>
+            <pre className="pc-secret-block is-public overflow-x-auto">{importCommand}</pre>
+          </section>
+          {mode === "sidecar" ? (
+            <section className="grid gap-2" aria-labelledby="passport-sidecar-heading">
+              <label className="grid gap-1 text-sm">
+                <strong id="passport-sidecar-heading">3. Configure and start the sidecar</strong>
+                <span>Static-key tool preset</span>
+                <select value={sidecarIntegration} onChange={(event) => setSidecarIntegration(event.target.value)}>
+                  {integrations.map((value) => <option key={value} value={value}>{value}</option>)}
+                </select>
+              </label>
+              <pre className="pc-secret-block is-public overflow-x-auto">{sidecarSnippet}</pre>
+              {copyButton("sidecar", "Copy sidecar setup", sidecarSnippet)}
+              <p className="pc-field-note">Point the tool at the sidecar URL, not the PassControl gateway. Direct Agent Keys use the gateway directly and are issued through the separate Direct Agent Key flow.</p>
+            </section>
+          ) : (
+            <section className="grid gap-2" aria-labelledby="passport-mcp-heading">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div><strong id="passport-mcp-heading">3. Configure the MCP client</strong><small className="block text-muted-foreground">Choose the client in the CLI. MCP currently uses bearer visas.</small></div>
+                {copyButton("mcp", "Copy MCP command", "passcontrol mcp")}
+              </div>
+              <pre className="pc-secret-block is-public">passcontrol mcp</pre>
+            </section>
+          )}
+        </>
+      )}
 
       {/* The DOM-level contract follows the STORED method, not this agent's
           setting. A setup call can prove bearer visa acceptance or the stronger
@@ -253,23 +314,6 @@ export function PassportStoreAndConnect({
           )}
         </div>
       </section>
-
-      <details className="rounded-md border border-border bg-secondary/30 p-3">
-        <summary className="cursor-pointer text-sm font-semibold">Advanced · passport sidecar for static-key tools</summary>
-        <p className="text-sm text-muted-foreground">Need passport identity in a static-key tool? The local sidecar remains available, but it requires a process running beside the application. For Cloud without a local process, use a Direct Agent Key instead.</p>
-        {integrations.length ? (
-          <>
-            <label className="grid gap-1 text-sm">
-              <span>Sidecar preset</span>
-              <select value={sidecarIntegration} onChange={(event) => setSidecarIntegration(event.target.value)}>
-                {integrations.map((value) => <option key={value} value={value}>{value}</option>)}
-              </select>
-            </label>
-            <pre className="pc-secret-block is-secret overflow-x-auto">{sidecarSnippet}</pre>
-            {copyButton("sidecar", "Copy advanced sidecar setup", sidecarSnippet)}
-          </>
-        ) : null}
-      </details>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <label className="flex items-center gap-2 text-sm">
