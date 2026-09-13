@@ -47,6 +47,7 @@ import {
   probeGatewayOrigin,
   requirePassportGateway,
   requirePassport,
+  shellQuotingHint,
   step,
   warn,
   writeConfigFile,
@@ -1248,13 +1249,28 @@ async function startDashboard(opts = {}) {
   // work (that is all the npm script is now), minus npm/cmd wrappers. Next's CLI
   // still forks its HTTP worker, so this pid is deliberately the SUPERVISOR.
   // Unix stops its process group; Windows uses taskkill /T for the whole tree.
+  //
+  // `detached` is set on BOTH platforms, and the two reasons are different.
+  // Unix needs it for the process group `stopDashboard` signals with kill(-pid).
+  // Windows needs it for something else entirely: it is what lets the child
+  // outlive us at all. This read `process.platform !== "win32"` — detached only
+  // on Unix, on the reasoning that Windows takes its tree from taskkill and so
+  // has no use for a process group. True, and it answered the wrong question.
+  //
+  // `child.unref()` below only lets the PARENT exit; it does not let the child
+  // survive. So on Windows `passcontrol start` raised the dashboard, waited for
+  // it, truthfully printed "dashboard online" — waitForGateway requires a live
+  // pid and an answering gateway on the same poll — and then killed it by
+  // returning. `setup` did the same, which is worse: a first-run self-hoster is
+  // handed a URL that stops working as they read it, with an empty log and no
+  // error anywhere. Reported and reproduced on Windows 11, 2026-09-13.
   const devServer = path.join(appRoot, "scripts", "dev-docker.mjs");
   if (!fs.existsSync(devServer)) {
     throw new Error(`${devServer} is missing — this checkout is incomplete or predates the local-stack launcher. Re-clone, or run \`npm run dev:docker\` from ${appRoot} by hand.`);
   }
   const child = spawn(process.execPath, [devServer], {
     cwd: appRoot,
-    detached: process.platform !== "win32",
+    detached: true,
     env: { ...process.env, PORT: String(dashboard.port) },
     stdio: ["ignore", logFd, logFd],
   });
@@ -1275,6 +1291,35 @@ async function startDashboard(opts = {}) {
   return dashboard;
 }
 
+/**
+ * Take down pid and everything below it on Windows. Reports, never throws.
+ *
+ * `taskkill /T` WITHOUT `/F` asks politely, and asking needs somewhere to ask:
+ * a `DETACHED_PROCESS` child has no console and no window, so Windows answers
+ * "This process can only be terminated forcefully (with /F option)" and taskkill
+ * exits NON-ZERO. `execFileSync` turns a non-zero exit into a throw.
+ *
+ * That throw is why `passcontrol stop --dashboard-only` refused on Windows the
+ * moment the dashboard started being spawned detached: the catch around it only
+ * rescued `ESRCH`, a POSIX errno a failing taskkill cannot produce, so it
+ * rethrew and abandoned the stop eight lines above the `/F` escalation the
+ * function already had. The two-stage design was right; the throw jumped stage
+ * two. Reported from a Windows 11 box, 2026-09-13.
+ *
+ * So a non-zero exit is an ANSWER here, not an exception — it is how Windows
+ * says "use /F" — and the caller decides what to do about it. Whether the
+ * dashboard is actually down is settled by the port, not by this.
+ */
+function windowsTaskkillTree(pid, { force }) {
+  const args = ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])];
+  try {
+    execFileSync("taskkill.exe", args, { encoding: "utf8", timeout: 10_000, windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function stopDashboard() {
   const state = runningManagedDashboard();
   if (!state) {
@@ -1282,34 +1327,32 @@ async function stopDashboard() {
     return;
   }
 
-  try {
-    if (process.platform === "win32") {
-      execFileSync("taskkill.exe", ["/PID", String(state.pid), "/T"], {
-        encoding: "utf8",
-        timeout: 10_000,
-        windowsHide: true,
-      });
-    } else process.kill(-state.pid, "SIGTERM");
-  } catch (error) {
-    if (error.code === "ESRCH") {
-      removeDashboardState();
-      ok("No CLI-managed local dashboard is running.");
-      return;
+  if (process.platform === "win32") {
+    // Politely first — it lets Next flush if anything is listening for it — but
+    // escalate the instant taskkill says it cannot, rather than waiting out a
+    // port that a refused kill is never going to release. The port check below
+    // is still the authority, and still escalates on its own.
+    if (!windowsTaskkillTree(state.pid, { force: false })) {
+      windowsTaskkillTree(state.pid, { force: true });
     }
-    throw error;
+  } else {
+    try {
+      process.kill(-state.pid, "SIGTERM");
+    } catch (error) {
+      if (error.code === "ESRCH") {
+        removeDashboardState();
+        ok("No CLI-managed local dashboard is running.");
+        return;
+      }
+      throw error;
+    }
   }
 
   if (!await waitForPortRelease(state.port)) {
-    if (process.platform === "win32") {
-      execFileSync("taskkill.exe", ["/PID", String(state.pid), "/T", "/F"], {
-        encoding: "utf8",
-        timeout: 10_000,
-        windowsHide: true,
-      });
-    }
+    if (process.platform === "win32") windowsTaskkillTree(state.pid, { force: true });
     else process.kill(-state.pid, "SIGKILL");
     if (!await waitForPortRelease(state.port)) {
-      throw new Error(`Dashboard process group ${state.pid} did not release port ${state.port}.`);
+      throw new Error(`Dashboard (PID ${state.pid}) did not release port ${state.port}.`);
     }
   }
   removeDashboardState();
@@ -2742,7 +2785,13 @@ async function passportCommand(rest, opts = {}) {
   const gateway = bareGatewayOrigin(opts.gateway, "--gateway");
   const passportId = opts.id.trim();
   if (!isEncodedEd25519Key(passportId)) {
-    throw new Error("--id must be a 32-byte Ed25519 public key encoded as unpadded base64url.");
+    // Same hint as --gateway above, because it is the same operator on the same
+    // line: cmd.exe hands both flags their quotes. The id at least refuses a
+    // quoted value rather than storing one — base64url has no quote character —
+    // so this only ever needed the explanation, never a repair.
+    throw new Error(
+      `--id must be a 32-byte Ed25519 public key encoded as unpadded base64url.${shellQuotingHint(passportId)}`
+    );
   }
 
   const project = config.sources.find((source) =>

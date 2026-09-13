@@ -325,6 +325,31 @@ describe("new passport issuance reveal-once handoff", () => {
     expect(builder).not.toContain("buildPassportImportCommand");
   });
 
+  // The clipboard holds one thing at a time, and the flow used to ignore that:
+  // step 1 said "Copy the one-time Passport secret", step 2 said "Copy import
+  // command", and the second copy replaced the first. So at the CLI's hidden
+  // "Paste the Passport secret" prompt the operator's clipboard held the import
+  // command — the one value the flow had just told them was shown once and could
+  // never be retrieved. Reported by a self-hoster on 2026-09-13, who put it
+  // plainly: it asks you to copy the private key, then to copy something else.
+  //
+  // The secret is still shown once and still prominent. It simply comes second,
+  // because it is needed second.
+  it("asks for the import command before the secret, because the clipboard holds one", () => {
+    const store = read("components/PassportStoreAndConnect.tsx");
+    const importStep = store.indexOf('id="passport-import-heading"');
+    const secretStep = store.indexOf('id="passport-secret-heading"');
+    expect(importStep, "the import step is missing").toBeGreaterThan(-1);
+    expect(secretStep, "the secret step is missing").toBeGreaterThan(-1);
+    expect(
+      importStep,
+      "copying the secret before the command overwrites it with the command",
+    ).toBeLessThan(secretStep);
+    // And the numbering the operator reads must agree with the DOM order.
+    expect(store).toMatch(/1\. Import into the OS credential store/);
+    expect(store).toMatch(/2\. Paste the one-time Passport secret/);
+  });
+
   it("takes the floor from the server row, not the browser clock", () => {
     // agent_logs.created_at and agents.created_at are stamped by the same database
     // clock. A Date.now() taken in the browser is a different clock, and skew either

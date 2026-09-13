@@ -79,6 +79,85 @@ describe("the dev server the CLI starts", () => {
     expect(body).toContain("process.execPath");
     expect(body).not.toContain('"run", "dev:docker"');
   });
+
+  // …and it must OUTLIVE the CLI that spawned it. `child.unref()` only lets the
+  // PARENT exit; on Windows it is `detached` that lets the CHILD survive, and
+  // this spawn read `detached: process.platform !== "win32"` — detached only on
+  // Unix, because `detached` was reasoned about purely as the thing that makes
+  // `kill(-pid)` work in stopDashboard, and Windows gets its tree from
+  // `taskkill /T` instead. True about stopping, and it missed the other half.
+  //
+  // The symptom is worse than a crash, because nothing on screen is wrong:
+  // waitForGateway requires the gateway to answer AND the pid to be alive on the
+  // same poll, so "✓ dashboard online" was *true* when printed. The CLI then
+  // exited and took the server with it. `passcontrol setup` did it too — a
+  // first-run self-hoster is handed a URL that stopped working as they read it.
+  //
+  // Confirmed on a Windows 11 box, 2026-09-13: `passcontrol start` reported
+  // online, `passcontrol local-logs` showed the dev server's normal output with
+  // no error and no stack trace, and `npm run dev:docker` in the same shell then
+  // bound port 3000 cleanly — so nothing was still holding it.
+  it("detaches the dashboard on every platform, so it survives the CLI exiting", () => {
+    const from = cli.indexOf("async function startDashboard");
+    const body = cli.slice(from, cli.indexOf("\nasync function ", from + 1));
+    expect(body).toMatch(/detached:\s*true/);
+    expect(
+      body,
+      "detached decides whether the child outlives us, not just how we stop it — it may not be conditional on the platform",
+    ).not.toMatch(/detached:\s*process\.platform/);
+  });
+
+  // The pairing the fix above depends on: with the child detached, the CLI is no
+  // longer its console's parent by the time anyone stops it, so the stop has to
+  // address the tree by pid. Both halves must stay present together.
+  it("still stops the whole tree by pid, on both platforms", () => {
+    const helper = cli.slice(
+      cli.indexOf("function windowsTaskkillTree"),
+      cli.indexOf("async function stopDashboard"),
+    );
+    expect(helper).toContain("taskkill.exe");
+    expect(helper).toContain('"/T"');
+
+    const from = cli.indexOf("async function stopDashboard");
+    const body = cli.slice(from, cli.indexOf("\nasync function ", from + 1));
+    expect(body).toMatch(/process\.kill\(-state\.pid/);
+  });
+
+  // And the half detaching the child broke, reported from the same Windows box
+  // on 2026-09-13: `passcontrol stop --dashboard-only` refused with taskkill's
+  // "This process can only be terminated forcefully (with /F option)".
+  //
+  // `taskkill /T` WITHOUT /F asks politely, and a DETACHED_PROCESS child has
+  // nowhere to receive the request — no console, no window — so taskkill exits
+  // NON-ZERO and execFileSync turns that into a throw. The catch around it only
+  // ever rescued ESRCH, which is a POSIX errno a failing taskkill cannot
+  // produce, so it rethrew and abandoned the stop EIGHT LINES ABOVE the /F
+  // escalation the function already had. The two-stage design was right; the
+  // throw jumped over stage two.
+  //
+  // So the graceful attempt is best-effort by construction: it reports whether
+  // it worked and never throws. Whether the dashboard is down is decided by the
+  // port, which is the only fact that settles it.
+  it("treats the polite taskkill as best-effort and escalates to /F itself", () => {
+    const helper = cli.slice(
+      cli.indexOf("function windowsTaskkillTree"),
+      cli.indexOf("async function stopDashboard"),
+    );
+    expect(helper).toContain('"/F"');
+    expect(
+      helper,
+      "a non-zero taskkill must be an answer, not an exception — it is how Windows says 'use /F'",
+    ).toMatch(/catch\s*\{[^}]*return false/);
+
+    const from = cli.indexOf("async function stopDashboard");
+    const body = cli.slice(from, cli.indexOf("\nasync function ", from + 1));
+    expect(
+      body,
+      "stopDashboard must go through the helper, so taskkill's exit code cannot abort it",
+    ).not.toContain("execFileSync");
+    expect(body).toMatch(/force:\s*false/);
+    expect(body).toMatch(/force:\s*true/);
+  });
 });
 
 describe("bash resolution for the local stack scripts", () => {

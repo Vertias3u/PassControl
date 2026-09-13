@@ -232,19 +232,19 @@ export function PassportStoreAndConnect({
         </>
       ) : (
         <>
-          <section className="grid gap-2" aria-labelledby="passport-secret-heading">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div><strong id="passport-secret-heading">1. Copy the one-time Passport secret</strong><small className="block text-muted-foreground">The CLI asks for this with hidden input. It is never part of the command.</small></div>
-              {copyButton("secret", "Copy Passport secret", passportSecret)}
-            </div>
-            <pre className="pc-secret-block is-secret whitespace-pre-wrap break-all">{passportSecret}</pre>
-          </section>
           <section className="grid gap-2" aria-labelledby="passport-import-heading">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div><strong id="passport-import-heading">2. Import into the OS credential store</strong><small className="block text-muted-foreground">This command contains only the public gateway and Passport ID.</small></div>
+              <div><strong id="passport-import-heading">1. Import into the OS credential store</strong><small className="block text-muted-foreground">This command contains only the public gateway and Passport ID. Run it first — it then asks for the secret below.</small></div>
               {copyButton("import", "Copy import command", importCommand)}
             </div>
             <pre className="pc-secret-block is-public overflow-x-auto">{importCommand}</pre>
+          </section>
+          <section className="grid gap-2" aria-labelledby="passport-secret-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><strong id="passport-secret-heading">2. Paste the one-time Passport secret</strong><small className="block text-muted-foreground">Copy this once the command is waiting, not before: it asks with hidden input, so nothing appears as you paste. Copying it earlier replaces the command on your clipboard.</small></div>
+              {copyButton("secret", "Copy Passport secret", passportSecret)}
+            </div>
+            <pre className="pc-secret-block is-secret whitespace-pre-wrap break-all">{passportSecret}</pre>
           </section>
           {mode === "sidecar" ? (
             <section className="grid gap-2" aria-labelledby="passport-sidecar-heading">

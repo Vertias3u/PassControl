@@ -432,6 +432,42 @@ export function requireControlApiKey(current = config) {
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
+ * A value that still carries its own quote characters, explained.
+ *
+ * `cmd.exe` does not treat `'` as quoting. A Windows operator copying a POSIX
+ * invocation out of a README types `--gateway 'http://localhost:3000'` and the
+ * CLI receives those quotes as part of the argument — so a value that is right
+ * on the line they typed is refused by a message about the string that arrived.
+ * The same trap already broke `npm run dev:docker`, which was a bash one-liner
+ * in single quotes until cmd handed bash `'set` as its whole command; see the
+ * header of `scripts/dev-docker.mjs`.
+ *
+ * Deliberately a hint and not a repair. The callers below validate values that
+ * decide where a credential is sent, and quietly normalizing an argument before
+ * a strict rule sees it is how strict rules stop being strict. This only
+ * explains the refusal.
+ *
+ * Returns a sentence to append, or "". It describes the shape and never the
+ * value: a gateway URL or a passport id can itself be a credential.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function shellQuotingHint(value) {
+  const text = String(value ?? "");
+  if (text.length < 2) return "";
+  const quote = text[0];
+  if ((quote !== "'" && quote !== '"') || text[text.length - 1] !== quote) return "";
+  // Only single quotes get the cmd.exe sentence: cmd *does* strip double
+  // quotes, so a value that arrives wrapped in them came from a config file or
+  // another shell, and naming cmd would send the reader somewhere wrong.
+  const cause =
+    quote === "'" ? " Windows cmd.exe does not treat ' as quoting and passes it through literally." : "";
+  const name = quote === "'" ? "a single quote" : "a double quote";
+  return ` The value starts and ends with ${name}, so the quote characters are part of it.${cause} Retype it with no quotes around it.`;
+}
+
+/**
  * Validate a gateway value and return the origin to build URLs from.
  *
  * A bare HTTPS origin — scheme, host, optional port — with no path beyond `/`,
@@ -452,6 +488,11 @@ const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
  * prints the message and exits 1, and `doctor` catches it to report a failed
  * check instead of vanishing mid-diagnosis. The message never quotes the value,
  * because a rejected gateway can itself carry credentials.
+ *
+ * The unparseable branch appends `shellQuotingHint`, which the SDK has no reason
+ * to carry — it is never handed a cmd.exe argv. That is a message, not a rule:
+ * what this accepts and refuses is still identical to the SDK's, which is all
+ * the parity test asserts.
  */
 export function bareGatewayOrigin(gateway, label = "PASSCONTROL_GATEWAY") {
   let url;
@@ -459,7 +500,8 @@ export function bareGatewayOrigin(gateway, label = "PASSCONTROL_GATEWAY") {
     url = new URL(String(gateway ?? ""));
   } catch {
     throw new Error(
-      `${label} must be an absolute URL (for example https://passcontrol.example.com).`
+      `${label} must be an absolute URL (for example https://passcontrol.example.com).` +
+        shellQuotingHint(gateway)
     );
   }
   const loopback = LOOPBACK_HOSTNAMES.has(url.hostname);
