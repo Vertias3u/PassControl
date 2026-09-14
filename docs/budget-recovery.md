@@ -14,7 +14,7 @@ answer to them either invents capacity or destroys it.
 **Nothing in the gateway ever lowers a spend counter except the rebuild in this
 document, and the rebuild is audited.**
 
-Reservations, settlements, and the nightly reconcile can all raise `spent:`.
+Reservations, settlements, and the scheduled reconcile can all raise `spent:`.
 None of them can lower it. That asymmetry is the whole defence: a lost
 settlement costs an operator nothing but a slightly conservative budget, while a
 wrongly lowered counter hands out capacity for money that was really spent — to
@@ -161,7 +161,7 @@ it forwards, which is also what stops the same attempt being sent twice. It is
 not a guess from the hold's age, and age is not a substitute for it: a hold can
 be hours old and never have left.
 
-The nightly reconcile reports a count of these and **never acts on them**. A
+The scheduled reconcile reports a count of these and **never acts on them**. A
 cron that tidied up open holds would be the expiry bug with a scheduler
 attached.
 
@@ -196,7 +196,7 @@ Evidence, in the order it is actually available:
    for the same model. Usually there is nothing, for the reason above.
 
 If none of it settles the question, **charge it**. Over-charging an agent costs
-its owner a little headroom until the next budget period. Under-charging spends
+its owner headroom; these counters do not reset on a periodic budget window. Under-charging spends
 real money and calls it free.
 
 ### Recording the decision
@@ -310,7 +310,7 @@ Write scope, no body. It:
 **A log row that arrives after the rebuild is handled.** The gateway writes its
 audit row in the background, so a row for an attempt you had already resolved by
 hand can land minutes later — dated after the watermark the rebuild set. The
-nightly fold charges only the amount by which that row exceeds the figure you
+scheduled fold charges only the amount by which that row exceeds the figure you
 supplied, so the same call is never counted twice, and a call that turned out to
 cost more than you recorded is topped up without another rebuild.
 

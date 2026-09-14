@@ -14,6 +14,8 @@ what the dashboard looks like — it is what the gateway refuses to do.
 
 ## Recording
 
+The demo scripts require bash, curl and their script-specific utilities (including Node and jq); on Windows use a bash environment such as Git Bash. They are not PowerShell scripts.
+
 [vhs](https://github.com/charmbracelet/vhs) turns a `.tape` into a GIF:
 
 ```
@@ -31,7 +33,8 @@ here creates state — a demo that silently reconfigures your fleet to make itse
 look good is not a demo.
 
 - **Everything except `receipt-demo.sh`** goes through the sidecar. Start it and
-  leave it running: `passcontrol sidecar`. Override the address with `SIDECAR=…`.
+  leave it running: `passcontrol sidecar`. Budget, scope and portability demos read
+  the `SIDECAR` environment variable; the kill demo fixes its listener at port 8788.
 - **`budget-demo.sh`** needs an agent whose *remaining* budget is small enough to
   exhaust within its bounded call loop. Use a disposable agent with known usage and
   a small remaining cap. Do not seed `agents.spent_microcents` alone: admission
@@ -50,9 +53,8 @@ look good is not a demo.
   `.passcontrol` file from the working directory if there is one. It also needs
   the instance to be signing: no `INSTANCE_SIGNING_KEY` means no receipt, and the
   script says that plainly instead of failing obscurely.
-- **`portability-demo.sh`** runs the CLI and a raw HTTP client. Set `HERMES=1`
-  and substitute your own Hermes task for the second client if you want the
-  stronger version, where the second caller is a real agent framework.
+- **`portability-demo.sh`** runs the CLI and a raw HTTP client. It does not read a
+  `HERMES` switch; testing a real framework requires running that client separately.
 
 ## A note on honesty
 
@@ -62,7 +64,7 @@ decided. It is not a claim about whether the model's answer was any good, and it
 carries no prompt or completion by design — the evidence should not become
 another copy of your sensitive content.
 
-`receipt-demo.sh` uses the direct CLI call path, so it needs sender-proof mode off/observe
+`receipt-demo.sh` and the CLI leg of `portability-demo.sh` use the direct CLI call path, so they need sender-proof mode off/observe
 today. It samples the latest log row rather than correlating a request ID; use an
 isolated demo agent with no concurrent traffic and allow for asynchronous log writes.
 A failed/missing receipt can mean logging/signing failure, not just absent configuration.

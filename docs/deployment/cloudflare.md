@@ -46,9 +46,7 @@ npm ci
 npm run typecheck
 npm test
 npm run build:cloudflare
-XDG_CONFIG_HOME=/tmp/passcontrol-wrangler-config \
-  WRANGLER_LOG_PATH=/tmp/passcontrol-wrangler.log \
-  npx wrangler deploy --dry-run
+npx wrangler deploy --dry-run
 npm run preview:cloudflare
 ```
 
@@ -91,7 +89,7 @@ the custom domain.
 
 ## Self-host boundaries and database setup
 
-Apply the migrations included in your public checkout with `DATABASE_URL=… npm run migrate`
+Set `DATABASE_URL` in your shell environment and apply the migrations included in your public checkout with `npm run migrate`
 before serving traffic. A fresh install applies its full migration tree; existing deployments
 must review ordering requirements before upgrades. Do not copy a private deployment's migration
 count: Cloud-only statement-operation migrations are absent from the public tree.

@@ -37,6 +37,8 @@ demo call after approval. [Request access](https://passcontrol.vertias.eu/beta).
 
 ### The fast path — Cloud
 
+On Windows, run these shell commands in PowerShell. Replace placeholders before running.
+
 ```bash
 npm install -g passcontrol
 passcontrol login            # browser opens, you approve once, this machine is set up
@@ -72,6 +74,9 @@ credentials.
 
 ### The other path — run the gateway yourself
 
+For setup failures, confusing refusals or day-to-day operations, see the
+[self-host help guide](./docs/self-host.md). The walkthrough continues below.
+
 Everything below is self-hosting: your own Postgres, your own Vault, your own signing key, and
 your instance signs its own receipts. You control where requests are processed, but calls still leave for the selected
 upstream unless you configure a local custom endpoint. It is more to operate.
@@ -99,7 +104,8 @@ passcontrol setup  # checks prereqs, clones the stack, starts services, migrates
 `--app-dir <path>`), installs it, and starts it. Prefer to clone yourself? That works too:
 
 ```bash
-git clone https://github.com/Vertias3u/PassControl && cd PassControl
+git clone https://github.com/Vertias3u/PassControl
+cd PassControl
 npm install
 npm run cli -- setup   # run the CLI from the checkout
 ```
@@ -171,10 +177,10 @@ passcontrol call "Say hi in 3 words"
 > Runnable raw example scripts also live in [`examples/`](./examples). (From a source clone
 > without the global install, use `npm run cli -- <cmd>` in place of `passcontrol <cmd>`.)
 
-Prefer env vars? They still work and override `.passcontrol`:
+Prefer env vars? Set `PASSPORT_ID` and `PASSPORT_SECRET` in your shell environment first; they override `.passcontrol`:
 
 ```bash
-PASSPORT_ID=<pub> PASSPORT_SECRET=<priv> passcontrol call "Say hi in 3 words"
+passcontrol call "Say hi in 3 words"
 ```
 
 Expected:
@@ -196,15 +202,15 @@ passcontrol status                 # cockpit: config, gateway, next commands
 passcontrol doctor --fix           # recover a stopped local dashboard
 passcontrol start                  # dashboard + Supabase + Redis (--dashboard-only for just the app)
 passcontrol restart                # replace the CLI-managed dashboard process
-passcontrol local-logs --follow    # stream local dashboard output
-passcontrol passport import --global --gateway <origin> --id <public-id> # hidden secret prompt
+passcontrol local-logs             # print local dashboard output; --follow is macOS/Linux only
+passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST --id PUBLIC_PASSPORT_ID # hidden secret prompt
 passcontrol mcp                    # local stdio MCP server (chat + list_models)
 passcontrol sidecar                # local bridge for Hermes/OpenHands/Aider/Cline/etc.
 passcontrol agent list             # managed passports
 passcontrol spend                  # fleet and per-agent spend
 passcontrol logs --limit 20        # recent gateway calls
 passcontrol keygen instance        # signing key for receipts + agent tokens
-passcontrol verify receipt <jws> --issuer <origin>  # check a receipt; needs no account
+passcontrol verify receipt "RECEIPT_JWS" --issuer https://YOUR-PASSCONTROL-HOST  # check a receipt; needs no account
 passcontrol kill on                # emergency tenant stop
 passcontrol kill off               # release the tenant stop
 passcontrol configure aider        # preview an Aider project config
@@ -288,9 +294,10 @@ passcontrol keygen instance
 → Its public half publishes at /.well-known/jwks.json as kid <derived-key-id>…
 ```
 
-Put that in your environment, plus the origin this deployment answers on:
+Add these values to the server configuration file described below; this is file content,
+not a shell command. Also set `PASSCONTROL_ISSUER` in the diagnostic terminal before the Node checks:
 
-```bash
+```dotenv
 INSTANCE_SIGNING_KEY=<the seed above>
 PASSCONTROL_ISSUER=http://localhost:3000     # your https origin, in a real deployment
 ```
@@ -301,14 +308,14 @@ file back and preserves these values across runs, so they survive a restart. Sta
 `npm run dev:docker`, which loads it. For a deployed instance, set them wherever that host keeps
 environment variables.
 
-> Plain `npm run dev` loads `.env.local` instead, which has no signing key — so the app starts
+> Plain `npm run dev` loads `.env.local` instead; if the signing key exists only in `.env.docker`, the app starts
 > fine and publishes an empty key set. That failure looks like broken signing and is really a
 > wrong env file.
 
 Restart, then check the public half is actually being published:
 
 ```bash
-curl -s $PASSCONTROL_ISSUER/.well-known/jwks.json
+node -e "fetch(new URL('/.well-known/jwks.json', process.env.PASSCONTROL_ISSUER)).then(r => r.text()).then(console.log)"
 ```
 
 ```json
@@ -321,18 +328,17 @@ curl -s $PASSCONTROL_ISSUER/.well-known/jwks.json
 
 ### b. Get a receipt
 
-Make a call, then look up the log row it wrote and pull its receipt:
+Set `PASSCONTROL_ISSUER` and the workspace control key `PASSCONTROL_API_KEY` in your
+shell environment first. Make a call, then fetch the latest visible row and its receipt
+with Node (the same command works on Windows). Use an isolated agent without concurrent
+traffic; the latest row is not guaranteed to belong to this call, and logging is asynchronous:
 
 ```bash
 passcontrol call "Say hi in 3 words"
 
 # The call id comes from the logs endpoint; the receipt is fetched one at a time,
 # because a receipt is ~700 bytes and would bloat every page of results.
-CALL_ID=$(curl -s -H "Authorization: Bearer $PASSCONTROL_API_KEY" \
-  "$PASSCONTROL_ISSUER/api/control/v1/logs?limit=1" | jq -r '.data[0].id')
-
-curl -s -H "Authorization: Bearer $PASSCONTROL_API_KEY" \
-  "$PASSCONTROL_ISSUER/api/control/v1/receipts/$CALL_ID" | jq -r '.data.receipt'
+node --input-type=module -e "const base=process.env.PASSCONTROL_ISSUER; const headers={authorization:'Bearer '+process.env.PASSCONTROL_API_KEY}; const logs=await fetch(new URL('/api/control/v1/logs?limit=1',base),{headers}); if(logs.ok===false) throw Error('Logs HTTP '+logs.status); const id=(await logs.json()).data?.[0]?.id; if(id===undefined) throw Error('No visible call row yet'); const receipt=await fetch(new URL('/api/control/v1/receipts/'+encodeURIComponent(id),base),{headers}); if(receipt.ok===false) throw Error('Receipt HTTP '+receipt.status); console.log((await receipt.json()).data.receipt);"
 ```
 
 You get one long line with two dots in it. That whole string **is** the receipt — there is
@@ -417,7 +423,12 @@ The safe rotation is two steps, and the first one is the one people skip:
 
 ```bash
 # 1. Record the key you are retiring, permanently. This prints a `<kid>:<public>` pair.
-passcontrol keygen instance --retire <your current seed>
+passcontrol keygen instance --retire "REPLACE_WITH_CURRENT_SEED"
+```
+
+Then update the server environment/configuration values (not shell commands):
+
+```dotenv
 INSTANCE_SIGNING_KEY_HISTORY=<whatever is already there>,<the pair it printed>
 
 # 2. Now rotate. _PREV covers the changeover window.
@@ -509,7 +520,7 @@ passcontrol env open-webui
 passcontrol env librechat
 ```
 
-Anything else that takes a custom base URL works through `passcontrol env generic`.
+For other clients that use the supported provider endpoints, `passcontrol env generic` prints connection settings.
 `passcontrol env` with an unknown name prints the full, current list of presets.
 
 Compatibility: OpenAI Chat Completions and POST `/responses` are supported, including
@@ -522,9 +533,8 @@ Responses was unsupported.
 Quick sanity check that scoping works — a blocked endpoint returns `403 blocked_endpoint`:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8788/api/v1/anthropic/v1/files \
-  -H 'content-type: application/json' -d '{"model":"claude-haiku-4-5"}'
-# → {"error":"blocked_endpoint"}
+node -e "fetch('http://127.0.0.1:8788/api/v1/anthropic/v1/files',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'claude-haiku-4-5'})}).then(async r => console.log(r.status,await r.text()))"
+# → 403 {"error":"blocked_endpoint"}
 ```
 
 ---
@@ -565,10 +575,13 @@ another restores it. (Note: blocking already-issued visas relies on Redis; see �
 
 The Docker stack is for local dev. To self-host for real:
 
-```bash
-cp .env.example .env.local          # fill in Supabase / Upstash / secrets
-DATABASE_URL='postgresql://…' npm run migrate   # apply db/migrations in order, once each
-npm run build && npm run start      # or deploy to Vercel / any Node host
+Copy `.env.example` to `.env.local` and fill in Supabase, Redis and secrets. Set
+`DATABASE_URL` in your shell environment, then apply migrations and build:
+
+```sh
+npm run migrate
+npm run build
+npm run start
 ```
 
 Production checklist:
@@ -582,7 +595,7 @@ Production checklist:
 - **Behind a trusted proxy** — per-IP rate limits trust `X-Forwarded-For`; only real behind
   Vercel or a proxy that sets it.
 - **Reconcile cron** — schedule `GET /api/cron/reconcile` (Bearer `$CRON_SECRET`) every few
-  minutes to correct budget drift. On Vercel it's wired via `vercel.json`; elsewhere use
+  minutes to correct budget drift. The committed Vercel schedule is nightly (`vercel.json`), while the Cloudflare trigger runs every five minutes; elsewhere use
   system `cron` or a GitHub Action.
 - **Never deploy the seeded dev user** — configure production Auth/SMTP and `PASSCONTROL_SIGNUP_MODE` (`open`, `invite`, `closed`); invite mode uses `INVITE_CODE`.
 - **Kill switch fail mode** — reads fail *open* by default; set `KILL_SWITCH_FAIL_CLOSED=true`

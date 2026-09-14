@@ -31,7 +31,7 @@ review. Treat it accordingly: **run it on a non-critical provider key first.**
   (encrypted) in Redis/Upstash. PassControl operators never store it in plaintext.
 - **Agents never hold the provider key.** They use either a scoped Direct Agent Key or an Ed25519 Passport whose private
   key signs locally to mint short-lived visas. Required sender proof additionally binds
-  each request to key possession; off/observe retain bearer-visa authentication.
+  visa-authenticated requests to key possession; it does not upgrade Direct Agent Keys; off/observe retain bearer-visa authentication.
 - **Tenant isolation** is enforced in code on the service-role path and by Postgres RLS;
   `db/tests/rls_invariants.sql` checks it, and CI runs it against a from-scratch database.
 - **Revocation** is layered: Redis-backed per-tenant/platform kill switch, per-agent

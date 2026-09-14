@@ -5,10 +5,13 @@ and PRs are welcome, and so is patience. Be kind.
 
 ## Getting started
 
-Fastest local setup:
+Fastest local setup (replace `YOUR-ACCOUNT` with your fork owner):
+
+On Windows, run these shell commands in PowerShell. Replace placeholders before running.
 
 ```bash
-git clone https://github.com/<you>/passcontrol && cd passcontrol
+git clone "https://github.com/YOUR-ACCOUNT/passcontrol"
+cd passcontrol
 npm install
 npm run dev:stack      # starts Supabase + Redis, applies migrations, seeds a dev user
 npm run dev:docker     # runs the app with .env.docker loaded
@@ -16,21 +19,23 @@ npm run dev:docker     # runs the app with .env.docker loaded
 
 That starts Supabase locally, Redis-over-REST, applies migrations, and seeds the dev login
 documented in the README. Docker Desktop and the Supabase CLI are required; host `psql` is
-not.
+not. Use Node 22+ for the full stack; see [OS prerequisites](./docs/self-host.md#setup-says-a-prerequisite-is-missing).
 
 For local synthetic calls, `PASSCONTROL_DEMO=1` enables the keyless demo provider.
-The `try` command has been removed. Use `passcontrol call` with a configured
-demo agent, or the login/doctor self-test on a demo-enabled gateway. The demo exercises
+The `try` command has been removed. Use the login or `passcontrol doctor --deep`
+self-test on a demo-enabled gateway; `passcontrol call` accepts real providers, not `demo`. The demo exercises
 governance and synthetic accounting, not a provider invoice. Keep local seeded accounts
 out of production.
 
-Manual setup against your own Supabase/Redis:
+Manual setup against your own Supabase/Redis: after cloning and installing, copy
+`.env.example` to `.env.local` and fill it in. Set `DATABASE_URL` in your shell
+environment before running the migration command below. Replace `YOUR-ACCOUNT` with your fork owner.
 
 ```bash
-git clone https://github.com/<you>/passcontrol && cd passcontrol
+git clone "https://github.com/YOUR-ACCOUNT/passcontrol"
+cd passcontrol
 npm install
-cp .env.example .env.local      # fill in Supabase / Upstash / secrets
-DATABASE_URL='postgresql://…' npm run migrate   # applies db/migrations/*.sql in order, once each
+npm run migrate
 npm run dev
 ```
 

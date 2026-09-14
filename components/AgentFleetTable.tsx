@@ -1,5 +1,5 @@
 "use client";
-import { type FormEvent, useMemo, useState, useTransition } from "react";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { Search, ArrowUpRight, SlidersHorizontal } from "lucide-react";
 import { setAgentSuspended, updateAgentBudgets } from "@/app/dashboard/actions";
@@ -300,22 +300,19 @@ export function AgentFleetTable({
                       Open
                       <ArrowUpRight aria-hidden="true" />
                     </Link>
-                    <details className="pc-row-menu">
-                      <summary aria-label={`Actions for ${a.name}`}>Actions</summary>
-                      <div>
-                        <button onClick={() => toggle(a.id, "budgets")}>Edit budgets</button>
-                        <button disabled={a.status === "revoked"} onClick={() => toggle(a.id, "scopes")}>
-                          Edit scopes
-                        </button>
-                        <Link className="pc-open-agent" href={publicListingHref(a)}>{publicListingAction(a)}</Link>
-                        <button
-                          disabled={pending || a.status === "revoked"}
-                          onClick={() => start(() => setAgentSuspended(a.id, !suspended))}
-                        >
-                          {suspended ? "Reactivate agent" : "Suspend agent"}
-                        </button>
-                      </div>
-                    </details>
+                    <RowMenu label={`Actions for ${a.name}`}>
+                      <button onClick={() => toggle(a.id, "budgets")}>Edit budgets</button>
+                      <button disabled={a.status === "revoked"} onClick={() => toggle(a.id, "scopes")}>
+                        Edit scopes
+                      </button>
+                      <Link className="pc-open-agent" href={publicListingHref(a)}>{publicListingAction(a)}</Link>
+                      <button
+                        disabled={pending || a.status === "revoked"}
+                        onClick={() => start(() => setAgentSuspended(a.id, !suspended))}
+                      >
+                        {suspended ? "Reactivate agent" : "Suspend agent"}
+                      </button>
+                    </RowMenu>
                   </div>
                 </td>
               </tr>
@@ -401,6 +398,77 @@ export function AgentFleetTable({
         </div>
       ) : null}
     </div>
+  );
+}
+
+const ROW_MENU_GAP = 6;
+
+/**
+ * Where the row menu's panel goes, in viewport coordinates.
+ *
+ * The panel used to be `position: absolute` under its button, and every Fleet
+ * section is `overflow: hidden` (the rounded-corner clip) — below 1120px the
+ * table wrap is a horizontal scroll box too. So on a short fleet, which is every
+ * new workspace, the menu opened and only its top edge showed; the rest was cut
+ * off by the section. Found in the 2026-09-14 Windows E2E. A fixed panel escapes
+ * both boxes, which means placing it by hand: right-aligned under the button, or
+ * above it when the viewport has more room there.
+ */
+export function placeRowMenu(
+  anchor: { top: number; bottom: number; right: number },
+  panel: { width: number; height: number },
+  viewport: { width: number; height: number },
+): { top: number; left: number; placement: "below" | "above" } {
+  const below = viewport.height - anchor.bottom - ROW_MENU_GAP;
+  const above = anchor.top - ROW_MENU_GAP;
+  const placement = below < panel.height && above > below ? "above" : "below";
+  const top = placement === "above"
+    ? Math.max(ROW_MENU_GAP, anchor.top - ROW_MENU_GAP - panel.height)
+    : anchor.bottom + ROW_MENU_GAP;
+  const left = Math.min(
+    Math.max(ROW_MENU_GAP, anchor.right - panel.width),
+    Math.max(ROW_MENU_GAP, viewport.width - panel.width - ROW_MENU_GAP),
+  );
+  return { top, left, placement };
+}
+
+function RowMenu({ label, children }: { label: string; children: ReactNode }) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    const details = detailsRef.current;
+    const panel = panelRef.current;
+    if (!open || !details || !panel) return;
+    const summary = details.querySelector("summary");
+    if (!summary) return;
+    const place = () => {
+      const { top, left, placement } = placeRowMenu(
+        summary.getBoundingClientRect(),
+        { width: panel.offsetWidth, height: panel.offsetHeight },
+        { width: window.innerWidth, height: window.innerHeight },
+      );
+      panel.style.top = `${top}px`;
+      panel.style.left = `${left}px`;
+      details.dataset.placement = placement;
+    };
+    place();
+    // Capture, so a scroll inside the table wrap moves the panel as well as a page scroll.
+    window.addEventListener("scroll", place, { capture: true, passive: true });
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, { capture: true });
+      window.removeEventListener("resize", place);
+      delete details.dataset.placement;
+    };
+  }, [open]);
+
+  return (
+    <details ref={detailsRef} className="pc-row-menu" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary aria-label={label}>Actions</summary>
+      <div ref={panelRef}>{children}</div>
+    </details>
   );
 }
 

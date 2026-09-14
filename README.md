@@ -1,20 +1,201 @@
 # PassControl
 
-PassControl is an identity and credential gateway for AI agents. It keeps
-provider API keys out of agent configuration and applies per-agent scopes, policies,
-budgets, and stop controls before forwarding model requests.
+**An identity and credential gateway for AI agents.** The agent never holds the real
+provider key: PassControl authenticates it, checks scope, policy and budget, then injects
+the key and forwards the request. Call logs and signed receipts let you inspect what
+happened, with [explicit limits on that evidence](#limits-and-security-status).
 
-Bring your own provider key. In **Cloud**, it is stored in the managed server-side
-Supabase Vault. When **self-hosted**, you operate the gateway, Vault, database, and
-Redis. In both cases the gateway decrypts and injects the provider key; the agent
-receives the provider response, not that key. The gateway operator remains trusted:
-this is credential isolation, not end-to-end encryption from the agent to the provider.
+Use it when you want to give each agent its own permissions, spending allowance and
+stop control without copying provider secrets into every tool. Bring your own provider key.
 
-Built by one developer under [Vertias](https://vertias.eu). Early software, **not yet
-independently audited**. Start with a non-critical provider key. Source-available
-under [BSL 1.1](./LICENSE).
+| Start here | Choose it when | You operate |
+|---|---|---|
+| [Cloud](#cloud) — free private beta, access by request | You want a managed gateway without running a database or Docker | Your agents and provider account |
+| [Self-host](#self-host) — full working core | You want the gateway and provider credentials on infrastructure you control | Gateway, dashboard, Supabase Auth + Vault + database, and Redis |
 
-## Request and authentication flow
+A **Passport** is an Ed25519 signing key used to obtain a short-lived visa. A **Direct
+Agent Key** is a lower-assurance bearer credential bound to one agent; its calls are
+not passport-signed. Both go through gateway controls.
+
+Built by one developer under [Vertias](https://vertias.eu). Early software, **not
+independently audited**. Start with a non-critical provider key. Source-available under
+[BSL 1.1](./LICENSE).
+
+## Cloud
+
+[Request beta access](https://passcontrol.vertias.eu/beta). To look around first, try
+[the keyless browser demo](https://passcontrol.vertias.eu): it synthesizes output and
+does not call a billed provider.
+
+Once you have access, install the CLI with Node/npm and sign in:
+
+```sh
+npm install -g passcontrol
+passcontrol login
+```
+
+Approve only the device code from your own terminal: this grants the machine a workspace
+control key. Login creates a Passport locally, registers its public key, and attempts a
+keyless governed call and receipt verification. That check needs demo and signing enabled;
+it is not a real-provider test.
+
+For a real call, add a provider key in the dashboard, give the agent a matching
+provider/model scope and budgets, and follow [the first-call tutorial](./TUTORIAL.md#4-govern-it).
+For a static-key client, use **Connect an agent** and copy its generated gateway URL,
+Direct Agent Key and concrete model into your client. The provider key stays in Vault.
+
+## Self-host
+
+Already stuck? See [self-host troubleshooting and operations](./docs/self-host.md).
+
+Use **Node 22+**, npm, Git, Docker and the Supabase CLI. The npm package contains the CLI
+and compiled SDK; setup obtains the public application source and starts the local stack.
+
+```sh
+npm install -g passcontrol
+passcontrol setup
+```
+
+Setup starts Supabase (Postgres + Auth + Vault) and Redis with a REST adapter, applies
+migrations, seeds a local account and opens the dashboard. There are no shared default
+credentials. This is a **local development setup**, not a production deployment.
+
+1. **Make a Passport call.** Add a non-critical provider key in **Provider Keys**. Issue a
+   Passport with a matching provider/model scope and budgets. Choose the dashboard's
+   Sidecar or MCP configuration flow, copy its generated Passport import command into
+   your terminal, then paste the one-time secret at the hidden prompt. The command itself
+   contains no secret. Follow the generated client configuration and send a small prompt.
+   Check the call and budget charge in the dashboard.
+2. **Try a Direct Agent Key.** Use **Connect an agent**, select a concrete model within
+   scope, and copy the generated gateway URL and reveal-once key into your static-key
+   client. Send another prompt and check its authentication method in the call log.
+3. **Check the budget.** Lower the test agent's token budget below the next request's
+   reservation estimate and retry; expect a budget refusal. Restore the budget afterward.
+4. **Check the kill switch.** Arm it in the dashboard and retry; subsequent requests
+   should be refused. Disarm it when finished. It cannot cancel a request already upstream.
+
+The Passport import hands browser-issued configuration to the CLI without putting its
+secret in shell history. Keep the one-time secret until import succeeds.
+[The tutorial](./TUTORIAL.md#3-your-first-governed-call-self-host-path) explains the manual
+CLI path; [client options](#connect-a-real-agent) cover SDK, Sidecar and MCP.
+
+## Limits and security status
+
+PassControl is **not independently audited**. The public developer API has **not shipped**;
+the source includes a control-plane API, but that is not a launched public developer service.
+No independent audit or production assurance is implied by the test suite.
+
+PassControl governs requests routed through it. It cannot prevent an agent from using
+another credential or network path, secure a compromised signer, guarantee a provider's
+usage report, or make an issuer's assertions independently true. Budget admission reserves
+an estimate, not a guaranteed invoice ceiling. Logging and receipt signing are best-effort;
+a valid receipt does not prove every call was recorded.
+
+The gateway operator remains trusted: Cloud uses managed server-side Supabase Vault;
+self-hosting uses your Vault. The gateway decrypts and injects the provider key. This is
+credential isolation, not end-to-end encryption from agent to provider.
+
+Short visas, stop controls, pricing tables and evidence each have further limits below.
+Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/Vertias3u/PassControl/security/advisories/new).
+See [SECURITY.md](./SECURITY.md) and [LICENSE](./LICENSE) for security guidance and usage terms.
+
+## Connect a real agent
+
+Use the dashboard's generated provider-native configuration: gateway base URL, Direct
+Agent Key and model. Anthropic uses its native base URL and key variables. Never paste
+a Passport private key into an API-key field.
+
+Add a provider credential in the dashboard and give the agent a concrete model within
+its scope and suitable budgets. Choose by what your client supports:
+
+| Client | Integration |
+|---|---|
+| Static base URL + API key | Dashboard **Connect an agent**: copy its provider-native URL and DAK |
+| Your JS/TS code | `PassControl` from `passcontrol/sdk`; [SDK guide](./docs/integrations/passport-sdk.md) |
+| Static-key client needing Passport | `passcontrol sidecar`, then `passcontrol env <integration>` |
+| MCP client | `passcontrol mcp`; configure as below |
+
+Direct Agent Keys point the client at the PassControl gateway origin. Passport Sidecar clients
+point at loopback with a provider path (for example `http://127.0.0.1:8788/api/v1/anthropic`) and the sidecar forwards to the gateway.
+The sidecar adds per-request sender proof; the current SDK and MCP paths use bearer visas and are
+refused when sender proof is required.
+
+For a Passport bridge to Cloud or self-host, start this in one terminal:
+
+```sh
+passcontrol sidecar
+```
+
+In another terminal, print the client settings:
+
+```sh
+passcontrol env hermes
+```
+
+For MCP, write client configuration using the global Passport profile, with no secret
+in the generated configuration:
+
+```sh
+passcontrol configure claude-desktop --write
+```
+
+The cursor preset also writes configuration; claude-code prints its client-managed add command.
+
+The sidecar listens on loopback by default and substitutes a visa for the client's dummy
+API key. Treat access to that local listener as access to the configured agent. It is
+not a sandbox against other processes running as you. Its provider CONNECT requests are
+refused; use base URLs rather than TLS interception.
+
+Presets (from `cli/presets.mjs`): `generic`, `openhands`, `litellm`, `aider`, `hermes`, `cline`, `continue`, `chatbox`, `jan`, `msty`, `cherry-studio`, `open-webui`, `librechat`; MCP presets: `claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
+supported paths. [Hermes configuration](./docs/integrations/hermes.md).
+
+## CLI configuration and key storage
+
+<details>
+<summary>Command browser, key custody and Passport import</summary>
+
+Run **`passcontrol`** with no arguments in an interactive terminal to open the command
+browser: searchable grouped commands, recent actions, and configuration-aware options.
+Use `passcontrol --help` or explicit commands in scripts.
+
+The direct CLI call uses off/observe sender-proof mode; real provider calls need a stored
+key and matching scope. Key migration moves an existing file key to the OS store.
+
+```sh
+passcontrol status
+passcontrol call "Say hello"
+passcontrol doctor --deep
+passcontrol key status
+passcontrol key migrate
+passcontrol logout
+```
+
+The CLI supports macOS Keychain, Linux Secret Service (`secret-tool`), and Windows
+DPAPI-backed storage. File configuration may contain a storage marker instead of the
+Passport secret; explicit environment secrets take precedence. An unavailable OS store
+can use an existing file fallback with a warning. Custody shown by the gateway is
+**DECLARED evidence**, not proof of storage. The signer still reads key material into
+process memory; this is not a non-exportable hardware key.
+
+For a Passport issued in the dashboard for Sidecar or MCP, import it without putting the
+one-time secret in shell history:
+
+```bash
+passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST --id PUBLIC_PASSPORT_ID
+```
+
+The CLI proves the 32-byte Ed25519 secret matches the public ID, stores it in macOS Keychain,
+Linux Secret Service, or Windows DPAPI, verifies readback, and only then atomically updates the
+global profile. Replacement requires `--replace`. The public command contains no secret.
+
+</details>
+
+## Security and protocol reference
+
+<details>
+<summary>Authentication, enforcement, budget uncertainty, providers and evidence</summary>
+
+### Request and authentication flow
 
 ```text
 Direct Agent Key ───────────────────────────────────────────────┐
@@ -55,7 +236,7 @@ these controls do not cancel an upstream request already in flight. Public lifec
 checks and the signed [revocation list](./DOCUMENTATION.md#public-passport-revocation-list)
 are separate from signature verification.
 
-## What the gateway enforces
+### What the gateway enforces
 
 - An allowlist of provider endpoints, plus the agent's provider/model scope.
 - Live policy rules: model/endpoint denials, time windows, request limits; optional
@@ -71,7 +252,7 @@ behavior. Kill-state reads default to fail-open; `KILL_SWITCH_FAIL_CLOSED=true` 
 on kill/suspend read failure. Required sender-proof replay checks and DAK credential
 validation fail closed. Redis persistence and no-eviction configuration matter.
 
-### Budgets under uncertainty
+#### Budgets under uncertainty
 
 Admission reserves an **estimate**, not a provider invoice or a guaranteed upper bound.
 Concurrent attempts consume reserved headroom. Complete usage settles measured tokens
@@ -99,7 +280,7 @@ live open reservations marked **not yet charged**. The call table keeps observed
 charge in separate columns and can load older durable rows on demand. An unavailable database or
 Redis explanation is shown as unavailable, never as zero.
 
-## Supported providers and endpoints
+### Supported providers and endpoints
 
 All paths below are relative to `/api/v1/<provider>`. SDK base URLs and aliases are in
 [the endpoint reference](./DOCUMENTATION.md#data-plane--proxy-a-model-call).
@@ -124,7 +305,7 @@ refuses custom endpoints. Shape validation is **not full SSRF prevention**: it d
 resolve or pin DNS. Operators must control egress and trust the destination receiving
 the provider credential. Upstream redirects are refused, never followed.
 
-## Receipts, statements, and identity evidence
+### Receipts, statements, and identity evidence
 
 A signed call receipt records the issuer's decision, authentication method, reported
 usage/cost, and (when read) a digest of client request bytes. It does not include the
@@ -160,116 +341,18 @@ that company. Only published bindings are attached to public evidence.
 The recording illustrates a stop control on successive calls; it does not show cancellation
 of an already-dispatched stream.
 
-## Try Cloud
+</details>
 
-[Request access to the free private beta](https://passcontrol.vertias.eu/beta), or try
-[the keyless browser demo](https://passcontrol.vertias.eu). The demo synthesizes model
-output; it does not exercise a billed provider.
+## Self-host operations reference
 
-With Node installed:
+<details>
+<summary>Source setup, lifecycle, credential switching, production and portability</summary>
 
-```bash
-npm install -g passcontrol
-passcontrol login
-```
-
-Login prints a device code and opens browser approval. Enter only the code from your
-own terminal: approval grants this machine a workspace control key. The CLI creates a
-Passport locally, registers its public key, saves configuration, and attempts a keyless
-governed call and receipt verification. That proof requires a gateway with demo and
-signing enabled; it is not a real-provider test. See [the tutorial](./TUTORIAL.md).
-
-Run **`passcontrol`** with no arguments in an interactive terminal to open the command
-browser: searchable grouped commands, recent actions, and configuration-aware options.
-Use `passcontrol --help` or explicit commands in scripts.
+The CLI package declares Node ≥18, but the full stack needs Node 22+: locked Supabase
+dependencies need ≥20 and Wrangler needs ≥22. Use `passcontrol setup --no-open` to
+suppress browser launch. From a source checkout, the equivalent development path is:
 
 ```bash
-passcontrol status
-passcontrol call "Say hello"  # off/observe mode; real provider calls require a stored key
-passcontrol doctor --deep
-passcontrol key status
-passcontrol key migrate       # move an existing file key to the OS store
-passcontrol logout
-```
-
-The CLI supports macOS Keychain, Linux Secret Service (`secret-tool`), and Windows
-DPAPI-backed storage. File configuration may contain a storage marker instead of the
-Passport secret; explicit environment secrets take precedence. An unavailable OS store
-can use an existing file fallback with a warning. Custody shown by the gateway is
-**DECLARED evidence**, not proof of storage. The signer still reads key material into
-process memory; this is not a non-exportable hardware key.
-
-For a Passport issued in the dashboard for Sidecar or MCP, import it without putting the
-one-time secret in shell history:
-
-```bash
-passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST \
-  --id PUBLIC_PASSPORT_ID
-# paste the secret at the hidden prompt, or provide it on raw stdin
-```
-
-The CLI proves the 32-byte Ed25519 secret matches the public ID, stores it in macOS Keychain,
-Linux Secret Service, or Windows DPAPI, verifies readback, and only then atomically updates the
-global profile. Replacement requires `--replace`. The public command contains no secret.
-
-## Connect a real agent
-
-For example, the direct OpenAI configuration has this shape:
-
-```bash
-export OPENAI_BASE_URL=https://YOUR-PASSCONTROL-HOST/api/v1/openai/v1
-export OPENAI_API_KEY=pc_agent_REVEAL_ONCE_VALUE
-export OPENAI_MODEL=gpt-4o-mini
-```
-
-Use your dashboard's actual values; Anthropic uses its native base URL and key variables.
-Never paste a Passport private key into an API-key field.
-
-Add a provider credential in the dashboard and give the agent a concrete model within
-its scope and suitable budgets. Choose by what your client supports:
-
-| Client | Integration |
-|---|---|
-| Static base URL + API key | Dashboard **Connect an agent**: copy its provider-native URL and DAK |
-| Your JS/TS code | `PassControl` from `passcontrol/sdk`; [SDK guide](./docs/integrations/passport-sdk.md) |
-| Static-key client needing Passport | `passcontrol sidecar`, then `passcontrol env <integration>` |
-| MCP client | `passcontrol mcp`; configure as below |
-
-Direct Agent Keys point the client at the PassControl gateway origin. Passport Sidecar clients
-point at loopback (default `http://127.0.0.1:8788`) and the sidecar forwards to the gateway.
-The sidecar adds per-request sender proof; the current SDK and MCP paths use bearer visas and are
-refused when sender proof is required.
-
-```bash
-# Passport bridge: talks to Cloud or your self-hosted gateway
-passcontrol sidecar
-passcontrol env hermes
-
-# MCP: global Passport configuration, no secret in generated client config
-passcontrol configure claude-desktop --write
-# Also: cursor; claude-code prints its client-managed add command
-```
-
-The sidecar listens on loopback by default and substitutes a visa for the client's dummy
-API key. Treat access to that local listener as access to the configured agent. It is
-not a sandbox against other processes running as you. Its provider CONNECT requests are
-refused; use base URLs rather than TLS interception.
-
-Presets: `openhands`, `aider`, `cline`, `continue`, `litellm`, `hermes`, `chatbox`, `jan`,
-`msty`, `cherry-studio`, `open-webui`, `librechat`, `generic`; MCP presets:
-`claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
-supported paths. [Hermes configuration](./docs/integrations/hermes.md).
-
-## Self-host
-
-The npm package contains the CLI and compiled SDK, not the application/database stack.
-`passcontrol setup` obtains the public source and starts a local development stack.
-It needs Git, Docker, the Supabase CLI, and Node/npm. The CLI package declares Node ≥18, but use **Node 22+ for the full stack**:
-locked Supabase dependencies need ≥20 and Wrangler needs ≥22.
-
-```bash
-passcontrol setup --no-open
-# Or from a source checkout:
 git clone https://github.com/Vertias3u/PassControl.git
 cd PassControl
 npm ci
@@ -298,7 +381,8 @@ global write could not override them safely. Clean up any still-active remote id
 original gateway.
 
 For production, configure [`.env.example`](./.env.example), use Supabase (plain Postgres
-is insufficient), apply the public migrations with `DATABASE_URL=… npm run migrate`,
+is insufficient), set `DATABASE_URL` in your shell environment and apply the public migrations with
+`npm run migrate`,
 and build/run the app. Supported paths are Next.js on Vercel, `npm run build` then
 `npm start` on a Node host behind a trusted reverse proxy, and the
 [Cloudflare/OpenNext build](./docs/deployment/cloudflare.md). Configure Auth/SMTP,
@@ -321,14 +405,7 @@ as sensitive configuration and inspect the result for partial/refused items.
 [Release updates](https://passcontrol.vertias.eu/updates) and the
 [learning center](https://passcontrol.vertias.eu/learn) are hosted-site resources.
 
-## Limits and security status
+</details>
 
-PassControl governs requests routed through it. It cannot prevent an agent from using
-another credential or network path, secure a compromised signer, guarantee a provider's
-usage report, or make an issuer's assertions independently true. Short visas, stop controls,
-pricing tables, and best-effort logs each have the limits described above.
-
-Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/Vertias3u/PassControl/security/advisories/new).
-See [SECURITY.md](./SECURITY.md), [API documentation](./DOCUMENTATION.md), and
-[contributing](./CONTRIBUTING.md). No independent audit or production assurance is implied
-by the test suite. Read [LICENSE](./LICENSE) for the actual usage terms.
+For the full reference, see [API documentation](./DOCUMENTATION.md).
+Contributions: [CONTRIBUTING.md](./CONTRIBUTING.md).

@@ -6,14 +6,16 @@ real agent — these *are* the example agents). Self-contained `.mjs`, run with 
 
 | Script | Plane | What it does |
 |---|---|---|
-| `starter-agent.mjs` | data | A real **tool-using loop** (think → call tool → think) run through the gateway — the "be user #1" demo. Every model round-trip is a proxied, audited call. |
-| `chat-agent.mjs` | data | Minimal: signs a challenge → mints a visa → calls a model **through the gateway**. Generates real audit + spend rows. |
+| `starter-agent.mjs` | data | A real **tool-using loop** (think → call tool → think) run through the gateway — the "be user #1" demo. Every model round-trip is proxied and attempts to record audit evidence. |
+| `chat-agent.mjs` | data | Minimal: signs a challenge → mints a visa → calls a model **through the gateway**. Attempts to record real call + spend evidence. |
 | `visa-sidecar.mjs` | data | A local reverse proxy that mints/refreshes the visa for you — makes PassControl **drop-in for any agent that wants a static key** (OpenHands, Aider, Cline, …), no SDK required. |
 | `fleet-admin.mjs` | control | Drives `/api/control/v1` with a `pc_` API key: list/create/suspend/revoke agents, read spend/audit, toggle kill switch. |
 
 ## Product CLI
 
 Install the CLI globally (`npm install -g passcontrol`) and drive everything with `passcontrol`:
+
+On Windows, run these shell commands in PowerShell. Replace placeholders before running.
 
 ```bash
 passcontrol status
@@ -44,10 +46,10 @@ passcontrol init
 
 The CLI/examples load the nearest `.passcontrol` from your current directory or a parent
 directory. A global profile from `passcontrol init --global` also works. Real
-environment variables always win, so this still works for one-off overrides:
+environment variables always win. For a one-off model override, set `MODEL` in your shell environment before running:
 
 ```bash
-MODEL=claude-haiku-4-5 node examples/chat-agent.mjs "Say hi"
+node examples/chat-agent.mjs "Say hi"
 ```
 
 If config is missing, the CLI and scripts print a one-line fix.
@@ -96,7 +98,7 @@ API key set to **anything** (it's replaced):
 - **Aider:** use the OpenAI-compatible preset (`OPENAI_API_BASE`, `OPENAI_API_KEY`,
   `AIDER_MODEL`) printed by `passcontrol env aider`.
 - **Cline / Continue:** use their OpenAI-compatible/custom provider UI with the sidecar base
-  URL and API key `sidecar`. The Continue preset selects Chat Completions; OpenAI POST `/responses` is also
+  URL and API key `sidecar`. The Continue preset prints connection fields without selecting a request API; OpenAI POST `/responses` is also
   supported by the gateway.
 
 The agent never holds a real key *or* a visa — the sidecar owns the visa, the gateway owns
@@ -128,8 +130,8 @@ passcontrol logs --limit 10
 passcontrol audit --limit 10
 
 # 4. Kill-switch drill
-passcontrol agent suspend <agent-id>   # next call → 403
-passcontrol agent resume <agent-id>
+passcontrol agent suspend "AGENT_ID"   # next call → 403
+passcontrol agent resume "AGENT_ID"
 ```
 
 ## Notes
@@ -141,7 +143,7 @@ passcontrol agent resume <agent-id>
   not part of the app build or test suite.
 
 
-0.9.0: the sidecar attaches sender proofs; the minimal raw examples, direct CLI `call`,
+The sidecar attaches sender proofs; the minimal raw examples, direct CLI `call`,
 and MCP chat do not. Use off/observe with those bearer-visa clients, or a proof-capable
 client for required mode. Supported gateway providers include Gemini via its
 OpenAI-compatible API. Logs/receipts are best-effort and budgets reserve estimates;

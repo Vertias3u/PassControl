@@ -6,6 +6,8 @@ It reads the same environment, nearest `.passcontrol`, and global
 passport in the global profile so clients can launch from any working directory without
 embedding a secret:
 
+On Windows, run these shell commands in PowerShell. Replace placeholders before running.
+
 ```sh
 passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST --id PUBLIC_PASSPORT_ID
 # paste the one-time secret at the hidden prompt

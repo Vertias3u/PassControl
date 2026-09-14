@@ -1,6 +1,6 @@
 # PassControl spend statement format
 
-**Wire format version 1, shipped with PassControl 0.9.0.** It is written so that someone with no access
+**Wire format version 1.** It is written so that someone with no access
 to PassControl's source can implement a verifier, and check it against the recorded test
 vector at the bottom.
 

@@ -7,12 +7,14 @@ your existing OpenAI/Anthropic SDK, **not rewriting the agent**.
 
 Install it beside the provider SDK used by your agent:
 
+On Windows, run these shell commands in PowerShell. Replace placeholders before running.
+
 ```bash
-npm install passcontrol@0.9.1 openai
-# or: npm install passcontrol@0.9.1 @anthropic-ai/sdk
+npm install passcontrol openai
+# or: npm install passcontrol @anthropic-ai/sdk
 ```
 
-Dependencies: only [`@noble/curves`](https://github.com/paulmillr/noble-curves) and the
+Dependencies: [`@noble/curves`](https://github.com/paulmillr/noble-curves), `@noble/hashes`, and the
 platform `fetch`/`crypto`. Runs on Node 18+ and edge/server runtimes.
 
 > Keep `passportSecret` in the trusted agent runtime and out of source control, logs,
@@ -105,7 +107,7 @@ const res = await pc.fetch(`${gateway}/api/v1/anthropic/v1/messages`, {
 ## Control-plane SDK (manage your fleet)
 
 Separate from the data-plane client above: `ControlClient` (in `./control`) is a typed
-wrapper over the developer API (`/api/control/v1`), authenticated with a `pc_` API key.
+wrapper over the workspace control API (`/api/control/v1`), authenticated with a `pc_` API key.
 It mirrors the REST resources, unwraps the `{ data }` envelope, and throws
 `ControlApiError` (with `status`, `code`, `requestId`) on failure.
 
@@ -153,14 +155,14 @@ The full reference lives in [the public OpenAPI document](https://github.com/Ver
   the gateway only ever sees the public key and the signature.
 
 
-## 0.9.0 compatibility and assurance
+## Compatibility and assurance
 
 `clientOptions` accepts `openai`, `anthropic`, `groq`, `mistral`, `together`, `deepseek`,
 and `gemini`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
 Chat Completions. Gemini uses Google's OpenAI-compatible endpoint; native
 `generateContent` is not supported. See [accepted paths](https://github.com/Vertias3u/PassControl/blob/main/DOCUMENTATION.md#data-plane--proxy-a-model-call).
 
-The TypeScript SDK **does not attach sender proofs in 0.9.0**. Its provider requests use
+The TypeScript SDK **does not attach sender proofs**. Its provider requests use
 bearer visas: they work with sender-proof mode off/observe, but required mode refuses
 them without an additional correct proof implementation. The current sidecar attaches
 proofs. A valid mint signature is not a signature over each provider request.

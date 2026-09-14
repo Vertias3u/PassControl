@@ -139,7 +139,7 @@ proofs. A valid mint signature is not a signature over each provider request.
 Do not use the CLI Passport import command for an SDK runtime that stores the secret itself.
 Sidecar and MCP use `passcontrol passport import --global --gateway <origin> --id <public-id>`:
 the public command has no private key, and the secret is read hidden or from raw stdin into the
-OS credential store. Sidecar clients then target `http://127.0.0.1:8788`; Direct Agent Keys and
+OS credential store. Sidecar clients then target the loopback URL with its provider path (for example `http://127.0.0.1:8788/api/v1/anthropic`); Direct Agent Keys and
 SDK provider clients target the PassControl gateway.
 
 The wrapper validates the initial gateway origin/path. It does not override fetch's

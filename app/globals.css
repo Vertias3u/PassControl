@@ -1747,10 +1747,11 @@ a.pc-metric-card:hover {
 }
 .pc-row-menu summary::-webkit-details-marker { display: none; }
 .pc-row-menu[open] summary { border-color: var(--pc-line-strong); color: var(--pc-paper); }
+/* Fixed, not absolute: the Fleet section clips its overflow, so an absolute panel
+   was cut off after its first few pixels. `RowMenu` places it; until it has, it
+   stays invisible rather than flashing at its static position. */
 .pc-row-menu > div {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
+  position: fixed;
   z-index: 20;
   display: grid;
   width: 164px;
@@ -1760,6 +1761,7 @@ a.pc-metric-card:hover {
   background: var(--pc-surface-2);
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
 }
+.pc-row-menu:not([data-placement]) > div { visibility: hidden; }
 .pc-row-menu button {
   justify-content: flex-start;
   min-height: 34px;

@@ -4,6 +4,7 @@ This reference describes the current implementation. Start with [README](./READM
 or the [tutorial](./TUTORIAL.md). The public self-host tree contains the gateway,
 dashboard, authentication, control API, and artifact verifiers. Cloud's statement
 operation and hosted beta machinery are separate; see the statement section below.
+This documents the implemented workspace control API; a public developer API has not shipped.
 
 | Surface | Authentication |
 |---|---|
@@ -43,7 +44,7 @@ matching provider-native configuration. DAK and Passport may coexist on one agen
 
 ### Work-visas (data plane)
 
-Agents authenticate to the proxy with a short-lived (5 min) JWT "visa", minted from a signed
+Passport clients authenticate to the proxy with a short-lived (normally 5 min) JWT "visa", minted from a signed
 challenge (below). Send it the way your provider SDK already sends a key — PassControl accepts
 both `Authorization: Bearer <visa>` (OpenAI-style) and `x-api-key: <visa>` (Anthropic-style).
 
@@ -136,14 +137,14 @@ embeddings, files, fine-tuning, batches, response retrieval/deletion, or token-c
 verifies the visa → checks kill switch → checks scope → checks endpoint allowlist → reserves
 budget → injects your real provider key → streams the response back, and attempts to log the call. It does not return the injected provider key.
 
-Errors: `401 missing_visa | invalid_visa`, `402 blocked_budget`, `403 blocked_suspended |
+Errors: `401 missing_visa | invalid_visa | invalid_credential`, `503 blocked_budget_state`, `402 blocked_budget`, `403 blocked_suspended |
 blocked_scope | blocked_endpoint`, `404 unknown_provider`, `413 payload_too_large`,
 `429 rate_limited`, `502 upstream_unreachable`.
 
-Every revocation answers `403 blocked_suspended` regardless of cause, so a caller cannot
+The proxy kill/suspend gate answers `403 blocked_suspended` for either cause, so a caller cannot
 probe which control stopped it. Your **audit log** does distinguish them:
 `blocked_killed` for the kill switch (platform, tenant, or denylist) and `blocked_suspended`
-for a per-agent suspend. Check `passcontrol logs` or the Control Tower when you need to know
+for a per-agent suspend. Invalid/revoked Direct Agent Keys can instead fail authentication with `401 invalid_credential`. Check `passcontrol logs` or the Control Tower when you need to know
 which one fired.
 
 ---
@@ -174,6 +175,8 @@ before expiry, single-flights concurrent mints, and retries once on a 401 when t
 For third-party agents that expect a static key, run the visa sidecar and point the agent at
 `http://127.0.0.1:8788/api/v1/<provider>` with any API key value. CLI presets print the
 right variables/settings:
+
+On Windows, run these shell commands in PowerShell. Replace placeholders before running.
 
 ```bash
 passcontrol env openhands
@@ -258,7 +261,7 @@ includes tenant-scoped agent lifecycle, logs, audit, spend, and kill-switch endp
 ### Conventions
 - **Versioning:** URI (`/v1`); breaking changes → `/v2`.
 - **Pagination:** list endpoints clamp `?limit=` to 1–100 (default 50). There is no cursor
-  parameter today.
+  parameter on most list endpoints; `/logs` accepts `cursor` and returns `next_cursor`.
 - **Idempotency:** send `Idempotency-Key` on writes; retries won't double-apply.
 - **Errors:** `{ "error": { "code", "message", "request_id" } }` + HTTP status.
 - **Rate limits:** per key (read 600/min, write 120/min) → `429` + `Retry-After`.
@@ -484,7 +487,12 @@ The old signatures remain mathematically valid against a retained trusted public
 
 ```bash
 # 1. Record the retiring key permanently. Prints a `<kid>:<public>` pair.
-passcontrol keygen instance --retire <the old seed>
+passcontrol keygen instance --retire "REPLACE_WITH_CURRENT_SEED"
+```
+
+Then update the server environment/configuration values (not shell commands):
+
+```dotenv
 INSTANCE_SIGNING_KEY_HISTORY=<existing entries>,<the pair it printed>
 
 # 2. Then rotate.

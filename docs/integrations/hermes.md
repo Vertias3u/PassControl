@@ -32,6 +32,8 @@ model:
 
 Merge it into `~/.hermes/config.yaml`, store the file with user-only permissions, and run:
 
+On Windows, run these shell commands in PowerShell. Replace placeholders before running.
+
 ```bash
 hermes chat
 ```
@@ -55,11 +57,11 @@ against whichever gateway you configured, Cloud included. Hermes receives only a
 passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST --id PUBLIC_PASSPORT_ID
 # paste the one-time secret at the hidden prompt; it never appears in argv
 passcontrol configure hermes --provider openai --model gpt-5-mini
-passcontrol sidecar
 passcontrol env hermes --provider openai --model gpt-5-mini
+passcontrol sidecar
 ```
 
-The last command prints a block like:
+The env command prints a block like this; leave the sidecar running while using Hermes in another terminal:
 
 ```yaml
 model:
@@ -106,9 +108,9 @@ refusals use their own exact stored statuses.
 - `401` means the Direct Agent Key/passport path was not accepted or the sidecar could not
   mint a visa.
 - `403 blocked_scope` means the concrete Hermes model is outside the agent scope.
-- `403 blocked_endpoint` means the base URL/path does not land on chat completions.
-- `402 blocked_budget` means the agent budget is exhausted.
-- A running self-hosted Hermes session requires the foreground sidecar to remain available.
+- `403 blocked_endpoint` means the requested endpoint is not allowlisted. A missing provider prefix may miss the proxy route entirely.
+- `402 blocked_budget` means the next request estimate does not fit the remaining budget headroom.
+- A Hermes session using Passport through the sidecar requires that foreground process to remain available, for either Cloud or self-host. A Direct Agent Key connection does not use it.
 
 PassControl does not rewrite Hermes config automatically. `passcontrol env hermes` is
 read-only and prints the exact block so an existing YAML file is never overwritten or
