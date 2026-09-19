@@ -3,9 +3,15 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ed25519 } from "@noble/curves/ed25519";
-import { ArrowRight, Check, KeyRound, ShieldCheck, Upload, X } from "lucide-react";
+import { ArrowRight, Check, KeyRound, Plus, ShieldCheck, Upload, X } from "lucide-react";
 import { completeKeyImport, probeProviderKey } from "@/app/dashboard/actions";
-import { clientModelIsUsable, DEFAULT_CLIENT_MODELS } from "@/lib/agent-connect";
+import {
+  clientModelIsUsable,
+  DEFAULT_CLIENT_MODELS,
+  DISCOVERED_MODEL_SUGGESTION_LIMIT,
+  preferredClientModel,
+  routableDiscoveredModels,
+} from "@/lib/agent-connect";
 import { bytesToBase64url } from "@/lib/encoding";
 import {
   PROVIDERS,
@@ -38,6 +44,11 @@ export function KeyImportOnramp({
   const [providerOverridden, setProviderOverridden] = useState(false);
   const [handoff, setHandoff] = useState("");
   const [probeMode, setProbeMode] = useState<"detected" | "manual">("manual");
+  // What the provider reported, kept SEPARATE from the grant below. Discovery
+  // describes the key; `models` authorizes the agent. Merging the two is what
+  // filled a scope to its validator ceiling before the operator chose anything.
+  const [discovered, setDiscovered] = useState<string[]>([]);
+  const [discoveredTotal, setDiscoveredTotal] = useState(0);
   const [models, setModels] = useState("");
   const [clientModel, setClientModel] = useState(DEFAULT_CLIENT_MODELS.anthropic);
   const [name, setName] = useState("");
@@ -64,6 +75,21 @@ export function KeyImportOnramp({
     () => models.split(",").map((model) => model.trim()).filter(Boolean),
     [models]
   );
+  // Discovered ids this gateway could actually route — the provider listing
+  // minus the embedding, audio, image and moderation models the endpoint
+  // allowlist has no route to. Offering those as grants authorizes calls that
+  // can never be made.
+  const routable = useMemo(
+    () => routableDiscoveredModels(provider, discovered),
+    [provider, discovered]
+  );
+  const suggestions = useMemo(
+    () =>
+      routable
+        .filter((model) => !selectedModels.includes(model))
+        .slice(0, DISCOVERED_MODEL_SUGGESTION_LIMIT),
+    [routable, selectedModels]
+  );
 
   const reset = () => {
     setStage("key");
@@ -72,6 +98,8 @@ export function KeyImportOnramp({
     setProviderOverridden(false);
     setHandoff("");
     setProbeMode("manual");
+    setDiscovered([]);
+    setDiscoveredTotal(0);
     setModels("");
     setClientModel(DEFAULT_CLIENT_MODELS.anthropic);
     setName("");
@@ -100,8 +128,15 @@ export function KeyImportOnramp({
       }
       setHandoff(result.handoff);
       setProbeMode(result.mode);
-      setModels(result.models.join(", "));
-      setClientModel(result.models.find(clientModelIsUsable) ?? DEFAULT_CLIENT_MODELS[provider]);
+      setDiscovered(result.models);
+      setDiscoveredTotal(result.modelsTotal);
+      // The grant starts at the ONE model this agent is about to call, not at
+      // everything the key can see. The rest of the listing is offered below as
+      // one-click additions, so widening the scope stays an operator decision
+      // rather than the default.
+      const concrete = preferredClientModel(provider, result.models);
+      setClientModel(concrete);
+      setModels(concrete);
       setStage("scope");
     } catch (cause) {
       setError((cause as Error).message || "Something went wrong. Please try again.");
@@ -151,6 +186,11 @@ export function KeyImportOnramp({
 
   const removeModel = (modelToRemove: string) => {
     setModels(selectedModels.filter((model) => model !== modelToRemove).join(", "));
+  };
+
+  const addModel = (modelToAdd: string) => {
+    if (selectedModels.includes(modelToAdd)) return;
+    setModels([...selectedModels, modelToAdd].join(", "));
   };
 
   const acknowledgeStored = () => {
@@ -268,13 +308,23 @@ export function KeyImportOnramp({
           <div className="rounded-md border border-border bg-secondary/40 p-3 text-sm">
             {probeMode === "detected" ? (
               <p className="m-0">
-                Models returned by <strong>{provider}</strong> are pre-filled below. Trim this
-                list before granting the passport.
+                <strong>{provider}</strong> reported {discoveredTotal} model
+                {discoveredTotal === 1 ? "" : "s"} for this key
+                {routable.length < discovered.length ? (
+                  <>
+                    {" "}
+                    ({routable.length} of them reachable through this gateway&apos;s
+                    endpoints)
+                  </>
+                ) : null}
+                . That is what the key can see, not what the agent may use — the grant
+                below starts at one model and you widen it deliberately.
               </p>
             ) : (
               <p className="m-0">
-                We couldn&apos;t detect models. The key is ready for secure import; enter the model
-                ids this agent should be allowed to use.
+                We couldn&apos;t detect models. The key is ready for secure import; the grant
+                below starts at this provider&apos;s usual model — replace it with the model ids
+                this agent should be allowed to use.
               </p>
             )}
           </div>
@@ -301,7 +351,7 @@ export function KeyImportOnramp({
               placeholder="Enter exact model ids"
             />
             <span className="text-xs text-muted-foreground">
-              This is the passport&apos;s capability grant. Remove anything the agent does not need.
+              This is the passport&apos;s capability grant. Add only what the agent needs.
             </span>
           </label>
           {selectedModels.length ? (
@@ -314,6 +364,34 @@ export function KeyImportOnramp({
                   </button>
                 </span>
               ))}
+            </div>
+          ) : null}
+          {suggestions.length ? (
+            <div className="grid gap-2">
+              <span className="text-xs text-muted-foreground">
+                {/* "Showing N of M", never a truncated list presented as the whole
+                    set — that is how an operator concludes a model is unavailable
+                    when it simply was not listed. */}
+                Also available on this key
+                {routable.length > suggestions.length + selectedModels.length
+                  ? ` (showing ${suggestions.length} of ${routable.length})`
+                  : ""}
+                :
+              </span>
+              <div className="pc-onramp__models" aria-label="Suggested models from this provider">
+                {suggestions.map((model) => (
+                  <span key={model}>
+                    <code>{model}</code>
+                    <button
+                      type="button"
+                      onClick={() => addModel(model)}
+                      aria-label={`Allow ${model}`}
+                    >
+                      <Plus aria-hidden="true" />
+                    </button>
+                  </span>
+                ))}
+              </div>
             </div>
           ) : null}
           <div className="pc-onramp__review">

@@ -121,6 +121,13 @@ import {
   type ProviderId,
 } from "@/lib/providers";
 import { completeKeyImport, probeProviderKey } from "@/app/dashboard/actions";
+import {
+  DEFAULT_CLIENT_MODELS,
+  DISCOVERED_MODEL_SUGGESTION_LIMIT,
+  preferredClientModel,
+  routableDiscoveredModels,
+} from "@/lib/agent-connect";
+import { LIMITS } from "@/lib/validate";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -582,5 +589,184 @@ describe("the import probe's outbound leg", () => {
     // is what every other unhelpful upstream answer already does.
     expect(result).toMatchObject({ ok: true, mode: "manual", models: [] });
     expect(JSON.stringify(result)).not.toContain(RAW_KEY);
+  });
+});
+
+/**
+ * Discovery describes the key. It does not authorize the agent.
+ *
+ * The probe used to stop collecting ids at exactly 50, and `LIMITS.models` — the
+ * most patterns one scope entry may carry — is also exactly 50. Nothing in the
+ * code linked the two numbers, but the onramp pasted the probe's list straight
+ * into the grant, so OpenAI's listing filled a scope to the validator's ceiling
+ * before the operator had chosen anything. Adding one more legitimate model then
+ * failed with "Invalid models in scope." — and the model in question was
+ * `gpt-5-mini`, which this project's own integration defaults tell people to
+ * call.
+ *
+ * These tests hold the two numbers apart.
+ */
+describe("provider model discovery is informational, not a grant", () => {
+  function listing(ids: string[]) {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("no longer stops at the scope validator's ceiling", async () => {
+    const ids = Array.from({ length: 63 }, (_, i) => `gpt-model-${i}`);
+    listing(ids);
+
+    const result = await probeProviderKey({ provider: "openai", key: RAW_KEY });
+
+    if (!result.ok) throw new Error("expected a successful probe");
+    // The old code returned exactly 50 here — LIMITS.models — and the operator
+    // could not then add a 51st model of their own.
+    expect(result.models).toHaveLength(63);
+    expect(result.models).not.toHaveLength(LIMITS.models);
+    expect(result.modelsTotal).toBe(63);
+  });
+
+  it("reports the true total so a truncated list is never shown as complete", async () => {
+    const ids = Array.from({ length: 260 }, (_, i) => `gpt-model-${i}`);
+    listing(ids);
+
+    const result = await probeProviderKey({ provider: "openai", key: RAW_KEY });
+
+    if (!result.ok) throw new Error("expected a successful probe");
+    expect(result.models).toHaveLength(200);
+    // The count is the honest one, so the UI can say "showing 200 of 260"
+    // instead of implying 200 is everything the key reaches.
+    expect(result.modelsTotal).toBe(260);
+  });
+
+  it("keeps discovery well clear of what one scope entry may hold", async () => {
+    // The relationship that matters, asserted rather than assumed: these are
+    // answers to different questions and must not be one number again.
+    listing(["gpt-5-mini"]);
+    const result = await probeProviderKey({ provider: "openai", key: RAW_KEY });
+
+    if (!result.ok) throw new Error("expected a successful probe");
+    expect(result.modelsTotal).toBe(1);
+    expect(LIMITS.models).toBe(50);
+  });
+});
+
+/**
+ * What the onramp actually pre-fills.
+ *
+ * OpenAI's listing leads with `text-embedding-ada-002`, and the old UI took the
+ * first usable id as "Model to call" — so the field that decides what is really
+ * sent to a chat endpoint defaulted to an embedding model.
+ */
+describe("the models offered from a provider listing", () => {
+  // The exact shape of the openai listing that produced the reported bug.
+  const OPENAI_LISTING = [
+    "text-embedding-ada-002",
+    "whisper-1",
+    "gpt-3.5-turbo",
+    "tts-1",
+    "dall-e-3",
+    "omni-moderation-latest",
+    "gpt-4.1-nano",
+    "gpt-5-mini",
+    "gpt-image-1",
+  ];
+
+  it("offers only models this gateway's endpoints can actually route", () => {
+    const routable = routableDiscoveredModels("openai", OPENAI_LISTING);
+
+    // Embeddings, audio, image and moderation have no route through the
+    // endpoint allowlist; granting them authorizes a call that cannot be made.
+    expect(routable).not.toContain("text-embedding-ada-002");
+    expect(routable).not.toContain("whisper-1");
+    expect(routable).not.toContain("tts-1");
+    expect(routable).not.toContain("dall-e-3");
+    expect(routable).not.toContain("omni-moderation-latest");
+    expect(routable).toContain("gpt-5-mini");
+    expect(routable).toContain("gpt-4.1-nano");
+  });
+
+  it("prefers our own documented model over whatever the provider listed first", () => {
+    // Not `text-embedding-ada-002`, which is what `find(clientModelIsUsable)`
+    // returned for this exact listing.
+    expect(preferredClientModel("openai", OPENAI_LISTING)).toBe("gpt-5-mini");
+  });
+
+  it("falls back to a routable discovered model when ours is not on the key", () => {
+    expect(preferredClientModel("openai", ["whisper-1", "gpt-4.1-nano"])).toBe("gpt-4.1-nano");
+  });
+
+  it("falls back to the documented default when nothing discovered is routable", () => {
+    // NOT `whisper-1`. The picker widens to the whole listing rather than show
+    // nothing; the one model actually sent to the provider does not, because
+    // widening it is the original bug.
+    expect(preferredClientModel("openai", ["whisper-1", "tts-1"])).toBe(
+      DEFAULT_CLIENT_MODELS.openai
+    );
+    expect(routableDiscoveredModels("openai", ["whisper-1", "tts-1"])).toEqual([
+      "whisper-1",
+      "tts-1",
+    ]);
+  });
+
+  it("never hands back more than one scope entry may hold", () => {
+    // The pre-fill is one model and the suggestions are capped, so no discovery
+    // result can walk an operator into "Invalid models in scope."
+    const many = Array.from({ length: 300 }, (_, i) => `gpt-${i}`);
+    expect(DISCOVERED_MODEL_SUGGESTION_LIMIT).toBeLessThan(LIMITS.models);
+    expect(routableDiscoveredModels("openai", many).slice(0, DISCOVERED_MODEL_SUGGESTION_LIMIT))
+      .toHaveLength(DISCOVERED_MODEL_SUGGESTION_LIMIT);
+  });
+
+  it("leaves every other provider's listing on the same rule", () => {
+    // Driven off each provider's own default pattern, not a hand-kept table.
+    expect(routableDiscoveredModels("anthropic", ["claude-haiku-4-5", "whisper-1"])).toEqual([
+      "claude-haiku-4-5",
+    ]);
+    expect(routableDiscoveredModels("groq", ["llama-3.3-70b-versatile", "whisper-large-v3"])).toEqual([
+      "llama-3.3-70b-versatile",
+    ]);
+  });
+
+  /**
+   * The default pattern describes what we DOCUMENT, not what a provider serves.
+   * Measured: `gemini-*` matches none of Google's OpenAI-compat listing, which
+   * spells its ids `models/gemini-2.5-flash`. Filtering on it left the picker
+   * EMPTY on a key that reaches real models — a worse failure than showing a few
+   * the gateway cannot route.
+   */
+  it("never returns an empty picker for a key that found models", () => {
+    const listings: Array<[ProviderId, string[]]> = [
+      ["openai", ["text-embedding-ada-002", "whisper-1", "gpt-5-mini"]],
+      ["anthropic", ["claude-haiku-4-5", "claude-sonnet-4-5"]],
+      ["groq", ["llama-3.3-70b-versatile", "whisper-large-v3"]],
+      ["mistral", ["mistral-small-latest", "codestral-latest"]],
+      ["together", ["meta-llama/Llama-3.3-70B-Instruct-Turbo", "Qwen/Qwen2.5-72B-Instruct-Turbo"]],
+      ["deepseek", ["deepseek-chat", "deepseek-reasoner"]],
+      ["gemini", ["models/gemini-2.5-flash", "models/gemini-2.5-pro"]],
+    ];
+    for (const [provider, listing] of listings) {
+      expect(routableDiscoveredModels(provider, listing).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("hands back the whole listing when the default pattern matches none of it", () => {
+    // gemini's real compat listing. The pattern is what was wrong, not the key.
+    const listing = ["models/gemini-2.5-flash", "models/gemini-2.5-pro"];
+    expect(routableDiscoveredModels("gemini", listing)).toEqual(listing);
+  });
+
+  it("still filters where the pattern genuinely describes the listing", () => {
+    // The fallback must not become a way of never filtering at all: OpenAI is
+    // where the filter earns its place.
+    expect(
+      routableDiscoveredModels("openai", ["whisper-1", "tts-1", "gpt-5-mini"])
+    ).toEqual(["gpt-5-mini"]);
   });
 });

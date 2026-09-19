@@ -87,6 +87,7 @@ import { readCurrentAgentFallbacks } from "@/lib/state/fallbacks";
 import type { SenderProofObservation } from "@/lib/sender-constraint";
 import {
   endpointPolicy,
+  forwardableUpstreamSearch,
   isEndpointAllowed,
   joinUpstream,
   versionlessUpstreamPath,
@@ -2068,7 +2069,16 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       const upstreamSuffix = custom
         ? versionlessUpstreamPath(target.upstreamPath)
         : target.upstreamPath;
-      targetUrl = `${joinUpstream(upstreamBase, upstreamSuffix)}${new URL(req.url).search}`;
+      // The client's query string, MINUS this route's own routing parameters.
+      // Next re-appends `[provider]` and `[...path]` to `req.url` as ordinary
+      // query parameters before a handler runs, so forwarding `req.url`'s search
+      // verbatim sent our router's internals to the provider — see
+      // forwardableUpstreamSearch. The names come from the params object, so a
+      // renamed route segment cannot leave a stale one behind. Inside the try
+      // deliberately: a query string that cannot even be parsed refuses the call
+      // with nothing dispatched, rather than travelling with a provider key.
+      const forwardedSearch = forwardableUpstreamSearch(req.url, Object.keys(params));
+      targetUrl = `${joinUpstream(upstreamBase, upstreamSuffix)}${forwardedSearch}`;
     } catch {
       // The upstream URL could not even be constructed. Nothing was sent.
       const settle = reconcile(NO_USAGE, "blocked_endpoint", "not_dispatched", 400);

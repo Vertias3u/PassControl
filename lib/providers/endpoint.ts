@@ -218,3 +218,76 @@ export function joinUpstream(base: string, upstreamPath: readonly string[]): str
   // Trailing separators collapse; the segments are already known to carry none.
   return `${base.replace(/\/+$/u, "")}/${upstreamPath.join("/")}`;
 }
+
+/**
+ * The client's own query string, with this route's framework-injected routing
+ * parameters removed.
+ *
+ * ── Why this exists ──────────────────────────────────────────────────────────
+ *
+ * The proxy lives at `app/api/v1/[provider]/[...path]`, and Next does not hand
+ * a dynamic route's parameters to the handler through `ctx.params` ALONE. The
+ * router carries them in the query string under its own `nxtP` prefix, and the
+ * edge adapter then strips that prefix and re-appends them as ORDINARY query
+ * parameters before the handler ever sees the request
+ * (`next/dist/server/web/adapter.js` — `normalizeNextQueryParam`). So a request
+ * the SDK sent as
+ *
+ *   POST /api/v1/openai/v1/chat/completions
+ *
+ * arrives with `req.url` reading
+ *
+ *   ...?provider=openai&path=v1&path=chat&path=completions
+ *
+ * — verified against a running server, not inferred. Forwarding `req.url`'s
+ * search verbatim therefore appended OUR ROUTER'S INTERNALS to a
+ * credential-bearing upstream request. OpenAI rejects it outright ("Duplicate
+ * parameter: 'path'"); every other provider silently ignored the junk, which is
+ * why this survived heavy Anthropic testing. The leak was never
+ * provider-specific — only the symptom was.
+ *
+ * ── Why the parameters are DROPPED rather than reconstructed ─────────────────
+ *
+ * The adapter deletes any same-named parameter the client sent before appending
+ * the route segments, so a genuine `?path=…` from a caller is already gone by
+ * the time this runs. There is nothing left to preserve, and inventing a value
+ * for it would be a fabrication on the path that carries a provider key. A key
+ * whose name cannot be decoded is dropped for the same reason: it cannot be
+ * compared against the route's own names, and an undecidable parameter does not
+ * get to ride along with a credential. Every endpoint on the allowlist treats
+ * its query string as optional, so dropping is always safe and never silent
+ * about a value that mattered.
+ *
+ * Everything else is forwarded BYTE FOR BYTE, original percent-encoding intact.
+ * Anthropic's `GET /v1/models` pagination (`limit`, `after_id`, `before_id`) is
+ * a real client parameter on a real allowlisted endpoint, and re-encoding a
+ * query the caller built is not this function's business.
+ *
+ * `routeParamNames` is asked of the params object rather than written out here,
+ * so renaming a route segment cannot leave a stale name behind. The `nxt`
+ * prefixes are belt-and-braces: nothing prefixed reaches a handler today, and
+ * the day one does it must not reach a provider either.
+ */
+const NEXT_ROUTER_PARAM_PREFIX = /^nxt[PI]/u;
+
+export function forwardableUpstreamSearch(
+  requestUrl: string,
+  routeParamNames: readonly string[]
+): string {
+  const raw = new URL(requestUrl).search.replace(/^\?/u, "");
+  if (!raw) return "";
+  const kept = raw.split("&").filter((pair) => {
+    if (!pair) return false;
+    const rawKey = pair.split("=")[0] ?? "";
+    let key: string;
+    try {
+      key = decodeURIComponent(rawKey.replace(/\+/gu, " "));
+    } catch {
+      // Undecodable: unprovable, so it does not travel with the credential.
+      return false;
+    }
+    if (routeParamNames.includes(key)) return false;
+    return !NEXT_ROUTER_PARAM_PREFIX.test(key);
+  });
+  return kept.length ? `?${kept.join("&")}` : "";
+}

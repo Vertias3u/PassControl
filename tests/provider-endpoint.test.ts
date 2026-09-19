@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   endpointPolicy,
+  forwardableUpstreamSearch,
   isEndpointAllowed,
   joinUpstream,
   normalizeEndpoint,
@@ -171,5 +172,85 @@ describe("joining an upstream path onto a base", () => {
     expect(joinUpstream("https://h/v1", ["models", "meta%2Fllama-3"])).toBe(
       "https://h/v1/models/meta%2Fllama-3"
     );
+  });
+});
+
+/**
+ * The framework's routing parameters are not the client's query string.
+ *
+ * Next hands `[provider]` and `[...path]` to the handler in `req.url`'s SEARCH
+ * as well as in `ctx.params` — it re-appends them as ordinary parameters after
+ * stripping its own `nxtP` prefix. Forwarded verbatim, that put
+ * `?provider=openai&path=v1&path=chat&path=completions` on a request carrying a
+ * provider key, and OpenAI answered "Duplicate parameter: 'path'".
+ *
+ * These cases are written against the URL shape a running Next server was
+ * OBSERVED to produce, because a test that builds a tidy URL passes whether or
+ * not the bug is fixed.
+ */
+describe("the query string forwarded upstream", () => {
+  const ROUTE_PARAMS = ["provider", "path"];
+
+  it("drops the routing parameters Next injects into req.url", () => {
+    expect(
+      forwardableUpstreamSearch(
+        "https://gw.test/api/v1/openai/v1/chat/completions?provider=openai&path=v1&path=chat&path=completions",
+        ROUTE_PARAMS
+      )
+    ).toBe("");
+  });
+
+  it("keeps a real client parameter that sits among them", () => {
+    // Anthropic's model listing pages with `limit` / `after_id`, and Next
+    // interleaves its own parameters around whatever the caller sent.
+    expect(
+      forwardableUpstreamSearch(
+        "https://gw.test/api/v1/anthropic/v1/models?limit=5&path=v1&path=models&after_id=m_1&provider=anthropic",
+        ROUTE_PARAMS
+      )
+    ).toBe("?limit=5&after_id=m_1");
+  });
+
+  it("forwards a client parameter byte for byte, encoding intact", () => {
+    // Re-encoding a query the caller built is not this function's job; the only
+    // thing it is allowed to do is remove.
+    expect(
+      forwardableUpstreamSearch("https://gw.test/x?after_id=a%2Cb%20c", ROUTE_PARAMS)
+    ).toBe("?after_id=a%2Cb%20c");
+  });
+
+  it("returns nothing at all when the client sent no query", () => {
+    expect(forwardableUpstreamSearch("https://gw.test/api/v1/openai/v1/chat/completions", [])).toBe("");
+  });
+
+  it("drops a routing parameter smuggled in percent-encoded", () => {
+    // `pa%74h` decodes to `path`. Compared after decoding, so a caller cannot
+    // spell its way past the filter.
+    expect(forwardableUpstreamSearch("https://gw.test/x?pa%74h=evil", ROUTE_PARAMS)).toBe("");
+  });
+
+  it("drops a key it cannot decode rather than forwarding it with a credential", () => {
+    // Undecodable means uncheckable. Every allowlisted endpoint treats its query
+    // as optional, so refusing to carry it is always the safe answer.
+    expect(forwardableUpstreamSearch("https://gw.test/x?%E0%A4%A=1&limit=2", ROUTE_PARAMS)).toBe(
+      "?limit=2"
+    );
+  });
+
+  it("drops the framework's own prefixed parameters if one ever survives", () => {
+    // Nothing prefixed reaches a handler today — the adapter normalises them
+    // first. The day one does, it must not reach a provider either.
+    expect(
+      forwardableUpstreamSearch("https://gw.test/x?nxtPpath=v1&nxtIfoo=1&limit=2", ROUTE_PARAMS)
+    ).toBe("?limit=2");
+  });
+
+  it("takes the names from the route, so a renamed segment cannot leave a stale one", () => {
+    // `provider` is only special because THIS route calls a segment that. Asked
+    // of the params object, never written down twice.
+    expect(forwardableUpstreamSearch("https://gw.test/x?provider=openai", [])).toBe(
+      "?provider=openai"
+    );
+    expect(forwardableUpstreamSearch("https://gw.test/x?tenant=acme", ["tenant"])).toBe("");
   });
 });

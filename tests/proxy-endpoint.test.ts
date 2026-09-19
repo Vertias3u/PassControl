@@ -1159,3 +1159,139 @@ describe("when the endpoint read does not answer", () => {
     expect(target()).toBe("https://api.openai.com/v1/chat/completions");
   });
 });
+
+/**
+ * The router's own parameters must never reach a provider.
+ *
+ * ── Why these tests build an UGLY url on purpose ─────────────────────────────
+ *
+ * Every other request in this file is constructed with a tidy URL, and that is
+ * exactly why none of them caught this. Next does not deliver a dynamic route's
+ * parameters through `ctx.params` alone: it carries them in the query string
+ * under its `nxtP` prefix, and the edge adapter strips the prefix and
+ * re-appends them as ORDINARY parameters before the handler runs. So the real
+ * `req.url` for a `POST /api/v1/openai/v1/chat/completions` reads
+ *
+ *   ...chat/completions?provider=openai&path=v1&path=chat&path=completions
+ *
+ * The proxy forwarded that search verbatim onto the upstream URL, so OpenAI
+ * received `path` three times and refused the call:
+ *
+ *   Duplicate parameter: 'path'. You provided multiple values for this
+ *   parameter, whereas only one is allowed.
+ *
+ * Anthropic, Groq, Mistral, Together, DeepSeek and Gemini ignored the junk
+ * instead of rejecting it, which is why heavy Anthropic testing never saw it.
+ * The leak was framework-level and identical for all of them.
+ *
+ * `injected()` below reproduces the URL shape observed from a running Next
+ * server. A regression here is a test that stops using it.
+ */
+describe("framework routing parameters never reach the provider", () => {
+  const target = () => String(fetchMock.mock.calls.at(-1)?.[0]);
+
+  /** The URL Next actually hands the handler, client query and all. */
+  function injected(provider: string, path: string[], clientQuery?: string): string {
+    const routing = [`provider=${provider}`, ...path.map((seg) => `path=${seg}`)].join("&");
+    const search = clientQuery ? `${clientQuery}&${routing}` : routing;
+    return `https://gateway.test/api/v1/${provider}/${path.join("/")}?${search}`;
+  }
+
+  async function post(provider: string, path: string[], model: string, clientQuery?: string) {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider, models: [model] }] });
+    return POST(
+      new Request(injected(provider, path, clientQuery), {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      }),
+      { params: Promise.resolve({ provider, path }) }
+    );
+  }
+
+  async function get(provider: string, path: string[], clientQuery?: string) {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider, models: ["nothing-*"] }] });
+    return GET(
+      new Request(injected(provider, path, clientQuery), {
+        method: "GET",
+        headers: { authorization: "Bearer visa" },
+      }),
+      { params: Promise.resolve({ provider, path }) }
+    );
+  }
+
+  // The exact call the OpenAI Python SDK makes for
+  // client.chat.completions.parse(model="gpt-5-mini", response_format=…) against
+  // base_url=".../api/v1/openai/v1".
+  it("sends OpenAI chat with no query string at all", async () => {
+    const res = await post("openai", ["v1", "chat", "completions"], "gpt-5-mini");
+
+    expect(res.status).toBe(200);
+    expect(target()).toBe("https://api.openai.com/v1/chat/completions");
+  });
+
+  // The other half of the same call: an SDK configured with
+  // base_url=".../api/v1/openai" appends "chat/completions" without the version.
+  it("sends OpenAI chat clean on the versionless client spelling too", async () => {
+    const res = await post("openai", ["chat", "completions"], "gpt-5-mini");
+
+    expect(res.status).toBe(200);
+    expect(target()).toBe("https://api.openai.com/v1/chat/completions");
+  });
+
+  // Provider-agnostic, because the injection is. Only the symptom differed.
+  it.each([
+    ["anthropic", ["v1", "messages"], "claude-haiku-4-5", "https://api.anthropic.com/v1/messages"],
+    ["groq", ["v1", "chat", "completions"], "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/chat/completions"],
+    ["mistral", ["v1", "chat", "completions"], "mistral-small-latest", "https://api.mistral.ai/v1/chat/completions"],
+    ["together", ["v1", "chat", "completions"], "openai/gpt-oss-20b", "https://api.together.ai/v1/chat/completions"],
+    ["deepseek", ["chat", "completions"], "deepseek-chat", "https://api.deepseek.com/chat/completions"],
+    ["gemini", ["chat", "completions"], "gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"],
+  ])("sends %s clean as well", async (provider, path, model, upstream) => {
+    const res = await post(provider, path, model);
+
+    expect(res.status).toBe(200);
+    expect(target()).toBe(upstream);
+  });
+
+  it("keeps a real client query parameter while dropping the routing ones", async () => {
+    // Anthropic's model listing really does page with `limit` / `after_id`.
+    // Dropping the whole query string would have been a different bug.
+    const res = await get("anthropic", ["v1", "models"], "limit=5&after_id=m_1");
+
+    expect(res.status).toBe(200);
+    expect(target()).toBe("https://api.anthropic.com/v1/models?limit=5&after_id=m_1");
+  });
+
+  it("does not leak the routing parameters to a custom endpoint either", async () => {
+    // Same code path, and the one where a leak is least excusable: the operator
+    // named this host, so the gateway must send it exactly what was asked for —
+    // and still no `/v1/v1/`.
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
+    try {
+      const res = await post("openai", ["v1", "chat", "completions"], "gpt-5-mini");
+
+      expect(res.status).toBe(200);
+      expect(target()).toBe("http://10.1.2.3:8000/v1/chat/completions");
+    } finally {
+      delete process.env.PROVIDER_ENDPOINT_MODE;
+    }
+  });
+
+  it("still refuses an endpoint that is not on the allowlist", async () => {
+    // The fix removes parameters; it must not have widened what is reachable.
+    const res = await post("openai", ["v1", "files"], "gpt-5-mini");
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "blocked_endpoint" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("carries the single-model retrieve segment but none of the routing ones", async () => {
+    const res = await get("openai", ["v1", "models", "gpt-5-mini"]);
+
+    expect(res.status).toBe(200);
+    expect(target()).toBe("https://api.openai.com/v1/models/gpt-5-mini");
+  });
+});

@@ -533,6 +533,8 @@ type ProbeSuccess = {
   provider: ProviderId;
   mode: "detected" | "manual";
   models: string[];
+  /** Distinct ids the provider listed, which may exceed `models.length`. */
+  modelsTotal: number;
   handoff: string;
 };
 
@@ -550,7 +552,25 @@ function clientIp(h: Headers): string {
   );
 }
 
-function modelIds(payload: unknown, rawKey: string): string[] {
+/**
+ * How many discovered ids the probe hands back.
+ *
+ * This bound exists to keep a hostile or eccentric `/models` response from
+ * arriving unbounded. It is deliberately NOT `LIMITS.models`.
+ *
+ * It used to be 50, which is exactly `LIMITS.models` — the maximum number of
+ * patterns one scope entry may hold. Nothing in the code linked the two numbers
+ * and nothing explained them, but the onramp pasted this list straight into the
+ * grant, so OpenAI's listing filled a scope to the validator's ceiling before
+ * the operator chose anything. Adding one more real model then failed with
+ * "Invalid models in scope." Discovery answers "what does this key reach";
+ * `LIMITS.models` answers "how much may one grant authorize". They are
+ * different questions and they no longer share a number.
+ */
+const MODEL_DISCOVERY_LIMIT = 200;
+
+/** Distinct model ids from a provider listing, plus how many there really were. */
+function modelIds(payload: unknown, rawKey: string): { ids: string[]; total: number } {
   const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
   const rows = Array.isArray(payload) ? payload : Array.isArray(record?.data) ? record.data : [];
   const unique = new Set<string>();
@@ -559,9 +579,19 @@ function modelIds(payload: unknown, rawKey: string): string[] {
     const id = String((row as { id?: unknown }).id ?? "").trim();
     if (!id || id.length > 200 || id.includes(rawKey)) continue;
     unique.add(id);
-    if (unique.size === 50) break;
+    // Counting continues past the slice so `total` can be honest. The UI says
+    // "showing N of M" rather than implying the returned list is everything —
+    // a truncated list presented as complete is how an operator concludes a
+    // model is unavailable when it simply was not shown.
+    //
+    // `total` is therefore exact up to this scan ceiling and reads as the
+    // ceiling beyond it. No provider lists anywhere near 800 models; the bound
+    // is here so a hostile response cannot make this loop unbounded, and a count
+    // that understates a listing nobody has is the safe direction to be wrong in.
+    if (unique.size >= MODEL_DISCOVERY_LIMIT * 4) break;
   }
-  return [...unique];
+  const all = [...unique];
+  return { ids: all.slice(0, MODEL_DISCOVERY_LIMIT), total: all.length };
 }
 
 /**
@@ -602,6 +632,7 @@ export async function probeProviderKey(input: {
 
   let mode: "detected" | "manual" = "manual";
   let models: string[] = [];
+  let modelsTotal = 0;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8_000);
   try {
@@ -622,7 +653,9 @@ export async function probeProviderKey(input: {
       return { ok: false, error: "invalid_key", message: "That key didn't work." };
     }
     if (response.ok) {
-      models = modelIds(await response.json(), clean.key);
+      const discovered = modelIds(await response.json(), clean.key);
+      models = discovered.ids;
+      modelsTotal = discovered.total;
       mode = models.length ? "detected" : "manual";
     }
     // Any other status is intentionally manual-mode. In particular, a valid
@@ -652,7 +685,7 @@ export async function probeProviderKey(input: {
     })),
     KEY_IMPORT_HANDOFF_TTL_S
   );
-  return { ok: true, provider, mode, models, handoff };
+  return { ok: true, provider, mode, models, modelsTotal, handoff };
 }
 
 interface KeyImportHandoff {
