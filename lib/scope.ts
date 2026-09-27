@@ -2,6 +2,7 @@
 // against patterns that may contain a trailing/embedded `*` wildcard.
 import type { ScopeEntry } from "./auth/visa";
 import type { ProviderId } from "./providers";
+import type { RequestedOutput } from "./output-limit";
 
 // Real model identifiers are short. Bound both sides of a match: the model
 // comes from the request body and the pattern comes from a jsonb column a
@@ -14,7 +15,7 @@ const MAX_PROVIDER_LEN = 50;
 // sides: a scope entry that never matches denies, and a deny rule that trips
 // this makes the whole document malformed, which also denies.
 const MAX_WILDCARDS = 4;
-const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour"]);
+const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens"]);
 // Exported for the policy editor, which must offer exactly the days the parser
 // accepts. Retyping them there is how the form ends up letting an operator save
 // a window the gateway reads as malformed — the failure mode validateFallbacks
@@ -169,11 +170,17 @@ export function scopeAllows(scopes: ScopeEntry[], provider: string, model: strin
   return scopeRuleMatch(scopes, provider, model) !== null;
 }
 
-export type AgentPolicyBlockReason = "deny" | "window" | "malformed";
+export type AgentPolicyBlockReason = "deny" | "window" | "malformed" | "output_limit";
 
 export type AgentPolicyDecision =
   | { allowed: true; maxRequestsPerHour: number | null }
-  | { allowed: false; reason: AgentPolicyBlockReason; rule: string };
+  | {
+      allowed: false;
+      reason: AgentPolicyBlockReason;
+      rule: string;
+      /** The configured ceiling, on an `output_limit` refusal only. */
+      limit?: number;
+    };
 
 interface DenyRule {
   provider: string;
@@ -191,6 +198,7 @@ interface AgentPolicy {
   deny: DenyRule[];
   windows: TimeWindow[];
   maxRequestsPerHour: number | null;
+  maxOutputTokens: number | null;
 }
 
 export interface AgentPolicyView {
@@ -199,6 +207,7 @@ export interface AgentPolicyView {
   deny: DenyRule[];
   windows: TimeWindow[];
   maxRequestsPerHour: number | null;
+  maxOutputTokens: number | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -262,11 +271,18 @@ export const POLICY_LIMITS = {
    *  belongs with the other limits rather than alone further up the file. */
   patternLen: MAX_MODEL_LEN,
   modelLen: MAX_MODEL_LEN,
+  /**
+   * The largest `max_output_tokens` ceiling the reader accepts. Far above any
+   * model's real output limit on purpose — this is a read boundary, and
+   * tightening one is retroactive (see above) — while still refusing a value
+   * that is not a plausible token count.
+   */
+  maxOutputTokens: 10_000_000,
 } as const;
 
 function parsePolicy(value: unknown): AgentPolicy | null {
   // Existing rows and pre-policy visas must preserve the legacy path exactly.
-  if (value === null) return { deny: [], windows: [], maxRequestsPerHour: null };
+  if (value === null) return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null };
   if (!isRecord(value)) return null;
   if (Object.keys(value).some((key) => !POLICY_KEYS.has(key))) return null;
 
@@ -349,7 +365,20 @@ function parsePolicy(value: unknown): AgentPolicy | null {
     maxRequestsPerHour = value.max_requests_per_hour;
   }
 
-  return { deny, windows, maxRequestsPerHour };
+  let maxOutputTokens: number | null = null;
+  if ("max_output_tokens" in value) {
+    if (
+      typeof value.max_output_tokens !== "number" ||
+      !Number.isSafeInteger(value.max_output_tokens) ||
+      value.max_output_tokens <= 0 ||
+      value.max_output_tokens > POLICY_LIMITS.maxOutputTokens
+    ) {
+      return null;
+    }
+    maxOutputTokens = value.max_output_tokens;
+  }
+
+  return { deny, windows, maxRequestsPerHour, maxOutputTokens };
 }
 
 /**
@@ -380,6 +409,7 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
       deny: [],
       windows: [],
       maxRequestsPerHour: null,
+      maxOutputTokens: null,
     };
   }
   return {
@@ -388,6 +418,7 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
     deny: policy.deny.map((rule) => ({ ...rule, models: [...rule.models] })),
     windows: policy.windows.map((window) => ({ ...window, days: [...window.days] })),
     maxRequestsPerHour: policy.maxRequestsPerHour,
+    maxOutputTokens: policy.maxOutputTokens,
   };
 }
 
@@ -404,12 +435,19 @@ function timeToMinute(value: string): number {
  * Evaluate current per-agent policy after scope and endpoint checks. UTC is the
  * only accepted timezone for now; malformed or unsupported policy fails closed.
  * The clock is injectable so window decisions are deterministic in tests.
+ *
+ * `output` is what the request asks the provider to generate, read strictly for
+ * its shape (lib/output-limit.ts). `null` means the request runs no inference —
+ * a model listing — and is exempt from an output ceiling. UNDEFINED IS NOT
+ * EXEMPT: it reads as "no limit stated", so a caller that forgets to supply the
+ * facts is refused by a configured ceiling rather than silently admitted.
  */
 export function evaluateAgentPolicy(
   value: unknown,
   provider: string,
   model: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  output?: RequestedOutput | null
 ): AgentPolicyDecision {
   const policy = parsePolicy(value);
   if (!policy || !Number.isFinite(now.getTime())) {
@@ -442,6 +480,24 @@ export function evaluateAgentPolicy(
     );
     if (!inWindow) {
       return { allowed: false, reason: "window", rule: "windows:no_match" };
+    }
+  }
+
+  // The output ceiling, BEFORE the hourly counter is consulted, so a request it
+  // refuses never spends a unit of that quota. Refused, never rewritten: a body
+  // clamped to the ceiling would be a request the agent never made, truncated in
+  // a way it cannot tell from the model stopping.
+  if (policy.maxOutputTokens !== null && output !== null) {
+    const limit = policy.maxOutputTokens;
+    const asked: RequestedOutput = output ?? { kind: "absent" };
+    if (asked.kind === "absent") {
+      return { allowed: false, reason: "output_limit", rule: "max_output_tokens:missing", limit };
+    }
+    if (asked.kind === "invalid") {
+      return { allowed: false, reason: "output_limit", rule: "max_output_tokens:invalid", limit };
+    }
+    if (asked.tokens > limit) {
+      return { allowed: false, reason: "output_limit", rule: "max_output_tokens:exceeded", limit };
     }
   }
 

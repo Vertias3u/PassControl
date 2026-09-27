@@ -44,7 +44,7 @@ function render(
   expectation: string | null = null
 ) {
   return renderToStaticMarkup(
-    <AgentFleetTable
+    <AgentFleetTable agentsAvailable
       agents={agents as never}
       visaTtlSeconds={900}
       keyCustody={keyCustody}

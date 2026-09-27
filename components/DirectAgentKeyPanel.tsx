@@ -85,7 +85,7 @@ export function DirectAgentKeyPanel({
   };
 
   return (
-    <section className="grid gap-5 rounded-xl border border-border bg-card p-5 shadow-sm sm:p-6" aria-labelledby="direct-agent-keys-heading">
+    <section id="direct-agent-keys" className="grid scroll-mt-40 gap-5 rounded-xl border border-border bg-card p-5 shadow-sm sm:p-6" aria-labelledby="direct-agent-keys-heading">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-primary">Installation credentials</p>
@@ -203,7 +203,7 @@ export function DirectAgentKeyPanel({
         open={Boolean(revoking)}
         onOpenChange={(next) => { if (!next && !busy) setRevoking(null); }}
         title="Revoke this Direct Agent Key?"
-        description="This installation will be refused on its next request. Existing stored call records remain intact."
+        description="Only this installation key: it is refused on its next request. The agent's other keys and any passport access keep working, and stored call records remain intact. To stop the whole agent, suspend it instead."
       >
         <div className="grid gap-4">
           <div className="rounded-xl border border-danger/30 bg-danger/8 p-4 text-sm">

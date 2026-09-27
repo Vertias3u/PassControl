@@ -10,6 +10,7 @@ import { CapabilityHistory } from "./CapabilityHistory";
 import { DirectAgentIdentity } from "./DirectAgentIdentity";
 import styles from "./AgentPassport.module.css";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
+import { CALL_OUTCOME, callOutcome, isDeliberateRefusal } from "@/lib/call-outcome";
 
 const SVG_SIZE = 960;
 const EXPORT_SCALE = 2;
@@ -118,40 +119,21 @@ function lifecycleClasses(status: string): string {
 }
 
 function verdictClasses(status: string): string {
-  if (status === "ok") return "border-success/30 bg-success/10 text-success";
-  if (status.startsWith("blocked_")) return "border-danger/30 bg-danger/10 text-danger";
-  if (status === "upstream_error") return "border-warning/30 bg-warning/10 text-warning";
+  const { category } = callOutcome(status);
+  if (category === "forwarded") return "border-success/30 bg-success/10 text-success";
+  if (isDeliberateRefusal(category)) return "border-danger/30 bg-danger/10 text-danger";
+  if (category === "provider_failure" || category === "usage_unconfirmed") return "border-warning/30 bg-warning/10 text-warning";
   return "border-border bg-secondary text-muted-foreground";
 }
 
-// Keyed by LogEntry["status"] rather than `string`, so a new audit status fails
-// to compile here instead of rendering as "Unknown". This map was a plain
-// Record<string, string> and had already missed blocked_policy — the third
-// place the same drift landed. `import type` is erased, so no server code
-// reaches the client.
-const VERDICT_LABELS: Record<LogEntry["status"], string> = {
-  ok: "Allowed",
-  blocked_budget: "Budget exceeded",
-  blocked_endpoint: "Endpoint blocked",
-  blocked_killed: "Kill switch",
-  blocked_suspended: "Agent suspended",
-  blocked_scope: "Scope violation",
-  blocked_policy: "Policy rule",
-  provider_exhausted: "Provider out of credit",
-  no_provider_key: "No provider key stored",
-  endpoint_unavailable: "Endpoint lookup failed",
-  credential_state_unavailable: "Credential check unavailable",
-  credential_changed: "Credential changed mid-call",
-  blocked_unpriced_endpoint: "Cost cap cannot be priced here",
-  upstream_error: "Provider error",
-  usage_unknown: "Sent, usage unconfirmed",
-  blocked_budget_state: "Budget state unavailable",
-  dispatch_unavailable: "Not sent, dispatch unconfirmed",
-};
+// The words come from lib/call-outcome.ts — a Record over LogEntry["status"],
+// so a new audit status fails to compile there — shared with the board, the
+// drawer and the status pill. This file used to carry its own copy, which is
+// how "Scope violation" here and "NO VISA" on the board named one refusal.
 
 function verdictLabel(status: string): string {
   return (
-    VERDICT_LABELS[status as LogEntry["status"]] ??
+    CALL_OUTCOME[status as LogEntry["status"]]?.label ??
     `Unknown · ${cleanedText(status, 28) || "unlabelled"}`
   );
 }
@@ -536,7 +518,7 @@ function PassportSvg({
         accent={accent}
         x={72}
         y={510}
-        label="TOKEN LIMIT · RECONCILED"
+        label="TOKEN CAP · CUMULATIVE"
         value={tokenValue}
         percent={passport.budgets.tokens.percentUsed}
         unlimited={passport.budgets.tokens.unlimited}
@@ -545,7 +527,7 @@ function PassportSvg({
         accent={accent}
         x={520}
         y={510}
-        label="COST LIMIT · RECONCILED"
+        label="COST CAP · CUMULATIVE"
         value={costValue}
         percent={passport.budgets.cost.percentUsed}
         unlimited={passport.budgets.cost.unlimited}
@@ -1167,7 +1149,8 @@ export function AgentPassport({
       ) : null}
 
       <section
-        className="grid gap-4 rounded-xl border border-border bg-card p-4 sm:p-6"
+        id="agent-access"
+        className="grid scroll-mt-40 gap-4 rounded-xl border border-border bg-card p-4 sm:p-6"
         aria-labelledby="passport-visas-heading"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1175,8 +1158,10 @@ export function AgentPassport({
             <p className="m-0 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
               Capability record
             </p>
+            {/* "Visas" names the passport mechanism; a Direct Agent Key agent has
+                no visas, only this list of what it may call. */}
             <h2 id="passport-visas-heading" className="mt-2 text-lg font-bold">
-              Visas
+              {passport.agent.passportId ? "Visas" : "Allowed models"}
             </h2>
           </div>
           {editingScopes ? null : (
@@ -1190,12 +1175,15 @@ export function AgentPassport({
             agentId={passport.agent.id}
             scopes={passport.visas}
             ttlSeconds={visaTtlSeconds}
+            hasPassport={Boolean(passport.agent.passportId)}
             onClose={() => setEditingScopes(false)}
           />
         ) : passport.visas.length === 0 ? (
           <div className="rounded-lg border border-warning/30 bg-warning/10 p-4">
             <p className="m-0 font-semibold text-warning">
-              No scopes — this passport can reach nothing.
+              {passport.agent.passportId
+                ? "No scopes — this passport can reach nothing."
+                : "No scopes — this agent can reach nothing."}
             </p>
           </div>
         ) : (
@@ -1361,6 +1349,7 @@ export function AgentPassport({
             {passport.recentVerdicts.map((entry) => (
               <li
                 key={entry.id}
+                data-outcome-category={callOutcome(entry.status).category}
                 className="grid min-w-0 gap-2 rounded-lg border border-border bg-secondary/30 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
               >
                 <div className="min-w-0">

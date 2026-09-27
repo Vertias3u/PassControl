@@ -34,8 +34,10 @@ const MUST_GATE = [
   // Provider secret into Vault, and the secret behind an existing credential row.
   "addProviderKeyForUser",
   "rotateProviderKey",
-  // Direct Agent Keys — bearer credentials on the data plane.
-  "issueDirectAgent",
+  // Direct Agent Keys — bearer credentials on the data plane. The gate sits on
+  // the shared helper; the exported wrapper and the key-import on-ramp both
+  // delegate to it (pinned below).
+  "issueDirectAgentForUser",
   "issueDirectAgentKey",
   "attachAgentPassport",
   // A `pc_` developer key is control-plane authority: fleet reads, budget writes,
@@ -199,6 +201,16 @@ describe("credential-minting Server Actions clear the strict MFA gate", () => {
         /mintApiKeyForUser\(/,
       );
     }
+  });
+
+  it("routes every Direct Agent Key creation through the gated helper", () => {
+    expect(functionBody("issueDirectAgent")).toMatch(/issueDirectAgentForUser\(/);
+    const direct = functionBody("completeKeyImportDirect");
+    expect(direct).toMatch(/addProviderKeyForUser\(/);
+    expect(direct).toMatch(/issueDirectAgentForUser\(/);
+    // One mint site: nothing else in the file may call the fleet mutation.
+    expect(source.match(/fleet\.createDirectAgent\(/g)?.length).toBe(1);
+    expect(functionBody("issueDirectAgentForUser")).toMatch(/fleet\.createDirectAgent\(/);
   });
 
   it("gates the key-import on-ramp through the shared helpers it delegates to", () => {

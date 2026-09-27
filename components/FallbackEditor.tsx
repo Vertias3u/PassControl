@@ -96,7 +96,7 @@ export function FallbackEditor({
                 <input
                   value={row.model}
                   onChange={(e) => setRow(index, { model: e.target.value })}
-                  placeholder="llama-3.3-70b"
+                  placeholder="openai/gpt-oss-20b"
                   spellCheck={false}
                 />
               </label>

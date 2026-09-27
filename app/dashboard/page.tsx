@@ -1,11 +1,12 @@
 // Control Tower — server component. Loads owned agents + recent audit via the
 // user-scoped (RLS) client and composes the dashboard.
 import { userClient } from "@/lib/supabase/server";
-import { readKillState } from "@/lib/state/killswitch";
+import { observeKillState, readKillState } from "@/lib/state/killswitch";
 import { GlobalKillSwitchBar } from "@/components/GlobalKillSwitchBar";
 import { FleetOverviewCards } from "@/components/FleetOverviewCards";
 import { AgentFleetTable } from "@/components/AgentFleetTable";
 import { visaTtlSeconds } from "@/lib/auth/visa";
+import { callOutcome, isDeliberateRefusal } from "@/lib/call-outcome";
 import { DeparturesBoard } from "@/components/DeparturesBoard";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { redirect } from "next/navigation";
@@ -26,13 +27,16 @@ import { partitionByClass } from "@/lib/call-class";
 import { shadowRevision } from "@/lib/policy-shadow";
 import { OperationsPanel } from "@/components/dashboard/OperationsPanel";
 import { FirstCallActivation } from "@/components/dashboard/FirstCallActivation";
-import { latestControlExerciseAt, onboardingStateHidden } from "@/lib/first-call-activation";
+import { onboardingStateHidden, type RefusalTest } from "@/lib/first-call-activation";
 import { buildCloudSupportBundle, type CloudOperationsSignals } from "@/lib/cloud-operations";
 import { loadInstanceSigner, instanceIssuer } from "@/lib/crypto/instanceKey";
 import { isSentryConfigured } from "@/lib/observability";
 import { isProvider } from "@/lib/providers";
 import { operatorEmails } from "@/lib/operator-allowlist";
 import { redis } from "@/lib/state/redis";
+import { readPeriodUsageMany } from "@/lib/state/holds";
+import type { PeriodKind } from "@/lib/period";
+import type { PeriodUsageView } from "@/lib/period-display";
 import {
   readDeclaredKeyStorageMany,
   toDeclaredKeyStorageView,
@@ -82,6 +86,23 @@ async function buildKeyCustodyViews(
   );
 }
 
+/** Period usage for every agent with a periodic limit; empty on any failure. */
+async function readPeriodUsageForFleet(
+  agents: readonly { id: string; budget_period?: unknown }[]
+): Promise<Record<string, PeriodUsageView>> {
+  const limited = agents.flatMap((agent) =>
+    agent.budget_period === "day" || agent.budget_period === "month"
+      ? [{ id: agent.id, kind: agent.budget_period as PeriodKind }]
+      : []
+  );
+  if (limited.length === 0) return {};
+  try {
+    return Object.fromEntries(await readPeriodUsageMany(limited));
+  } catch {
+    return {};
+  }
+}
+
 export default async function ControlTowerPage() {
   const db = await userClient();
   const {
@@ -112,6 +133,8 @@ export default async function ControlTowerPage() {
     quota,
     { data: onboardingState },
     keyCustodyExpectation,
+    refusalTestRead,
+    killObserved,
   ] =
     await Promise.all([
     db.from("agents").select("*").order("created_at", { ascending: false }),
@@ -134,11 +157,14 @@ export default async function ControlTowerPage() {
     // Promise.all rather than awaited after it — the two serial round trips
     // that used to follow (api_keys, then getMfaStatus) were pure TTFB for
     // panels that now live on /dashboard/settings.
+    // Bounded at 200 rather than a handful: the worker-connect form refuses a
+    // provider with no stored key, so this list is read as EVIDENCE of absence,
+    // and six rows of one provider must not hide a key for another.
     db
       .from("provider_credentials")
       .select("provider", { count: "exact" })
       .order("created_at", { ascending: false })
-      .limit(6),
+      .limit(200),
     Promise.resolve(null),
     db
       .from("onboarding_state")
@@ -150,6 +176,18 @@ export default async function ControlTowerPage() {
     // request for an unknown column. Kept out of any shared select so the blast
     // radius of an unapplied migration is this one line of the fleet table.
     readKeyCustodyExpectation(db, user.id),
+    // Its own query for the same reason as the line above: these two columns
+    // arrive with 0072, and selecting them beside dismissed_at/completed_at
+    // would make PostgREST fail THAT read on an unmigrated database — which
+    // would re-open the guide for every operator who dismissed it.
+    db
+      .from("onboarding_state")
+      .select("refusal_test_agent_id, refusal_test_started_at")
+      .eq("user_id", user.id)
+      .maybeSingle(),
+    // For the kill-switch bar: the raw flags, null when unreadable. `kill`
+    // above applies the enforcement posture and cannot say "could not read".
+    observeKillState(user.id),
   ]);
 
   const agentList = agents ?? [];
@@ -191,16 +229,22 @@ export default async function ControlTowerPage() {
   // Passport agents only: a Direct Agent Key has no passport private key, so
   // asking where it keeps one would turn a question nobody asked into an
   // unanswered one. Those rows are told apart in the table by passport_pubkey.
-  const [keyCustody, spendReconciliation] = await Promise.all([
+  const [keyCustody, spendReconciliation, periodUsage] = await Promise.all([
     buildKeyCustodyViews(fleetAgents),
     // `serviceClient` uncalled on purpose: the builder constructs it inside its
     // own failure domain, so an absent service-role env reads as unavailable
     // instead of throwing this page away. See lib/spend-reconciliation.ts.
     buildSpendReconciliation(serviceClient, user.id, agentList),
+    // K1: what each periodic limit has used this period, as the gateway counts
+    // it. A presentation read like the rest of this block — a failure leaves the
+    // map empty, which the table states as "usage unavailable", never as $0.
+    readPeriodUsageForFleet(agentList),
   ]);
   const displayLogs = attentionLogRows.slice(0, 100);
   const attentionQueue = buildFleetAttention(agentList, attentionLogRows);
-  const blockedCalls = displayLogs.filter((l) => l.status.startsWith("blocked")).length;
+  // Deliberate refusals only — see lib/call-outcome.ts. `blocked_budget_state`
+  // is PassControl failing to read its own counters, not a rule refusing a call.
+  const blockedCalls = displayLogs.filter((l) => isDeliberateRefusal(callOutcome(l.status).category)).length;
   // Split for presentation only. The query above is unchanged and still fetches
   // every row — nothing is filtered out of the fetch, so the window does not
   // silently shrink, and the departures board below still receives all of it.
@@ -210,16 +254,31 @@ export default async function ControlTowerPage() {
     shadowRevisions: Object.fromEntries(
       agentList.map((agent) => [agent.id, shadowRevision(agent.policy_shadow ?? null)])
     ),
+    // Current names, from the tenant-scoped agents read above. Resolved at
+    // presentation: the log rows keep only the id, so a renamed agent's history
+    // shows its current name, and a deleted agent's rows fall back to the id.
+    agentNames: Object.fromEntries(agentList.map((agent) => [agent.id, String(agent.name ?? "")])),
   };
   // A count of null (the query errored) is treated as "set up": showing a
   // getting-started card because a count failed is the more annoying wrong guess.
   const needsFirstKey = (providerKeys.count ?? 1) === 0;
-  // Read off the admin_audit rows already fetched above — the activation guide's
-  // last step must not cost a fourth round trip for a rail most tenants have
-  // dismissed. Bounded to the same newest-100 window; completion persistence
-  // re-checks the full ordered history inside complete_onboarding().
-  const controlExerciseAt = latestControlExerciseAt(adminAudit ?? []);
+  // The guide's refusal test (0072). Completion persistence re-checks the full
+  // ordered history inside complete_onboarding(); this only says which worker
+  // the test is for and when it started.
+  const refusalTest: RefusalTest | null | "unavailable" = refusalTestRead.error
+    ? "unavailable"
+    : refusalTestRead.data?.refusal_test_agent_id && refusalTestRead.data?.refusal_test_started_at
+      ? {
+          agentId: refusalTestRead.data.refusal_test_agent_id,
+          startedAt: refusalTestRead.data.refusal_test_started_at,
+        }
+      : null;
   const firstStoredProvider = providerKeys.data?.map((row) => row.provider).find(isProvider);
+  // null = the read failed, which the connect form reports as "could not
+  // confirm" rather than as "no key stored".
+  const configuredProviders = providerKeys.error
+    ? null
+    : [...new Set((providerKeys.data ?? []).map((row) => row.provider).filter(isProvider))];
   const operationsSignals: CloudOperationsSignals = {
     providerCredentials: providerKeys.error
       ? "unavailable"
@@ -249,25 +308,29 @@ export default async function ControlTowerPage() {
       description="Identity, capability, spend, and every governed call in one operational view."
       actions={
         <div className="flex flex-wrap items-center gap-2">
-          <DirectAgentConnect initialProvider={firstStoredProvider} />
+          <DirectAgentConnect initialProvider={firstStoredProvider} configuredProviders={configuredProviders} />
           <PassportIssuanceModal userId={user.id} integrations={SIDECAR_PRESETS.map(String)} />
         </div>
       }
     >
         <section id="overview" aria-label="Fleet safety controls">
-        <GlobalKillSwitchBar initialArmed={kill.userKill} />
+        <GlobalKillSwitchBar
+          initial={killObserved}
+          failClosed={process.env.KILL_SWITCH_FAIL_CLOSED === "true"}
+        />
         </section>
 
         <FirstCallActivation
           userId={user.id}
           providerConfigured={!needsFirstKey}
-          controlExerciseAt={controlExerciseAt}
+          refusalTest={refusalTest}
           initiallyHidden={onboardingStateHidden(onboardingState)}
           agents={agentList.map((agent) => ({
             id: agent.id,
             name: agent.name,
             status: agent.status,
             identityKind: agent.passport_pubkey ? "passport" as const : "direct_key" as const,
+            scopes: Array.isArray(agent.allowed_scopes) ? agent.allowed_scopes : [],
           }))}
           initialLogs={displayLogs.map((row) => ({
             id: row.id,
@@ -277,10 +340,12 @@ export default async function ControlTowerPage() {
             status: row.status,
             receipt: row.receipt,
             auth_method: row.auth_method,
+            agent_access_key_id: row.agent_access_key_id,
             created_at: row.created_at,
           }))}
           integrations={SIDECAR_PRESETS.map(String)}
           defaultProvider={firstStoredProvider}
+          configuredProviders={configuredProviders}
           logsAvailable={logsAvailable}
         />
 
@@ -293,6 +358,7 @@ export default async function ControlTowerPage() {
           housekeepingCalls={housekeepingLogs.length}
           attention={summariseFleetAttention(attentionQueue)}
           logsAvailable={logsAvailable}
+          agentsAvailable={!agentsError}
         />
 
         {/* Directly under the kill switch on purpose: arming it and watching the
@@ -335,6 +401,8 @@ export default async function ControlTowerPage() {
               keyCustody={keyCustody}
               keyCustodyExpectation={keyCustodyExpectation.expectation}
               logsAvailable={logsAvailable}
+              agentsAvailable={!agentsError}
+              periodUsage={periodUsage}
             />
           </div>
         </section>

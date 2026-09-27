@@ -107,14 +107,14 @@ export function ProviderKeysManager({
       setKey("");
       setLabel("");
       setAdding(false);
-    }, "Stored in Vault (encrypted).");
+    }, "Stored in Vault (encrypted). Not tested yet — PassControl does not call the provider to check it; the first governed call through it is the test.");
 
   const submitRotate = (credentialId: string) =>
     run(async () => {
       await rotateProviderKey({ credentialId, key: rotateKey });
       setRotateKey("");
       setRotating(null);
-    }, "Replaced the secret behind that credential. In effect immediately.");
+    }, "Replaced the secret behind that credential for every agent that uses it. Cached copies are cleared; any that are missed expire within a minute.");
 
   return (
     <div className="pc-settings-manager">
@@ -158,8 +158,9 @@ export function ProviderKeysManager({
                 <KeyRound aria-hidden="true" />
                 <span>
                   <strong>{nickname(credential)}</strong>
-                  <small>
-                    Added {new Date(credential.created_at).toISOString().slice(0, 10)}
+                  <small data-credential-check="stored-not-tested">
+                    Added {new Date(credential.created_at).toISOString().slice(0, 10)} · stored, not tested by
+                    PassControl
                   </small>
                 </span>
                 {credential.is_active ? (
@@ -176,11 +177,14 @@ export function ProviderKeysManager({
                     onClick={() =>
                       run(
                         () => setActiveProviderKey({ credentialId: credential.id }),
-                        "The gateway will inject that credential. In effect immediately."
+                        // Workspace-wide, not agent-local, and the propagation is
+                        // bounded rather than instant: cached copies are purged
+                        // best-effort, and one that is missed expires within a minute.
+                        `Every agent in this workspace that calls ${credential.provider} now uses this credential. Cached copies are cleared; any that are missed expire within a minute.`
                       )
                     }
                   >
-                    <Check aria-hidden="true" /> Use this key
+                    <Check aria-hidden="true" /> Use this key for every {credential.provider} agent
                   </button>
                 )}
                 <button
@@ -250,8 +254,9 @@ export function ProviderKeysManager({
                     {credential.provider}&rsquo;s. The endpoint must speak{" "}
                     {credential.provider}&rsquo;s API — changing where a call goes does not
                     change what it says — and calls made through it are recorded with their
-                    token counts but <strong>no cost</strong>, because we cannot know what
-                    your server charges. Leave it empty to go back to {credential.provider}.
+                    token counts but <strong>no calculated cost</strong>, because we cannot know
+                    what your server charges. That is unknown, not free: your server may still
+                    bill for them. Leave it empty to go back to {credential.provider}.
                   </p>
                   <div className="flex flex-wrap gap-2">
                     <button

@@ -741,7 +741,7 @@ export function ControlGraph({
       <div className="sr-only" aria-live="polite" aria-atomic="true">
         {shownActiveEvent ? `New governed call: ${shownActiveEvent.label}.` : ""}
       </div>
-      {!presentation ? <CallDetailDrawer row={selectedRow} open={Boolean(selectedRow)} onOpenChange={(open) => !open && setSelectedRow(null)} currentShadowRevision={selectedRow?.agent_id ? callContext.shadowRevisions[selectedRow.agent_id] ?? null : null} /> : null}
+      {!presentation ? <CallDetailDrawer row={selectedRow} open={Boolean(selectedRow)} onOpenChange={(open) => !open && setSelectedRow(null)} currentShadowRevision={selectedRow?.agent_id ? callContext.shadowRevisions[selectedRow.agent_id] ?? null : null} agentName={selectedRow?.agent_id ? callContext.agentNames[selectedRow.agent_id] ?? null : null} /> : null}
     </div>
   );
 }

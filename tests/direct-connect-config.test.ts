@@ -109,6 +109,51 @@ describe("Direct Agent setup output", () => {
   });
 });
 
+// v1 playbook Session 04, requirement 4: the same builder serves the reveal
+// (with the new key) and the agent's Setup view reopened later (without it).
+// The reopened view must never carry a key — PassControl does not have one to
+// show — and must still be a complete, runnable setup.
+describe("key-less setup for a reopened Setup view", () => {
+  it.each(PROVIDERS.map((provider) => [provider]))("never emits a Direct Agent Key for %s", (provider) => {
+    const setup = buildDirectConnectSetup({
+      origin: "https://passcontrol.example",
+      provider,
+      key: null,
+      model: "concrete-model-1",
+    });
+    const everything = JSON.stringify(setup);
+    expect(everything).not.toMatch(/pc_agent_[A-Za-z0-9_-]{8,}/u);
+    expect(parseEnv(setup.envBlock)[setup.keyVariable]).toBe("PASTE_YOUR_DIRECT_AGENT_KEY");
+    expect(setup.smokeCommand).toContain(`$${setup.keyVariable}`);
+  });
+
+  it("names the SDK to install, how to load the file, and what replaces the provider key", () => {
+    const openai = buildDirectConnectSetup({ origin: "https://p.example", provider: "groq", key: null, model: "llama-3.3-70b-versatile" });
+    expect(openai.keyVariable).toBe("OPENAI_API_KEY");
+    expect(openai.installCommand).toBe("npm install openai");
+    const anthropic = buildDirectConnectSetup({ origin: "https://p.example", provider: "anthropic", key: DIRECT_KEY, model: "claude-haiku-4-5" });
+    expect(anthropic.keyVariable).toBe("ANTHROPIC_API_KEY");
+    expect(anthropic.installCommand).toBe("npm install @anthropic-ai/sdk");
+    for (const setup of [openai, anthropic]) {
+      expect(setup.envFileName).toBe("passcontrol.env");
+      expect(setup.loadCommand).toBe("set -a; . ./passcontrol.env; set +a");
+      expect(setup.runtimeNote).toMatch(/replace/i);
+      expect(setup.runtimeNote).toMatch(/provider key/i);
+    }
+  });
+
+  it("keeps the wire contract identical with and without the key", () => {
+    const withKey = buildDirectConnectSetup({ origin: "https://p.example", provider: "openai", key: DIRECT_KEY, model: "gpt-5-mini" });
+    const without = buildDirectConnectSetup({ origin: "https://p.example", provider: "openai", key: null, model: "gpt-5-mini" });
+    expect(without.smokeCommand).toBe(withKey.smokeCommand);
+    expect(without.example).toBe(withKey.example);
+    const a = parseEnv(withKey.envBlock);
+    const b = parseEnv(without.envBlock);
+    expect(b.OPENAI_BASE_URL).toBe(a.OPENAI_BASE_URL);
+    expect(b.OPENAI_MODEL).toBe(a.OPENAI_MODEL);
+  });
+});
+
 describe("vendor SDK smoke", () => {
   it("drives the displayed OpenAI values through the real SDK", async () => {
     let seen: { path?: string; authorization?: string; body?: string } = {};

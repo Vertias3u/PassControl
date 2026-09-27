@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const raiseSpentFloorMock = vi.fn();
@@ -156,16 +157,23 @@ describe("runReconcile — incremental, checkpoint-backed spend reconciliation",
       { agent_id: "a1", spent_tokens: 1200, spent_microcents: 45_000 },
       { agent_id: "a2", spent_tokens: 0, spent_microcents: 0 },
     ]);
+    const before = Date.now();
     const res = await runReconcile(db, redish.r as any, { lagSeconds: 60 });
+    const after = Date.now();
 
     expect(raiseSpentFloorMock).toHaveBeenCalledWith(
-      { agentId: "a1", tokens: 1200, microcents: 45_000 },
+      { agentId: "a1", tokens: 1200, microcents: 45_000, cutoffMs: expect.any(Number) },
       redish.r
     );
     expect(raiseSpentFloorMock).toHaveBeenCalledWith(
-      { agentId: "a2", tokens: 0, microcents: 0 },
+      { agentId: "a2", tokens: 0, microcents: 0, cutoffMs: expect.any(Number) },
       redish.r
     );
+    // K1: the cutoff is the ledger's — now minus the lag the RPC folded behind —
+    // so spend recovered from before a period boundary stays out of a new period.
+    const cutoff = raiseSpentFloorMock.mock.calls[0]![0].cutoffMs as number;
+    expect(cutoff).toBeGreaterThanOrEqual(before - 60_000);
+    expect(cutoff).toBeLessThanOrEqual(after - 60_000);
     // Not one direct write to a spend counter. A `set` here is the bug.
     expect(Object.keys(redish.sets).filter((kk) => kk.startsWith("spent"))).toEqual([]);
     expect(res.agents).toBe(2);
@@ -399,5 +407,25 @@ describe("runReconcile — passport source observation summary", () => {
 
     expect(res.passportSourceSignals).toEqual([{ agentId: "a9", ...signal }]);
     expect(res).not.toHaveProperty("agentsSuspended");
+  });
+});
+
+// G2 — the cron's own header described the two behaviours this file exists to
+// have removed ("reset reserved:<agid> … self-heal", a SET that "fixes Redis
+// drift"). A reader auditing the money path starts at the route, so its header
+// must say what runReconcile does, not what it used to do.
+describe("the reconcile route's header", () => {
+  const header = readFileSync("app/api/cron/reconcile/route.ts", "utf8").split("export const runtime")[0];
+
+  it("does not claim to reset reservations or to recompute spend downward", () => {
+    expect(header).not.toMatch(/reset reserved/i);
+    expect(header).not.toMatch(/self-heal/i);
+    expect(header).not.toMatch(/fixes Redis drift/i);
+  });
+
+  it("states the raise-only floor and that reservations are reported, not written", () => {
+    expect(header).toMatch(/RAISES spent:<agid>/);
+    expect(header).toMatch(/never lower a\s*\/\/\s*counter|never lower a counter/);
+    expect(header).toMatch(/Does NOT write reserved:<agid>/);
   });
 });

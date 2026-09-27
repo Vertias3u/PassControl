@@ -51,6 +51,30 @@ export async function readKillState(userId: string | null): Promise<KillState> {
   }
 }
 
+/**
+ * The tenant and platform kill flags as OBSERVED, for the operator's screen.
+ * `null` means that read failed. Deliberately separate from `readKillState`,
+ * which applies the configured fail posture for enforcement: shown on a
+ * dashboard, that posture would turn "could not read" into "armed" or "clear".
+ */
+export async function observeKillState(
+  userId: string
+): Promise<{ platform: boolean | null; tenant: boolean | null }> {
+  const r = (() => {
+    try {
+      return redis();
+    } catch {
+      return null;
+    }
+  })();
+  if (!r) return { platform: null, tenant: null };
+  const [platform, tenant] = await Promise.all([
+    r.get(KEY.platform).then((value) => Boolean(value), () => null),
+    r.get(KEY.tenant(userId)).then((value) => Boolean(value), () => null),
+  ]);
+  return { platform, tenant };
+}
+
 export function isBlocked(state: KillState, agentId: string): boolean {
   return state.platformKill || state.userKill || state.denylist.includes(agentId);
 }

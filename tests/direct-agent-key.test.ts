@@ -95,4 +95,49 @@ describe("Direct Agent Key authentication", () => {
       )
     ).resolves.toBeNull();
   });
+
+  describe("agent status", () => {
+    const row = (extra: Record<string, unknown>) => ({
+      rpc: vi.fn(async () => ({
+        data: [
+          {
+            key_id: "key-1",
+            agent_id: "agent-1",
+            user_id: "user-1",
+            allowed_scopes: [{ provider: "openai", models: ["gpt-*"] }],
+            break_glass_scopes: null,
+            budget_tokens: null,
+            budget_cents: null,
+            spent_tokens: 0,
+            spent_microcents: 0,
+            ...extra,
+          },
+        ],
+        error: null,
+      })),
+    });
+    const key = `${DIRECT_AGENT_KEY_PREFIX}${"A".repeat(43)}`;
+
+    it("authenticates a suspended agent and marks it suspended, so the gateway can refuse it with a reason", async () => {
+      // A suspended agent's key is still a VALID key. Treating it as unknown
+      // answered 401 invalid_credential and wrote no audit row.
+      const principal = await authenticateDirectAgentKey(row({ agent_status: "suspended" }) as never, key);
+      expect(principal).toMatchObject({ agentId: "agent-1", suspended: true });
+    });
+
+    it("marks an active agent as not suspended", async () => {
+      const principal = await authenticateDirectAgentKey(row({ agent_status: "active" }) as never, key);
+      expect(principal?.suspended).toBe(false);
+    });
+
+    it("treats a row without a status as active — the pre-0071 RPC returned only active agents", async () => {
+      const principal = await authenticateDirectAgentKey(row({}) as never, key);
+      expect(principal?.suspended).toBe(false);
+    });
+
+    it("refuses any status it does not recognise, revoked included", async () => {
+      await expect(authenticateDirectAgentKey(row({ agent_status: "revoked" }) as never, key)).resolves.toBeNull();
+      await expect(authenticateDirectAgentKey(row({ agent_status: "paused" }) as never, key)).resolves.toBeNull();
+    });
+  });
 });

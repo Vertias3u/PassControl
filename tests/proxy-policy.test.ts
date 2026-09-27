@@ -297,6 +297,13 @@ describe("proxy agent policy", () => {
     expect(first).not.toBe(blocked);
   });
 
+  it("keeps a deny-rule refusal opaque: no rule is named to the agent", async () => {
+    const res = await callProxy({ deny: [{ provider: "openai", models: ["gpt-4*"] }] });
+    expect(res.status).toBe(403);
+    expect(res.headers.get("x-passcontrol-policy-rule")).toBeNull();
+    expect(await res.json()).toEqual({ error: "blocked_policy" });
+  });
+
   it("blocks a denied model after scope and before budget reservation", async () => {
     let reservedTokens = 0;
     let spentTokens = 50;
@@ -486,9 +493,10 @@ describe("proxy agent policy", () => {
     // separate read for the shadow value would be a second round-trip on the
     // way to a provider key, for a decision that decides nothing.
     // 0055 added the budget-state pair to the SAME read, for the same reason:
-    // the epoch check on the money path costs no round trip of its own.
+    // the epoch check on the money path costs no round trip of its own. 0073's
+    // periodic limit rides it too, on a rung of its own above the rest.
     expect(builder.select).toHaveBeenCalledWith(
-      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents"
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents"
     );
 
     // Cached together for the same reason, so a cache HIT is also one round
@@ -580,6 +588,7 @@ describe("proxy agent policy", () => {
     // discarding it here while the cache decoder honoured it made a legacy
     // install enforce while warm and drop to bearer-only once the entry expired.
     expect(policySelects).toEqual([
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents",
       "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents",
       "policy, policy_shadow, sender_constraint_mode",
       "policy, policy_shadow, require_sender_constrained_visa",
@@ -658,7 +667,7 @@ describe("proxy agent policy", () => {
     // in passport silently fall back to bearer, so the passport path fails closed.
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "sender_constraint_state_unavailable" });
-    expect(policySelects).toEqual(["policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents"]);
+    expect(policySelects).toEqual(["policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents"]);
     expect(setCachedAgentPolicyMock).not.toHaveBeenCalled();
   });
 
@@ -986,5 +995,261 @@ describe("the cap that actually gates the call", () => {
     });
 
     expect(openHoldMock).toHaveBeenCalledWith(expect.objectContaining({ capTokens: 1_000 }));
+  });
+});
+
+// K2 — an output ceiling in the live policy. Refused before any reservation and
+// before the hourly counter is spent; the forwarded body is never rewritten.
+describe("output ceiling (max_output_tokens)", () => {
+  async function callWithBody(policy: unknown, body: Record<string, unknown>, shadow: unknown = null) {
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(JSON.stringify({ p: policy, s: shadow }));
+    return POST(
+      new Request("https://gateway.test/api/v1/openai/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4.1", messages: [{ role: "user", content: "hi" }], ...body }),
+      }),
+      { params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }) }
+    );
+  }
+
+  it("forwards a request under the ceiling byte-for-byte in its limit fields", async () => {
+    const res = await callWithBody({ max_output_tokens: 100 }, { max_completion_tokens: 100 });
+    expect(res.status).toBe(200);
+    const sent = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(sent.max_completion_tokens).toBe(100);
+    expect(sent).not.toHaveProperty("max_tokens");
+  });
+
+  it.each([
+    ["over the ceiling", { max_tokens: 101 }, "max_output_tokens:exceeded"],
+    ["n choices over the ceiling", { max_tokens: 60, n: 2 }, "max_output_tokens:exceeded"],
+    ["no limit stated", {}, "max_output_tokens:missing"],
+    ["a non-integer limit", { max_tokens: "50" }, "max_output_tokens:invalid"],
+  ])("refuses %s with 403 blocked_policy, no hold and no upstream call", async (_label, body, rule) => {
+    const res = await callWithBody({ max_output_tokens: 100 }, body);
+    expect(res.status).toBe(403);
+    // D3: this refusal alone names its rule, so a compliant agent can fix the body.
+    expect(res.headers.get("x-passcontrol-policy-rule")).toBe("max_output_tokens");
+    expect(res.headers.get("x-passcontrol-receipt-id")).toEqual(expect.any(String));
+    expect(await res.json()).toEqual({
+      error: "blocked_policy",
+      rule: "max_output_tokens",
+      reason: rule.slice("max_output_tokens:".length),
+      limit: 100,
+    });
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ status: "blocked_policy" }));
+    expect(captureSecurityEventMock).toHaveBeenCalledWith(
+      "proxy.blocked_policy_output_limit",
+      expect.objectContaining({ code: "blocked_policy_output_limit", controlScope: rule })
+    );
+  });
+
+  it("spends none of the hourly quota on a request the ceiling refuses", async () => {
+    const hourly = vi.fn(async (_key: string) => ({ success: true, remaining: 1 }));
+    rateLimitMock.mockImplementation(async (key: string) =>
+      key.startsWith("policy-hour:") ? hourly(key) : { success: true, remaining: 1 }
+    );
+    const res = await callWithBody({ max_output_tokens: 100, max_requests_per_hour: 5 }, { max_tokens: 500 });
+    expect(res.status).toBe(403);
+    expect(hourly).not.toHaveBeenCalled();
+  });
+
+  it("lets a shadow draft record the ceiling's would-deny without changing the response", async () => {
+    const draft = { max_output_tokens: 100 };
+    const res = await callWithBody({}, { max_tokens: 500 }, draft);
+    expect(res.status).toBe(200);
+    await flushDeferredWork();
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "ok",
+        policyShadowWould: stampShadowVerdict("deny:policy", shadowRevision(draft)),
+      })
+    );
+  });
+
+  it("does not apply to a model listing", async () => {
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(JSON.stringify({ p: { max_output_tokens: 100 }, s: null }));
+    fetchMock.mockImplementationOnce(async () =>
+      new Response(JSON.stringify({ object: "list", data: [] }), { status: 200, headers: { "content-type": "application/json" } })
+    );
+    const { GET } = await import("@/app/api/v1/[provider]/[...path]/route");
+    const res = await GET(
+      new Request("https://gateway.test/api/v1/openai/models", { headers: { authorization: "Bearer visa" } }),
+      { params: Promise.resolve({ provider: "openai", path: ["models"] }) }
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("applies on the demo path too", async () => {
+    process.env.PASSCONTROL_DEMO = "1";
+    verifyVisaMock.mockResolvedValueOnce({ ...baseClaims, scope: [{ provider: "demo", models: ["*"] }] });
+    getCachedAgentPolicyMock.mockResolvedValueOnce(JSON.stringify({ p: { max_output_tokens: 100 }, s: null }));
+    const res = await POST(
+      new Request("https://gateway.test/api/v1/demo/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: "demo-1", messages: [{ role: "user", content: "hi" }] }),
+      }),
+      { params: Promise.resolve({ provider: "demo", path: ["chat", "completions"] }) }
+    );
+    expect(res.status).toBe(403);
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+});
+
+// K1 — the periodic spend limit, as the proxy wires it. What the hold script
+// DOES is tests/holds-period.redis.test.ts's job (real Lua, real Redis); this
+// asserts which arguments the route hands it and what it does with each reply.
+describe("periodic spend limit (K1)", () => {
+  const cached = (extra: Record<string, unknown>) =>
+    JSON.stringify({ p: {}, s: null, r: "off", be: "epoch-1", bs: true, ...extra });
+  const DAILY = { bk: true, bt: null, bc: null, pdk: true, pdp: "day", pdc: 2500 };
+  const call = (model = "gpt-4.1") =>
+    POST(request("openai", model), {
+      params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }),
+    });
+
+  it("treats a period-only agent as budgeted and hands the live limit to the hold", async () => {
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached(DAILY));
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(openHoldMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capTokens: null,
+        capMicrocents: null,
+        budgetState: { epoch: "epoch-1", established: true },
+        periodLimit: { mode: "set", kind: "day", capMicrocents: 2500 * 1_000_000 },
+        nowMs: expect.any(Number),
+      })
+    );
+  });
+
+  it("passes `none` for a budgeted agent without a limit, and `unknown` when the limit could not be read", async () => {
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(
+      cached({ bk: true, bt: 100_000, bc: null, pdk: true, pdp: null, pdc: null })
+    );
+    await call();
+    expect(openHoldMock.mock.calls.at(-1)?.[0]).toMatchObject({ periodLimit: { mode: "none" } });
+
+    // A cache entry from the previous deploy: no period fields at all.
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ bk: true, bt: 100_000, bc: null }));
+    await call();
+    expect(openHoldMock.mock.calls.at(-1)?.[0]).toMatchObject({ periodLimit: { mode: "unknown" } });
+  });
+
+  it("does not make an unbudgeted agent budgeted because its limit could not be read", async () => {
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ bk: true, bt: null, bc: null }));
+    await call();
+    const args = openHoldMock.mock.calls.at(-1)?.[0];
+    expect(args).not.toHaveProperty("budgetState");
+    expect(args).not.toHaveProperty("periodLimit");
+  });
+
+  it("refuses with 402 blocked_budget_period and a retry-after to the next UTC day", async () => {
+    // beforeEach pins the clock at 2026-07-27T10:00:00Z: 14 hours to midnight.
+    openHoldMock.mockResolvedValueOnce({ ok: false, reason: "period" });
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached(DAILY));
+    const res = await call();
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "blocked_budget_period" });
+    expect(res.headers.get("retry-after")).toBe(String(14 * 3600));
+    expect(res.headers.get("x-passcontrol-receipt-id")).toEqual(expect.any(String));
+    expect(fetchMock).not.toHaveBeenCalled();
+    await flushDeferredWork();
+    expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ status: "blocked_budget_period" }));
+  });
+
+  it("seeds a missing snapshot from the ledger once, over the current period, then proceeds", async () => {
+    const rpc = vi.fn(async (name: string) =>
+      name === "agent_period_spend"
+        ? { data: [{ spent_tokens: 10, spent_microcents: 700_000 }], error: null }
+        : { data: "provider-key", error: null }
+    );
+    serviceClientMock.mockReturnValue({ from: vi.fn(), rpc });
+    openHoldMock
+      .mockResolvedValueOnce({ ok: false, needsPeriodSeed: true })
+      .mockResolvedValueOnce({ ok: true, reserved: 1 });
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached(DAILY));
+
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(rpc).toHaveBeenCalledWith("agent_period_spend", {
+      p_agent_id: "agent-a",
+      p_since: "2026-07-27T00:00:00.000Z",
+    });
+    expect(rpc.mock.calls.filter(([name]) => name === "agent_period_spend")).toHaveLength(1);
+    const [first, second] = openHoldMock.mock.calls.map((c) => c[0]);
+    expect(first).not.toHaveProperty("periodSeedMicrocents");
+    expect(second).toMatchObject({ attemptId: first.attemptId, periodSeedMicrocents: 700_000, nowMs: first.nowMs });
+  });
+
+  it("persists a freshly minted epoch before seeding, and refuses 503 when the ledger cannot answer", async () => {
+    const rpc = vi.fn(async (name: string) =>
+      name === "agent_period_spend" ? { data: null, error: { message: "timeout" } } : { data: "k", error: null }
+    );
+    serviceClientMock.mockReturnValue({ from: vi.fn(), rpc });
+    establishBudgetStateMock.mockResolvedValue(undefined);
+    openHoldMock.mockResolvedValueOnce({ ok: false, needsPeriodSeed: true, epochToPersist: "minted" });
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ ...DAILY, be: null, bs: false }));
+
+    const res = await call();
+    expect(establishBudgetStateMock).toHaveBeenCalledWith("agent-a", "minted");
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "blocked_budget_state" });
+    expect(openHoldMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("signs the limit into the policy revision only when one is set", async () => {
+    const revisionFor = async (extra: Record<string, unknown>) => {
+      signReceiptMock.mockClear();
+      verifyVisaMock.mockResolvedValueOnce(baseClaims);
+      getCachedAgentPolicyMock.mockResolvedValueOnce(cached(extra));
+      await call();
+      await vi.waitFor(() => expect(signReceiptMock).toHaveBeenCalled());
+      return signReceiptMock.mock.calls.at(-1)?.[0]?.policyRevision as string;
+    };
+    const capOnly = await revisionFor({ bk: true, bt: 5000, bc: null });
+    const capAndNone = await revisionFor({ bk: true, bt: 5000, bc: null, pdk: true, pdp: null, pdc: null });
+    const capAndDaily = await revisionFor({ bk: true, bt: 5000, bc: null, pdk: true, pdp: "day", pdc: 2500 });
+    const capAndMonthly = await revisionFor({ bk: true, bt: 5000, bc: null, pdk: true, pdp: "month", pdc: 2500 });
+    // No limit: byte-identical to the revision before periods existed.
+    expect(capAndNone).toBe(capOnly);
+    expect(capAndDaily).not.toBe(capOnly);
+    expect(capAndMonthly).not.toBe(capAndDaily);
+  });
+
+  it("applies on the demo path too", async () => {
+    process.env.PASSCONTROL_DEMO = "1";
+    openHoldMock.mockResolvedValueOnce({ ok: false, reason: "period" });
+    verifyVisaMock.mockResolvedValueOnce({ ...baseClaims, scope: [{ provider: "demo", models: ["*"] }] });
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ bk: true, bt: null, bc: null, pdk: true, pdp: "month", pdc: 10 }));
+    const res = await POST(
+      new Request("https://gateway.test/api/v1/demo/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: "demo-1", max_tokens: 5, messages: [{ role: "user", content: "hi" }] }),
+      }),
+      { params: Promise.resolve({ provider: "demo", path: ["chat", "completions"] }) }
+    );
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "blocked_budget_period" });
+    // 2026-07-27T10:00Z to 2026-08-01T00:00Z.
+    expect(res.headers.get("retry-after")).toBe(String(4 * 86400 + 14 * 3600));
+    expect(openHoldMock).toHaveBeenCalledWith(
+      expect.objectContaining({ periodLimit: { mode: "set", kind: "month", capMicrocents: 10_000_000 } })
+    );
   });
 });

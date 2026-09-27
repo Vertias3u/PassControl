@@ -10,6 +10,9 @@
 // GET /agents *and* GET /agents/{id} — the list endpoint, not one page. No test
 // catches that, because the test schema is not the deployed schema. Add it once
 // 0018 has been applied everywhere that matters.
+//
+// `budget_period` / `budget_period_cents` (0073) are absent for the same reason:
+// PATCH accepts them, GET does not return them yet.
 export const AGENT_COLS =
   "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, created_at, last_seen_at";
 

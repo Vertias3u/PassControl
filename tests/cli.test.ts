@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -615,6 +615,66 @@ describe("passcontrol CLI", () => {
     const { stdout } = await runCli(["stop"]);
     expect(stdout).toContain("No CLI-managed local dashboard is running.");
   }, 10000);
+
+  // C7 — a recorded PID is not proof the process is still ours. After a crash
+  // or a reboot the state file survives and the OS hands the PID to something
+  // else; `stop` then signalled that process's whole group (taskkill /T on
+  // Windows). The state now records the supervisor's script, and the PID is
+  // trusted only while its command line still names it.
+  it.skipIf(process.platform === "win32")(
+    "does not stop an unrelated process that reused the recorded PID, and clears the stale state",
+    async () => {
+      const stranger = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+      const alive = (pid: number) => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      try {
+        const dir = path.join(tmp, "home", ".config", "passcontrol");
+        await fs.mkdir(dir, { recursive: true });
+        const statePath = path.join(dir, "local-dashboard.json");
+        await fs.writeFile(
+          statePath,
+          JSON.stringify({ pid: stranger.pid, gateway: "http://localhost:39999", port: 39999, logPath: "x", startedAt: "2026-09-01T00:00:00Z" })
+        );
+        const { stdout } = await runCli(["stop", "--dashboard-only"]);
+        expect(alive(stranger.pid!)).toBe(true);
+        expect(stdout).toMatch(/No CLI-managed local dashboard is running/);
+        await expect(fs.stat(statePath)).rejects.toThrow();
+      } finally {
+        try {
+          process.kill(-stranger.pid!, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    },
+    15000
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "still stops a recorded supervisor whose command line names its script",
+    async () => {
+      const script = path.join(tmp, "scripts", "dev-docker.mjs");
+      const ours = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", script], { detached: true, stdio: "ignore" });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const dir = path.join(tmp, "home", ".config", "passcontrol");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "local-dashboard.json"),
+        JSON.stringify({ pid: ours.pid, script, gateway: "http://localhost:39998", port: 39998, logPath: "x", startedAt: "2026-09-26T00:00:00Z" })
+      );
+      const exited = new Promise((resolve) => ours.once("exit", resolve));
+      const { stdout } = await runCli(["stop", "--dashboard-only"]);
+      expect(stdout).toContain(`stopped CLI-managed dashboard (PID ${ours.pid})`);
+      await exited;
+    },
+    15000
+  );
 
   it("prints the local dashboard log without needing a control-plane API key", async () => {
     const logDir = path.join(tmp, "home", ".config", "passcontrol");

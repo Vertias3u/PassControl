@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** @type {import('next').NextConfig} */
 const isProd = process.env.NODE_ENV === "production";
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
+const reactLostPingLoader = path.join(repoRoot, "lib", "build", "react-lost-ping-loader.cjs");
 
 // Edge routes cannot read the checkout at request time. Freeze the exact bytes
 // we build against once here, rather than reporting whatever a mutable runtime
@@ -115,6 +117,26 @@ const nextConfig = {
   experimental: {
     // Server Actions are used by the dashboard kill-switch / key management flows.
     serverActions: { bodySizeLimit: "1mb" },
+  },
+  // The React Next 15 vendors into the browser drops a wake-up that arrives
+  // mid-render, which left router.refresh() and revalidating server actions
+  // pending forever on production builds. The loader applies React's own
+  // upstream fix to that one branch as webpack reads the file, and stops the
+  // build if the vendored React is one it does not recognise. See the loader.
+  webpack(config) {
+    // Required here, not at the top: only a webpack build needs it, and a
+    // missing loader must fail that build rather than every config load.
+    const { TARGET_FILE } = createRequire(import.meta.url)(reactLostPingLoader);
+    config.module.rules.push({
+      test: TARGET_FILE,
+      use: [{ loader: reactLostPingLoader }],
+    });
+    // Vercel restores .next/cache between builds: key it on the loader so a
+    // module compiled before the loader existed (or changed) is not reused.
+    if (config.cache && typeof config.cache === "object") {
+      config.cache.buildDependencies = { ...config.cache.buildDependencies, reactLostPing: [reactLostPingLoader] };
+    }
+    return config;
   },
   async headers() {
     return [

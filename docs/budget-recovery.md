@@ -106,7 +106,10 @@ An **open hold** is an attempt where no ending ever ran. A worker was killed
 between dispatch and settlement. A response body was never consumed. The process
 went away.
 
-Its capacity stays consumed. Indefinitely. **Holds do not expire, and that is
+Its capacity stays consumed. Indefinitely — and for an agent with a daily or
+monthly limit that includes **every later period**: an open hold counts against
+whichever period is current until it is resolved, and the dashboard shows it as
+"held by N unfinished attempts". **Holds do not expire, and that is
 the point** — expiry-as-release was the original defect: it released money that
 had genuinely been spent, on a timer, for exactly the failures where spending is
 most likely.
@@ -290,7 +293,11 @@ itself worth recording.
 POST /api/control/v1/agents/{agent_id}/budget/rebuild
 ```
 
-Write scope, no body. It:
+Write scope, no body. For an agent with a daily or monthly limit it also reads
+the audit log's spend for the current period (`agent_period_spend`) before
+writing anything, and rewrites the period record from it for the new
+generation — so a rebuild never gives the current period back. If that read
+fails, the whole rebuild is refused and nothing is written; run it again. It:
 
 1. Recomputes total spend for the agent via `rebuild_agent_spend`, and **sets**
    the reconcile checkpoint to that total rather than advancing it. Two inputs:

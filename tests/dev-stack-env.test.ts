@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { instanceIssuer, loadInstanceSigner, loadInstanceVerifiers } from "@/lib/crypto/instanceKey";
 
@@ -141,5 +142,44 @@ describe("the committed template", () => {
     for (const key of ["INSTANCE_SIGNING_KEY", "PASSCONTROL_ISSUER"]) {
       expect(template, `.env.docker.example does not mention ${key}`).toContain(key);
     }
+  });
+});
+
+// `passcontrol update` re-runs the stack for its migrations and must not start an
+// account-setup conversation: PASSCONTROL_SKIP_SEED=1 skips step 6 (the dev-user
+// seed) and nothing else — migrations, env regeneration and services still run.
+describe("PASSCONTROL_SKIP_SEED", () => {
+  const script = readFileSync("scripts/dev-stack.sh", "utf8");
+  const seed = script.slice(script.indexOf("# ── 6. Seed"), script.indexOf("# ── 7. Done"));
+
+  it("guards the seed step, and only the seed step", () => {
+    expect(seed).toMatch(/PASSCONTROL_SKIP_SEED/);
+    expect(seed).toMatch(/node scripts\/seed\.mjs/);
+    const before = script.slice(0, script.indexOf("# ── 6. Seed"));
+    expect(before).not.toMatch(/PASSCONTROL_SKIP_SEED/);
+  });
+});
+
+// The closing text `passcontrol setup` shows (1.0.0 self-host E2E): it told a CLI
+// user to start an app setup had already started, offered `down -v` (which also
+// deletes the Redis volume: kill-switch and budget state) as the way to stop,
+// and never mentioned the invite code a second local account needs.
+describe("the stack's closing text", () => {
+  const script = readFileSync("scripts/dev-stack.sh", "utf8");
+  const done = script.slice(script.indexOf("# ── 7. Done"));
+
+  it("names the invite code for additional local accounts, read from the env file", () => {
+    expect(done).toMatch(/Invite code[^\n]*\$\{INVITE_CODE\}/);
+    // Not left to step 6's `source`: PASSCONTROL_SKIP_SEED skips that step.
+    expect(done).toMatch(/INVITE_CODE="\$\(grep '\^INVITE_CODE=' "\$ENVF"/);
+  });
+
+  it("never suggests a stop that deletes data volumes", () => {
+    expect(done).not.toMatch(/down -v/);
+  });
+
+  it("tells a CLI-driven setup to use the CLI, not npm, to start and stop", () => {
+    expect(done).toMatch(/PASSCONTROL_VIA_CLI/);
+    expect(done).toMatch(/passcontrol stop/);
   });
 });

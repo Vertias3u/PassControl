@@ -60,6 +60,11 @@ begin
   if not has_column_privilege('authenticated', 'public.agents', 'allowed_scopes', 'UPDATE') then
     raise exception 'authenticated lost UPDATE on agents.allowed_scopes';
   end if;
+  -- 0073: the periodic limit is the tenant's own, like the cumulative caps.
+  if not has_column_privilege('authenticated', 'public.agents', 'budget_period', 'UPDATE')
+     or not has_column_privilege('authenticated', 'public.agents', 'budget_period_cents', 'UPDATE') then
+    raise exception 'authenticated lost UPDATE on the periodic spend limit (0073)';
+  end if;
 
   -- Publishing an agent is a disclosure act: it puts a label and a passport
   -- fingerprint on a page a stranger reads. It runs server-side behind
@@ -288,6 +293,8 @@ begin
   end if;
   if has_function_privilege('anon', 'public.dismiss_onboarding()', 'EXECUTE')
      or has_function_privilege('anon', 'public.complete_onboarding()', 'EXECUTE')
+     or has_function_privilege('anon', 'public.start_onboarding_refusal_test(uuid)', 'EXECUTE')
+     or not has_function_privilege('authenticated', 'public.start_onboarding_refusal_test(uuid)', 'EXECUTE')
      or not has_function_privilege('authenticated', 'public.dismiss_onboarding()', 'EXECUTE')
      or not has_function_privilege('authenticated', 'public.complete_onboarding()', 'EXECUTE') then
     raise exception 'onboarding persistence RPCs have the wrong execution grants';
@@ -410,11 +417,19 @@ begin
   insert into public.agent_logs (agent_id, user_id, passport_id, jti, model, status)
     select id, user_id, 'pk', 'j-inference', 'test-model', 'ok'
       from public.agents where user_id = v_a;
+  -- 0072: completion is an allowed inference followed by a scope refusal from
+  -- the same agent, after the guide's refusal test started. A kill-switch row
+  -- is kept in the fixture on purpose — it no longer proves anything.
+  insert into public.agent_logs (agent_id, user_id, passport_id, jti, model, status, created_at)
+    select id, user_id, 'pk', 'j-refused', 'other-model', 'blocked_scope', now() + interval '1 second'
+      from public.agents where user_id = v_a;
   insert into public.admin_audit (user_id, action)
     values (v_a, 'killswitch.master'), (v_b, 'agent.create');
   insert into public.provider_credentials (user_id, provider, label, vault_secret_id)
     values (v_a, 'openai', '__rls_A__', gen_random_uuid());
   insert into public.onboarding_state (user_id, dismissed_at) values (v_b, now());
+  insert into public.onboarding_state (user_id, refusal_test_agent_id, refusal_test_started_at)
+    select user_id, id, now() - interval '1 minute' from public.agents where user_id = v_a;
   insert into public.api_keys (user_id, name, key_prefix, key_hash, scope)
     values (v_a, 'A', 'pc_aaaa', 'hash_a_'||v_a, 'read'), (v_b, 'B', 'pc_bbbb', 'hash_b_'||v_b, 'read');
   insert into public.mfa_recovery_codes (user_id, code_hash)

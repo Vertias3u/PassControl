@@ -104,3 +104,8 @@ coverage/
 /REVIEW_*.md
 /featurestoadd.md
 /opuswork112.md
+
+# assets_distribution/scripts/capture-ui.mjs installs its Control Tower capture
+# harness here for the length of one `next dev` capture and removes it after. It
+# must never be committed: it is a fixture page, not a product route.
+/app/verify/pc-capture-harness/

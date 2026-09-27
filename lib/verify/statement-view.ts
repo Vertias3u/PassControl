@@ -279,3 +279,13 @@ export const STATEMENT_LIMITS: readonly { claim: string; body: string }[] = [
       "you also need that call's receipt and an inclusion proof from the issuer's control API. Without a proof, a statement tells you about a set, not about a specific call.",
   },
 ];
+
+/**
+ * Whether a read error means the table does not exist. PostgREST reports an
+ * unknown relation as PGRST205 (schema cache) and Postgres as 42P01; anything
+ * else — a timeout, a permission fault, an outage — is a failed read of a
+ * table that may well be there.
+ */
+export function statementTableMissing(error: { code?: string | null } | null): boolean {
+  return error?.code === "PGRST205" || error?.code === "42P01";
+}

@@ -7,7 +7,7 @@
 export const DEFAULT_ALLOWED_MODELS = Object.freeze({
   anthropic: "claude-*",
   openai: "gpt-*",
-  groq: "llama-*",
+  groq: "openai/gpt-oss-*",
   mistral: "mistral-*",
   together: "openai/gpt-oss-*",
   deepseek: "deepseek-*",
@@ -17,11 +17,11 @@ export const DEFAULT_ALLOWED_MODELS = Object.freeze({
 export const DEFAULT_CLIENT_MODELS = Object.freeze({
   anthropic: "claude-haiku-4-5",
   openai: "gpt-5-mini",
-  groq: "llama-3.3-70b-versatile",
+  groq: "openai/gpt-oss-20b",
   mistral: "mistral-small-latest",
-  together: "openai/gpt-oss-20b",
-  deepseek: "deepseek-chat",
-  gemini: "gemini-2.5-flash",
+  together: "openai/gpt-oss-120b",
+  deepseek: "deepseek-flash",
+  gemini: "gemini-3.8-flash",
 });
 
 export function defaultAllowedModelForProvider(provider) {

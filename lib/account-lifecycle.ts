@@ -185,6 +185,8 @@ export async function purgeAccountRuntimeState(
     exact.add(`spent:${agentId}`);
     exact.add(`reserved_cost:${agentId}`);
     exact.add(`spent_cost:${agentId}`);
+    // The periodic limit's snapshot (K1): per agent, like the counters above.
+    exact.add(`pbase:${agentId}`);
     exact.add(`policy2:${userId}:${agentId}`);
     exact.add(`fallbacks:${userId}:${agentId}`);
     exact.add(`suspended:${agentId}`);

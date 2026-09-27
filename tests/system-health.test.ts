@@ -128,6 +128,7 @@ describe("system health snapshot", () => {
     expect(redis?.impact?.security.summary).not.toMatch(/all credentials|same fail mode/i);
   });
 
+
   it("distinguishes exact-prefix extras from gaps, duplicates, mismatches, and unvetted rows", () => {
     const expected = [["0001_init.sql", "a".repeat(64)], ["0002_lock_privileged_columns.sql", "b".repeat(64)]] as const;
     expect(classifyMigrations([...expected.map(([version, checksum]) => ({ version, checksum })), { version: "9999_future.sql", checksum: "c".repeat(64) }], expected).state).toBe("ahead");

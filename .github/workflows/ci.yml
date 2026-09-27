@@ -199,6 +199,11 @@ jobs:
       - name: Budget accounting invariant test
         run: psql -v ON_ERROR_STOP=1 -f db/tests/budget_accounting_invariants.sql "$DB_URL"
 
+      # What completes the first-run guide (0072): each forgery of the
+      # same-worker refusal proof must fail against the real RPCs.
+      - name: Onboarding refusal-proof invariant test
+        run: psql -v ON_ERROR_STOP=1 -f db/tests/onboarding_refusal_proof.sql "$DB_URL"
+
       - name: Stop Supabase
         if: always()
         run: supabase stop || true

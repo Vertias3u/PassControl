@@ -4,6 +4,7 @@
 // JavaScript at all — which is not minimalism for its own sake, it is what lets
 // the page work under the strict CSP with nothing to nonce, and it keeps the
 // only unauthenticated surface in the app as small as it can be.
+import { IssuerReachNotice } from "@/components/IssuerReachNotice";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -54,6 +55,8 @@ export default async function VerifyIndexPage({
           <h1 className="m-0 text-lg font-bold text-foreground">Agent passport verification</h1>
         </div>
       </header>
+
+      <IssuerReachNotice />
 
       <section className="rounded-xl border border-border bg-card p-6 shadow-sm sm:p-8">
         <h2 className="m-0 text-xl font-bold text-foreground">

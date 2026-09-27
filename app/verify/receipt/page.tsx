@@ -13,6 +13,7 @@
 //
 // A static segment, so Next resolves it ahead of [passportId]. Safe: a passport
 // id is a 43-character base64url public key and can never be "receipt".
+import { IssuerReachNotice } from "@/components/IssuerReachNotice";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { SiteLogo, SITE_BRAND_LABEL } from "@/components/SiteBrand";
@@ -48,6 +49,8 @@ export default function VerifyReceiptPage() {
           <h1 className="m-0 text-lg font-bold text-foreground">Receipt verification</h1>
         </div>
       </header>
+
+      <IssuerReachNotice />
 
       <ReceiptVerifier />
 

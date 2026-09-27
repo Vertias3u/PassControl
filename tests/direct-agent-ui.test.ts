@@ -12,35 +12,57 @@ const actionBody = (name: string): string => {
 };
 
 describe("Direct Agent browser on-ramp", () => {
+  // The reveal is one shared component, used by the Connect dialog and the
+  // key-import on-ramp, so its guarantees are asserted once, where they live.
+  const reveal = () => read("components/DirectAgentKeyReveal.tsx");
+
   it("ships one provider-native wizard with reveal-once handling", () => {
     const ui = read("components/DirectAgentConnect.tsx");
     expect(ui).toMatch(/issueDirectAgent/);
-    expect(ui).toMatch(/buildDirectConnectSetup/);
+    expect(ui).toMatch(/<DirectAgentKeyReveal/);
     expect(ui).toMatch(/Client model/);
-    expect(ui).toMatch(/Shown once/i);
     expect(ui).toMatch(/preventClose=\{Boolean\(result && !stored\)\}/);
-    expect(ui).toMatch(/I(?:&apos;|')ve stored this credential securely/);
+    expect(reveal()).toMatch(/buildDirectConnectSetup/);
+    expect(reveal()).toMatch(/Shown once/i);
+    expect(reveal()).toMatch(/I(?:&apos;|')ve stored this credential securely/);
   });
 
   it("does not revalidate before the Direct Agent Key is committed to browser state", () => {
     const ui = read("components/DirectAgentConnect.tsx");
     expect(actionBody("issueDirectAgent")).not.toMatch(/revalidatePath/);
+    expect(actionBody("completeKeyImportDirect")).not.toMatch(/revalidatePath/);
     expect(ui).toMatch(/useRouter/);
     expect(ui).toMatch(/const acknowledgeStored = \(\) =>/);
-    expect(ui).toMatch(/disabled=\{!stored\} onClick=\{acknowledgeStored\}/);
+    expect(ui).toMatch(/onDone=\{acknowledgeStored\}/);
+    expect(reveal()).toMatch(/disabled=\{!stored\} onClick=\{onDone\}/);
+  });
+
+  it("warns before reloads and in-tab link navigation while the key is unacknowledged", () => {
+    expect(reveal()).toMatch(/window\.addEventListener\("beforeunload", warn\)/);
+    expect(reveal()).toMatch(/document\.addEventListener\("click", warnBeforeLinkNavigation, true\)/);
+    // The reopen-Setup link opens a new tab, so it cannot take the key with it.
+    expect(reveal()).toMatch(/#agent-setup`\} target="_blank"/);
   });
 
   it("does not pretend configuration proves a provider call succeeded", () => {
-    const ui = read("components/DirectAgentConnect.tsx");
-    expect(ui).toMatch(/Credential created/);
-    expect(ui).toMatch(/not yet proof that traffic reached the gateway/i);
-    expect(ui).not.toMatch(/Keyless verified|Provider path verified/);
+    expect(reveal()).toMatch(/Credential created/);
+    expect(reveal()).toMatch(/not yet proof that traffic reached the gateway/i);
+    expect(reveal()).not.toMatch(/Keyless verified|Provider path verified/);
   });
 
   it("makes direct connect the primary fleet action without removing passport issuance", () => {
     const page = read("app/dashboard/page.tsx");
     expect(page).toMatch(/<DirectAgentConnect/);
     expect(page).toMatch(/<PassportIssuanceModal/);
+  });
+
+  it("defaults the key-import on-ramp to a Direct Agent Key and keeps Passport as the explicit alternative", () => {
+    const onramp = read("components/KeyImportOnramp.tsx");
+    expect(onramp).toMatch(/useState<WorkerCredential>\("direct"\)/);
+    expect(onramp).toMatch(/completeKeyImportDirect\(/);
+    expect(onramp).toMatch(/completeKeyImport\(\{/);
+    expect(onramp).toMatch(/<DirectAgentKeyReveal/);
+    expect(onramp).toMatch(/Boolean\(passportSecret\) \|\| Boolean\(directIssued\)/);
   });
 });
 

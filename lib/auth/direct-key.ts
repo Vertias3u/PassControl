@@ -32,6 +32,10 @@ export interface DirectKeyPrincipal {
   budgetCents: number | null;
   spentTokens: number;
   spentMicrocents: number;
+  /** The agent is suspended in `agents.status`. The key is still valid — the
+   *  gateway refuses it with 403 `blocked_suspended` and an audit row, rather
+   *  than the 401 an unknown key gets. */
+  suspended: boolean;
 }
 
 type DirectKeyDatabase = Pick<SupabaseClient, "rpc">;
@@ -79,6 +83,12 @@ export function classifyGatewayCredential(token: string): GatewayCredential {
  * One uncached, indexed lookup. Revocation therefore bites on the next call.
  * Database errors throw so the gateway can answer 503; an unknown/revoked/
  * expired key is an ordinary null and answers the same generic 401.
+ *
+ * A SUSPENDED agent's key is not null: it authenticates with `suspended: true`
+ * so the proxy's revocation gate refuses it with a reason and records it. The
+ * RPC before 0071 returned only active agents and no `agent_status` column, so
+ * a missing status reads as active. Any other status — `revoked`, or one added
+ * to the enum later — is refused here, whatever the RPC let through.
  */
 export async function authenticateDirectAgentKey(
   db: DirectKeyDatabase,
@@ -95,6 +105,8 @@ export async function authenticateDirectAgentKey(
   const agentId = typeof row.agent_id === "string" ? row.agent_id : "";
   const userId = typeof row.user_id === "string" ? row.user_id : "";
   if (!keyId || !agentId || !userId) return null;
+  const status = row.agent_status ?? "active";
+  if (status !== "active" && status !== "suspended") return null;
 
   const base = parseGrantScopes(row.allowed_scopes);
   const elevated = parseGrantScopes(row.break_glass_scopes);
@@ -108,6 +120,7 @@ export async function authenticateDirectAgentKey(
     budgetCents: nullableInteger(row.budget_cents),
     spentTokens: finiteInteger(row.spent_tokens),
     spentMicrocents: finiteInteger(row.spent_microcents),
+    suspended: status === "suspended",
   };
 }
 

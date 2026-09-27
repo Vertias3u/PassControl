@@ -2,6 +2,9 @@ import { notFound as nextNotFound } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { agentPolicyForDisplay, type AgentPolicyView } from "@/lib/scope";
+import { readPeriodUsageMany } from "@/lib/state/holds";
+import type { PeriodKind } from "@/lib/period";
+import type { PeriodUsageView } from "@/lib/period-display";
 import { toFallbackRows, type FallbackRow } from "@/lib/fallback-rows";
 import { toCapabilityHistory, type CapabilityChange } from "@/lib/audit-history";
 import { toShadowState, type ShadowState } from "@/lib/policy-shadow";
@@ -22,6 +25,9 @@ import {
 // makes against 0018.
 const AGENT_PASSPORT_COLUMNS =
   "id, name, passport_pubkey, status, budget_tokens, budget_cents, spent_tokens, spent_microcents, allowed_scopes, policy, policy_shadow, fallbacks, expires_at, previous_passport_pubkey, previous_valid_until, created_at, last_seen_at, published, public_label, sender_constraint_mode";
+// 0073's periodic limit, on a rung of its own: a database without it answers
+// 42703 to the whole select, and that must not take the agent page down.
+const AGENT_PASSPORT_COLUMNS_WITH_PERIOD = `${AGENT_PASSPORT_COLUMNS}, budget_period, budget_period_cents`;
 const PASSPORT_LOG_COLUMNS = "id, provider, model, status, auth_method, created_at";
 // created_at is selected so the sample can be cut at the moment the CURRENT
 // draft was saved. Without it the panel attributes an earlier draft's verdicts
@@ -167,6 +173,8 @@ export interface AgentPassportView {
   budgets: {
     tokens: PassportTokenBudgetView;
     cost: PassportCostBudgetView;
+    /** The periodic limit (K1), or null for none (or a database without 0073). */
+    period: { kind: PeriodKind; capCents: number; usage: PeriodUsageView | null } | null;
   };
 }
 
@@ -308,7 +316,8 @@ export function buildAgentPassportView(
   rawShadowLogs?: unknown,
   shadowSince?: string | null,
   breakGlass: BreakGlassGrant | null = null,
-  directKeys: readonly AgentAccessKeyView[] = []
+  directKeys: readonly AgentAccessKeyView[] = [],
+  periodUsage: PeriodUsageView | null = null
 ): AgentPassportView {
   const agent: Record<string, unknown> = isRecord(rawAgent) ? rawAgent : {};
   const verdicts = normalizeVerdicts(Array.isArray(rawLogs) ? rawLogs : []);
@@ -316,6 +325,9 @@ export function buildAgentPassportView(
   const capTokens = cap(agent.budget_tokens);
   const spentMicrocents = nonNegativeInteger(agent.spent_microcents);
   const capCents = cap(agent.budget_cents);
+  const periodKind: PeriodKind | null =
+    agent.budget_period === "day" || agent.budget_period === "month" ? agent.budget_period : null;
+  const periodCapCents = cap(agent.budget_period_cents);
 
   return {
     agent: {
@@ -359,6 +371,10 @@ export function buildAgentPassportView(
     sourceSignals: [],
     directKeys: [...directKeys],
     budgets: {
+      period:
+        periodKind !== null && periodCapCents !== null
+          ? { kind: periodKind, capCents: periodCapCents, usage: periodUsage }
+          : null,
       tokens: {
         spentTokens,
         capTokens,
@@ -443,12 +459,12 @@ async function loadOwnedAgent(
   agentId: string
 ): Promise<AgentPassportRow | null> {
   try {
-    const { data, error } = await db
-      .from("agents")
-      .select(AGENT_PASSPORT_COLUMNS)
-      .eq("user_id", userId)
-      .eq("id", agentId)
-      .maybeSingle();
+    const select = (columns: string) =>
+      db.from("agents").select(columns).eq("user_id", userId).eq("id", agentId).maybeSingle();
+    let { data, error } = await select(AGENT_PASSPORT_COLUMNS_WITH_PERIOD);
+    if ((error as { code?: string } | null)?.code === "42703") {
+      ({ data, error } = await select(AGENT_PASSPORT_COLUMNS));
+    }
 
     if (error) throw new Error(LOAD_ERROR);
     if (data === null) return null;
@@ -679,6 +695,17 @@ export async function requireAgentPassport(
     readLiveGrant(db, userId, agentId),
     loadDirectKeys(db, userId, agentId),
   ]);
+  // The gateway's own count for the periodic limit — a presentation read that
+  // leaves the header saying "unavailable" on failure, never $0.
+  const row = agent as { budget_period?: unknown };
+  let periodUsage: PeriodUsageView | null = null;
+  if (row.budget_period === "day" || row.budget_period === "month") {
+    try {
+      periodUsage = (await readPeriodUsageMany([{ id: agentId, kind: row.budget_period }])).get(agentId) ?? null;
+    } catch {
+      periodUsage = null;
+    }
+  }
   // A null aggregate (function not deployed) falls through to stamps derived
   // from the recent history already fetched above.
   return buildAgentPassportView(
@@ -689,6 +716,7 @@ export async function requireAgentPassport(
     shadowLogs,
     shadowSince,
     breakGlass,
-    directKeys
+    directKeys,
+    periodUsage
   );
 }

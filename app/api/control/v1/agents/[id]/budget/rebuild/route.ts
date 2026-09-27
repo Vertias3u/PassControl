@@ -35,6 +35,8 @@ export const runtime = "edge";
 import { control } from "@/lib/control/handler";
 import { jsonResponse, errorResponse } from "@/lib/control/respond";
 import { rebuildBudgetState } from "@/lib/state/holds";
+import { periodStart, type PeriodKind } from "@/lib/period";
+import { MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { purgeAgentPolicy } from "@/lib/state/redis";
 import { recordAdminAction } from "@/lib/audit";
 
@@ -51,12 +53,20 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId }
 
   // Tenant scope by hand: the service-role client bypasses RLS, and both the RPC
   // and every Redis key below are addressed by agent id alone.
-  const { data: agent, error: lookupError } = await db
+  // The periodic limit (0073) is read on its own rung: a database without the
+  // columns answers 42703, and that must not stop an operator recovering an
+  // agent's cumulative counters.
+  const withPeriod = await db
     .from("agents")
-    .select("id, budget_epoch")
+    .select("id, budget_epoch, budget_period, budget_period_cents")
     .eq("user_id", userId)
     .eq("id", id)
     .maybeSingle();
+  const lookup =
+    (withPeriod.error as { code?: string } | null)?.code === "42703"
+      ? await db.from("agents").select("id, budget_epoch").eq("user_id", userId).eq("id", id).maybeSingle()
+      : withPeriod;
+  const { data: agent, error: lookupError } = lookup;
   if (lookupError) return errorResponse(500, "query_failed", requestId);
   if (!agent) return errorResponse(404, "not_found", requestId);
 
@@ -65,6 +75,35 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId }
   const row = (Array.isArray(rebuilt) ? rebuilt[0] : rebuilt) as RebuildRow | undefined;
   const spentTokens = Number(row?.spent_tokens) || 0;
   const spentMicrocents = Number(row?.spent_microcents) || 0;
+
+  // THE PERIOD IS REBUILT FROM THE SAME LEDGER (K1). The new epoch below makes
+  // the agent's period snapshot invalid; rewriting it here, from the ledger's own
+  // total for the current period, is what stops a rebuild from handing the
+  // period's spend back as capacity. Read BEFORE anything is written, and a
+  // failure refuses the whole rebuild — the operator retries, rather than
+  // getting a half-recovery that looks complete.
+  const agentRow = agent as { budget_period?: unknown; budget_period_cents?: unknown };
+  const periodKind: PeriodKind | null =
+    agentRow.budget_period === "day" || agentRow.budget_period === "month" ? agentRow.budget_period : null;
+  const periodCents =
+    typeof agentRow.budget_period_cents === "number" && Number.isFinite(agentRow.budget_period_cents)
+      ? agentRow.budget_period_cents
+      : null;
+  const nowMs = Date.now();
+  let period: { kind: PeriodKind; capMicrocents: number; spentMicrocents: number } | undefined;
+  if (periodKind !== null && periodCents !== null) {
+    const { data: periodData, error: periodError } = await db.rpc("agent_period_spend", {
+      p_agent_id: id,
+      p_since: periodStart(periodKind, nowMs).toISOString(),
+    });
+    if (periodError) return errorResponse(500, "query_failed", requestId);
+    const periodRow = (Array.isArray(periodData) ? periodData[0] : periodData) as RebuildRow | undefined;
+    period = {
+      kind: periodKind,
+      capMicrocents: Math.round(periodCents * MICROCENTS_PER_CENT),
+      spentMicrocents: Number(periodRow?.spent_microcents) || 0,
+    };
+  }
 
   const epoch = crypto.randomUUID();
 
@@ -89,6 +128,7 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId }
     epoch,
     spentTokens,
     spentMicrocents,
+    ...(period ? { period, nowMs } : {}),
   });
 
   // MANDATORY. The cached policy carries the epoch the proxy compares against,
@@ -126,6 +166,7 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId }
       computed_reserved_tokens: state.computedReservedTokens,
       computed_reserved_microcents: state.computedReservedMicrocents,
       seeded_reserved: state.seededReserved,
+      ...(period ? { period: period.kind, period_spent_microcents: period.spentMicrocents } : {}),
     },
   });
 

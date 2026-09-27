@@ -1,3 +1,4 @@
+import { readPassportSecretExposure } from "@/lib/state/redis";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -15,6 +16,8 @@ import { BreakGlassPanel } from "@/components/BreakGlassPanel";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { StatusPill, type StatusType } from "@/components/StatusPill";
 import { DirectAgentKeyPanel } from "@/components/DirectAgentKeyPanel";
+import { AgentSetupPanel } from "@/components/AgentSetupPanel";
+import { AgentOperatingHeader } from "@/components/AgentOperatingHeader";
 import { AgentPublicListing } from "@/components/AgentPublicListing";
 import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
@@ -31,8 +34,10 @@ import { readKeyCustodyExpectation } from "@/lib/key-custody-expectation";
 
 export const dynamic = "force-dynamic";
 
+// Neutral on purpose: a Direct Agent Key agent has no passport, and naming the
+// tab after one mislabels the identity (CLAUDE.md trust boundary 1).
 export const metadata: Metadata = {
-  title: "Agent Passport",
+  title: "Agent",
   robots: { index: false, follow: false },
 };
 
@@ -134,6 +139,14 @@ function AgentPolicySummary({ policy }: { policy: AgentPolicyView }) {
                 : `${policy.maxRequestsPerHour.toLocaleString()} requests per agent`}
             </dd>
           </div>
+          <div>
+            <dt className="font-semibold text-foreground">Output ceiling</dt>
+            <dd className="mt-1 text-muted-foreground" data-policy-summary="max_output_tokens">
+              {policy.maxOutputTokens === null
+                ? "No ceiling"
+                : `${policy.maxOutputTokens.toLocaleString()} tokens per request — requests must state a limit at or under it`}
+            </dd>
+          </div>
         </dl>
       )}
     </section>
@@ -172,6 +185,12 @@ export default async function AgentPassportPage({
     ? await readKeyCustodyExpectation(db, user.id)
     : null;
   const passportWithSourceSignals = { ...passport, sourceSignals };
+  // C1 detection: the gateway proved this agent's private passport key was sent
+  // to it as an API key. Shown only while it names the CURRENT key, so rotating
+  // the passport clears it. Best-effort, like the source signals above.
+  const secretExposure = passport.agent.passportId ? await readPassportSecretExposure(passport.agent.id) : null;
+  const passportSecretExposedAt =
+    secretExposure && secretExposure.passportId === passport.agent.passportId ? secretExposure.at : null;
   // The exported card carries real colour values, so the accent has to reach it as
   // data — it cannot read var(--pc-brand) through an image serialisation.
   const firstVisa = passport.visas[0];
@@ -208,16 +227,29 @@ export default async function AgentPassportPage({
       contentClassName="pc-agent-content"
     >
         <nav className="pc-agent-subnav" aria-label="Agent sections">
+          <a href="#agent-operate">Operate</a>
           <a href="#agent-overview">Overview</a>
           <a href="#agent-identity">Identity</a>
+          {passport.directKeys.length > 0 ? <a href="#agent-setup">Setup</a> : null}
           <a href="#agent-public">Public listing</a>
           <a href="#agent-policy">Live policy</a>
           <a href="#agent-policy-lab">Policy lab</a>
           <a href="#agent-activity">Activity</a>
-          <a href="#agent-emergency">Emergency access</a>
+          <a href="#agent-emergency">Temporary access (break glass)</a>
           <a href="#agent-trace">Decision trace</a>
         </nav>
 
+        <AgentOperatingHeader
+          agentId={passport.agent.id}
+          agentName={passport.agent.name}
+          status={passport.agent.status}
+          hasPassport={Boolean(passport.agent.passportId)}
+          activeDirectKeys={passport.directKeys.filter((key) => !key.revokedAt && !(key.expiresAt && Date.parse(key.expiresAt) <= Date.now())).length}
+          scopes={passport.visas}
+          budgets={passport.budgets}
+          visaTtlSeconds={visaTtlSeconds()}
+          passportSecretExposedAt={passportSecretExposedAt}
+        />
         <section id="agent-overview" className="scroll-mt-40">
         <div id="agent-identity" className="scroll-mt-40">
         <AgentPassport
@@ -252,6 +284,19 @@ export default async function AgentPassportPage({
                 passport.lastRecordedAuthentication?.recordedAt
               )
             )}
+          />
+        ) : null}
+        {/* Direct Agent Key agents only: a passport worker connects through the
+            SDK or sidecar configured at issuance, which this view does not
+            rebuild. Above the key list because reconnecting is the common
+            visit and replacing a lost key is the exception. */}
+        {passport.directKeys.length > 0 ? (
+          <AgentSetupPanel
+            agentId={passport.agent.id}
+            agentName={passport.agent.name}
+            status={passport.agent.status}
+            scopes={passport.visas}
+            keys={passport.directKeys}
           />
         ) : null}
         <DirectAgentKeyPanel
@@ -295,6 +340,7 @@ export default async function AgentPassportPage({
           agentId={passport.agent.id}
           shadow={passport.shadow}
           liveConfigured={passport.policy.configured}
+          liveReadable={passport.policy.valid}
           livePolicy={passport.policyDocument}
         />
         {/* Beside the shadow panel because they are the same idea one boundary

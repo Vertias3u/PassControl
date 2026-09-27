@@ -105,7 +105,7 @@ describe("checkForUpdate", () => {
       fetchLatestImpl: async () => "0.7.0",
     });
     expect(notice).toContain("0.6.1 → 0.7.0");
-    expect(notice).toContain("npm install -g passcontrol@latest");
+    expect(notice).toContain("passcontrol update");
   });
 
   it("says nothing when the CLI is current", async () => {
@@ -270,10 +270,28 @@ describe("the cache location", () => {
 
 describe("updateNotice", () => {
   it("names the upgrade command, because that is the point of telling anyone", () => {
-    expect(updateNotice("0.6.1", "0.7.0")).toContain("npm install -g passcontrol@latest");
+    // `passcontrol update` (1.0.0) knows how this copy was installed and prints
+    // the right command for npx, pnpm and the rest, so one line fits everyone.
+    expect(updateNotice("0.6.1", "0.7.0")).toContain("passcontrol update");
+    expect(updateNotice("0.6.1", "0.7.0")).not.toContain("npm install -g");
   });
 
   it("is null when there is nothing to say", () => {
     expect(updateNotice("0.7.0", "0.6.1")).toBeNull();
+  });
+});
+
+// The registry answers `406 Not Acceptable` to the abbreviated-metadata type on
+// the /latest endpoint (checked against registry.npmjs.org, 2026-09-27). Sending
+// it made every lookup return null, so no release notice was ever shown. Plain
+// JSON is what /latest serves.
+describe("the registry request", () => {
+  it("asks for plain JSON, which /latest serves", async () => {
+    let accept = null;
+    await fetchLatest("https://registry.test/passcontrol/latest", 1000, async (_url, init) => {
+      accept = new Headers(init?.headers).get("accept");
+      return new Response(JSON.stringify({ version: "1.0.1" }), { status: 200 });
+    });
+    expect(accept).toBe("application/json");
   });
 });

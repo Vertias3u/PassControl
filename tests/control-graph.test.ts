@@ -83,7 +83,7 @@ describe("Control Graph truth model", () => {
 
   it.each([
     ["ok", "CLEARED", "receipt", "allowed"],
-    ["blocked_scope", "NO VISA", "gate", "blocked"],
+    ["blocked_scope", "NOT ALLOWED", "gate", "blocked"],
     ["blocked_budget", "NO FUNDS", "gate", "blocked"],
     ["blocked_suspended", "SUSPENDED", "gate", "blocked"],
     ["blocked_killed", "KILL SWITCH", "gate", "blocked"],

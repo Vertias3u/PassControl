@@ -300,10 +300,16 @@ describe("the audit status model stays the single source of truth", () => {
   });
 
   it("gives each declared status its own Control Tower label", () => {
+    // The words moved to lib/call-outcome.ts (Session 06) so the pill, board,
+    // drawer and agent page name one outcome one way. The pill still keys its
+    // tone/icon by status, and takes the label from the shared map.
+    const outcome = readFileSync(join(process.cwd(), "lib/call-outcome.ts"), "utf8");
     const union = log.match(/status:\s*([\s\S]*?);/)?.[1] ?? "";
     for (const [, status] of union.matchAll(/"([a-z_]+)"/g)) {
-      expect(statusPill).toMatch(new RegExp(`\\b${status}:\\s*\\{\\s*label:`));
+      expect(outcome).toMatch(new RegExp(`\\b${status}:\\s*\\{\\s*category:\\s*"[a-z_]+",\\s*label:`));
+      expect(statusPill).toMatch(new RegExp(`\\b${status}:\\s*\\{\\s*Icon:`));
     }
+    expect(statusPill).toContain("CALL_OUTCOME[status as LogEntry[\"status\"]].label");
   });
 
   it("labels every status everywhere a status is turned into words", () => {
@@ -314,12 +320,13 @@ describe("the audit status model stays the single source of truth", () => {
     const union = log.match(/status:\s*([\s\S]*?);/)?.[1] ?? "";
     const statuses = [...union.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
     const maps = {
-      "components/AgentPassport.tsx": readFileSync(
-        join(process.cwd(), "components/AgentPassport.tsx"),
-        "utf8"
-      ),
+      // AgentPassport's own copy is gone; it reads CALL_OUTCOME (asserted below).
+      "lib/call-outcome.ts": readFileSync(join(process.cwd(), "lib/call-outcome.ts"), "utf8"),
       "lib/departures.ts": readFileSync(join(process.cwd(), "lib/departures.ts"), "utf8"),
     };
+    expect(readFileSync(join(process.cwd(), "components/AgentPassport.tsx"), "utf8")).toMatch(
+      /CALL_OUTCOME\[status as LogEntry\["status"\]\]\?\.label/
+    );
 
     for (const [file, source] of Object.entries(maps)) {
       expect(source, `${file} must key its label map by LogEntry["status"]`).toMatch(

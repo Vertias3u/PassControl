@@ -43,6 +43,11 @@ const COST_CONSUMERS = [
   "components/dashboard/CallDetailDrawer.tsx",
   "components/dashboard/ActivityWorkspace.tsx",
   "lib/departures.ts",
+  // The shared outcome vocabulary (Session 06). `capCharge` decides what a row
+  // can say about its charge against the cap: a usage_unknown row with no
+  // enforced figures is "not recorded", never the observed amount presented as
+  // enforced, and never $0.00. It formats no money itself.
+  "lib/call-outcome.ts",
   "lib/dashboard-attention.ts",
   "lib/control-graph.ts",
   "lib/log.ts",

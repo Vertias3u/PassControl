@@ -184,6 +184,22 @@ describe("updateAgent", () => {
     expect(purgeAgentPolicy).not.toHaveBeenCalled();
   });
 
+  // K1: the periodic limit rides the same cache entry as the caps, so an edit
+  // to it must invalidate that entry exactly as a cap edit does.
+  it("purges the live policy entry for a periodic-limit edit, and writes the pair", async () => {
+    const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
+    const r = await updateAgent(db, "u1", "a1", { budget_period: "day", budget_period_cents: 2500 });
+    expect(r).toEqual({ ok: true, value: { id: "a1", budgetsLive: true } });
+    expect(purgeAgentPolicy).toHaveBeenCalledWith("u1", "a1");
+    expect(calls.update).toEqual({ budget_period: "day", budget_period_cents: 2500 });
+  });
+
+  it("refuses half a periodic limit before the database does", async () => {
+    const { db } = makeDb({ data: { id: "a1" }, error: null });
+    const r = await updateAgent(db, "u1", "a1", { budget_period: "day" });
+    expect(r).toMatchObject({ ok: false, status: 422 });
+  });
+
   it("reports budgetsLive false when the invalidation could not be recorded", async () => {
     purgeAgentPolicy.mockResolvedValueOnce(false);
     const { db } = makeDb({ data: { id: "a1" }, error: null });

@@ -34,6 +34,11 @@ export const WORKSPACE_CONFIG_TABLES = [
     // receipt (0021:39-48) — and the Ed25519 private half is generated on the
     // operator's machine and never reaches the server.
     columns:
+      "id,name,status,budget_tokens,budget_cents,budget_period,budget_period_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at",
+    // A database without 0073 refuses the whole select (42703). Such an agent
+    // HAS no periodic limit, so the export is still complete without the pair —
+    // unlike an export that failed outright, which leaves the operator nothing.
+    fallbackColumns:
       "id,name,status,budget_tokens,budget_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at",
   },
   {
@@ -78,12 +83,17 @@ async function readWorkspaceRows(db: SupabaseClient, userId: string, spec: Works
     // overflows what TS will represent. Four tables stay inside the limit. If a
     // fifth is ever added and the union blows up, copy the directive — do not
     // widen the column strings to make the error go away.
-    const { data, error } = await db
-      .from(spec.table)
-      .select(spec.columns)
-      .eq("user_id", userId)
-      .order("created_at", { ascending: true })
-      .range(start, start + PAGE_SIZE - 1);
+    const page_ = (columns: string) =>
+      db
+        .from(spec.table)
+        .select(columns)
+        .eq("user_id", userId)
+        .order("created_at", { ascending: true })
+        .range(start, start + PAGE_SIZE - 1);
+    let { data, error } = await page_(spec.columns);
+    if ((error as { code?: string } | null)?.code === "42703" && "fallbackColumns" in spec) {
+      ({ data, error } = await page_(spec.fallbackColumns));
+    }
     if (error) throw new Error(`workspace_export_${spec.key}_unavailable`);
     const page = data ?? [];
     rows.push(...page);

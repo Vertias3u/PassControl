@@ -85,6 +85,9 @@ export function buildConfigureSnippet(input: ConfigureSnippetInput): string {
  * a hyphen, so neither can be mistaken for a flag.
  */
 export function buildPassportImportCommand(input: { gateway: string; passportId: string }): string {
+  // A self-host build renders the reveal with an empty gateway until the browser
+  // supplies its own origin; no address yet means no command yet.
+  if (!input.gateway) return "";
   const origin = new URL(input.gateway).origin;
   return [
     "passcontrol passport import --global",

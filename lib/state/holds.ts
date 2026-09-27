@@ -37,6 +37,7 @@
 import type { Redis } from "@upstash/redis";
 import { redis } from "./redis";
 import { serviceClient } from "../supabase";
+import { periodKeys, type PeriodKind, type PeriodLimit } from "../period";
 
 /**
  * The client a call should use.
@@ -86,7 +87,25 @@ const k = {
    * told apart from "this counter was lost".
    */
   fmt: (agid: string) => `acctfmt:${agid}`,
+  /**
+   * THE PERIOD SNAPSHOT (K1, migration 0073). A hash: `ep` the generation it
+   * belongs to, `pk` the period it describes ("d:2026-09-26" / "m:2026-09"),
+   * `bc` the value of `spent_cost:` when that period began, `cap` the periodic
+   * limit last enforced, in micro-cents.
+   *
+   * NOT A SECOND COUNTER. Period usage is derived — `spent_cost − bc`, plus the
+   * reservations in flight — from the one cumulative counter every transition
+   * already moves atomically, so nothing here can drift from it. See
+   * `periodLimit` on openHold for the rules.
+   */
+  pbase: (agid: string) => `pbase:${agid}`,
 };
+
+// ── Periods (K1) ───────────────────────────────────────────────────────────
+// The pure half lives in lib/period.ts, so a caller that mocks this module (the
+// proxy's suites all do) still gets real period arithmetic.
+export { periodKeys, periodStart, secondsUntilPeriodEnd } from "../period";
+export type { PeriodKind, PeriodLimit } from "../period";
 
 /** The only accounting format this build can reason about. */
 const ACCT_FORMAT = "1";
@@ -131,7 +150,15 @@ export interface OpenHoldResult {
    * stops retrying, which is the wrong response to an operator-recoverable
    * infrastructure fault. See the early return in the proxy.
    */
-  reason?: "tokens" | "cost" | "state";
+  reason?: "tokens" | "cost" | "state" | "period";
+  /**
+   * The agent has a periodic limit and no valid snapshot of when this period
+   * began (a new limit, a changed period, a new generation, or a lost key).
+   * Nothing was reserved. The caller reads the ledger's spend so far this period
+   * and opens again with `periodSeedMicrocents`; it must still persist
+   * `epochToPersist` first, exactly as for a denial.
+   */
+  needsPeriodSeed?: boolean;
   reserved?: number;
   reservedMicrocents?: number;
   /** True when this exact attempt id had already opened — a transport replay. */
@@ -198,6 +225,12 @@ export interface SettleResult {
 //
 // Returns { code, reservedTokens, reservedCost, liveEpoch }:
 //    1 opened   2 replay   -1 token cap   -2 cost cap   -3 budget state lost
+//   -4 period snapshot needed (nothing reserved; retry with a ledger seed)
+//   -5 periodic limit (K1)
+//
+// K1 adds KEYS[9] = pbase and ARGV 13–18: periodMode (skip|none|set|unknown),
+// periodKind (day|month|''), dayKey, monthKey, periodCap (µ¢, -1 unset) and
+// periodSeed (the ledger's spend so far this period in µ¢, or '').
 //
 // `liveEpoch` is the epoch REDIS ACTUALLY HOLDS, not the one this call offered.
 // The caller persists that value and nothing else. Returning the offered mint
@@ -219,6 +252,17 @@ local mintEpoch     = ARGV[9]
 local provider      = ARGV[10]
 local model         = ARGV[11]
 local fmtVersion    = ARGV[12]
+local periodMode    = ARGV[13] or 'skip'
+local periodKind    = ARGV[14] or ''
+local dayKey        = ARGV[15] or ''
+local monthKey      = ARGV[16] or ''
+local periodCap     = tonumber(ARGV[17] or '-1')
+local periodSeed    = ARGV[18] or ''
+
+-- Integers as integer strings. A Lua number handed to redis.call is formatted
+-- with %.14g, which turns a large micro-cent figure into "1.2345678901234e+14";
+-- every value this script WRITES from arithmetic goes through here.
+local function istr(x) return string.format('%.0f', x) end
 
 -- BUDGET-STATE CHECK FIRST, before the replay short-circuit. State loss is a
 -- fact about the agent, not about this attempt, so it must be answered the same
@@ -362,6 +406,71 @@ local spentCost   = tonumber(redis.call('GET', KEYS[4]) or '0')
 local reservedTokens = tonumber(redis.call('GET', KEYS[1]) or '0') + tokenEstimate
 local reservedCost   = tonumber(redis.call('GET', KEYS[3]) or '0') + costEstimate
 
+-- ── THE PERIOD (K1) ─────────────────────────────────────────────────────────
+-- Period usage = (spent_cost now − spent_cost when the period began) + every
+-- reservation in flight. One snapshot, no second counter: whatever moves
+-- spent_cost: moves period usage with it, atomically.
+local periodLimit = -1
+local periodBase = 0
+if periodMode == 'none' then
+  -- The owner removed the limit. Delete the snapshot, so the "last enforced
+  -- limit" an unknown read falls back to can never be one they removed.
+  redis.call('DEL', KEYS[9])
+elseif periodMode == 'set' or periodMode == 'unknown' then
+  -- A period can only be fenced to a generation. The caller treats a
+  -- period-limited agent as budgeted precisely so there is one; a call that
+  -- arrives without one is a caller defect, and it refuses rather than runs
+  -- unfenced.
+  if holdEpoch == '' then
+    return {-3, 0, 0, epochOut}
+  end
+  local pep = redis.call('HGET', KEYS[9], 'ep')
+  local ppk = redis.call('HGET', KEYS[9], 'pk')
+  -- Valid only for THIS generation: a rebuild writes a new epoch and rewrites
+  -- the snapshot with it, so a stale one is never read as current.
+  local valid = pep ~= false and ppk ~= false and pep == holdEpoch
+  local prefix = ''
+  if periodMode == 'set' then
+    prefix = (periodKind == 'day') and 'd:' or 'm:'
+    -- A day snapshot says nothing about a month, and vice versa.
+    if valid and string.sub(ppk, 1, 2) ~= prefix then valid = false end
+  elseif valid then
+    prefix = string.sub(ppk, 1, 2)
+  end
+
+  if periodMode == 'set' or valid then
+    local cur = (prefix == 'd:') and dayKey or monthKey
+    if not valid then
+      -- NO SNAPSHOT IS NOT ZERO USAGE. Reading it as zero would hand this
+      -- period's spend back as capacity — after a new limit, a kind change, a
+      -- rebuild's missing write or a lost key alike. Ask for the ledger's
+      -- figure instead; nothing is reserved on this reply.
+      if periodSeed == '' then
+        return {-4, 0, 0, epochOut}
+      end
+      redis.call('DEL', KEYS[9])
+      redis.call('HSET', KEYS[9],
+        'ep', holdEpoch,
+        'pk', cur,
+        'bc', istr(spentCost - tonumber(periodSeed)),
+        'cap', istr(periodCap))
+    elseif ppk < cur then
+      -- FORWARD ONLY. A caller whose clock is behind the stored period is
+      -- judged against the newer period and never moves it back.
+      redis.call('HSET', KEYS[9], 'pk', cur, 'bc', istr(spentCost))
+    end
+    if periodMode == 'set' then
+      if redis.call('HGET', KEYS[9], 'cap') ~= istr(periodCap) then
+        redis.call('HSET', KEYS[9], 'cap', istr(periodCap))
+      end
+      periodLimit = periodCap
+    else
+      periodLimit = tonumber(redis.call('HGET', KEYS[9], 'cap') or '-1')
+    end
+    periodBase = tonumber(redis.call('HGET', KEYS[9], 'bc') or '0')
+  end
+end
+
 -- A cap of ZERO refuses unconditionally, including an estimate of zero. A call
 -- that is forwarded can always spend, so "you may spend nothing" cannot mean
 -- "you may make free calls" — and the arithmetic alone would admit it, since
@@ -375,6 +484,11 @@ if tokenCap >= 0 and (tokenCap == 0 or (reservedTokens + spentTokens) > tokenCap
 end
 if costCap >= 0 and (costCap == 0 or (reservedCost + spentCost) > costCap) then
   return {-2, 0, 0, epochOut}
+end
+-- After the cumulative caps, so a call both would refuse is told the more final
+-- reason. Zero refuses unconditionally, for the reason given above.
+if periodLimit >= 0 and (periodLimit == 0 or (spentCost - periodBase) + reservedCost > periodLimit) then
+  return {-5, 0, 0, epochOut}
 end
 
 redis.call('INCRBY', KEYS[1], tokenEstimate)
@@ -398,9 +512,10 @@ return {1, reservedTokens, reservedCost, epochOut}
 
 // ── settle ───────────────────────────────────────────────────────────────────
 //
-// KEYS: reserved, spent, reserved_cost, spent_cost, hold, holds
+// KEYS: reserved, spent, reserved_cost, spent_cost, hold, holds, epoch, pbase
 // ARGV: 1 attemptId 2 outcome 3 knownTokens 4 knownMicrocents 5 tombstoneTtl
 //       6 token certainty (known|unknown) 7 money certainty (known|unknown)
+//       8 dayKey 9 monthKey (K1: the periods current at the settle)
 //
 // Returns { code, appliedTokens, appliedMicrocents }:
 //    1 applied   0 replay (already terminal)   -1 no hold at all
@@ -415,6 +530,8 @@ local knownCost    = tonumber(ARGV[4])
 local tombstoneTtl = tonumber(ARGV[5])
 local tokenCertainty = ARGV[6]
 local moneyCertainty = ARGV[7]
+local dayKey       = ARGV[8] or ''
+local monthKey     = ARGV[9] or ''
 
 local state = redis.call('HGET', KEYS[5], 'st')
 
@@ -489,6 +606,25 @@ end
 local function applied(known, estimate, certainty)
   if certainty == 'known' then return known end
   return known > estimate and known or estimate
+end
+
+-- ── THE PERIOD ROLLS BEFORE THIS SETTLE'S OWN DELTA (K1) ────────────────────
+-- A call counts toward the period in which it SETTLES. If this is the first
+-- transition since the boundary, the snapshot moves to the new period at the
+-- counter's value BEFORE this charge lands, so the charge is the new period's.
+-- Only on a counted, fenced settle: a degraded one moves no counter, and a
+-- refused one returned above. Forward only, as in OPEN_LUA.
+if degraded == 0 and holdEpoch and holdEpoch ~= false and holdEpoch ~= '' then
+  if redis.call('HGET', KEYS[8], 'ep') == holdEpoch then
+    local ppk = redis.call('HGET', KEYS[8], 'pk')
+    if ppk ~= false then
+      local cur = (string.sub(ppk, 1, 2) == 'd:') and dayKey or monthKey
+      if cur ~= '' and ppk < cur then
+        redis.call('HSET', KEYS[8], 'pk', cur,
+          'bc', string.format('%.0f', tonumber(redis.call('GET', KEYS[4]) or '0')))
+      end
+    end
+  end
 end
 
 local appliedTokens, appliedCost, newState
@@ -567,8 +703,10 @@ return {1}
  */
 // ── rebase (operator rebuild) ────────────────────────────────────────────────
 //
-// KEYS: epoch, spent, spent_cost, reserved, reserved_cost
+// KEYS: epoch, spent, spent_cost, reserved, reserved_cost, fmt, pbase
 // ARGV: 1 epoch 2 spentTokens 3 spentMicrocents 4 seedReserved 5 seedReservedCost
+//       6 fmt 7 periodKind (day|month|'') 8 periodKey 9 periodSpent (µ¢, the
+//       ledger's this period) 10 periodCap (µ¢)
 //
 // Returns { liveReservedTokens, liveReservedCost, seeded }.
 //
@@ -586,6 +724,18 @@ redis.call('SET', KEYS[2], ARGV[2])
 redis.call('SET', KEYS[3], ARGV[3])
 if redis.call('SET', KEYS[4], ARGV[4], 'NX') then seeded = 1 end
 if redis.call('SET', KEYS[5], ARGV[5], 'NX') then seeded = seeded + 2 end
+-- THE PERIOD SNAPSHOT IS PART OF THE REBUILD TOO (K1). The new epoch makes the
+-- old snapshot invalid, and a rebuild that left it for the next call to reseed
+-- would be trusting a later ledger read to be as complete as this one. Written
+-- here, from the same ledger figures, so a rebuild never hands back a period.
+redis.call('DEL', KEYS[7])
+if ARGV[7] == 'day' or ARGV[7] == 'month' then
+  redis.call('HSET', KEYS[7],
+    'ep', ARGV[1],
+    'pk', ARGV[8],
+    'bc', string.format('%.0f', tonumber(ARGV[3]) - tonumber(ARGV[9])),
+    'cap', ARGV[10])
+end
 local rt = tonumber(redis.call('GET', KEYS[4]) or '0')
 local rc = tonumber(redis.call('GET', KEYS[5]) or '0')
 return {rt, rc, seeded}
@@ -606,7 +756,29 @@ local curTokens = tonumber(redis.call('GET', KEYS[1]) or '0')
 local curCost   = tonumber(redis.call('GET', KEYS[2]) or '0')
 local raised = 0
 if floorTokens > curTokens then redis.call('SET', KEYS[1], floorTokens) raised = 1 end
-if floorCost   > curCost   then redis.call('SET', KEYS[2], floorCost)   raised = 1 end
+if floorCost   > curCost   then
+  redis.call('SET', KEYS[2], floorCost)
+  raised = 1
+  -- THE PERIOD (K1). Everything this raise recovers was written before the
+  -- cron's cutoff. If the period snapshot has already rolled past the cutoff's
+  -- period, that spend belongs to an EARLIER period, so the snapshot's baseline
+  -- moves by the same amount and the current period's usage is unchanged. When
+  -- they are the same period the recovered spend counts in it, as it should.
+  -- No cutoff (ARGV[3] == '') keeps the behaviour from before periods.
+  local cutDay = ARGV[3] or ''
+  local cutMonth = ARGV[4] or ''
+  if cutDay ~= '' and redis.call('HGET', KEYS[3], 'ep') ~= false
+     and redis.call('HGET', KEYS[3], 'ep') == redis.call('GET', KEYS[4]) then
+    local ppk = redis.call('HGET', KEYS[3], 'pk')
+    if ppk ~= false then
+      local cut = (string.sub(ppk, 1, 2) == 'd:') and cutDay or cutMonth
+      if ppk > cut then
+        local bc = tonumber(redis.call('HGET', KEYS[3], 'bc') or '0')
+        redis.call('HSET', KEYS[3], 'bc', string.format('%.0f', bc + (floorCost - curCost)))
+      end
+    end
+  end
+end
 return {raised, curTokens, curCost}
 `;
 
@@ -662,6 +834,21 @@ export async function openHold(params: {
    */
   provider?: string;
   model?: string;
+  /**
+   * The agent's periodic limit (K1). Omitted means `skip`: the snapshot is not
+   * read or written, which is exactly the behaviour before periods existed.
+   * A `set` or `unknown` limit requires `budgetState` — a period is fenced to a
+   * generation like every other counter.
+   */
+  periodLimit?: PeriodLimit;
+  /**
+   * The ledger's spend so far in the current period, in micro-cents, supplied
+   * only on the retry after `needsPeriodSeed`. Ignored when a valid snapshot
+   * already exists — a second caller racing the first seed uses the first one.
+   */
+  periodSeedMicrocents?: number;
+  /** The clock, for tests. Decides the period and the hold's `cr`. */
+  nowMs?: number;
 }): Promise<OpenHoldResult> {
   const tokenCap = params.capTokens == null ? -1 : Math.max(0, Math.floor(params.capTokens));
   const costCap = params.capMicrocents == null ? -1 : Math.max(0, Math.round(params.capMicrocents));
@@ -684,6 +871,9 @@ export async function openHold(params: {
       : "0"
     : "-";
   const mintEpoch = crypto.randomUUID();
+  const nowMs = params.nowMs ?? Date.now();
+  const keys = periodKeys(nowMs);
+  const period = params.periodLimit ?? { mode: "skip" as const };
 
   const res = await redis().eval(
     OPEN_LUA,
@@ -696,6 +886,7 @@ export async function openHold(params: {
       k.holds(params.agentId),
       k.epoch(params.agentId),
       k.fmt(params.agentId),
+      k.pbase(params.agentId),
     ],
     [
       String(tokenCap),
@@ -703,13 +894,19 @@ export async function openHold(params: {
       String(costCap),
       String(costEstimate),
       params.attemptId,
-      String(Date.now()),
+      String(nowMs),
       params.budgetState?.epoch ?? "",
       established,
       mintEpoch,
       params.provider ?? "",
       params.model ?? "",
       ACCT_FORMAT,
+      period.mode,
+      period.mode === "set" ? period.kind : "",
+      keys.day,
+      keys.month,
+      period.mode === "set" ? String(Math.max(0, Math.round(period.capMicrocents))) : "-1",
+      params.periodSeedMicrocents == null ? "" : String(int(params.periodSeedMicrocents)),
     ]
   );
 
@@ -720,10 +917,18 @@ export async function openHold(params: {
   // protect, since that check only enforces for agents Postgres calls
   // established.
   const liveEpoch = Array.isArray(res) ? String(res[3] ?? "") : "";
-  const denied = (reason: "tokens" | "cost" | "state"): OpenHoldResult =>
+  const denied = (reason: "tokens" | "cost" | "state" | "period"): OpenHoldResult =>
     liveEpoch ? { ok: false, reason, epochToPersist: liveEpoch } : { ok: false, reason };
   if (code === -1) return denied("tokens");
   if (code === -2) return denied("cost");
+  if (code === -5) return denied("period");
+  // Not a denial: nothing was decided and nothing reserved. The epoch still
+  // rides out, because a first call may have minted one on this very reply.
+  if (code === -4) {
+    return liveEpoch
+      ? { ok: false, needsPeriodSeed: true, epochToPersist: liveEpoch }
+      : { ok: false, needsPeriodSeed: true };
+  }
   // A state refusal deliberately carries NO epoch: the whole point is that this
   // build cannot vouch for what is in Redis, so it must not ask Postgres to
   // record any of it. The script returns an empty string on that branch anyway;
@@ -748,8 +953,10 @@ async function settle(
   knownTokens: number,
   knownMicrocents: number,
   tokenCertainty: "known" | "unknown" = outcome === "complete" ? "known" : "unknown",
-  moneyCertainty: "known" | "unknown" = outcome === "complete" ? "known" : "unknown"
+  moneyCertainty: "known" | "unknown" = outcome === "complete" ? "known" : "unknown",
+  nowMs: number = Date.now()
 ): Promise<SettleResult> {
+  const keys = periodKeys(nowMs);
   const res = await redis().eval(
     SETTLE_LUA,
     [
@@ -760,6 +967,7 @@ async function settle(
       k.hold(agentId, attemptId),
       k.holds(agentId),
       k.epoch(agentId),
+      k.pbase(agentId),
     ],
     [
       attemptId,
@@ -769,6 +977,8 @@ async function settle(
       String(HOLD_TOMBSTONE_TTL_S),
       tokenCertainty,
       moneyCertainty,
+      keys.day,
+      keys.month,
     ]
   );
   const [code, appliedTokens, appliedMicrocents] = codes(res);
@@ -796,6 +1006,8 @@ export function settleKnown(params: {
   /** Defaults to known; unpriceable money is settled conservatively instead. */
   tokenCertainty?: "known" | "unknown";
   moneyCertainty?: "known" | "unknown";
+  /** The clock, for tests. Decides which period the charge lands in. */
+  nowMs?: number;
 }): Promise<SettleResult> {
   return settle(
     params.agentId,
@@ -804,7 +1016,8 @@ export function settleKnown(params: {
     params.tokens,
     params.microcents,
     params.tokenCertainty,
-    params.moneyCertainty
+    params.moneyCertainty,
+    params.nowMs
   );
 }
 
@@ -852,8 +1065,18 @@ export function settleUnknown(params: {
   /** What was observed, if anything. The script keeps the greater figure. */
   tokens: number;
   microcents: number;
+  nowMs?: number;
 }): Promise<SettleResult> {
-  return settle(params.agentId, params.attemptId, "usage_unknown", params.tokens, params.microcents);
+  return settle(
+    params.agentId,
+    params.attemptId,
+    "usage_unknown",
+    params.tokens,
+    params.microcents,
+    undefined,
+    undefined,
+    params.nowMs
+  );
 }
 
 /**
@@ -995,6 +1218,71 @@ export async function readReservedMany(
   return out;
 }
 
+export interface PeriodUsage {
+  /**
+   * tracked     — a snapshot for this generation and kind exists; `used` is exact.
+   * not_started — no snapshot yet. The next call seeds it from the ledger, so
+   *               the gateway has no figure of its own to show until then.
+   */
+  state: "tracked" | "not_started";
+  kind: PeriodKind;
+  /** Settled spend this period, micro-cents. 0 when the snapshot is from an earlier period. */
+  usedMicrocents: number;
+  /** Reservations in flight — counted against the period until they settle. */
+  heldMicrocents: number;
+  openHolds: number;
+}
+
+/**
+ * Period usage for presentation, derived exactly as OPEN_LUA derives it.
+ *
+ * A PRESENTATION READ, like readReservedMany: it never seeds, rolls or writes,
+ * and admission never consults it. A snapshot from an earlier period reads as
+ * zero used, because the first transition of this period will roll it there.
+ */
+export async function readPeriodUsageMany(
+  agents: readonly { id: string; kind: PeriodKind }[],
+  nowMs: number = Date.now(),
+  client?: Pick<Redis, "pipeline">
+): Promise<Map<string, PeriodUsage>> {
+  const out = new Map<string, PeriodUsage>();
+  const keys = periodKeys(nowMs);
+  const source = client ?? redis();
+  for (let offset = 0; offset < agents.length; offset += 100) {
+    const batch = agents.slice(offset, offset + 100);
+    if (!batch.length) continue;
+    const pipe = source.pipeline();
+    for (const agent of batch) {
+      pipe.hgetall(k.pbase(agent.id));
+      pipe.mget(k.epoch(agent.id), k.spentCost(agent.id), k.reservedCost(agent.id));
+      pipe.zcard(k.holds(agent.id));
+    }
+    const replies = (await pipe.exec()) as unknown[];
+    batch.forEach((agent, index) => {
+      const snapshot = (replies[index * 3] ?? null) as Record<string, unknown> | null;
+      const counters = (Array.isArray(replies[index * 3 + 1]) ? replies[index * 3 + 1] : []) as unknown[];
+      const openHolds = Number(replies[index * 3 + 2]) || 0;
+      const [epoch, spentCost, reservedCost] = counters;
+      const heldMicrocents = Number(reservedCost) || 0;
+      const current = agent.kind === "day" ? keys.day : keys.month;
+      const pk = snapshot && snapshot.pk != null ? String(snapshot.pk) : null;
+      const valid =
+        snapshot != null &&
+        pk != null &&
+        epoch != null &&
+        String(snapshot.ep) === String(epoch) &&
+        pk.slice(0, 2) === current.slice(0, 2);
+      if (!valid) {
+        out.set(agent.id, { state: "not_started", kind: agent.kind, usedMicrocents: 0, heldMicrocents, openHolds });
+        return;
+      }
+      const used = pk! < current ? 0 : Math.max(0, (Number(spentCost) || 0) - (Number(snapshot!.bc) || 0));
+      out.set(agent.id, { state: "tracked", kind: agent.kind, usedMicrocents: used, heldMicrocents, openHolds });
+    });
+  }
+  return out;
+}
+
 /**
  * Raise `spent:` to at least these figures. Used by the reconcile cron in place
  * of the unconditional `SET` that erased live spend settled inside its lag
@@ -1004,11 +1292,18 @@ export async function raiseSpentFloor(params: {
   agentId: string;
   tokens: number;
   microcents: number;
+  /**
+   * The ledger cutoff the floor was computed up to (K1). Recovered spend that
+   * predates a period the agent has already moved into is kept out of that
+   * period. Omitted: the raise does not consider periods at all.
+   */
+  cutoffMs?: number;
 }, client?: Client): Promise<{ raised: boolean }> {
+  const cut = params.cutoffMs === undefined ? null : periodKeys(params.cutoffMs);
   const res = await on(client).eval(
     RAISE_LUA,
-    [k.spent(params.agentId), k.spentCost(params.agentId)],
-    [String(int(params.tokens)), String(int(params.microcents))]
+    [k.spent(params.agentId), k.spentCost(params.agentId), k.pbase(params.agentId), k.epoch(params.agentId)],
+    [String(int(params.tokens)), String(int(params.microcents)), cut?.day ?? "", cut?.month ?? ""]
   );
   const [raised] = codes(res);
   return { raised: raised === 1 };
@@ -1075,7 +1370,14 @@ export async function rebuildBudgetState(params: {
   epoch: string;
   spentTokens: number;
   spentMicrocents: number;
+  /**
+   * The agent's periodic limit and the ledger's spend so far this period.
+   * Omitted (no limit) deletes the snapshot.
+   */
+  period?: { kind: PeriodKind; capMicrocents: number; spentMicrocents: number };
+  nowMs?: number;
 }): Promise<RebuildResult> {
+  const keys = periodKeys(params.nowMs ?? Date.now());
   const open = await listOpenHolds(params.agentId, REBUILD_HOLD_SCAN_LIMIT);
   const computedReservedTokens = open.reduce((sum, h) => sum + h.estimateTokens, 0);
   const computedReservedMicrocents = open.reduce((sum, h) => sum + h.estimateMicrocents, 0);
@@ -1089,6 +1391,7 @@ export async function rebuildBudgetState(params: {
       k.reserved(params.agentId),
       k.reservedCost(params.agentId),
       k.fmt(params.agentId),
+      k.pbase(params.agentId),
     ],
     [
       params.epoch,
@@ -1097,6 +1400,10 @@ export async function rebuildBudgetState(params: {
       String(computedReservedTokens),
       String(computedReservedMicrocents),
       ACCT_FORMAT,
+      params.period?.kind ?? "",
+      params.period ? (params.period.kind === "day" ? keys.day : keys.month) : "",
+      String(int(params.period?.spentMicrocents ?? 0)),
+      String(int(params.period?.capMicrocents ?? 0)),
     ]
   );
   const [reservedTokens, reservedMicrocents, seeded] = codes(res);

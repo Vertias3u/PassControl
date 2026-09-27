@@ -212,3 +212,34 @@ describe("the model-listing scope exemption cannot become a bypass", () => {
     expect(gate.deniedBy).toBe("scope");
   });
 });
+
+describe("the output ceiling in the policy step (K2)", () => {
+  const ceiling = { kind: "value" as const, value: { max_output_tokens: 500 } };
+
+  it("refuses a request over the ceiling with 403 and carries the ceiling on the step", () => {
+    const result = evaluateGate(
+      allowedInput({ policy: ceiling, requestedOutput: { kind: "stated", tokens: 501 } })
+    );
+    expect(result.deniedBy).toBe("policy");
+    const step = result.steps.find((s) => s.name === "policy");
+    expect(step).toMatchObject({ status: "fail", rule: "max_output_tokens:exceeded", httpStatus: 403, limit: 500 });
+    expect(result.policyRateLimitRequired).toBeNull();
+  });
+
+  it("admits a request under the ceiling", () => {
+    expect(
+      evaluateGate(allowedInput({ policy: ceiling, requestedOutput: { kind: "stated", tokens: 500 } })).verdict
+    ).toBe("allow");
+  });
+
+  it("refuses when the caller supplied no request facts at all", () => {
+    expect(evaluateGate(allowedInput({ policy: ceiling })).steps.find((s) => s.name === "policy")?.rule).toBe(
+      "max_output_tokens:missing"
+    );
+  });
+
+  it("exempts a model listing, which runs no inference", () => {
+    const listing = evaluateGate(allowedInput({ policy: ceiling, method: "GET", path: ["models"], model: "" }));
+    expect(listing.deniedBy).toBeUndefined();
+  });
+});

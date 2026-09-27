@@ -131,10 +131,12 @@ see [configuration locations](#i-changed-config-but-the-cli-still-uses-the-old-v
 
 ## “My API key gets `401 invalid_visa`”
 
-If you pasted a **Passport private key** into an API-key field, the refusal is correct.
-A Passport is an Ed25519 signing key, not a bearer visa. The gateway attempts visa
-verification and rejects it. Other invalid or expired visas can produce the same code;
-the code alone does not establish which credential you pasted.
+If you pasted a **Passport private key** into an API-key field, the gateway now recognises
+it and answers `401 passport_secret_presented_as_bearer` instead: it derives the public key
+from what you sent, finds the agent, and flags that agent's page "Passport private key
+exposed — rotate it". Rotate the passport; the key has left the agent's private runtime.
+`invalid_visa` remains the answer for other invalid or expired visas, and for a pasted
+secret when the gateway could not check (for example, its rate-limit store was unavailable).
 
 For Passport identity, import the browser-issued Passport using the dashboard's
 secret-free import command, then use the Sidecar, MCP or SDK signing path. The secret

@@ -401,6 +401,8 @@ describe("Agent Passport view model", () => {
         },
       ],
       maxRequestsPerHour: 100,
+      // K2: no ceiling in this agent's policy is a known absence, not unknown.
+      maxOutputTokens: null,
     });
 
     expect(buildAgentPassportView({ ...agentA, policy: null }, []).policy).toMatchObject({
@@ -415,6 +417,7 @@ describe("Agent Passport view model", () => {
       deny: [],
       windows: [],
       maxRequestsPerHour: null,
+      maxOutputTokens: null,
     });
   });
 

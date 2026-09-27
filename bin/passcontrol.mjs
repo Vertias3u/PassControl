@@ -36,6 +36,7 @@ import {
   formatProxyError,
   globalConfigPath,
   mergeConfigFile,
+  localActivationPatch,
   mergeConfigFileAtomic,
   muted,
   heading,
@@ -69,7 +70,19 @@ import {
   supportsWrite,
 } from "../cli/presets.mjs";
 import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
-import { checkForUpdate } from "../cli/update-check.mjs";
+import { checkForUpdate, fetchLatest, REGISTRY_URL } from "../cli/update-check.mjs";
+import {
+  clearMarker,
+  detectInstall,
+  dirtyBlockers,
+  expectedProjectId,
+  formatPlan,
+  isPublicRepoUrl,
+  planUpdate,
+  readMarker,
+  stackFromConfig,
+  writeMarker,
+} from "../cli/update.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
@@ -186,6 +199,7 @@ ${heading("Operate")}
   ${cmd} status [--no-network] [--json]
                                  show active config and instance state
   ${cmd} version [--json]         CLI, gateway and database schema versions
+  ${cmd} update [--check] [--yes]  update this CLI and the local self-host app (code, dependencies, migrations)
   ${cmd} doctor [--deep] [--fix]  diagnose setup and repair a stopped dashboard
   ${cmd} open                     open the Control Tower in a browser
   ${cmd} logout [--revoke-agent]  revoke this machine's key and clear its credentials
@@ -791,6 +805,7 @@ async function prepareLocalActivation(target, opts = {}) {
     storageMarker,
     previousGateway: config.gateway,
     globalPath: globalConfigPath(),
+    globalValues: values,
   };
 }
 
@@ -807,16 +822,21 @@ function restoreFileAtomically(file, contents) {
 }
 
 function commitLocalActivation(prepared) {
-  if (!prepared.switching) return;
+  const patch = localActivationPatch({
+    switching: prepared.switching,
+    globalValues: prepared.globalValues,
+    targetUrl: prepared.target.url,
+  });
+  if (!patch) return;
   const existed = fs.existsSync(prepared.globalPath);
   const previous = existed ? fs.readFileSync(prepared.globalPath, "utf8") : null;
-  mergeConfigFileAtomic(prepared.globalPath, {
-    PASSCONTROL_GATEWAY: prepared.target.url,
-    PASSPORT_ID: "",
-    PASSPORT_SECRET: "",
-    PASSPORT_KEY_STORAGE: "",
-    PASSCONTROL_API_KEY: "",
-  });
+  mergeConfigFileAtomic(prepared.globalPath, patch);
+  if (!prepared.switching) {
+    // A fresh machine: nothing to forget, only the gateway to record so that
+    // `login` targets this stack instead of Cloud.
+    ok(`active gateway set to ${prepared.target.url}`);
+    return;
+  }
 
   if (prepared.storageMarker === PASSPORT_KEY_STORAGE_OS && prepared.passportId) {
     const removed = createPassportCredentialStore().delete(prepared.passportId);
@@ -1073,16 +1093,65 @@ function removeDashboardState() {
   fs.rmSync(dashboardStatePath(), { force: true });
 }
 
+/**
+ * The command line of a live process, or null when it cannot be read.
+ *
+ * `ps -o command=` on macOS and Linux; on Windows, the CIM process record via
+ * PowerShell (present on every supported Windows). Bounded, never throws.
+ */
+function processCommandLine(pid) {
+  try {
+    if (process.platform === "win32") {
+      const out = execFileSync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`],
+        { encoding: "utf8", timeout: 10_000, windowsHide: true }
+      );
+      return out.trim() || null;
+    }
+    const out = execFileSync("ps", ["-o", "command=", "-p", String(Number(pid))], { encoding: "utf8", timeout: 5_000 });
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the recorded PID is still the supervisor this CLI spawned (C7).
+ *
+ * A live PID alone is not proof: after a crash or reboot the state file
+ * survives and the OS reuses the number, and `stop` then signalled the new
+ * owner's whole process group — or, on Windows, `taskkill /T` its tree. The
+ * state records the script the supervisor runs; the PID is ours only while its
+ * command line still names it. Older state files without `script` fall back to
+ * the launcher's file name.
+ *
+ * "unknown" (the command line could not be read) is not "ours": status still
+ * reports it, but nothing is killed on an unverified PID.
+ */
+function managedDashboardIdentity(state) {
+  const command = processCommandLine(state.pid);
+  if (command === null) return "unknown";
+  const expected = typeof state.script === "string" && state.script ? state.script : "dev-docker.mjs";
+  return command.includes(expected) ? "ours" : "other";
+}
+
 function runningManagedDashboard() {
   const state = readDashboardState();
   if (!state) return null;
   try {
     process.kill(state.pid, 0);
-    return state;
   } catch (error) {
     if (error.code === "ESRCH") removeDashboardState();
     return null;
   }
+  const identity = managedDashboardIdentity(state);
+  if (identity === "other") {
+    // The PID now belongs to something else. The dashboard we started is gone.
+    removeDashboardState();
+    return null;
+  }
+  return { ...state, verified: identity === "ours" };
 }
 
 function dashboardStatusLabel(gateway, noNetwork, target = managedDashboardTarget()) {
@@ -1278,7 +1347,8 @@ async function startDashboard(opts = {}) {
   child.unref();
   fs.writeFileSync(
     statePath,
-    `${JSON.stringify({ pid: child.pid, gateway: dashboard.url, port: dashboard.port, logPath, startedAt: new Date().toISOString() })}\n`,
+    // `script` is the identity check's anchor — see managedDashboardIdentity.
+    `${JSON.stringify({ pid: child.pid, script: devServer, gateway: dashboard.url, port: dashboard.port, logPath, startedAt: new Date().toISOString() })}\n`,
     { mode: 0o600 }
   );
 
@@ -1325,6 +1395,14 @@ async function stopDashboard() {
   if (!state) {
     ok("No CLI-managed local dashboard is running.");
     return;
+  }
+  if (!state.verified) {
+    // Refuse rather than guess: signalling a process group we cannot identify
+    // is exactly the failure this check exists to prevent.
+    throw new Error(
+      `Could not confirm that PID ${state.pid} is the dashboard this CLI started, so it was not stopped. ` +
+        `Stop it yourself if it is, then delete ${dashboardStatePath()}.`
+    );
   }
 
   if (process.platform === "win32") {
@@ -1547,6 +1625,188 @@ async function resetLocalStack(opts = {}) {
   ok("Local stack recreated. Run `passcontrol start` to launch the dashboard.");
 }
 
+// ── passcontrol update ───────────────────────────────────────────────────────
+//
+// The decisions live in cli/update.mjs (pure, tested); this is the half that
+// runs git, npm and the stack. Order matters and is the whole design: read
+// everything, show the plan, ask once, update the CLI, then hand the app phase
+// to the NEW CLI so the version doing the work is the one that knows the steps.
+
+function gitIn(root, args, timeout = 60_000, { raw = false } = {}) {
+  const out = execFileSync("git", args, { cwd: root, encoding: "utf8", timeout, stdio: ["ignore", "pipe", "pipe"] });
+  // `raw` for porcelain output, whose leading space is a status column.
+  return raw ? out : out.trim();
+}
+
+/** The self-host checkout's state, or why it is left alone. Fetches origin/main. */
+function analyzeAppForUpdate({ fetchRemote = true } = {}) {
+  let source;
+  try {
+    source = resolveAppRootSource();
+  } catch (error) {
+    return { status: "refuse", reason: error.message };
+  }
+  if (!source) return { status: "none" };
+  const root = source.path;
+  const marker = readMarker();
+  const resume = marker && path.resolve(marker.appRoot) === root ? marker : null;
+  const refuse = (reason) => ({ status: "refuse", root, reason, resume });
+
+  if (!fs.existsSync(path.join(root, ".git"))) {
+    return refuse(`${root} is not a git checkout (a downloaded archive?), so it cannot be fast-forwarded. Update it by hand, or replace it with a fresh \`${cliCommand("setup")}\` clone.`);
+  }
+  let origin = "";
+  try {
+    origin = gitIn(root, ["config", "--get", "remote.origin.url"]);
+  } catch {
+    // No origin: refused just below.
+  }
+  if (!isPublicRepoUrl(origin, PUBLIC_REPO_URL)) {
+    return refuse(`${root} is not a clone of the public PassControl repo (origin: ${origin || "none"}), so it is its owner's to update.`);
+  }
+  let branch = "";
+  try {
+    branch = gitIn(root, ["symbolic-ref", "--short", "HEAD"]);
+  } catch {
+    // Detached HEAD: refused just below.
+  }
+  if (branch !== "main") return refuse(`${root} is on ${branch || "a detached HEAD"}, not main.`);
+  const blockers = dirtyBlockers(gitIn(root, ["status", "--porcelain", "--untracked-files=no"], 60_000, { raw: true }));
+  if (blockers.length) {
+    return refuse(`${root} has local changes (${blockers.join(", ")}). Commit or discard them, then rerun.`);
+  }
+  const configPath = path.join(root, "supabase", "config.toml");
+  const stack = fs.existsSync(configPath) ? stackFromConfig(fs.readFileSync(configPath, "utf8")) : null;
+  if (!stack) return refuse(`the local stack was never set up in ${root}; run \`${cliCommand("setup")}\` first.`);
+  const expected = expectedProjectId(path.basename(root), stack.offset);
+  if (stack.projectId !== expected) {
+    return refuse(
+      `supabase/config.toml names the project "${stack.projectId}", but this directory would now run as "${expected}". ` +
+        "Was the checkout moved or renamed? Re-running the stack here would start an EMPTY database, so it is left alone. Move it back, then rerun."
+    );
+  }
+  if (fetchRemote) {
+    try {
+      gitIn(root, ["fetch", "--quiet", "origin", "main"], 120_000);
+    } catch (error) {
+      return refuse(`could not fetch the public repo (${String(error.message).split("\n")[0]}).`);
+    }
+  }
+  const head = gitIn(root, ["rev-parse", "HEAD"]);
+  const target = gitIn(root, ["rev-parse", "origin/main"]);
+  const ahead = Number(gitIn(root, ["rev-list", "--count", "origin/main..HEAD"]));
+  if (ahead > 0) return refuse(`${root} has ${ahead} commit(s) that are not in the public repo, so it cannot be fast-forwarded.`);
+  const behind = Number(gitIn(root, ["rev-list", "--count", "HEAD..origin/main"]));
+  const base = { root, offset: stack.offset, head, target, resume, lockfileDirty: gitIn(root, ["status", "--porcelain", "--untracked-files=no", "--", "package-lock.json"]) !== "" };
+  if (behind === 0) return { status: "current", ...base };
+  const migrations = gitIn(root, ["diff", "--name-only", "--diff-filter=A", head, target, "--", "db/migrations"]).split("\n").filter(Boolean);
+  return { status: "behind", behind, from: head.slice(0, 7), to: target.slice(0, 7), migrations, ...base };
+}
+
+async function applyAppUpdate(app) {
+  appRoot = app.root;
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const dashboard = managedDashboardTarget();
+  const managed = runningManagedDashboard();
+  // A dashboard the CLI did not start (\`npm run dev\` by hand) would have its
+  // dependencies and env rewritten underneath it — the same trap as building
+  // while dev runs. Refuse rather than break it.
+  if (!managed && await portIsListening(dashboard.port)) {
+    throw new Error(
+      `Port ${dashboard.port} is served by something this CLI did not start (a dashboard run by hand?). Stop it, then rerun \`${cliCommand("update")}\`. Nothing was changed.`
+    );
+  }
+  const restart = app.resume?.wasRunning ?? Boolean(managed);
+  const from = app.resume?.from ?? app.head;
+  writeMarker({ appRoot: app.root, from, to: app.target, wasRunning: restart, startedAt: new Date().toISOString() });
+  try {
+    if (managed) {
+      step("Stopping the dashboard…");
+      await stopDashboard();
+    }
+    if (app.status === "behind") {
+      // npm's own rewrite of the lockfile (see dirtyBlockers); \`npm ci\` below
+      // installs exactly what the new lockfile says.
+      if (app.lockfileDirty) gitIn(app.root, ["checkout", "--", "package-lock.json"]);
+      step(`Fast-forwarding ${app.from} → ${app.to}…`);
+      await runCommand("git", ["merge", "--ff-only", "origin/main"], { cwd: app.root });
+    }
+    step("Installing dependencies (npm ci)…");
+    await runCommand(npm, ["ci"], { cwd: app.root });
+    step("Applying migrations and refreshing the local stack…");
+    await runCommand(npm, ["run", "dev:stack"], {
+      cwd: app.root,
+      env: { ...process.env, PASSCONTROL_PORT_OFFSET: String(app.offset), PASSCONTROL_SKIP_SEED: "1", PASSCONTROL_VIA_CLI: "1" },
+    });
+    if (restart) await startDashboard({ dashboardOnly: true });
+  } catch (error) {
+    throw new Error(
+      `The update stopped part way: ${error.message}\n` +
+        `Fix the cause, then run \`${cliCommand("update --app-only")}\` to finish (install, migrations${restart ? ", restart" : ""}). ` +
+        "The dashboard is stopped until then."
+    );
+  }
+  clearMarker();
+  ok(`App updated to ${String(app.target).slice(0, 7)}.`);
+  step(`To roll back the code: git -C ${app.root} checkout ${from}. Database migrations only go forward.`);
+}
+
+async function updateCommand(opts = {}) {
+  const appOnly = Boolean(opts.appOnly);
+  if (appOnly && opts.expectVersion && String(opts.expectVersion) !== CLI_VERSION) {
+    throw new Error(
+      `Expected the updated CLI ${opts.expectVersion}, but this is ${CLI_VERSION}. The CLI update did not land where this command runs from; nothing in the app was changed.`
+    );
+  }
+  const latest = appOnly ? CLI_VERSION : await fetchLatest(REGISTRY_URL, 10_000);
+  const install = detectInstall({
+    scriptPath: fs.realpathSync(CLI_ENTRY),
+    isSourceCheckout: isRepoCheckout(PACKAGE_ROOT) && process.env.PASSCONTROL_FORCE_INSTALLED !== "1",
+    version: latest ?? CLI_VERSION,
+  });
+  const app = analyzeAppForUpdate();
+  const plan = planUpdate({ current: CLI_VERSION, latest, install, app });
+  if (opts.json) {
+    console.log(JSON.stringify(plan, null, 2));
+    return;
+  }
+  for (const line of formatPlan(plan)) console.log(line);
+  if (opts.check) return;
+  if (plan.nothingToDo) {
+    ok("Nothing to update.");
+    return;
+  }
+  if (!opts.yes) {
+    if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+      throw new Error("Refusing to update without a terminal to confirm. Rerun with --yes, or --check to only see the plan.");
+    }
+    if (!await confirmYes("\nProceed? [Y/n] ")) {
+      step("Nothing was changed.");
+      return;
+    }
+  }
+  const appWork = plan.app.status === "behind" || Boolean(plan.app.resume);
+  if (plan.cli.needed && plan.cli.command) {
+    step(`Updating the CLI: ${plan.cli.command.join(" ")}`);
+    try {
+      await runCommand(plan.cli.command[0], plan.cli.command.slice(1), { cwd: os.homedir() });
+    } catch (error) {
+      throw new Error(
+        `The CLI update failed (${error.message}). If npm reported EACCES, run it yourself with the permissions your install needs:\n  ${plan.cli.manual}\nNothing else was changed.`
+      );
+    }
+    ok(`CLI updated to ${plan.cli.to}.`);
+    if (!appWork) return;
+    // Hand the app phase to the NEW CLI and do nothing else here: any lazy import
+    // after npm replaced these files would load the new code into the old process.
+    const child = spawn(process.execPath, [CLI_ENTRY, "update", "--app-only", "--yes", "--expect-version", String(plan.cli.to)], { stdio: "inherit" });
+    process.exitCode = await new Promise((resolve) => child.once("exit", (code) => resolve(code ?? 1)));
+    return;
+  }
+  if (plan.cli.needed) step(`Update the CLI yourself: ${plan.cli.manual}`);
+  if (appWork) await applyAppUpdate(plan.app);
+}
+
 async function setupLocal(opts = {}) {
   const dashboard = canonicalLocalDashboard();
   const activation = await prepareLocalActivation(dashboard, opts);
@@ -1560,6 +1820,7 @@ async function setupLocal(opts = {}) {
   await runLocalCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:stack"], {
     ...process.env,
     PASSCONTROL_PORT_OFFSET: String(offset),
+    PASSCONTROL_VIA_CLI: "1",
   });
   // dev:stack has just brought Supabase and Redis up (and would have exited
   // non-zero if it hadn't), so skip start's own service pass rather than print
@@ -3511,6 +3772,9 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
       break;
     case "reset":
       await resetLocalStack(opts);
+      break;
+    case "update":
+      await updateCommand(opts);
       break;
     case "setup":
       await setupLocal(opts);

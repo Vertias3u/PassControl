@@ -185,6 +185,33 @@ function budget(v: unknown, label: string): number | null {
   return v;
 }
 
+/** The largest periodic limit `budget_period_cents` (an `integer` column) holds. */
+const MAX_PERIOD_CENTS = 2_147_483_647;
+
+/**
+ * Validate a periodic spend limit (K1, migration 0073) as the PAIR it is stored
+ * as: a calendar UTC period and a limit in cents, or both null for no limit.
+ * The database refuses a half pair too; this says why before it gets there.
+ */
+export function validatePeriodBudget(
+  period: unknown,
+  cents: unknown
+): { budget_period: "day" | "month" | null; budget_period_cents: number | null } {
+  if (period === null && cents === null) return { budget_period: null, budget_period_cents: null };
+  if (
+    (period === "day" || period === "month") &&
+    typeof cents === "number" &&
+    Number.isInteger(cents) &&
+    cents >= 0 &&
+    cents <= MAX_PERIOD_CENTS
+  ) {
+    return { budget_period: period, budget_period_cents: cents };
+  }
+  throw new Error(
+    "budget_period must be \"day\" or \"month\" with budget_period_cents a non-negative whole number of cents, or both null."
+  );
+}
+
 /** Validate a partial agent-update payload → a DB column patch with only the
  *  provided fields. Throws on invalid input. Allows name / scopes / budgets /
  *  fallbacks — the four the `authenticated` role may UPDATE (migrations 0011
@@ -194,12 +221,16 @@ export function validateAgentUpdate(input: {
   scopes?: unknown;
   budget_tokens?: unknown;
   budget_cents?: unknown;
+  budget_period?: unknown;
+  budget_period_cents?: unknown;
   fallbacks?: unknown;
 }): {
   name?: string;
   allowed_scopes?: { provider: string; models: string[] }[];
   budget_tokens?: number | null;
   budget_cents?: number | null;
+  budget_period?: "day" | "month" | null;
+  budget_period_cents?: number | null;
   fallbacks?: FallbackEntry[];
 } {
   const patch: {
@@ -207,6 +238,8 @@ export function validateAgentUpdate(input: {
     allowed_scopes?: { provider: string; models: string[] }[];
     budget_tokens?: number | null;
     budget_cents?: number | null;
+    budget_period?: "day" | "month" | null;
+    budget_period_cents?: number | null;
     fallbacks?: FallbackEntry[];
   } = {};
   if (input.name !== undefined) {
@@ -219,6 +252,14 @@ export function validateAgentUpdate(input: {
   if (input.scopes !== undefined) patch.allowed_scopes = validateScopes(input.scopes);
   if (input.budget_tokens !== undefined) patch.budget_tokens = budget(input.budget_tokens, "budget_tokens");
   if (input.budget_cents !== undefined) patch.budget_cents = budget(input.budget_cents, "budget_cents");
+  // The periodic limit moves as a pair or not at all: half of it would be a
+  // limit nobody set, and the database refuses one.
+  if (input.budget_period !== undefined || input.budget_period_cents !== undefined) {
+    if (input.budget_period === undefined || input.budget_period_cents === undefined) {
+      throw new Error("budget_period and budget_period_cents must be set together.");
+    }
+    Object.assign(patch, validatePeriodBudget(input.budget_period, input.budget_period_cents));
+  }
   // `[]` is a value, not an absence: it is how failover is switched off. Only an
   // undefined field leaves the column untouched.
   if (input.fallbacks !== undefined) patch.fallbacks = validateFallbacks(input.fallbacks);

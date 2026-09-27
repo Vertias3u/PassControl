@@ -59,16 +59,40 @@ describe("what a usage_unknown row is allowed to claim", () => {
     expect(html).toContain("$0.000091");
   });
 
-  // The prose in STATUS used to promise "the enforced figures" while the drawer
-  // rendered none of them — a sentence pointing at a number that is not on the
-  // page, which is worse than no sentence. It is hedged now ("where the row
-  // records them"), and a row that records neither must still render the zero
-  // budget result rather than omitting the accounting dimension.
-  it("renders an explicit zero budget charge when no enforced amount exists", () => {
+  // v1 playbook Session 06: "Given a missing enforcement field on an old
+  // record, then it says unavailable/legacy unknown rather than inferring
+  // enforcement from observation." `enforced_*` is absent on rows written
+  // before 0055 AND when a settlement was refused, so absence here is not
+  // "charged the observed amount". This used to render "$0.000000" — a charge
+  // of zero the row does not record.
+  it("says the charge is not recorded when a usage_unknown row stores no enforced amount", () => {
     const html = render({ ...base, status: "usage_unknown" });
-    expect(html).toContain("<dt>Budget tokens</dt><dd>0</dd>");
-    expect(html).toContain("<dt>Budget charge</dt>");
-    expect(html).toContain("$0.000000");
+    expect(html).toContain('data-cap-charge="not_recorded"');
+    expect(html).toContain("<dt>Budget tokens</dt><dd>Not recorded on this row</dd>");
+    expect(html).not.toContain("$0.000000");
+  });
+
+  it("never shows a refused call's stored zeros as a measurement", () => {
+    const html = render({ ...base, status: "blocked_scope", auth_method: "direct_key" });
+    expect(html).toContain("Not sent — nothing to measure");
+    expect(html).toContain("Not sent — no cost");
+    expect(html).not.toMatch(/visa/i);
+  });
+
+  it("keeps a reported zero distinct from an unreported count", () => {
+    const zero = render({ ...base, input_tokens: 0, output_tokens: 0, cost_microcents: 0 });
+    expect(zero).toContain("<dt>Total tokens</dt><dd>0</dd>");
+    const missing = render({ ...base, input_tokens: null, output_tokens: null, cost_microcents: null });
+    expect(missing).toContain("<dt>Total tokens</dt><dd>Not reported</dd>");
+    expect(missing).toContain("No recorded cost — unknown, not zero");
+    const partial = render({ ...base, input_tokens: 120, output_tokens: null, cost_microcents: null });
+    expect(partial).toContain("120 + not reported");
+  });
+
+  it("says a dispatch_unavailable reservation is still held rather than returned", () => {
+    const html = render({ ...base, status: "dispatch_unavailable" });
+    expect(html).toContain('data-cap-charge="held"');
+    expect(html).toContain("Reservation still held");
   });
 
   // An ordinary row is an observation. Nothing about it is hedged, and the

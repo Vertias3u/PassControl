@@ -22,6 +22,8 @@ API_PORT=$((54321 + OFFSET))
 SRH_PORT=$((8079 + OFFSET))
 COMPOSE_PROJECT_NAME="passcontrol_${PROJECT_ID//[^A-Za-z0-9]/_}"
 COMPOSE_PROJECT_NAME="$(printf '%s' "$COMPOSE_PROJECT_NAME" | tr '[:upper:]' '[:lower:]')"
+# The generated local stack uses a shared invite code. Do not pass the optional
+# database-invite hook flag here: it would reject every signup from the local UI.
 node "$SRC/scripts/write-local-supabase-config.mjs" "$SRC" "$PROJECT_ID" "$OFFSET" "${PORT:-3000}"
 
 # ── 1. Prereqs ────────────────────────────────────────────────────────────────
@@ -216,20 +218,44 @@ for f in db/migrations/*.sql; do
 done
 
 # ── 6. Seed a confirmed dev user ──────────────────────────────────────────────
-echo "→ Seeding dev user…"
-set -a; . "$ENVF"; set +a
-node scripts/seed.mjs
+# `passcontrol update` re-runs this script for its migrations on an install that
+# already has its account, and sets PASSCONTROL_SKIP_SEED=1 so an update never
+# opens an account-setup conversation. Everything above still runs.
+if [[ "${PASSCONTROL_SKIP_SEED:-}" == "1" ]]; then
+  echo "→ Skipping the dev-user seed (PASSCONTROL_SKIP_SEED=1)."
+else
+  echo "→ Seeding dev user…"
+  set -a; . "$ENVF"; set +a
+  node scripts/seed.mjs
+fi
 
 # ── 7. Done ───────────────────────────────────────────────────────────────────
+# `passcontrol setup` sets PASSCONTROL_VIA_CLI=1 and starts the dashboard itself
+# right after this, so its user gets CLI commands; a hand run gets npm ones.
+# Read from the env file: it is a variable here only when step 6 sourced it,
+# which PASSCONTROL_SKIP_SEED skips.
+INVITE_CODE="$(grep '^INVITE_CODE=' "$ENVF" | cut -d= -f2- || true)"
+if [[ "${PASSCONTROL_VIA_CLI:-}" == "1" ]]; then
+cat <<DONE
+
+✅ Local stack is up.
+   Supabase API    : ${API_URL}   (Studio UI is excluded — use the PassControl dashboard)
+   Invite code     : ${INVITE_CODE}   (for signing up more local accounts)
+   Stop everything : passcontrol stop   (data is kept)
+DONE
+else
 cat <<DONE
 
 ✅ Local stack is up.
    Supabase API    : ${API_URL}   (Studio UI is excluded — use the PassControl dashboard)
    Start the app   : npm run dev:docker
                      → http://localhost:3000  (log in with the account you just created)
+   Invite code     : ${INVITE_CODE}   (for signing up more local accounts)
 
    Then: add a provider key + issue a passport in the dashboard, and run:
          node examples/chat-agent.mjs "Say hi in 3 words"
 
-   Stop everything : supabase stop && docker compose -f docker/compose.yml down -v
+   Stop everything : supabase stop && docker compose -f docker/compose.yml down
+                     (data is kept; add -v to the compose command to also wipe Redis)
 DONE
+fi

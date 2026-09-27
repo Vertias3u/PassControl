@@ -11,6 +11,9 @@ import {
   isModelListing,
   scopeRuleMatch,
 } from "./scope";
+import type { RequestedOutput } from "./output-limit";
+import { isServerSideSearchModel } from "./providers/server-side-tools";
+import { hasListedPrice } from "./pricing";
 
 export const POLICY_UNREADABLE = "POLICY_UNREADABLE" as const;
 
@@ -24,6 +27,8 @@ export interface GateStepResult {
   rule?: string;
   httpStatus?: 402 | 403 | 429;
   presentation?: "normal" | "warning";
+  /** The configured output ceiling, on a `max_output_tokens:*` refusal only. */
+  limit?: number;
 }
 
 export type GatePolicyInput =
@@ -38,7 +43,8 @@ export interface GateRateLimitInput {
 
 export interface GateBudgetInput {
   ok: boolean;
-  reason?: "tokens" | "cost";
+  /** Which cap refused. `period` is the periodic spend limit (K1). */
+  reason?: "tokens" | "cost" | "period";
   estimateTokens: number;
   estimateMicrocents: number;
   reservedTokens?: number;
@@ -74,6 +80,22 @@ export interface GateInput {
   policyRateLimit?: GateRateLimitInput;
   now?: Date;
   budget?: GateBudgetInput;
+  /**
+   * What the request asks the provider to generate (lib/output-limit.ts), for
+   * the policy's output ceiling. Model listings are exempt by path. For any other
+   * request an ABSENT value reads as "no limit stated", so a configured ceiling
+   * refuses it: forgetting to supply the facts can never become an admission.
+   */
+  requestedOutput?: RequestedOutput;
+  /**
+   * The agent has a dollar limit: a cost cap or a periodic limit. A model with no
+   * price row of its own is then refused (`endpoint:unpriced_model`), because
+   * its cost could only be the provider fallback, and a limit enforced with a
+   * number that is not the model's price does not hold. Owner decision
+   * 2026-09-27. Absent reads as no dollar limit: a token cap alone is enforced
+   * with provider-reported counts, which are real for any model.
+   */
+  dollarLimited?: boolean;
 }
 
 export interface GatePolicyResult {
@@ -245,6 +267,32 @@ export function evaluateGate(input: GateInput): GateEvaluation {
       "endpoint:no_match",
       403
     );
+  } else if (isServerSideSearchModel(input.provider, input.model)) {
+    // Refused here rather than in the proxy so the decision trace and failover,
+    // which share this evaluator, give the same answer (lib/providers/server-side-tools.ts).
+    fail(
+      "endpoint",
+      `${input.model} runs a web search on every call, billed outside tokens, which no budget here can hold.`,
+      "endpoint:openai_search_model",
+      403
+    );
+  } else if (
+    input.dollarLimited === true &&
+    isProvider(input.provider) &&
+    !isModelListing(input.path) &&
+    !hasListedPrice(input.model, input.provider)
+  ) {
+    // Here, not at the budget step, so it is refused before policy: the hourly
+    // counter is never consumed and no hold is opened for a call that cannot be
+    // priced. 402 like its siblings `unpriced_endpoint` and `unpriced_option`, and
+    // like a spent budget: the OpenAI and Anthropic SDKs retry 409 and 429 on their
+    // own, and a retry cannot price a model (owner decision 2026-09-27).
+    fail(
+      "endpoint",
+      `${input.model || "(no model)"} has no price row, so a dollar limit cannot be enforced against it.`,
+      "endpoint:unpriced_model",
+      402
+    );
   } else {
     steps.push({
       name: "endpoint",
@@ -292,16 +340,20 @@ export function evaluateGate(input: GateInput): GateEvaluation {
       input.policy.value,
       input.provider,
       input.model,
-      input.now
+      input.now,
+      isModelListing(input.path) ? null : input.requestedOutput
     );
     if (!decision.allowed) {
       policy = { outcome: "deny_by_rule" };
       fail(
         "policy",
-        `Policy rule ${decision.rule} denied this call.`,
+        decision.limit !== undefined
+          ? `Policy rule ${decision.rule} denied this call (output ceiling ${decision.limit} tokens).`
+          : `Policy rule ${decision.rule} denied this call.`,
         decision.rule,
         403
       );
+      if (decision.limit !== undefined) steps[steps.length - 1]!.limit = decision.limit;
     } else {
       policyRateLimitRequired = decision.maxRequestsPerHour;
       if (decision.maxRequestsPerHour !== null && input.policyRateLimit === undefined) {
@@ -357,10 +409,15 @@ export function evaluateGate(input: GateInput): GateEvaluation {
     steps.push(skipped("budget", "Budget has not been evaluated yet."));
     pending = true;
   } else if (!input.budget.ok) {
-    const dimension = input.budget.reason === "cost" ? "cost" : "token";
+    const dimension =
+      input.budget.reason === "period"
+        ? "periodic spend limit"
+        : input.budget.reason === "cost"
+          ? "cost budget"
+          : "token budget";
     fail(
       "budget",
-      `The ${dimension} budget cannot reserve ${input.budget.estimateTokens} estimated tokens ` +
+      `The ${dimension} cannot reserve ${input.budget.estimateTokens} estimated tokens ` +
         `(${input.budget.estimateMicrocents} micro-cents)${headroomSuffix(input.budget)}.`,
       `budget:${input.budget.reason ?? "tokens"}`,
       402

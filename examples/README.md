@@ -4,12 +4,40 @@ Configured example scripts to exercise PassControl end-to-end (you don't have to
 real agent — these *are* the example agents). Self-contained `.mjs`, run with plain
 `node`; they use the same flows the SDK wraps (`../sdk/`).
 
+**Start here:** `direct-key-worker.mjs` is the canonical integration — an existing worker
+that uses the official OpenAI SDK, changed only by the two variables the dashboard's agent
+Setup page gives you. See [the section below](#the-canonical-integration-a-direct-agent-key-worker).
+
 | Script | Plane | What it does |
 |---|---|---|
+| `direct-key-worker.mjs` | data | **The canonical integration.** The OpenAI SDK with a Direct Agent Key: one governed call (prints the receipt ID), then one model outside the agent's access, refused by PassControl before it reaches the provider. |
 | `starter-agent.mjs` | data | A real **tool-using loop** (think → call tool → think) run through the gateway — the "be user #1" demo. Every model round-trip is proxied and attempts to record audit evidence. |
 | `chat-agent.mjs` | data | Minimal: signs a challenge → mints a visa → calls a model **through the gateway**. Attempts to record real call + spend evidence. |
 | `visa-sidecar.mjs` | data | A local reverse proxy that mints/refreshes the visa for you — makes PassControl **drop-in for any agent that wants a static key** (OpenHands, Aider, Cline, …), no SDK required. |
 | `fleet-admin.mjs` | control | Drives `/api/control/v1` with a `pc_` API key: list/create/suspend/revoke agents, read spend/audit, toggle kill switch. |
+
+## The canonical integration: a Direct Agent Key worker
+
+1. In the dashboard, connect an agent (a Direct Agent Key is the default) and store the key
+   when it is shown once.
+2. Open the agent's **Setup**, copy the OpenAI-compatible configuration, save it as
+   `passcontrol.env`, and replace the placeholder with your key.
+3. From this checkout (`npm ci` installs the `openai` package):
+
+```bash
+set -a; . ./passcontrol.env; set +a
+node examples/direct-key-worker.mjs
+```
+
+It prints what actually came back for each call: *allowed and forwarded* with the
+provider-reported usage and a receipt ID, then *refused by PassControl — HTTP 403
+blocked_scope* for `REFUSAL_MODEL` (default `passcontrol-refusal-demo`). If the agent's access
+admits that model — a wildcard grant, say — it says so instead of claiming a refusal, and a
+provider error is reported as the provider's, not PassControl's. It exits 0 only for the
+expected pair. The key is never printed, and the SDK's automatic retries are off so each line
+is exactly one governed call.
+
+For native Anthropic, use the Anthropic SDK variant on the same Setup page.
 
 ## Product CLI
 

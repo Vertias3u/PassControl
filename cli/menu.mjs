@@ -226,6 +226,7 @@ export const GROUPS = [
       command({ id: "doctor", label: "Diagnose setup", run: ["doctor"], detail: "doctor", description: "Inspect the local stack, gateway, credentials, and protocol compatibility.", network: "gateway", current: currentFrom("gateway") }),
       command({ id: "status", label: "Show cockpit status", run: ["status"], detail: "status", description: "Show local configuration, gateway health, and the next useful action.", network: "gateway", current: currentFrom("gateway") }),
       command({ id: "version", label: "CLI, gateway and schema versions", run: ["version"], detail: "version", description: "Compare CLI, gateway build, schema, and protocol versions.", network: "gateway" }),
+      command({ id: "update", label: "Update PassControl", run: ["update"], detail: "update [--check]", description: "Update the CLI and the local app: code, dependencies, migrations.", effect: "irreversible", network: "provider", keywords: ["upgrade", "new version", "migrate"] }),
       command({ id: "open", label: "Open the Control Tower", run: ["open"], detail: "open", description: "Open the configured dashboard in the system browser.", effect: "launch", network: "browser" }),
       command({ id: "call", label: "Make a governed model call", run: ["call"], detail: "call \"<prompt>\"", description: "Mint a visa and make a billable governed provider call.", effect: "tenant_write", network: "provider", needsArgs: true, current: currentFrom("provider") }),
     ],

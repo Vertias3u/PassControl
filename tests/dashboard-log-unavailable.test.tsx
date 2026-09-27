@@ -37,7 +37,7 @@ const CENSUS_CLAIMS = [
   "No agent alerts",
 ];
 
-const callContext = { shadowRevisions: {} };
+const callContext = { shadowRevisions: {}, agentNames: {} };
 
 function row(over: Partial<DepartureRow> = {}): DepartureRow {
   return {
@@ -91,6 +91,7 @@ describe("the fleet cards during an unreadable log read", () => {
         housekeepingCalls={0}
         attention={summariseFleetAttention([])}
         logsAvailable={false}
+        agentsAvailable
       />
     );
 
@@ -110,6 +111,7 @@ describe("the fleet cards during an unreadable log read", () => {
         housekeepingCalls={0}
         attention={summariseFleetAttention([])}
         logsAvailable
+        agentsAvailable
       />
     );
 
@@ -131,11 +133,58 @@ describe("the fleet cards during an unreadable log read", () => {
         housekeepingCalls={0}
         attention={summariseFleetAttention([])}
         logsAvailable={false}
+        agentsAvailable
       />
     );
 
     expect(html).toContain("$0.12");
     expect(html).toContain("of 4");
+  });
+
+  // Session 07, step 10: with the agents read failing (PostgREST down) the
+  // agent list arrives empty, and the rail said "ACTIVE AGENTS 0 of 0 · No
+  // passports issued" and "SETTLED BUDGET CHARGES $0.00" — a census and a
+  // money figure measured from the failure itself.
+  it("does not turn a failed agent read into zero agents and $0.00 charged", () => {
+    const html = renderToStaticMarkup(
+      <FleetOverviewCards
+        activeAgents={0}
+        totalAgents={0}
+        spentMicrocents={0}
+        blockedCalls={0}
+        recentCalls={0}
+        housekeepingCalls={0}
+        attention={summariseFleetAttention([])}
+        logsAvailable
+        agentsAvailable={false}
+      />
+    );
+
+    expect(html).not.toContain("$0.00");
+    expect(html).not.toContain("of 0");
+    expect(html).not.toContain("No passports issued");
+    expect(html).not.toContain("No agents yet");
+    expect(html).toContain("Agent list unavailable");
+    // Agent count, settled charges and the agent-derived attention queue.
+    expect(html.match(/data-state="unavailable"/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("names an empty readable workspace by agents, not by passports", () => {
+    const html = renderToStaticMarkup(
+      <FleetOverviewCards
+        activeAgents={0}
+        totalAgents={0}
+        spentMicrocents={0}
+        blockedCalls={0}
+        recentCalls={0}
+        housekeepingCalls={0}
+        attention={summariseFleetAttention([])}
+        logsAvailable
+        agentsAvailable
+      />
+    );
+    expect(html).toContain("No agents yet");
+    expect(html).not.toContain("No passports issued");
   });
 });
 
@@ -219,7 +268,7 @@ describe("the fleet table's last-seen column", () => {
   // failed AND the stored column null, there is no evidence in either place.
   it("does not say never when the scan that would prove otherwise failed", () => {
     const html = renderToStaticMarkup(
-      <AgentFleetTable
+      <AgentFleetTable agentsAvailable
         agents={[agentRow]}
         visaTtlSeconds={300}
         keyCustody={{}}
@@ -234,7 +283,7 @@ describe("the fleet table's last-seen column", () => {
 
   it("still says never for an agent that has genuinely never called", () => {
     const html = renderToStaticMarkup(
-      <AgentFleetTable
+      <AgentFleetTable agentsAvailable
         agents={[agentRow]}
         visaTtlSeconds={300}
         keyCustody={{}}
@@ -256,7 +305,7 @@ describe("the activation rail during an unreadable log read", () => {
       <FirstCallActivation
         userId="user-1"
         providerConfigured
-        controlExerciseAt={null}
+        refusalTest={null}
         initiallyHidden={false}
         agents={[{ id: "agent-1", name: "Reconciler", status: "active", identityKind: "passport" }]}
         initialLogs={[]}
@@ -273,7 +322,7 @@ describe("the activation rail during an unreadable log read", () => {
       <FirstCallActivation
         userId="user-1"
         providerConfigured
-        controlExerciseAt={null}
+        refusalTest={null}
         initiallyHidden={false}
         agents={[{ id: "agent-1", name: "Reconciler", status: "active", identityKind: "passport" }]}
         initialLogs={[]}

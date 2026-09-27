@@ -3,13 +3,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  CONTROL_EXERCISE_ACTIONS,
   activationDiagnosis,
   authenticationProofLabel,
   deriveFirstCallActivation,
-  hasExercisedControls,
-  latestControlExerciseAt,
   onboardingStateHidden,
+  refusalTestModel,
   type FirstCallRow,
 } from "@/lib/first-call-activation";
 
@@ -34,13 +32,13 @@ describe("first-call activation state", () => {
   });
 
   it("keeps provider setup, agent creation and call proof as separate states", () => {
-    expect(deriveFirstCallActivation({ providerConfigured: false, controlExerciseAt: null, agents: [], logs: [] }).stage)
+    expect(deriveFirstCallActivation({ providerConfigured: false, refusalTest: null, agents: [], logs: [] }).stage)
       .toBe("provider");
-    expect(deriveFirstCallActivation({ providerConfigured: true, controlExerciseAt: null, agents: [], logs: [] }).stage)
+    expect(deriveFirstCallActivation({ providerConfigured: true, refusalTest: null, agents: [], logs: [] }).stage)
       .toBe("agent");
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [],
     }).stage).toBe("call");
@@ -49,16 +47,16 @@ describe("first-call activation state", () => {
   it("treats only a stored ok row as first-call completion", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("blocked_scope")],
     }).stage).toBe("diagnose");
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("ok")],
-    })).toMatchObject({ stage: "complete", agentId: "agent-1", receiptRecorded: true });
+    })).toMatchObject({ stage: "refuse", agentId: "agent-1", receiptRecorded: true });
   });
 
   // ── SDK housekeeping must not fire the milestone ──────────────────────────
@@ -80,7 +78,7 @@ describe("first-call activation state", () => {
   it("does not complete on a successful capability probe alone", () => {
     const state = deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [probeRow()],
     });
@@ -93,7 +91,7 @@ describe("first-call activation state", () => {
   it("reports no connection when nothing at all has arrived", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [],
     })).toMatchObject({ stage: "call", connected: false });
@@ -102,10 +100,10 @@ describe("first-call activation state", () => {
   it("completes on the real call even when a probe arrived first", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [row("ok"), probeRow()],
-    })).toMatchObject({ stage: "complete", agentId: "agent-1" });
+    })).toMatchObject({ stage: "refuse", agentId: "agent-1" });
   });
 
   it("diagnoses a real refusal rather than the probe that succeeded beside it", () => {
@@ -113,7 +111,7 @@ describe("first-call activation state", () => {
     // row, but the refusal is the one the operator has to act on.
     const state = deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [probeRow(), row("blocked_scope")],
     });
@@ -127,7 +125,7 @@ describe("first-call activation state", () => {
     const refusedProbe: FirstCallRow = { ...probeRow(), id: "log-killed", status: "blocked_killed", receipt: null };
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [refusedProbe],
     })).toMatchObject({ stage: "diagnose", agentId: "agent-1" });
@@ -136,7 +134,7 @@ describe("first-call activation state", () => {
   it("keeps a suspended identity in the flow so its refusal can be diagnosed", () => {
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "suspended" }],
       logs: [row("blocked_suspended")],
     })).toMatchObject({ stage: "diagnose", agentId: "agent-1" });
@@ -156,17 +154,17 @@ describe("first-call activation state", () => {
     ] as const) {
       expect(deriveFirstCallActivation({
         providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
         agents: [{ id: "agent-1", name: "Scout", status: "active" }],
         logs: [row(status)],
       }).stage).toBe("diagnose");
     }
     expect(deriveFirstCallActivation({
       providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
+      refusalTest: null,
       agents: [{ id: "agent-1", name: "Scout", status: "active" }],
       logs: [{ ...row("ok"), receipt: null }],
-    })).toMatchObject({ stage: "complete", receiptRecorded: false });
+    })).toMatchObject({ stage: "refuse", receiptRecorded: false });
   });
 });
 
@@ -307,7 +305,7 @@ describe("first-call dashboard integration", () => {
     expect(component).toContain("authenticationProofLabel");
     expect(component).toContain("not receipt-verified");
     expect(component).toContain('aria-live="polite"');
-    expect(page).toMatch(/select\("provider", \{ count: "exact" \}\)[\s\S]{0,100}limit\(6\)/);
+    expect(page).toMatch(/select\("provider", \{ count: "exact" \}\)[\s\S]{0,100}limit\(200\)/);
     expect(page).toContain("defaultProvider={firstStoredProvider");
     expect(page).toContain("auth_method: row.auth_method");
   });
@@ -336,99 +334,142 @@ describe("first-call dashboard integration", () => {
 
   it("keeps reveal-once handling while adding a copyable smoke test", () => {
     const direct = read("components/DirectAgentConnect.tsx");
+    const reveal = read("components/DirectAgentKeyReveal.tsx");
     const setup = read("lib/direct-connect-config.ts");
-    expect(direct).toContain("Copy smoke test");
+    expect(direct).toContain("<DirectAgentKeyReveal");
+    expect(reveal).toContain("Copy smoke test");
     expect(direct).toMatch(/preventClose=\{Boolean\(result && !stored\)\}/);
     expect(setup).toContain("smokeCommand");
     expect(setup).not.toContain("model: gpt-*");
   });
 });
 
-// ── Step 4: the guide does not end at "it worked" ────────────────────────────
+// ── Step 4: the guide ends on a refusal, not on "it worked" ─────────────────
 //
-// A stored `ok` inference row proves the path is open. It proves nothing about
-// whether the operator can CLOSE it, and closing it is the product. So the
-// milestone splits: `verify` once traffic has passed, `complete` once a stop
-// control has actually been exercised.
-describe("first-call control verification", () => {
-  const okRow = (): FirstCallRow => row("ok");
+// A stored `ok` inference row proves the path is open. The product is the
+// other half: that PassControl says no to something this worker asked for.
+// v1 playbook Contract D: an allowed inference, then — after the operator
+// starts the guide's refusal test — a `blocked_scope` refusal from the SAME
+// worker. A kill-switch toggle, another worker's refusal, or a refusal from
+// before the test do not count. The browser only derives `proven`; completion
+// is rendered after complete_onboarding() confirms it (0072).
+describe("first-call refusal proof", () => {
+  const agents = [
+    { id: "agent-1", name: "Scout", status: "active", scopes: [{ provider: "openai", models: ["gpt-5-mini"] }] },
+    { id: "agent-2", name: "Other", status: "active", scopes: [{ provider: "openai", models: ["gpt-5-mini"] }] },
+  ];
+  const at = (minute: number) => `2026-08-12T12:${String(minute).padStart(2, "0")}:00.000Z`;
+  const logRow = (overrides: Partial<FirstCallRow>): FirstCallRow => ({
+    id: `log-${Math.random()}`,
+    agent_id: "agent-1",
+    provider: "openai",
+    model: "gpt-5-mini",
+    status: "ok",
+    receipt: null,
+    created_at: at(0),
+    ...overrides,
+  });
+  const derive = (logs: FirstCallRow[], refusalTest: { agentId: string; startedAt: string } | null) =>
+    deriveFirstCallActivation({ providerConfigured: true, agents, logs: [...logs].reverse(), refusalTest });
 
-  it("stops at verify until a stop control has been exercised", () => {
-    expect(deriveFirstCallActivation({
-      providerConfigured: true,
-      controlExerciseAt: null,
-      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
-      logs: [okRow()],
-    })).toMatchObject({ stage: "verify", agentId: "agent-1", receiptRecorded: true });
+  it("asks for the refusal test once a call has been admitted, and names a model outside the grant", () => {
+    const state = derive([logRow({})], null);
+    expect(state).toMatchObject({ stage: "refuse", agentId: "agent-1", test: null });
+    expect(state.stage === "refuse" && state.testModel).toBeTruthy();
+    expect(state.stage === "refuse" && state.testModel).not.toBe("gpt-5-mini");
   });
 
-  it("completes once a stop control has been exercised after the call", () => {
-    expect(deriveFirstCallActivation({
-      providerConfigured: true,
-      controlExerciseAt: "2026-08-12T12:01:00.000Z",
-      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
-      logs: [okRow()],
-    })).toMatchObject({ stage: "complete", agentId: "agent-1", receiptRecorded: true });
+  it("is proven by a same-worker scope refusal after the test started", () => {
+    const state = derive(
+      [logRow({ created_at: at(0) }), logRow({ status: "blocked_scope", model: "gpt-5", created_at: at(6) })],
+      { agentId: "agent-1", startedAt: at(5) }
+    );
+    expect(state).toMatchObject({ stage: "proven", agentId: "agent-1" });
+    expect(state.stage === "proven" && state.refusal.model).toBe("gpt-5");
   });
 
-  it("does not complete from a stale stop-control event that predates the call", () => {
-    expect(deriveFirstCallActivation({
-      providerConfigured: true,
-      controlExerciseAt: "2026-08-12T11:59:00.000Z",
-      agents: [{ id: "agent-1", name: "Scout", status: "active" }],
-      logs: [okRow()],
-    })).toMatchObject({ stage: "verify", agentId: "agent-1" });
+  it("is not proven by a refusal from before the test started", () => {
+    const state = derive(
+      [logRow({ created_at: at(0) }), logRow({ status: "blocked_scope", model: "gpt-5", created_at: at(3) })],
+      { agentId: "agent-1", startedAt: at(5) }
+    );
+    expect(state).toMatchObject({ stage: "refuse", test: { agentId: "agent-1" } });
   });
 
-  it("does not let the flag skip an earlier stage", () => {
-    // The flag only ever splits the milestone. An operator who armed the kill
-    // switch before wiring anything up has proven nothing about their own agent.
-    for (const stage of ["provider", "agent", "call"] as const) {
-      const input = {
-        provider: { providerConfigured: false, agents: [], logs: [] },
-        agent: { providerConfigured: true, agents: [], logs: [] },
-        call: {
-          providerConfigured: true,
-          agents: [{ id: "agent-1", name: "Scout", status: "active" }],
-          logs: [],
-        },
-      }[stage];
-      expect(deriveFirstCallActivation({ ...input, controlExerciseAt: "2026-08-12T12:01:00.000Z" }).stage).toBe(stage);
+  it("is not proven by another worker's refusal", () => {
+    const state = derive(
+      [logRow({ created_at: at(0) }), logRow({ agent_id: "agent-2", status: "blocked_scope", model: "gpt-5", created_at: at(6) })],
+      { agentId: "agent-1", startedAt: at(5) }
+    );
+    expect(state.stage).toBe("refuse");
+  });
+
+  it("is not proven by any other kind of refusal", () => {
+    for (const status of ["blocked_killed", "blocked_suspended", "blocked_policy", "blocked_budget"]) {
+      const state = derive(
+        [logRow({ created_at: at(0) }), logRow({ status, model: "gpt-5", created_at: at(6) })],
+        { agentId: "agent-1", startedAt: at(5) }
+      );
+      expect(state.stage, status).toBe("refuse");
     }
   });
 
-  it("counts both stop controls and nothing that setup also writes", () => {
-    for (const action of CONTROL_EXERCISE_ACTIONS) {
-      expect(hasExercisedControls([{ action, created_at: "2026-08-12T12:01:00.000Z" }]), action).toBe(true);
-    }
-    expect(hasExercisedControls([])).toBe(false);
-    // `agent.update` is the one that matters here. It is emitted by the scope
-    // editor, and `activationDiagnosis` sends a refused first call straight to
-    // the scope editor — so accepting it would let the guide close the loop on
-    // its own advice with no stop control ever touched. The rest are plain setup.
-    for (const action of ["agent.update", "agent.create", "provider_key.add", "apikey.create"]) {
-      expect(hasExercisedControls([{ action, created_at: "2026-08-12T12:01:00.000Z" }]), action).toBe(false);
-    }
+  it("does not pair an allowed call and a refusal made with different installation keys", () => {
+    const state = derive(
+      [
+        logRow({ created_at: at(0), agent_access_key_id: "key-a" }),
+        logRow({ status: "blocked_scope", model: "gpt-5", created_at: at(6), agent_access_key_id: "key-b" }),
+      ],
+      { agentId: "agent-1", startedAt: at(5) }
+    );
+    expect(state.stage).toBe("refuse");
+    const same = derive(
+      [
+        logRow({ created_at: at(0), agent_access_key_id: "key-a" }),
+        logRow({ status: "blocked_scope", model: "gpt-5", created_at: at(6), agent_access_key_id: "key-a" }),
+      ],
+      { agentId: "agent-1", startedAt: at(5) }
+    );
+    expect(same.stage).toBe("proven");
   });
 
-  it("returns the newest valid qualifying audit timestamp", () => {
-    expect(latestControlExerciseAt([
-      { action: "killswitch.master", created_at: "2026-08-12T12:01:00.000Z" },
-      { action: "agent.update", created_at: "2026-08-12T12:03:00.000Z" },
-      { action: "agent.suspend", created_at: "2026-08-12T12:02:00.000Z" },
-      { action: "agent.suspend", created_at: "not-a-date" },
-    ])).toBe("2026-08-12T12:02:00.000Z");
+  it("does not let a started test skip an earlier stage", () => {
+    const test = { agentId: "agent-1", startedAt: at(5) };
+    expect(deriveFirstCallActivation({ providerConfigured: false, agents: [], logs: [], refusalTest: test }).stage).toBe("provider");
+    expect(deriveFirstCallActivation({ providerConfigured: true, agents: [], logs: [], refusalTest: test }).stage).toBe("agent");
+    expect(deriveFirstCallActivation({ providerConfigured: true, agents, logs: [], refusalTest: test }).stage).toBe("call");
   });
 
-  it("pins the audit action strings to the writers that emit them", () => {
-    // These are string literals matched across a module boundary: renaming one
-    // in actions.ts would silently stall every tenant's onboarding at step 4
-    // with nothing red anywhere. Fail here instead.
-    expect([...CONTROL_EXERCISE_ACTIONS]).toEqual(["killswitch.master", "agent.suspend"]);
-    const actions = read("app/dashboard/actions.ts");
-    for (const action of CONTROL_EXERCISE_ACTIONS) {
-      expect(actions, action).toContain(`action: "${action}"`);
-    }
+  it("chooses a test model the grant refuses, and none when the grant allows everything", () => {
+    expect(refusalTestModel([{ provider: "openai", models: ["gpt-5-mini"] }], "openai")).toBe("gpt-5");
+    expect(refusalTestModel([{ provider: "openai", models: ["gpt-*"] }], "openai")).toBe("o3");
+    expect(refusalTestModel([{ provider: "openai", models: ["*"] }], "openai")).toBeNull();
+    expect(refusalTestModel([], "openai")).toBe("gpt-5");
+  });
+
+  it("no longer reads the audit log: a stop control is not the proof", () => {
+    const lib = read("lib/first-call-activation.ts");
+    expect(lib).not.toMatch(/killswitch\.master|agent\.suspend|admin_audit/);
+    const page = read("app/dashboard/page.tsx");
+    expect(page).not.toMatch(/latestControlExerciseAt|controlExerciseAt/);
+  });
+
+  it("renders completion only after the server confirms it", () => {
+    const guide = read("components/dashboard/FirstCallActivation.tsx");
+    expect(guide).toMatch(/rpc\("complete_onboarding"\)/);
+    expect(guide).toMatch(/rpc\("start_onboarding_refusal_test"/);
+    expect(guide).toMatch(/confirmation === "confirmed"/);
+  });
+
+  it("does not depend on realtime alone while a refusal test is waiting", () => {
+    // Found in the local walkthrough on 2026-09-26: the realtime channel reported
+    // subscribed but delivered no agent_logs inserts, and the guide sat on
+    // "waiting" after the refusal was recorded. A bounded poll of that one
+    // agent's rows since the test started covers it.
+    const guide = read("components/dashboard/FirstCallActivation.tsx");
+    expect(guide).toMatch(/\.eq\("agent_id", waitingAgentId\)[\s\S]{0,80}\.gte\("created_at", waitingSince\)/);
+    expect(guide).toMatch(/REFUSAL_POLL_WINDOW_MS = 10 \* 60_000/);
+    expect(guide).toMatch(/\.limit\(10\)/);
   });
 
   it("keeps diagnose in the step order so earlier steps cannot regress", () => {

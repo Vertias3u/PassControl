@@ -27,6 +27,9 @@ export function ActivityWorkspace({
     const rows = tab === "calls"
       ? logs.map((row) => ({
           created_at: row.created_at,
+          // Current name at export time, beside the stored id it was resolved from.
+          agent_id: row.agent_id,
+          agent_name: row.agent_id ? callContext.agentNames[row.agent_id] ?? "" : "",
           passport_id: row.passport_id,
           jti: row.jti,
           auth_method: row.auth_method,
@@ -100,7 +103,7 @@ export function ActivityWorkspace({
           </div>
         ) : (
           <div id={operatorId} role="tabpanel" aria-labelledby={`${operatorId}-tab`}>
-            <AdminAuditTable rows={adminRows} />
+            <AdminAuditTable rows={adminRows} agentNames={callContext.agentNames} />
           </div>
         )}
       </div>

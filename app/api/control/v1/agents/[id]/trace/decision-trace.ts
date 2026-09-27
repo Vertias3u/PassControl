@@ -18,9 +18,14 @@ import {
 import { isProvider, type ScopeProviderId } from "@/lib/providers";
 import type { ScopeEntry } from "@/lib/auth/visa";
 import { readLiveGrant, unionScopes } from "@/lib/break-glass";
+import { readPeriodUsageMany } from "@/lib/state/holds";
+import { periodStart, type PeriodKind } from "@/lib/period";
+import { serviceClient } from "@/lib/supabase";
 
 const TRACE_AGENT_COLUMNS =
   "id, status, allowed_scopes, budget_tokens, budget_cents, spent_tokens, spent_microcents";
+// 0073's periodic limit, on its own rung so a database without it still traces.
+const TRACE_AGENT_COLUMNS_WITH_PERIOD = `${TRACE_AGENT_COLUMNS}, budget_period, budget_period_cents`;
 
 interface TraceAgentRow {
   id: string;
@@ -30,6 +35,36 @@ interface TraceAgentRow {
   budget_cents: number | null;
   spent_tokens: number;
   spent_microcents: number;
+  budget_period?: unknown;
+  budget_period_cents?: unknown;
+}
+
+/**
+ * What the periodic limit has counted this period, as the gateway would count
+ * it on the next call: its own snapshot when it has one, or the ledger's figure
+ * when it would seed from it. Null when neither can be read — the trace then
+ * makes no period claim at all rather than projecting an admission.
+ */
+async function projectPeriodCounted(
+  agentId: string,
+  kind: PeriodKind,
+  nowMs: number
+): Promise<number | null> {
+  try {
+    const usage = (await readPeriodUsageMany([{ id: agentId, kind }], nowMs)).get(agentId);
+    if (!usage) return null;
+    if (usage.state === "tracked") return usage.usedMicrocents + usage.heldMicrocents;
+    const { data, error } = await serviceClient().rpc("agent_period_spend", {
+      p_agent_id: agentId,
+      p_since: periodStart(kind, nowMs).toISOString(),
+    });
+    if (error) return null;
+    const row = (Array.isArray(data) ? data[0] : data) as { spent_microcents?: unknown } | undefined;
+    const seed = Number(row?.spent_microcents);
+    return Number.isFinite(seed) ? seed + usage.heldMicrocents : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface DecisionTrace {
@@ -122,7 +157,8 @@ function projectBudget(
   snapshot: Awaited<ReturnType<typeof readBudgetSnapshot>>,
   provider: ScopeProviderId,
   model: string,
-  maxOutputTokens: number | null
+  maxOutputTokens: number | null,
+  period: { capMicrocents: number; countedMicrocents: number } | null = null
 ): GateBudgetInput {
   // The panel has no prompt body by design. Use the same estimator as the proxy
   // with the selected model and its normal default-output allowance, and label
@@ -193,6 +229,20 @@ function projectBudget(
       ...headroom,
     };
   }
+  // After the cumulative caps, in the gateway's order. Zero refuses outright.
+  if (
+    period !== null &&
+    (period.capMicrocents === 0 || period.countedMicrocents + estimateMicrocents > period.capMicrocents)
+  ) {
+    return {
+      ok: false,
+      reason: "period",
+      estimateTokens,
+      estimateMicrocents,
+      source: "snapshot",
+      headroomMicrocents: Math.max(0, period.capMicrocents - period.countedMicrocents),
+    };
+  }
   return {
     ok: true,
     estimateTokens,
@@ -216,12 +266,12 @@ function projectBudget(
 export async function evaluateDecisionTrace(
   input: EvaluateDecisionTraceInput
 ): Promise<DecisionTraceResult> {
-  const { data, error } = await input.db
-    .from("agents")
-    .select(TRACE_AGENT_COLUMNS)
-    .eq("user_id", input.userId)
-    .eq("id", input.agentId)
-    .maybeSingle();
+  const select = (columns: string) =>
+    input.db.from("agents").select(columns).eq("user_id", input.userId).eq("id", input.agentId).maybeSingle();
+  let { data, error } = await select(TRACE_AGENT_COLUMNS_WITH_PERIOD);
+  if ((error as { code?: string } | null)?.code === "42703") {
+    ({ data, error } = await select(TRACE_AGENT_COLUMNS));
+  }
 
   if (error) return { ok: false, status: 500, code: "query_failed" };
   if (!data) return { ok: false, status: 404, code: "not_found" };
@@ -238,12 +288,27 @@ export async function evaluateDecisionTrace(
     readLiveGrant(input.db, input.userId, input.agentId),
   ]);
   const path = defaultChatPath(input.provider);
+  // The periodic limit, projected only when both the limit and its count can
+  // be read — see projectPeriodCounted.
+  const periodKind: PeriodKind | null =
+    agent.budget_period === "day" || agent.budget_period === "month" ? agent.budget_period : null;
+  const periodCents =
+    typeof agent.budget_period_cents === "number" && Number.isFinite(agent.budget_period_cents)
+      ? agent.budget_period_cents
+      : null;
+  const periodCounted =
+    periodKind !== null && periodCents !== null
+      ? await projectPeriodCounted(input.agentId, periodKind, input.evaluatedAt.getTime())
+      : null;
   const budget = projectBudget(
     agent,
     budgetSnapshot,
     input.provider,
     input.model,
-    input.maxOutputTokens ?? null
+    input.maxOutputTokens ?? null,
+    periodCents !== null && periodCounted !== null
+      ? { capMicrocents: periodCents * MICROCENTS_PER_CENT, countedMicrocents: periodCounted }
+      : null
   );
   const gateInput = {
     agentId: input.agentId,
@@ -266,6 +331,18 @@ export async function evaluateDecisionTrace(
     policyFailClosed: process.env.POLICY_FAIL_CLOSED === "true",
     now: input.policyAt,
     budget,
+    // The same size question the budget step projects, put to the output
+    // ceiling. No size means the call states no limit, which is exactly how the
+    // gateway reads a body without one — so a configured ceiling refuses it here
+    // too rather than the panel promising an admission the gateway would deny.
+    requestedOutput:
+      input.maxOutputTokens == null
+        ? ({ kind: "absent" } as const)
+        : ({ kind: "stated", tokens: input.maxOutputTokens } as const),
+    // The gateway's `dollarLimited`: a cost cap, or a periodic limit whose kind
+    // and amount are both set. Under one, a model with no price row is refused.
+    // Mirrors projectBudget's `capMicrocents !== null`.
+    dollarLimited: agent.budget_cents != null || (periodKind !== null && periodCents !== null),
   };
 
   const preliminary = evaluateGate(gateInput);

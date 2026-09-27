@@ -1,55 +1,137 @@
 "use client";
-import { useState, useTransition } from "react";
-import { setMasterKill } from "@/app/dashboard/actions";
-import { CheckCircle2, AlertTriangle, Loader2, ShieldOff } from "lucide-react";
+import { useState } from "react";
+import { observeMasterKill, setMasterKill, type KillObservation } from "@/app/dashboard/actions";
+import { CheckCircle2, AlertTriangle, HelpCircle, Loader2, RefreshCw, ShieldOff } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 
-export function GlobalKillSwitchBar({ initialArmed }: { initialArmed: boolean }) {
-  const [armed, setArmed] = useState(initialArmed);
-  const [showConfirm, setShowConfirm] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [announcement, setAnnouncement] = useState("");
-  const [pending, start] = useTransition();
+export type KillSwitchPhase = "disarmed" | "arming" | "armed" | "disarming" | "checking" | "unknown" | "unconfirmed";
+type KillBusy = { kind: "apply"; next: boolean } | { kind: "refresh" } | null;
 
-  const phase: "disarmed" | "arming" | "armed" | "disarming" = pending
-    ? armed
-      ? "disarming"
-      : "arming"
-    : armed
-      ? "armed"
-      : "disarmed";
+/**
+ * What the bar may claim. A readback is the truth, even when it is not what
+ * was asked for. A LOST response is different: the change may have landed, so
+ * the last observation is stale and the bar stops asserting it — Session 07
+ * saw an arm apply (calls refused) while the bar still read "DISARMED · Fleet
+ * operational". Work in progress is named from the intent, not inferred from
+ * that stale observation.
+ */
+export function killSwitchPhase({
+  busy,
+  tenant,
+  lost,
+}: {
+  busy: KillBusy;
+  tenant: boolean | null;
+  lost: boolean;
+}): KillSwitchPhase {
+  if (busy?.kind === "apply") return busy.next ? "arming" : "disarming";
+  if (busy?.kind === "refresh") return "checking";
+  if (lost) return "unconfirmed";
+  if (tenant === null) return "unknown";
+  return tenant ? "armed" : "disarmed";
+}
 
-  const apply = (next: boolean) =>
-    start(async () => {
-      setError(null);
-      try {
-        await setMasterKill(next);
-        setArmed(next);
-        setAnnouncement(
-          next
-            ? "Global kill switch armed. New calls for every agent in this tenant are now refused."
-            : "Global kill switch disarmed. Eligible agents can make governed calls again."
-        );
-      } catch (cause) {
-        setError((cause as Error).message || "The kill-switch state could not be changed.");
-        setAnnouncement("The kill-switch state did not change.");
-      }
-    });
-
-  const CONFIG = {
+export function killSwitchPresentation(phase: KillSwitchPhase, failClosed: boolean) {
+  return {
     disarmed: { color: "var(--success)", Icon: CheckCircle2, label: "DISARMED", desc: "Fleet operational" },
     arming: { color: "var(--warning)", Icon: Loader2, label: "ARMING…", desc: "Applying tenant-wide refusal" },
     disarming: { color: "var(--warning)", Icon: Loader2, label: "DISARMING…", desc: "Restoring governed access" },
+    checking: { color: "var(--warning)", Icon: Loader2, label: "CHECKING…", desc: "Reading the kill switch" },
     armed: { color: "var(--danger)", Icon: AlertTriangle, label: "ARMED", desc: "New calls are refused tenant-wide" },
+    unknown: {
+      color: "var(--warning)",
+      Icon: HelpCircle,
+      label: "STATE UNREADABLE",
+      desc: failClosed
+        ? "PassControl cannot read the fleet kill switch right now, and refuses every call until it can"
+        : "PassControl cannot read the fleet kill switch right now, and lets calls through while it cannot",
+    },
+    unconfirmed: {
+      color: "var(--warning)",
+      Icon: HelpCircle,
+      label: "NOT CONFIRMED",
+      desc: "The last change may or may not have applied, so the state shown before it is no longer known. Refresh to read what the gateway enforces",
+    },
   }[phase];
-  const { color, Icon, label, desc } = CONFIG;
+}
+
+/**
+ * The fleet kill switch, showing what was OBSERVED rather than what was last
+ * asked for (v1 playbook Contract C). Three facts are kept apart: the tenant
+ * flag this operator controls, PassControl's platform stop (visible, not
+ * theirs to change), and a read that failed. A failed read is never shown as
+ * "Fleet operational": it says what the gateway is doing about it, which
+ * depends on the deployment's configured posture.
+ */
+export function GlobalKillSwitchBar({
+  initial,
+  failClosed,
+}: {
+  initial: { tenant: boolean | null; platform: boolean | null };
+  /** KILL_SWITCH_FAIL_CLOSED on this deployment — how the gateway treats an unreadable read. */
+  failClosed: boolean;
+}) {
+  const [observed, setObserved] = useState(initial);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [unconfirmed, setUnconfirmed] = useState<{ requested: boolean; lost: boolean } | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  // Plain state, not a React transition. On a production build a transition started
+  // on /dashboard never commits (router.refresh and a server action's
+  // revalidated tree both stay pending — see tests/agent-operating-surface), so
+  // state set inside one was never shown: the bar sat on ARMING… after the
+  // switch had applied. The readback commits on its own, as
+  // AgentSuspendControl's does.
+  const [busy, setBusy] = useState<KillBusy>(null);
+  const pending = busy !== null;
+
+  const phase = killSwitchPhase({ busy, tenant: observed.tenant, lost: unconfirmed?.lost ?? false });
+
+  const settle = (result: KillObservation) => {
+    setObserved({ tenant: result.tenant, platform: result.platform });
+    setUnconfirmed(result.confirmed ? null : { requested: result.requested, lost: false });
+    setAnnouncement(
+      !result.confirmed
+        ? "Could not confirm the kill-switch change."
+        : result.requested
+          ? "Global kill switch armed. New calls for every agent in this tenant are now refused."
+          : "Global kill switch disarmed. Eligible agents can make governed calls again."
+    );
+  };
+
+  // Desired state in; a retry resends the same intent.
+  const apply = async (next: boolean) => {
+    setBusy({ kind: "apply", next });
+    try {
+      settle(await setMasterKill(next));
+    } catch {
+      setUnconfirmed({ requested: next, lost: true });
+      setAnnouncement("Could not confirm the kill-switch change.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const refresh = async (requested: boolean) => {
+    setBusy({ kind: "refresh" });
+    try {
+      settle(await observeMasterKill(requested));
+    } catch {
+      // A failed re-read after a lost change leaves it lost; a failed read
+      // of an unreadable switch leaves it unreadable. Neither becomes a claim.
+      setUnconfirmed((prev) => (prev ? { ...prev, lost: true } : prev));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const { color, Icon, label, desc } = killSwitchPresentation(phase, failClosed);
 
   return (
     <>
       <div
         className="pc-kill-switch"
         data-state={phase}
-        style={{ borderColor: color, background: armed ? "rgba(239,68,68,0.08)" : "var(--card)" }}
+        style={{ borderColor: color, background: phase === "armed" ? "rgba(239,68,68,0.08)" : "var(--card)" }}
       >
         <div className="pc-kill-switch__state">
           <Icon className={pending ? "animate-spin" : ""} style={{ color }} aria-hidden="true" />
@@ -62,14 +144,24 @@ export function GlobalKillSwitchBar({ initialArmed }: { initialArmed: boolean })
             </div>
           </div>
         </div>
-        {phase === "armed" ? (
+        {phase === "unknown" || phase === "unconfirmed" ? (
           <button
             className="ghost"
             disabled={pending}
-            onClick={() => apply(false)}
+            onClick={() => void refresh(unconfirmed?.requested ?? false)}
+            data-control="refresh-kill"
+          >
+            <RefreshCw aria-hidden="true" /> Refresh status
+          </button>
+        ) : null}
+        {phase === "unconfirmed" || phase === "checking" ? null : phase === "armed" || phase === "disarming" ? (
+          <button
+            className="ghost"
+            disabled={pending}
+            onClick={() => void apply(false)}
           >
             <ShieldOff aria-hidden="true" />
-            Disarm fleet
+            {phase === "disarming" ? "Disarming…" : "Disarm fleet"}
           </button>
         ) : (
           <button
@@ -77,15 +169,28 @@ export function GlobalKillSwitchBar({ initialArmed }: { initialArmed: boolean })
             disabled={pending}
             onClick={() => setShowConfirm(true)}
           >
-            {pending ? "Arming…" : "Engage kill switch"}
+            {phase === "arming" ? "Arming…" : "Engage kill switch"}
           </button>
         )}
       </div>
 
-      {error ? (
-        <p role="alert" className="pc-inline-error">
-          {error}
+      {observed.platform === true ? (
+        <p role="status" className="pc-inline-error" data-kill-layer="platform">
+          PassControl has stopped all traffic platform-wide. This switch cannot override it, and disarming it
+          will not resume calls until the platform stop is lifted.
         </p>
+      ) : null}
+      {unconfirmed ? (
+        <div role="alert" className="pc-inline-error" data-kill-result={unconfirmed.lost ? "lost" : "unconfirmed"}>
+          Could not confirm that the kill switch is {unconfirmed.requested ? "armed" : "disarmed"}
+          {unconfirmed.lost ? ": the request may or may not have applied." : "."} Nothing has been undone.{" "}
+          <button type="button" className="ghost" disabled={pending} onClick={() => void apply(unconfirmed.requested)}>
+            Retry {unconfirmed.requested ? "arm" : "disarm"}
+          </button>{" "}
+          <button type="button" className="ghost" disabled={pending} onClick={() => void refresh(unconfirmed.requested)}>
+            Refresh status
+          </button>
+        </div>
       ) : null}
       <p className="sr-only" aria-live="polite">
         {announcement}
@@ -126,7 +231,7 @@ export function GlobalKillSwitchBar({ initialArmed }: { initialArmed: boolean })
                 className="danger"
                 onClick={() => {
                   setShowConfirm(false);
-                  apply(true);
+                  void apply(true);
                 }}
               >
                 Confirm — arm

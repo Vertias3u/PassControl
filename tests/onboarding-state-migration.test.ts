@@ -51,3 +51,39 @@ describe("durable onboarding progression migration", () => {
     expect(beforeFunctions).not.toMatch(/aa\.action\s+in\s*\([^)]*agent\.update/i);
   });
 });
+
+describe("0072 — the guide ends on a same-worker refusal", () => {
+  const next = readFileSync(
+    resolve(process.cwd(), "db/migrations/0072_onboarding_refusal_proof.sql"),
+    "utf8"
+  );
+  const completion = next.slice(next.toLowerCase().indexOf("create or replace function public.complete_onboarding"));
+
+  it("adds only the agent and start time of the guide's refusal test", () => {
+    expect(next).toMatch(/add column if not exists refusal_test_agent_id uuid/i);
+    expect(next).toMatch(/add column if not exists refusal_test_started_at timestamptz/i);
+    expect(next).not.toMatch(/grant[^;]*(?:insert|update|delete)[^;]*on public\.onboarding_state to authenticated/i);
+  });
+
+  it("starts the test only through a narrow RPC bound to auth.uid() and an owned, unrevoked agent", () => {
+    expect(next).toMatch(/create or replace function public\.start_onboarding_refusal_test\(p_agent_id uuid\)[\s\S]*security definer[\s\S]*set search_path = ''/i);
+    expect(next).toMatch(/a\.user_id = v_user_id[\s\S]*a\.status <> 'revoked'/i);
+    expect(next).toMatch(/revoke all on function public\.start_onboarding_refusal_test\(uuid\) from public, anon/i);
+    expect(next).toMatch(/grant execute on function public\.start_onboarding_refusal_test\(uuid\) to authenticated/i);
+  });
+
+  it("completes only on an ok inference and a later blocked_scope refusal from the started agent", () => {
+    expect(completion).toMatch(/allowed\.status = 'ok'/i);
+    expect(completion).toMatch(/refused\.status = 'blocked_scope'/i);
+    expect(completion).toMatch(/refused\.created_at >= v_started/i);
+    expect(completion).toMatch(/refused\.created_at > allowed\.created_at/i);
+    expect(completion).toMatch(/allowed\.agent_id = v_agent_id/i);
+    expect(completion).toMatch(/allowed\.agent_access_key_id = refused\.agent_access_key_id/i);
+    expect(completion).not.toMatch(/admin_audit|killswitch\.master|agent\.suspend/i);
+  });
+
+  it("never clears an existing completion or dismissal", () => {
+    expect(completion).toMatch(/set completed_at = coalesce\(public\.onboarding_state\.completed_at, excluded\.completed_at\)/i);
+    expect(next).not.toMatch(/set\s+(?:dismissed_at|completed_at)\s*=\s*null/i);
+  });
+});

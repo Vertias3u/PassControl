@@ -322,7 +322,8 @@ export async function updateAgent(
   // Only for the fields that are actually in that cache. Scopes and fallbacks
   // are not, and purging on every update would throw away a hot entry for a
   // change it does not carry.
-  const touchesBudget = "budget_tokens" in clean || "budget_cents" in clean;
+  const touchesBudget =
+    "budget_tokens" in clean || "budget_cents" in clean || "budget_period" in clean;
   if (!touchesBudget) return { ok: true, value: { id: agentId } };
   const budgetsLive = await purgeAgentPolicy(userId, agentId).catch(() => false);
   return { ok: true, value: { id: agentId, budgetsLive } };

@@ -4,6 +4,7 @@ import {
   validateAgentInput,
   validateAgentUpdate,
   validateFallbacks,
+  validatePeriodBudget,
   validatePolicy,
   validateProviderKeyInput,
   validateRotateInput,
@@ -286,5 +287,39 @@ describe("the demo provider's one legal home", () => {
     expect(() => validateFallbacks([{ provider: "demo", model: "demo-1" }])).toThrow(
       "Unknown provider in fallbacks."
     );
+  });
+});
+
+// K1 — the periodic limit is stored, and validated, as a pair.
+describe("validatePeriodBudget", () => {
+  it("accepts a day or month limit in whole cents, and both null as no limit", () => {
+    expect(validatePeriodBudget("day", 2500)).toEqual({ budget_period: "day", budget_period_cents: 2500 });
+    expect(validatePeriodBudget("month", 0)).toEqual({ budget_period: "month", budget_period_cents: 0 });
+    expect(validatePeriodBudget(null, null)).toEqual({ budget_period: null, budget_period_cents: null });
+  });
+
+  it.each([
+    ["week", 100],
+    ["day", null],
+    [null, 100],
+    ["day", -1],
+    ["day", 1.5],
+    ["day", "2500"],
+    ["day", 2_147_483_648],
+    ["DAY", 100],
+  ])("refuses %s / %s", (period, cents) => {
+    expect(() => validatePeriodBudget(period, cents)).toThrow(/budget_period/);
+  });
+
+  it("moves through an agent update only as a pair", () => {
+    expect(validateAgentUpdate({ budget_period: "month", budget_period_cents: 900 })).toEqual({
+      budget_period: "month",
+      budget_period_cents: 900,
+    });
+    expect(validateAgentUpdate({ budget_period: null, budget_period_cents: null })).toEqual({
+      budget_period: null,
+      budget_period_cents: null,
+    });
+    expect(() => validateAgentUpdate({ budget_period_cents: 900 })).toThrow(/together/);
   });
 });

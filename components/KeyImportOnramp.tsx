@@ -4,13 +4,13 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ed25519 } from "@noble/curves/ed25519";
 import { ArrowRight, Check, KeyRound, Plus, ShieldCheck, Upload, X } from "lucide-react";
-import { completeKeyImport, probeProviderKey } from "@/app/dashboard/actions";
+import { completeKeyImport, completeKeyImportDirect, probeProviderKey } from "@/app/dashboard/actions";
 import {
   clientModelIsUsable,
   DEFAULT_CLIENT_MODELS,
-  DISCOVERED_MODEL_SUGGESTION_LIMIT,
+  OTHER_MODEL_DISPLAY_LIMIT,
   preferredClientModel,
-  routableDiscoveredModels,
+  rankDiscoveredModels,
 } from "@/lib/agent-connect";
 import { bytesToBase64url } from "@/lib/encoding";
 import {
@@ -21,9 +21,18 @@ import {
 } from "@/lib/providers";
 import { buttonVariants } from "@/components/ui/button";
 import { PassportStoreAndConnect } from "@/components/PassportStoreAndConnect";
+import { DirectAgentKeyReveal, type RevealedDirectAgent } from "@/components/DirectAgentKeyReveal";
 import { scopeAllows } from "@/lib/scope";
 
 type Stage = "key" | "scope" | "done";
+/**
+ * Which credential the worker gets. A Direct Agent Key is the default because
+ * it is what an existing SDK can use unchanged — replace the provider key with
+ * it and set a base URL. A Passport is the stronger, explicit second choice
+ * for code that can sign challenges.
+ */
+type WorkerCredential = "direct" | "passport";
+const DEFAULT_INSTALLATION_NAME = "My installation";
 
 export function KeyImportOnramp({
   userId,
@@ -57,6 +66,8 @@ export function KeyImportOnramp({
   const [passportSecret, setPassportSecret] = useState("");
   const [agentId, setAgentId] = useState("");
   const [issuedAt, setIssuedAt] = useState("");
+  const [credential, setCredential] = useState<WorkerCredential>("direct");
+  const [directIssued, setDirectIssued] = useState<RevealedDirectAgent | null>(null);
   const [stored, setStored] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,8 +77,8 @@ export function KeyImportOnramp({
   const revealRef = useRef(onRevealChange);
   revealRef.current = onRevealChange;
   useEffect(() => {
-    revealRef.current?.(stage === "done" && Boolean(passportSecret));
-  }, [stage, passportSecret]);
+    revealRef.current?.(stage === "done" && (Boolean(passportSecret) || Boolean(directIssued)));
+  }, [stage, passportSecret, directIssued]);
   useEffect(() => () => revealRef.current?.(false), []);
 
   const guess = useMemo(() => detectProviderFromKey(key), [key]);
@@ -75,21 +86,20 @@ export function KeyImportOnramp({
     () => models.split(",").map((model) => model.trim()).filter(Boolean),
     [models]
   );
-  // Discovered ids this gateway could actually route — the provider listing
-  // minus the embedding, audio, image and moderation models the endpoint
-  // allowlist has no route to. Offering those as grants authorizes calls that
-  // can never be made.
-  const routable = useMemo(
-    () => routableDiscoveredModels(provider, discovered),
-    [provider, discovered]
-  );
+  // Presentation only. The listing is split by id shape into a short list of
+  // current general-purpose models and everything else the key reported; the
+  // provider's own order is not a recommendation. Neither list is the grant —
+  // `models` is, and any exact id can still be typed into it.
+  const ranked = useMemo(() => rankDiscoveredModels(discovered), [discovered]);
   const suggestions = useMemo(
-    () =>
-      routable
-        .filter((model) => !selectedModels.includes(model))
-        .slice(0, DISCOVERED_MODEL_SUGGESTION_LIMIT),
-    [routable, selectedModels]
+    () => ranked.suggested.filter((model) => !selectedModels.includes(model)),
+    [ranked, selectedModels]
   );
+  const otherModels = useMemo(
+    () => ranked.other.filter((model) => !selectedModels.includes(model)),
+    [ranked, selectedModels]
+  );
+  const otherShown = otherModels.slice(0, OTHER_MODEL_DISPLAY_LIMIT);
 
   const reset = () => {
     setStage("key");
@@ -108,6 +118,8 @@ export function KeyImportOnramp({
     setPassportSecret("");
     setAgentId("");
     setIssuedAt("");
+    setCredential("direct");
+    setDirectIssued(null);
     setStored(false);
     setError(null);
   };
@@ -158,6 +170,26 @@ export function KeyImportOnramp({
     }
     setBusy(true);
     setError(null);
+    if (credential === "direct") {
+      try {
+        const result = await completeKeyImportDirect({
+          handoff,
+          provider,
+          label: label.trim() || "imported",
+          name,
+          keyName: DEFAULT_INSTALLATION_NAME,
+          models: selectedModels,
+        });
+        setDirectIssued({ ...result, provider: result.provider, model: concreteModel });
+        setHandoff("");
+        setStage("done");
+      } catch (cause) {
+        setError((cause as Error).message || "Something went wrong. Please try again.");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     const privateKey = ed25519.utils.randomPrivateKey();
     try {
       const publicKey = ed25519.getPublicKey(privateKey);
@@ -210,7 +242,7 @@ export function KeyImportOnramp({
         </h2>
         <p className="m-0 text-sm text-muted-foreground">
           Detect reachable models, choose the exact capability grant, store the key in Vault,
-          and issue a browser-generated passport in one flow.
+          and give one worker its own credential in one flow.
         </p>
       </div>
 
@@ -218,7 +250,7 @@ export function KeyImportOnramp({
         {[
           ["key", "Provider key"],
           ["scope", "Capability"],
-          ["done", "Connect agent"],
+          ["done", "Connect worker"],
         ].map(([id, text], index) => {
           const current = ["key", "scope", "done"].indexOf(stage);
           const complete = index < current;
@@ -309,16 +341,9 @@ export function KeyImportOnramp({
             {probeMode === "detected" ? (
               <p className="m-0">
                 <strong>{provider}</strong> reported {discoveredTotal} model
-                {discoveredTotal === 1 ? "" : "s"} for this key
-                {routable.length < discovered.length ? (
-                  <>
-                    {" "}
-                    ({routable.length} of them reachable through this gateway&apos;s
-                    endpoints)
-                  </>
-                ) : null}
-                . That is what the key can see, not what the agent may use — the grant
-                below starts at one model and you widen it deliberately.
+                {discoveredTotal === 1 ? "" : "s"} for this key. That is what the key can
+                see, not what the agent may use — the grant below starts at one model and
+                you widen it deliberately.
               </p>
             ) : (
               <p className="m-0">
@@ -343,7 +368,7 @@ export function KeyImportOnramp({
             </label>
           </div>
           <label className={labelClass}>
-            <span className={labelText}>Allowed models (comma-separated)</span>
+            <span className={labelText}>Allowed models · the grant (comma-separated)</span>
             <textarea
               value={models}
               onChange={(event) => setModels(event.target.value)}
@@ -351,7 +376,8 @@ export function KeyImportOnramp({
               placeholder="Enter exact model ids"
             />
             <span className="text-xs text-muted-foreground">
-              This is the passport&apos;s capability grant. Add only what the agent needs.
+              This is the worker&apos;s capability grant — the only list that authorizes
+              anything. Add only what the agent needs; any exact id works, listed below or not.
             </span>
           </label>
           {selectedModels.length ? (
@@ -367,39 +393,75 @@ export function KeyImportOnramp({
             </div>
           ) : null}
           {suggestions.length ? (
-            <div className="grid gap-2">
+            <div className="grid gap-2" data-section="suggested-models">
               <span className="text-xs text-muted-foreground">
+                Suggested — current general-purpose models on this key, picked by name
+                for convenience. Adding one widens the grant.
+              </span>
+              <ModelChips
+                models={suggestions}
+                onAdd={addModel}
+                label="Suggested models from this provider"
+              />
+            </div>
+          ) : null}
+          {otherModels.length ? (
+            <details className="grid gap-2" data-section="other-models">
+              <summary className="cursor-pointer text-xs text-muted-foreground">
                 {/* "Showing N of M", never a truncated list presented as the whole
                     set — that is how an operator concludes a model is unavailable
                     when it simply was not listed. */}
-                Also available on this key
-                {routable.length > suggestions.length + selectedModels.length
-                  ? ` (showing ${suggestions.length} of ${routable.length})`
+                Other models this key reports ({otherModels.length}) — not recommended
+              </summary>
+              <span className="text-xs text-muted-foreground">
+                Dated snapshots, older families, and audio, image, embedding or moderation
+                models, which the provider lists but which may not work on the chat and
+                Responses endpoints PassControl forwards.
+                {otherShown.length < otherModels.length
+                  ? ` Showing ${otherShown.length} of ${otherModels.length}; type any other exact id into the allowed models above.`
                   : ""}
-                :
               </span>
-              <div className="pc-onramp__models" aria-label="Suggested models from this provider">
-                {suggestions.map((model) => (
-                  <span key={model}>
-                    <code>{model}</code>
-                    <button
-                      type="button"
-                      onClick={() => addModel(model)}
-                      aria-label={`Allow ${model}`}
-                    >
-                      <Plus aria-hidden="true" />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            </div>
+              <ModelChips models={otherShown} onAdd={addModel} label="Other models from this provider" />
+            </details>
           ) : null}
+          <fieldset className="grid gap-2" data-section="worker-credential">
+            <legend className={labelText}>Credential for this worker</legend>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="radio"
+                name="worker-credential"
+                className="mt-1 w-auto"
+                checked={credential === "direct"}
+                onChange={() => setCredential("direct")}
+              />
+              <span>
+                <strong>Direct Agent Key</strong> — recommended. The worker&apos;s existing SDK uses it in
+                place of the provider key; only the base URL changes. A revocable bearer key, bound to
+                this one agent.
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="radio"
+                name="worker-credential"
+                className="mt-1 w-auto"
+                checked={credential === "passport"}
+                onChange={() => setCredential("passport")}
+              />
+              <span>
+                <strong>Passport</strong> — stronger identity for code that can sign challenges with the
+                PassControl SDK or sidecar. The private key is generated in this browser.
+              </span>
+            </label>
+          </fieldset>
           <div className="pc-onramp__review">
             <p className="pc-kicker">Before you continue</p>
             <p>
               Store one <strong>{provider}</strong> key as <strong>{label.trim() || "imported"}</strong>,
-              issue <strong>{name.trim() || "the named agent"}</strong> a browser-generated passport,
-              and grant exactly {selectedModels.length} model{selectedModels.length === 1 ? "" : "s"}.
+              {credential === "direct"
+                ? <> give <strong>{name.trim() || "the named agent"}</strong> a Direct Agent Key,</>
+                : <> issue <strong>{name.trim() || "the named agent"}</strong> a browser-generated passport,</>}
+              {" "}and grant exactly {selectedModels.length} model{selectedModels.length === 1 ? "" : "s"}.
             </p>
           </div>
           {error ? <p className="m-0 text-sm text-destructive">{error}</p> : null}
@@ -413,10 +475,23 @@ export function KeyImportOnramp({
               className={buttonVariants({ size: "sm" })}
             >
               <KeyRound className="h-4 w-4" />
-              {busy ? "Securing import…" : "Store key & issue passport"}
+              {busy
+                ? "Securing import…"
+                : credential === "direct"
+                  ? "Store key & create worker credential"
+                  : "Store key & issue passport"}
             </button>
           </div>
         </form>
+      ) : null}
+
+      {stage === "done" && directIssued ? (
+        <DirectAgentKeyReveal
+          issued={directIssued}
+          stored={stored}
+          onStoredChange={setStored}
+          onDone={acknowledgeStored}
+        />
       ) : null}
 
       {stage === "done" && agentId && issuedAt && passportId && passportSecret ? (
@@ -435,6 +510,29 @@ export function KeyImportOnramp({
           onFinish={acknowledgeStored}
         />
       ) : null}
+    </div>
+  );
+}
+
+function ModelChips({
+  models,
+  onAdd,
+  label,
+}: {
+  models: string[];
+  onAdd: (model: string) => void;
+  label: string;
+}) {
+  return (
+    <div className="pc-onramp__models" aria-label={label}>
+      {models.map((model) => (
+        <span key={model}>
+          <code>{model}</code>
+          <button type="button" onClick={() => onAdd(model)} aria-label={`Allow ${model}`}>
+            <Plus aria-hidden="true" />
+          </button>
+        </span>
+      ))}
     </div>
   );
 }

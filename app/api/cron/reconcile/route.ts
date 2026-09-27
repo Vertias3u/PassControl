@@ -1,13 +1,20 @@
-// Reconciliation cron (Tension 2). Periodically:
-//   - recompute spent:<agid> and spent_cost:<agid> from agent_logs
-//     (authoritative) -> fixes Redis drift.
-//     Done INCREMENTALLY DB-side via the reconcile_agent_spend RPC (a cron-owned
-//     checkpoint folds in only newly-settled rows each run) — O(new rows), not a
-//     full-history scan per agent.
-//   - reset reserved:<agid> and reserved_cost:<agid> to the sum of still-live
-//     per-jti markers (orphaned reservations from crashed reconciles have
-//     already expired) -> self-heal
-//   - flush coalesced lastseen:<agid> into agents.last_seen_at
+// Reconciliation cron (Tension 2). lib/reconcile.ts is the authority; this is
+// what it does now, and each step there says why:
+//   - RAISES spent:<agid> / spent_cost:<agid> toward the running totals from the
+//     incremental, lagged reconcile_agent_spend RPC (a cron-owned checkpoint
+//     folds in only newly settled agent_logs rows). A monotone floor: it can
+//     recover a settlement whose Redis write was lost, and it can never lower a
+//     counter or create capacity. It used to SET them, which erased every
+//     settlement made inside the lag window.
+//   - Does NOT write reserved:<agid> / reserved_cost:<agid>. Reservations move
+//     only through the atomic hold transitions; open holds and any mismatch
+//     between reserved: and the open holds are REPORTED in the result, never
+//     corrected. It used to rebuild reserved: from a SCAN of per-request markers,
+//     which could overwrite a reservation taken concurrently.
+//   - Flushes coalesced lastseen:<agid> into agents.last_seen_at.
+//   - Passport housekeeping: clears retired keys past their grace window, lists
+//     passports about to expire (reported, not renewed), closes lapsed
+//     break-glass grants, and reports observe-only passport source signals.
 //
 // Schedule via vercel.json cron hitting GET /api/cron/reconcile with CRON_SECRET.
 export const runtime = "edge";

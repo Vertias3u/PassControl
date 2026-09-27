@@ -70,6 +70,33 @@ function optionalToken(obj: Record<string, unknown>, key: string): number | null
   return obj[key] === undefined ? 0 : token(obj[key]);
 }
 
+/**
+ * Input and output from a Chat Completions usage object.
+ *
+ * Gemini bills thinking tokens at the output rate, but its OpenAI-compatible
+ * endpoint leaves them out of `completion_tokens`. Owner-run 2026-09-27,
+ * `gemini-3.8-flash` with `reasoning_effort: "medium"`: prompt 13, completion
+ * 127, total 304 — 164 billed tokens in neither field. So for Gemini the output
+ * is everything that is not input, `total_tokens − prompt_tokens`, and never less
+ * than `completion_tokens`. A total that is malformed or below the input yields
+ * no output figure, so the call cannot read as complete; the reported
+ * `completion_tokens` is still charged.
+ */
+function chatTokens(
+  provider: ProviderId,
+  u: any
+): { input: number | null; output: number | null; reportedOutput: number | null } {
+  const input = token(u?.prompt_tokens);
+  const output = token(u?.completion_tokens);
+  if (provider !== "gemini") return { input, output, reportedOutput: output };
+  const total = token(u?.total_tokens);
+  if (input === null || output === null || total === null || total < input) {
+    return { input, output: null, reportedOutput: output };
+  }
+  const billed = Math.max(output, total - input);
+  return { input, output: billed, reportedOutput: billed };
+}
+
 class Tally {
   input = 0;
   output = 0;
@@ -141,12 +168,24 @@ class Tally {
       // No cache fields read here on purpose — prompt_tokens already includes
       // them, so anything added would be the same tokens counted twice.
       const u = obj?.usage;
-      const input = token(u?.prompt_tokens);
-      const output = token(u?.completion_tokens);
+      const { input, output, reportedOutput } = chatTokens(provider, u);
       if (u) this.sawUsage = true;
       if (input !== null) this.input = input;
-      if (output !== null) this.output = output;
-      if (input !== null && output !== null) {
+      if (reportedOutput !== null) this.output = reportedOutput;
+      if (provider === "gemini") {
+        // Gemini does not send a `choices: []` usage chunk. Usage rides on the
+        // content chunks, the last of which carries `finish_reason`, then [DONE]
+        // (owner capture, 2026-09-27). So a report is final only on a chunk whose
+        // every choice has finished, and only if it is the last data chunk before
+        // [DONE]: every later chunk re-decides, so one without it clears the flag.
+        const choices = obj?.choices;
+        this.openAiFinalUsage =
+          input !== null &&
+          output !== null &&
+          Array.isArray(choices) &&
+          (choices.length === 0 ||
+            choices.every((c: any) => typeof c?.finish_reason === "string" && c.finish_reason !== ""));
+      } else if (input !== null && output !== null) {
         // Chat Completions' include_usage contract puts final usage on its
         // choices: [] event. Do not call a random usage-shaped chunk terminal.
         if (Array.isArray(obj?.choices) && obj.choices.length === 0) this.openAiFinalUsage = true;
@@ -370,12 +409,11 @@ export function usageFromJson(
   if (usesOpenAiUsageShape(provider)) {
     // `prompt_tokens` already includes any cached prompt tokens, so the cache
     // dimensions stay 0 here. See the Usage doc comment.
-    const input = token(body?.usage?.prompt_tokens);
-    const output = token(body?.usage?.completion_tokens);
+    const { input, output, reportedOutput } = chatTokens(provider, body?.usage);
     const sawUsage = body?.usage != null;
     return {
       inputTokens: input ?? 0,
-      outputTokens: output ?? 0,
+      outputTokens: reportedOutput ?? 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       sawUsage,

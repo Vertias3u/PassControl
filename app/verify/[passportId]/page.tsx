@@ -10,6 +10,7 @@
 // that an unauthenticated page has no business amplifying traffic into. This
 // page reads the passport's own lifecycle and stops there. The copy below says
 // so out loud so nobody mistakes a green badge for an authorization decision.
+import { IssuerReachNotice } from "@/components/IssuerReachNotice";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { headers } from "next/headers";
@@ -56,6 +57,8 @@ function Shell({ children }: { children: React.ReactNode }) {
           <h1 className="m-0 text-lg font-bold text-foreground">Agent passport verification</h1>
         </div>
       </header>
+
+      <IssuerReachNotice />
       {children}
       <footer className="grid gap-3 border-t border-border pt-6 text-sm text-muted-foreground">
         <p className="m-0">

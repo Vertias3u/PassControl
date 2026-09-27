@@ -67,7 +67,9 @@ describe("the first-call guide reuses the first-run provider read", () => {
     // The first agent form needs the provider family but never a Vault id or
     // secret. Showing setup because a COUNT errored is still the more annoying
     // way to be wrong.
-    expect(dashboard).toMatch(/from\("provider_credentials"\)[\s\S]{0,160}select\("provider"[\s\S]{0,80}limit\(6\)/);
+    // Bounded, but not at 6: the connect form reads this list as evidence that a
+    // provider has NO key, and six rows of one provider must not hide another.
+    expect(dashboard).toMatch(/from\("provider_credentials"\)[\s\S]{0,160}select\("provider"[\s\S]{0,80}limit\(200\)/);
     expect(dashboard).not.toMatch(/from\("provider_credentials"\)[\s\S]{0,120}vault_secret_id/);
     expect(dashboard).toMatch(/\?\? 1/);
   });
@@ -93,18 +95,21 @@ describe("the first-call guide reuses the first-run provider read", () => {
   });
 
 
-  it("derives the last activation step from audit rows it already fetched", () => {
-    // A rail most tenants have dismissed must not cost a round trip. admin_audit
-    // is loaded once, for ActivityWorkspace, and step 4 reads the same rows.
-    expect(dashboard).toContain("latestControlExerciseAt(adminAudit ?? [])");
-    expect(dashboard).toContain("controlExerciseAt={controlExerciseAt}");
+  it("reads the refusal test on its own and no longer derives step 4 from audit rows", () => {
+    // 0072: the last step is a same-worker scope refusal after a started test,
+    // not a stop-control audit row. Its two columns are read in their own query
+    // so an unmigrated database cannot fail the dismissed/completed read.
+    expect(dashboard).not.toMatch(/latestControlExerciseAt|controlExerciseAt/);
+    expect(dashboard).toContain('select("refusal_test_agent_id, refusal_test_started_at")');
+    expect(dashboard).toContain('select("dismissed_at, completed_at")');
+    expect(dashboard).toContain("refusalTest={refusalTest}");
     expect(dashboard.match(/from\("admin_audit"\)/g) ?? []).toHaveLength(1);
   });
 
-  it("ends the guide on proving the fleet can be stopped, not on one admitted call", () => {
-    expect(firstCall).toContain('"Verify controls"');
-    expect(firstCall).toContain('data-activation-state="verify"');
-    expect(firstCall).toContain('data-control="kill"');
+  it("ends the guide on a deliberate refusal, not on one admitted call", () => {
+    expect(firstCall).toContain('"Prove a refusal"');
+    expect(firstCall).toContain('data-activation-state="refuse"');
+    expect(firstCall).toContain('data-control="start-refusal-test"');
     // Trust boundary 3 in copy: tenant kill is reversible and independent of
     // per-agent suspension, and it purges nothing. The bar next to it said
     // otherwise until this step was written; neither may say it again.

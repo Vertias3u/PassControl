@@ -118,3 +118,23 @@ describe("the panel counts only what it can attribute", () => {
     expect(html).not.toMatch(/Promote to live policy/);
   });
 });
+
+// K2 — the panel is the only browser route to the live policy (via Promote), so
+// a ceiling it cannot carry is a ceiling an edit would silently drop.
+describe("the draft form round-trips the output ceiling", () => {
+  it("keeps max_output_tokens through the form and back", async () => {
+    const { toDraft, toPolicy } = await import("@/components/PolicyShadowPanel");
+    const draft = { deny: [{ provider: "openai", models: ["gpt-4*"] }], max_output_tokens: 4096 };
+    expect(toDraft(draft).ceiling).toBe("4096");
+    expect(toPolicy(toDraft(draft))).toEqual(draft);
+  });
+
+  it("writes only a positive whole ceiling, and a ceiling alone is a policy", async () => {
+    const { toDraft, toPolicy } = await import("@/components/PolicyShadowPanel");
+    const blank = toDraft(null);
+    expect(toPolicy({ ...blank, ceiling: "512" })).toEqual({ max_output_tokens: 512 });
+    for (const bad of ["", "0", "-3", "1.5", "lots"]) {
+      expect(toPolicy({ ...blank, ceiling: bad })).toBeNull();
+    }
+  });
+});

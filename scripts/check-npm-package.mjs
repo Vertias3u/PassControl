@@ -82,6 +82,7 @@ const allowed = new Set([
   // bin/passcontrol.mjs imports this on every run, so a missing file is not a
   // degraded update notice — it is an install that cannot start at all.
   "cli/update-check.mjs",
+  "cli/update.mjs",
   "cli/visa-client.mjs",
   "sdk/README.md",
   "sdk/control.d.ts",

@@ -186,3 +186,13 @@ describe("key-import guards", () => {
     })).toThrow("concrete model id");
   });
 });
+
+// A self-host build has no canonical origin, so the passport reveal renders with
+// an EMPTY gateway until the browser supplies window.location.origin. `new URL("")`
+// threw there, which the public mirror's render test hit (2026-09-27). No
+// address yet means no command yet, not a crash.
+describe("buildPassportImportCommand without a gateway", () => {
+  it("returns an empty command instead of throwing", () => {
+    expect(buildPassportImportCommand({ gateway: "", passportId: "P".repeat(43) })).toBe("");
+  });
+});

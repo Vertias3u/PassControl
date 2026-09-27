@@ -16,7 +16,8 @@
 //     wall-clock time rather than by how often the CLI is run.
 //
 // It reports only that a newer version exists. It never downloads, installs or
-// runs anything — upgrading stays a thing the operator types.
+// runs anything — upgrading stays a thing the operator types (`passcontrol update`,
+// cli/update.mjs, which asks before it changes anything).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -110,7 +111,7 @@ export function writeCache(file, data) {
 /** The notice itself, or null when there is nothing worth saying. */
 export function updateNotice(current, latest) {
   if (!isNewer(latest, current)) return null;
-  return `Update available ${current} → ${latest}   npm install -g passcontrol@latest`;
+  return `Update available ${current} → ${latest}   passcontrol update`;
 }
 
 /**
@@ -124,7 +125,10 @@ export async function fetchLatest(url = REGISTRY_URL, timeoutMs = 1500, fetchImp
   try {
     const res = await fetchImpl(url, {
       signal: controller.signal,
-      headers: { accept: "application/vnd.npm.install-v1+json" },
+      // Plain JSON. The abbreviated-metadata type is for the full packument; on
+      // /latest the registry answers 406 to it, which made every check return
+      // null and no notice was ever shown (found 2026-09-27).
+      headers: { accept: "application/json" },
     });
     if (!res.ok) return null;
     const body = await res.json();

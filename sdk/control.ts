@@ -157,7 +157,15 @@ export class ControlClient {
     ) => this.req<{ id: string; name: string; expires_at: string | null }>("POST", "/agents", { body, idempotencyKey: opts?.idempotencyKey }),
     update: (
       id: string,
-      patch: { name?: string; scopes?: { provider: string; models: string[] }[]; budget_tokens?: number | null; budget_cents?: number | null },
+      patch: {
+        name?: string;
+        scopes?: { provider: string; models: string[] }[];
+        budget_tokens?: number | null;
+        budget_cents?: number | null;
+        /** Periodic spend limit: send both, or both null to remove it. */
+        budget_period?: "day" | "month" | null;
+        budget_period_cents?: number | null;
+      },
       opts?: WriteOpts
     ) => this.req<{ id: string }>("PATCH", `/agents/${encodeURIComponent(id)}`, { body: patch, idempotencyKey: opts?.idempotencyKey }),
     suspend: (id: string, opts?: WriteOpts) =>

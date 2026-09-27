@@ -78,6 +78,7 @@ const k = {
   fallbacksFence: (uid: string, agid: string) => `fbgen:${uid}:${agid}`,
   providerKeysFence: (uid: string) => `pkgen:${uid}`,
   lastSeen: (agid: string) => `lastseen:${agid}`,
+  passportSecretExposed: (agentId: string) => `passport_secret_exposed:${agentId}`,
   keyImport: (uid: string, id: string) => `keyimport:${uid}:${id}`,
 };
 
@@ -611,6 +612,23 @@ export async function isSuspended(agentId: string): Promise<boolean> {
   }
 }
 
+/**
+ * The per-agent suspension flag as OBSERVED, for showing an operator what the
+ * gateway will do — not for deciding a call. `null` means the read failed.
+ *
+ * `isSuspended` above folds a failed read into the configured fail posture,
+ * which is right for enforcement and wrong for display: on a fail-closed
+ * deployment it would report "suspended" for an agent nobody suspended, and on
+ * a fail-open one it would report "active" while nobody knows.
+ */
+export async function readSuspensionFlag(agentId: string): Promise<boolean | null> {
+  try {
+    return (await redis().exists(k.suspended(agentId))) === 1;
+  } catch {
+    return null;
+  }
+}
+
 export async function suspendAgent(agentId: string): Promise<void> {
   await redis().set(k.suspended(agentId), 1);
 }
@@ -622,6 +640,41 @@ export async function unsuspendAgent(agentId: string): Promise<void> {
 // ── last_seen (write-coalesced; flushed to Postgres by the reconcile cron) ────
 export async function touchLastSeen(agentId: string): Promise<void> {
   await redis().set(k.lastSeen(agentId), Date.now());
+}
+
+// ── Passport secret presented as a bearer token (C1 detection) ───────────────
+// Evidence, never a gate: written when the gateway PROVES an agent's private
+// passport key was sent to it as an API key, read by the agent page to say
+// "rotate". Keyed by agent and stamped with the passport id it was proven for,
+// so rotating the passport makes the flag stop matching without a cleanup job.
+// Best-effort both ways; never holds the secret.
+const PASSPORT_SECRET_EXPOSED_TTL_SECONDS = 90 * 24 * 60 * 60;
+
+export interface PassportSecretExposure {
+  at: string;
+  passportId: string;
+}
+
+export async function flagPassportSecretExposed(agentId: string, passportId: string): Promise<void> {
+  await redis().set(
+    k.passportSecretExposed(agentId),
+    JSON.stringify({ at: new Date().toISOString(), passportId }),
+    { ex: PASSPORT_SECRET_EXPOSED_TTL_SECONDS }
+  );
+}
+
+/** null when unset OR unreadable — this is advice to the operator, not a control. */
+export async function readPassportSecretExposure(agentId: string): Promise<PassportSecretExposure | null> {
+  try {
+    const raw = await redis().get<unknown>(k.passportSecretExposed(agentId));
+    const value = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (value && typeof value === "object" && typeof (value as PassportSecretExposure).at === "string" && typeof (value as PassportSecretExposure).passportId === "string") {
+      return value as PassportSecretExposure;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ── Key-import handoff (dashboard on-ramp) ───────────────────────────────────

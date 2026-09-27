@@ -31,7 +31,13 @@ const CURRENT_SCHEMA = [
   "budget_state_established_at",
   "budget_tokens",
   "budget_cents",
+  // 0073, a rung of its own above the rest (see the pre-0073 test below).
+  "budget_period",
+  "budget_period_cents",
 ];
+
+/** The newest schema before 0073: every column above except the periodic limit. */
+const PRE_0073_SCHEMA = CURRENT_SCHEMA.filter((c) => !c.startsWith("budget_period"));
 
 /**
  * A database whose selects fail with 42703 until the caller asks for a column
@@ -99,8 +105,8 @@ describe("the pre-0049 schema, where the control is a boolean", () => {
 
     expect(read.senderConstraintMode).toBe("off");
     // Current schemas still pay one query; this rung is only reached after the
-    // newer ones have already been refused by 42703.
-    expect(selects.length).toBeLessThanOrEqual(3);
+    // newer ones have already been refused by 42703 (0073 added one above).
+    expect(selects.length).toBeLessThanOrEqual(4);
   });
 
   it("still falls through to policy-only on a schema older than 0046", async () => {
@@ -171,7 +177,65 @@ describe("reading the sender-constraint mode", () => {
     // No budget columns means this database cannot record budget state, so
     // nothing is enforced and the gateway behaves exactly as it did before 0055.
     expect(read.budgetState).toEqual({ epoch: null, established: false });
+    expect(selects).toHaveLength(3);
+  });
+
+  // THE RUNG 0073 ADDED, above the full select. Folded into the current first
+  // rung instead, a database that has not applied 0073 would fall to the
+  // pre-0055 rung and lose the budget epoch — silently disabling the loss check
+  // because an optional new column was missing. The epoch is the assertion.
+  it("narrows to a pre-0073 schema WITHOUT losing budget state or the caps", async () => {
+    const { client, selects } = db({
+      has: PRE_0073_SCHEMA,
+      row: {
+        policy: null,
+        policy_shadow: null,
+        sender_constraint_mode: "required",
+        budget_epoch: "epoch-1",
+        budget_state_established_at: "2026-09-01T00:00:00Z",
+        budget_tokens: 5000,
+        budget_cents: 250,
+      },
+    });
+    const read = await readCurrentAgentPolicyAndShadow(client, "u1", "a1", { cacheOnMiss: false });
+    expect(read.budgetState).toEqual({ epoch: "epoch-1", established: true });
+    expect(read.budget).toEqual({ known: true, tokens: 5000, cents: 250 });
+    expect(read.senderConstraintMode).toBe("required");
+    // Unknown, never "no periodic limit": the gateway then falls back to the
+    // last limit its own snapshot recorded.
+    expect(read.period).toEqual({ known: false });
     expect(selects).toHaveLength(2);
+  });
+
+  it("carries the periodic limit, and reads no limit as a known absence", async () => {
+    const limited = db({
+      has: CURRENT_SCHEMA,
+      row: { policy: null, budget_period: "day", budget_period_cents: 2500 },
+    });
+    expect(
+      (await readCurrentAgentPolicyAndShadow(limited.client, "u1", "a1", { cacheOnMiss: false })).period
+    ).toEqual({ known: true, kind: "day", cents: 2500 });
+    const unlimited = db({ has: CURRENT_SCHEMA, row: { policy: null } });
+    expect(
+      (await readCurrentAgentPolicyAndShadow(unlimited.client, "u1", "a1", { cacheOnMiss: false })).period
+    ).toEqual({ known: true, kind: null, cents: null });
+  });
+
+  it("keeps the periodic limit through its cache, and reads an older entry as unknown", async () => {
+    const { client } = db({
+      has: CURRENT_SCHEMA,
+      row: { policy: null, budget_period: "month", budget_period_cents: 900 },
+    });
+    await readCurrentAgentPolicyAndShadow(client, "u1", "a1");
+    h.getMock.mockResolvedValue(h.setMock.mock.calls[0]![2] as string);
+    expect((await readCurrentAgentPolicyAndShadow(client, "u1", "a1")).period).toEqual({
+      known: true,
+      kind: "month",
+      cents: 900,
+    });
+    // Written by the previous deploy: no `pdk`. Unknown, not "no limit".
+    h.getMock.mockResolvedValue(JSON.stringify({ p: null, s: null, bk: true, bt: null, bc: null }));
+    expect((await readCurrentAgentPolicyAndShadow(client, "u1", "a1")).period).toEqual({ known: false });
   });
 
   // The deployment-order ladder 0046 introduced, now two rungs longer. Code that
@@ -189,9 +253,9 @@ describe("reading the sender-constraint mode", () => {
     expect(read.shadow).toEqual({ draft: true });
     // No mode column AND no 0046 boolean means nothing was ever configured here.
     expect(read.senderConstraintMode).toBe("off");
-    // Four, not three: a schema this old refuses the legacy-boolean rung too.
-    // A real pre-0049 install HAS that column and still pays three.
-    expect(selects).toHaveLength(4);
+    // Five, not four: a schema this old refuses the legacy-boolean rung too.
+    // A real pre-0049 install HAS that column and still pays four.
+    expect(selects).toHaveLength(5);
   });
 
   it("narrows all the way to a pre-0020 schema", async () => {
@@ -201,7 +265,7 @@ describe("reading the sender-constraint mode", () => {
     expect(read.policy).toEqual({ live: true });
     expect(read.shadow).toBeNull();
     expect(read.senderConstraintMode).toBe("off");
-    expect(selects).toHaveLength(5);
+    expect(selects).toHaveLength(6);
   });
 
   // An infrastructure fault is not a configuration. The proxy refuses passport

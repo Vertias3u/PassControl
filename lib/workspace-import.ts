@@ -9,7 +9,7 @@
 // The governing rule is that an import may never leave a workspace holding an
 // agent with MORE reach than the file described. Everything that looks like a
 // lenient default below is that rule applied.
-import { validateAgentInput, validateFallbacks } from "@/lib/validate";
+import { validateAgentInput, validateFallbacks, validatePeriodBudget } from "@/lib/validate";
 import { policyIsWellFormed } from "@/lib/scope";
 
 // `agents.status` is an enum in 0001_init.sql:12. An unknown value must not
@@ -177,6 +177,22 @@ export function planAgentImports(agents: unknown, existingPubkeys: Iterable<stri
     }
     status = entry.status;
 
+    // The periodic limit (0073) is OPTIONAL in a file, unlike the fields above:
+    // an export written before it existed is complete without it, and its
+    // agents had no periodic limit. When present it is validated as the pair it
+    // is stored as, and a bad pair refuses the agent rather than dropping a limit.
+    let period: { budget_period: "day" | "month" | null; budget_period_cents: number | null } = {
+      budget_period: null,
+      budget_period_cents: null,
+    };
+    if (Object.hasOwn(entry, "budget_period") || Object.hasOwn(entry, "budget_period_cents")) {
+      try {
+        period = validatePeriodBudget(entry.budget_period ?? null, entry.budget_period_cents ?? null);
+      } catch {
+        return { action: "reject", name, reason: "invalid_budget_period" };
+      }
+    }
+
     let expiresAt: string | null;
     if (entry.expires_at !== null) {
       if (typeof entry.expires_at !== "string" || Number.isNaN(Date.parse(entry.expires_at))) {
@@ -204,6 +220,9 @@ export function planAgentImports(agents: unknown, existingPubkeys: Iterable<stri
       allowed_scopes: base.scopes,
       budget_tokens: base.budget_tokens,
       budget_cents: base.budget_cents,
+      // Written only when set, so restoring into a database without 0073 still
+      // works for every agent that has no periodic limit.
+      ...(period.budget_period !== null ? period : {}),
       // All config fields are emitted explicitly. A database default is not a
       // restore value, even where today's default happens to agree with null.
       policy: entry.policy,

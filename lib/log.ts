@@ -57,6 +57,11 @@ interface LogEntryBase {
   status:
     | "ok"
     | "blocked_budget"
+    // The agent's PERIODIC spend limit (K1) is used up for the current calendar
+    // UTC day or month. Distinct from blocked_budget because the fix is the
+    // opposite one: this clears by itself at the next boundary (the 402 carries
+    // retry-after), a cumulative cap only clears when the owner raises it.
+    | "blocked_budget_period"
     | "blocked_endpoint"
     | "blocked_killed"
     | "blocked_suspended"
@@ -146,7 +151,12 @@ interface LogEntryBase {
     // the operator either removes the dollar cap, or stops routing that agent
     // through an endpoint whose bill nobody here can compute. Token caps are
     // unaffected: the provider's token counts are real wherever the call went.
-    | "blocked_unpriced_endpoint";
+    | "blocked_unpriced_endpoint"
+    // Refused before anything was reserved because the agent has a DOLLAR limit
+    // and the model has no price row (lib/pricing.ts): its cost could only be
+    // the provider fallback. Never sent. Same remedy as its sibling above, plus
+    // a third: add the model's price to the table.
+    | "blocked_unpriced_model";
   /**
    * What the budget was actually CHARGED for this attempt, when that differs
    * from the observed figures above.

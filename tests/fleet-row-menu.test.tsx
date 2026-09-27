@@ -58,7 +58,7 @@ describe("placeRowMenu", () => {
 describe("Fleet row menu markup", () => {
   it("keeps the labelled summary and all four actions", () => {
     const html = renderToStaticMarkup(
-      <AgentFleetTable
+      <AgentFleetTable agentsAvailable
         agents={[{
           id: "a1",
           name: "agent-a1",

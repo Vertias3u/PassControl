@@ -29,6 +29,23 @@ function describe(row: AdminAuditRow): { label: string; Icon: typeof UserPlus; t
   switch (row.action) {
     case "agent.create":
       return { label: "Agent created", Icon: UserPlus, tone: "info" };
+    // The installation credential, not the agent: revoking one key stops only
+    // the worker that holds it (Session 05 wording, kept here).
+    case "agent.direct_key.create":
+      return { label: "Installation key created", Icon: KeyRound, tone: "info" };
+    case "agent.direct_key.revoke":
+      return { label: "Installation key revoked", Icon: KeyRound, tone: "warning" };
+    case "agent.update": {
+      const fields = String(m.fields ?? "");
+      if (fields === "allowed_scopes") return { label: "Allowed access changed", Icon: ShieldCheck, tone: "info" };
+      if (fields.includes("budget_period")) return { label: "Spend limits changed", Icon: ShieldCheck, tone: "info" };
+      if (fields.startsWith("budget_")) return { label: "Cumulative caps changed", Icon: ShieldCheck, tone: "info" };
+      if (fields === "fallbacks") return { label: "Fallback routes changed", Icon: RefreshCw, tone: "info" };
+      if (fields === "passport_pubkey") return { label: "Passport key replaced", Icon: KeyRound, tone: "warning" };
+      return { label: "Agent updated", Icon: Activity, tone: "info" };
+    }
+    case "agent.break_glass":
+      return { label: "Temporary access granted (break glass)", Icon: ShieldAlert, tone: "warning" };
     case "agent.suspend":
       return m.suspended === false
         ? { label: "Agent resumed", Icon: PlayCircle, tone: "info" }
@@ -62,21 +79,38 @@ function describe(row: AdminAuditRow): { label: string; Icon: typeof UserPlus; t
 
 // Human-readable context from the metadata/target, minus the fields already
 // folded into the label.
-function details(row: AdminAuditRow): string {
+function details(row: AdminAuditRow, agentNames: Readonly<Record<string, string>>): string {
   const m = { ...(row.metadata ?? {}) } as Record<string, unknown>;
   if (row.action === "agent.suspend") delete m.suspended;
   if (row.action === "killswitch.master") delete m.on;
   if (row.action === "workspace.key_custody_expectation") delete m.to;
+  if (row.action === "agent.update" && typeof m.fields === "string" && m.fields !== "passport_pubkey") delete m.fields;
   const parts = Object.entries(m).map(([k, v]) => `${k}: ${String(v)}`);
-  if (row.target_id) parts.unshift(`${row.target_type ?? "target"} ${row.target_id.slice(0, 12)}…`);
+  if (row.target_id) {
+    // The agent's CURRENT name, resolved here; the stored row keeps only the id,
+    // which stays visible so the row can still be matched against the log.
+    const name = row.target_type === "agent" ? agentNames[row.target_id] : undefined;
+    parts.unshift(
+      name
+        ? `${name} (agent ${row.target_id.slice(0, 8)}…)`
+        : `${row.target_type ?? "target"} ${row.target_id.slice(0, 12)}…`
+    );
+  }
   return parts.join(" · ") || "—";
 }
 
-export function AdminAuditTable({ rows }: { rows: AdminAuditRow[] }) {
+export function AdminAuditTable({
+  rows,
+  agentNames = {},
+}: {
+  rows: AdminAuditRow[];
+  /** Current agent names by id, from the same page read as the call history. */
+  agentNames?: Readonly<Record<string, string>>;
+}) {
   const [filter, setFilter] = useState("");
   const q = filter.toLowerCase();
   const shown = rows.filter((r) =>
-    !q ? true : [describe(r).label, r.action, details(r)].some((f) => f.toLowerCase().includes(q))
+    !q ? true : [describe(r).label, r.action, details(r, agentNames)].some((f) => f.toLowerCase().includes(q))
   );
   const { zoneLabel } = useDashboardTime();
 
@@ -87,7 +121,7 @@ export function AdminAuditTable({ rows }: { rows: AdminAuditRow[] }) {
   return (
     <div className="grid">
       <input
-        placeholder="Filter by action / target / detail…"
+        placeholder="Filter by action / agent name / detail…"
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
       />
@@ -122,7 +156,7 @@ export function AdminAuditTable({ rows }: { rows: AdminAuditRow[] }) {
                     {label}
                   </span>
                 </td>
-                <td className="mono">{details(r)}</td>
+                <td className="mono">{details(r, agentNames)}</td>
               </tr>
             );
           })}

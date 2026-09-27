@@ -23,7 +23,12 @@ import {
   modelListingUrl,
   type ProviderId,
 } from "@/lib/providers";
-import { purgeAgentCaches, purgeAgentFallbacks, purgeProviderKeysCache } from "@/lib/state/redis";
+import {
+  purgeAgentCaches,
+  purgeAgentFallbacks,
+  purgeProviderKeysCache,
+  readSuspensionFlag,
+} from "@/lib/state/redis";
 import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
 import {
   GRANT_TTL_S,
@@ -37,6 +42,7 @@ import { open, seal } from "@/lib/crypto/aesgcm";
 import { stashKeyImport, takeKeyImport } from "@/lib/state/redis";
 import * as fleet from "@/lib/fleet";
 import { mfaAuthorizedUser } from "@/lib/mfa";
+import { observeKillState } from "@/lib/state/killswitch";
 
 async function requireUser() {
   const db = await userClient();
@@ -75,6 +81,18 @@ function failGeneric(
   throw new Error("Something went wrong. Please try again.");
 }
 
+/**
+ * What arming/disarming the fleet kill switch asked for and then OBSERVED.
+ * `platform` is PassControl's own stop, which a tenant can see but not change.
+ * `null` = that read failed.
+ */
+export interface KillObservation {
+  requested: boolean;
+  tenant: boolean | null;
+  platform: boolean | null;
+  confirmed: boolean;
+}
+
 /** Per-tenant master kill: flip Redis `killswitch:tenant:<uid>`, and nothing else.
  *
  * It does NOT suspend agent rows and does NOT purge the provider-key cache. Both claims
@@ -84,33 +102,140 @@ function failGeneric(
  * agent that was separately suspended or revoked (lib/fleet.ts:729-731).
  *
  * The Redis flag is the whole enforcement: the proxy reads it per call at check 2. */
-export async function setMasterKill(on: boolean) {
+export async function setMasterKill(on: boolean): Promise<KillObservation> {
   const { db, user } = await requireUser();
-  await fleet.setTenantKill(db, user.id, on);
-  logSecurityEvent("killswitch.master", { user: user.id, on });
-  await dispatchSecurityAlert("killswitch.master", { user: user.id, on });
-  await recordAdminAction({ userId: user.id, action: "killswitch.master", metadata: { on } });
+  let applied = false;
+  try {
+    await fleet.setTenantKill(db, user.id, on);
+    applied = true;
+  } catch {
+    // Reported through the readback below: an operator pressing Stop needs
+    // "could not confirm", not an exception that says nothing about the state.
+  }
+  if (applied) {
+    logSecurityEvent("killswitch.master", { user: user.id, on });
+    await dispatchSecurityAlert("killswitch.master", { user: user.id, on });
+    await recordAdminAction({ userId: user.id, action: "killswitch.master", metadata: { on } });
+  }
+  const observed = await observeKillState(user.id);
   revalidatePath("/");
+  return { requested: on, ...observed, confirmed: observed.tenant === on };
 }
 
-/** Per-agent kill toggle. The session authenticates the owner; the server-only
- * fleet mutation enforces that owner with an explicit user_id filter. */
-export async function setAgentSuspended(agentId: string, suspended: boolean) {
+/** Read-only re-check of the fleet kill switch, behind "Refresh status". */
+export async function observeMasterKill(requested: boolean): Promise<KillObservation> {
   const { user } = await requireUser();
-  // Status is deliberately not client-updatable: use the server-only client
-  // with fleet's explicit user_id filter so a revoked passport stays terminal.
-  const r = await fleet.setAgentSuspended(serviceClient(), user.id, agentId, suspended);
-  if (!r.ok) throw new Error("not_authorized");
-  logSecurityEvent("agent.suspend", { user: user.id, agentId, suspended });
-  await dispatchSecurityAlert("agent.suspend", { user: user.id, agentId, suspended });
-  await recordAdminAction({
-    userId: user.id,
-    action: "agent.suspend",
-    targetType: "agent",
-    targetId: agentId,
-    metadata: { suspended },
-  });
+  const observed = await observeKillState(user.id);
+  return { requested: requested === true, ...observed, confirmed: observed.tenant === (requested === true) };
+}
+
+export type ControlIntent = "suspended" | "active";
+
+/**
+ * What a suspend/reactivate asked for and what was then OBSERVED — v1 playbook
+ * Contract C. `null` on either layer means that read failed. `confirmed` only
+ * when both layers show the intent: the database status (which the Direct
+ * Agent Key lookup reads) AND the Redis flag (which every call reads). One
+ * layer alone is exactly the partial state an operator must see.
+ */
+export interface AgentControlObservation {
+  agentId: string;
+  requested: ControlIntent;
+  database: "active" | "suspended" | "revoked" | null;
+  suspensionFlag: boolean | null;
+  confirmed: boolean;
+}
+
+function observation(
+  agentId: string,
+  requested: ControlIntent,
+  database: AgentControlObservation["database"],
+  suspensionFlag: boolean | null
+): AgentControlObservation {
+  const confirmed = requested === "suspended"
+    ? database === "suspended" && suspensionFlag === true
+    : database === "active" && suspensionFlag === false;
+  return { agentId, requested, database, suspensionFlag, confirmed };
+}
+
+/** The agent's status through the caller's own RLS read: undefined = not theirs, null = unreadable. */
+async function readOwnAgentStatus(
+  { db, user }: RequiredUser,
+  agentId: string
+): Promise<AgentControlObservation["database"] | undefined> {
+  const { data, error } = await db
+    .from("agents")
+    .select("status")
+    .eq("id", agentId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (error) return null;
+  if (!data) return undefined;
+  const status = (data as { status?: unknown }).status;
+  return status === "active" || status === "suspended" || status === "revoked" ? status : null;
+}
+
+/** Per-agent suspend/reactivate as a DESIRED STATE, never a toggle.
+ *
+ * The caller states the intent; a retry re-sends the same intent, so a lost
+ * response can never flip an applied stop back. The fleet mutation is ordered
+ * for safety and idempotent on retry (block first when suspending, persist
+ * active first when resuming). A failure part-way is reported through the
+ * readback rather than thrown: "the database says active but the gateway still
+ * refuses" is the answer the operator needs, and an exception says nothing.
+ *
+ * Stays on requireUser(): a stop is never behind a step-up. */
+export async function setAgentSuspended(
+  agentId: string,
+  suspended: boolean
+): Promise<AgentControlObservation> {
+  const auth = await requireUser();
+  const { user } = auth;
+  const requested: ControlIntent = suspended ? "suspended" : "active";
+  let applied = false;
+  try {
+    // Status is deliberately not client-updatable: use the server-only client
+    // with fleet's explicit user_id filter so a revoked passport stays terminal.
+    const r = await fleet.setAgentSuspended(serviceClient(), user.id, agentId, suspended);
+    if (!r.ok) throw new Error("not_authorized");
+    applied = true;
+  } catch (error) {
+    if ((error as Error).message === "not_authorized") throw error;
+    // A layer failed part-way. Fall through to the readback.
+  }
+  if (applied) {
+    logSecurityEvent("agent.suspend", { user: user.id, agentId, suspended });
+    await dispatchSecurityAlert("agent.suspend", { user: user.id, agentId, suspended });
+    await recordAdminAction({
+      userId: user.id,
+      action: "agent.suspend",
+      targetType: "agent",
+      targetId: agentId,
+      metadata: { suspended },
+    });
+  }
+  const [database, suspensionFlag] = await Promise.all([
+    readOwnAgentStatus(auth, agentId),
+    readSuspensionFlag(agentId),
+  ]);
   revalidatePath("/");
+  return observation(agentId, requested, database ?? null, suspensionFlag);
+}
+
+/** Read-only: where does this agent's stop actually stand? Behind "Refresh status". */
+export async function observeAgentControl(
+  agentId: string,
+  requested: ControlIntent
+): Promise<AgentControlObservation> {
+  const auth = await requireUser();
+  if (!UUID_RE.test(String(agentId))) throw new Error("This agent is unavailable.");
+  const intent: ControlIntent = requested === "suspended" ? "suspended" : "active";
+  // Ownership through the caller's own read BEFORE any Redis key is touched,
+  // so this cannot be used to probe other tenants' agent ids.
+  const database = await readOwnAgentStatus(auth, agentId);
+  if (database === undefined) throw new Error("not_authorized");
+  if (database === null) return observation(agentId, intent, null, null);
+  return observation(agentId, intent, database, await readSuspensionFlag(agentId));
 }
 
 // The gate lives here rather than on the exported wrapper so that every caller —
@@ -194,25 +319,76 @@ async function requireCredentialMfa(
   }
 }
 
-/** Create the browser-first on-ramp: one agent plus one reveal-once bearer key.
- * The key is returned from this action once and is never logged or persisted. */
-export async function issueDirectAgent(input: {
+type DirectAgentInput = {
   name: string;
   scopes: { provider: string; models: string[] }[];
   budget_tokens?: number | null;
   budget_cents?: number | null;
   keyName: string;
   expiresAt?: string | null;
-}): Promise<{
+};
+type IssuedDirectAgent = {
   agentId: string;
   keyId: string;
   key: string;
   name: string;
   keyName: string;
   expiresAt: string | null;
-}> {
-  const { db, user } = await requireUser();
+};
+
+// How many credential rows the provider check reads. Metadata only (the
+// provider column); far above any real tenant's key count, and bounded so the
+// check cannot become an unbounded scan.
+const STORED_PROVIDER_SCAN = 200;
+
+/**
+ * Every provider this worker is scoped to must have a stored key, or the
+ * credential is unusable: the gateway answers `no_provider_key` to every call,
+ * which reads to a new user like a broken product rather than a missing step.
+ *
+ * A failed read refuses rather than guessing "stored" — the operator gets a
+ * retry, not a credential that cannot work. Runs AFTER the credential gate so
+ * an unverified session learns nothing about which keys are stored.
+ */
+async function requireStoredProviders(
+  { db, user }: RequiredUser,
+  scopes: unknown
+): Promise<void> {
+  const wanted = new Set(
+    (Array.isArray(scopes) ? scopes : [])
+      .map((entry) => (entry && typeof entry === "object" ? (entry as { provider?: unknown }).provider : null))
+      .filter((provider): provider is string => typeof provider === "string" && provider.length > 0)
+  );
+  if (wanted.size === 0) return; // validation below rejects an empty grant with its own message
+  const { data, error } = await db
+    .from("provider_credentials")
+    .select("provider")
+    .eq("user_id", user.id)
+    .limit(STORED_PROVIDER_SCAN);
+  if (error || !Array.isArray(data)) {
+    throw new Error("PassControl could not confirm which provider keys are stored. Try again.");
+  }
+  const stored = new Set(data.map((row: { provider?: unknown }) => row.provider));
+  for (const provider of wanted) {
+    if (!stored.has(provider)) {
+      throw new Error(
+        `No ${provider} provider key is stored in PassControl yet. Add one before creating this worker's credential.`
+      );
+    }
+  }
+}
+
+// The one place a Direct Agent Key agent is minted. Gated here, not on the
+// exported wrappers, for the same reason as createAgentForUser: the dashboard
+// form and the key-import on-ramp both reuse it, and the next caller inherits
+// the gate instead of re-introducing the gap.
+async function issueDirectAgentForUser(
+  auth: RequiredUser,
+  input: DirectAgentInput
+): Promise<IssuedDirectAgent> {
+  const { db, user } = auth;
   await requireCredentialMfa(db, user);
+  await requireStoredProviders(auth, input?.scopes);
   // Service role, not `db` — see createAgentForUser above and 0032.
   try {
     await ensureProfileRow(serviceClient(), user);
@@ -242,6 +418,12 @@ export async function issueDirectAgent(input: {
   // remount DirectAgentConnect before it commits the credential to reveal-once
   // state; the component refreshes after the operator acknowledges storage.
   return result.value;
+}
+
+/** Create the browser-first on-ramp: one agent plus one reveal-once bearer key.
+ * The key is returned from this action once and is never logged or persisted. */
+export async function issueDirectAgent(input: DirectAgentInput): Promise<IssuedDirectAgent> {
+  return issueDirectAgentForUser(await requireUser(), input);
 }
 
 /** Add a named installation credential to an existing owned agent. */
@@ -346,7 +528,13 @@ export async function attachAgentPassport(agentId: string, passportPubkey: strin
 
 export async function updateAgentBudgets(
   agentId: string,
-  input: { budget_tokens: number | null; budget_cents: number | null }
+  input: {
+    budget_tokens: number | null;
+    budget_cents: number | null;
+    /** The periodic limit (K1). Omitted leaves it as it is. */
+    budget_period?: "day" | "month" | null;
+    budget_period_cents?: number | null;
+  }
 ) {
   const { db, user } = await requireUser();
   const r = await fleet.updateAgent(db, user.id, agentId, input);
@@ -366,7 +554,10 @@ export async function updateAgentBudgets(
     // worth having in the audit trail when someone asks why a lowered budget
     // took a minute to bite.
     metadata: {
-      fields: "budget_tokens,budget_cents",
+      fields:
+        input.budget_period !== undefined
+          ? "budget_tokens,budget_cents,budget_period,budget_period_cents"
+          : "budget_tokens,budget_cents",
       budgets_live: r.value.budgetsLive ?? null,
     },
   });
@@ -716,6 +907,32 @@ function parseKeyImportHandoff(value: string | null): KeyImportHandoff | null {
   }
 }
 
+/**
+ * Redeem a probed key by id. takeKeyImport is an atomic GETDEL, so a replayed
+ * id after this point finds nothing — the handoff is single-use, not merely
+ * expiring, and two racing redemptions cannot both succeed. That last clause
+ * was untrue until 2026-08-27; see tests/key-import-atomic.test.ts.
+ */
+async function redeemKeyImport(
+  { user }: RequiredUser,
+  input: { handoff?: unknown; provider?: unknown }
+): Promise<KeyImportHandoff> {
+  const token = String(input?.handoff ?? "");
+  const sealed = token.length > 0 && token.length <= 200
+    ? await takeKeyImport(user.id, token)
+    : null;
+  const handoff = sealed ? parseKeyImportHandoff(await open(sealed)) : null;
+  if (
+    !handoff ||
+    handoff.userId !== user.id ||
+    handoff.provider !== input?.provider ||
+    handoff.expiresAt < Date.now()
+  ) {
+    throw new Error("This key import has expired. Start again.");
+  }
+  return handoff;
+}
+
 /** Complete a probed import through the existing Vault and fleet actions. */
 export async function completeKeyImport(input: {
   handoff: string;
@@ -731,24 +948,7 @@ export async function completeKeyImport(input: {
   scope: { provider: ProviderId; models: string[] }[];
 }> {
   const auth = await requireUser();
-  const { user } = auth;
-  // Redeem by id. takeKeyImport is an atomic GETDEL, so a replayed id after this
-  // point finds nothing — the handoff is single-use, not merely expiring, and
-  // two racing redemptions cannot both succeed. That last clause was untrue until
-  // 2026-08-27; see tests/key-import-atomic.test.ts.
-  const token = String(input?.handoff ?? "");
-  const sealed = token.length > 0 && token.length <= 200
-    ? await takeKeyImport(user.id, token)
-    : null;
-  const handoff = sealed ? parseKeyImportHandoff(await open(sealed)) : null;
-  if (
-    !handoff ||
-    handoff.userId !== user.id ||
-    handoff.provider !== input?.provider ||
-    handoff.expiresAt < Date.now()
-  ) {
-    throw new Error("This key import has expired. Start again.");
-  }
+  const handoff = await redeemKeyImport(auth, input);
 
   const keyInput = validateProviderKeyInput({
     provider: input.provider,
@@ -776,6 +976,41 @@ export async function completeKeyImport(input: {
   await addProviderKeyForUser(auth, keyInput, false);
   const created = await createAgentForUser(auth, agentInput);
   return { agentId: created.id, createdAt: created.createdAt, provider, scope };
+}
+
+/**
+ * The same probed import, finishing with a Direct Agent Key instead of a
+ * Passport — the default on-ramp for a worker whose SDK takes a static key.
+ * Passport issuance stays available through completeKeyImport.
+ *
+ * Revalidation is deferred for the same reason as completeKeyImport: the
+ * worker's key exists only in this return value until the operator
+ * acknowledges storing it.
+ */
+export async function completeKeyImportDirect(input: {
+  handoff: string;
+  provider: string;
+  label: string;
+  name: string;
+  keyName: string;
+  models: string[];
+}): Promise<IssuedDirectAgent & { provider: ProviderId }> {
+  const auth = await requireUser();
+  const handoff = await redeemKeyImport(auth, input);
+  const keyInput = validateProviderKeyInput({
+    provider: input.provider,
+    label: input.label,
+    key: handoff.key,
+  });
+  await addProviderKeyForUser(auth, keyInput, false);
+  const issued = await issueDirectAgentForUser(auth, {
+    name: input.name,
+    keyName: input.keyName,
+    scopes: [{ provider: handoff.provider, models: Array.isArray(input.models) ? input.models : [] }],
+    budget_tokens: null,
+    budget_cents: null,
+  });
+  return { ...issued, provider: handoff.provider };
 }
 
 /**

@@ -5,10 +5,14 @@
 //
 // Two things this UI has to be honest about, because both bite operators:
 //
-//  1. A scope change is NOT instant. The proxy gates on the scope snapshot
-//     inside the visa, so an agent holding a live visa keeps its old scope
-//     until that visa expires. The delay is rendered from visaTtlSeconds() and
-//     never typed as a literal — VISA_TTL_SECONDS is tunable to 900.
+//  1. For a PASSPORT, a scope change is not instant. The proxy gates a visa
+//     call on the scope snapshot inside the visa, so a live visa keeps its old
+//     scope until it expires. The delay is rendered from visaTtlSeconds() and
+//     never typed as a literal — VISA_TTL_SECONDS is tunable to 900. A Direct
+//     Agent Key has no snapshot: it is checked against the agent's current
+//     access on every request, so for it the change IS the next request.
+//     Session 07 found this editor promising a visa delay to agents that
+//     had no passport at all.
 //  2. An empty scope list is valid and means "this agent can reach nothing".
 //     That is a legitimate way to park an agent, so validation does not block
 //     it; the form warns instead.
@@ -23,11 +27,14 @@ export function ScopeEditor({
   agentId,
   scopes,
   ttlSeconds,
+  hasPassport,
   onClose,
 }: {
   agentId: string;
   scopes: readonly ScopeRow[];
   ttlSeconds: number;
+  /** Whether a passport (and so a visa snapshot) exists for this agent. */
+  hasPassport: boolean;
   onClose: () => void;
 }) {
   const [rows, setRows] = useState<{ provider: string; models: string }[]>(
@@ -137,7 +144,7 @@ export function ScopeEditor({
           data-state="reaches-nothing"
         >
           <p className="m-0 text-sm font-semibold" style={{ color: "var(--warning)" }}>
-            Saving this leaves no scopes — this passport will reach nothing.
+            Saving this leaves no scopes — this agent will reach nothing.
           </p>
           <p className="m-0 mt-1 text-xs leading-5 text-muted-foreground">
             Every call it makes will be refused. That is a valid way to park an agent; use suspend
@@ -146,12 +153,17 @@ export function ScopeEditor({
         </div>
       ) : null}
 
-      <p className="m-0 text-xs leading-5 text-muted-foreground">
-        Takes effect on the agent&rsquo;s next visa. One already issued keeps the old scope until
-        it expires, up to {describeDelay(ttlSeconds)} from now — the gateway checks the scope
-        carried in the visa, not this record. To stop an agent immediately, suspend it or use the
-        kill switch.
-      </p>
+      <div className="grid gap-1 text-xs leading-5 text-muted-foreground" data-scope-timing={hasPassport ? "key-and-visa" : "key"}>
+        <p className="m-0">A Direct Agent Key is checked against this record, so it reads the change on its next request.</p>
+        {hasPassport ? (
+          <p className="m-0">
+            A passport work-visa already issued keeps the old access until it expires, up to{" "}
+            {describeDelay(ttlSeconds)} from now — a visa call is checked against the scope the visa
+            carries. Visas issued after the change carry the new access. To stop the agent
+            immediately, suspend it or use the kill switch.
+          </p>
+        ) : null}
+      </div>
 
       {error ? (
         <p className="m-0 text-sm" style={{ color: "var(--danger)" }}>

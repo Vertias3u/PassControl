@@ -14,12 +14,19 @@ const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), "utf8");
  * instance of exactly this.
  */
 const DISPLAY_MAPS = [
+  // The shared vocabulary (Session 06). The surfaces below that DERIVE their
+  // words from it are still listed: each must either name every status itself
+  // or import this module — dropping them from the list would be the gate
+  // quietly checking less.
+  "lib/call-outcome.ts",
   "lib/departures.ts",
   "lib/verify/receipt-view.ts",
   "components/AgentPassport.tsx",
   "components/StatusPill.tsx",
   "components/dashboard/CallDetailDrawer.tsx",
 ];
+
+const SHARED_MAP = "lib/call-outcome.ts";
 
 /**
  * The statuses a call can be logged with, parsed from the union in lib/log.ts.
@@ -82,6 +89,18 @@ describe("every log status has words on every surface", () => {
 
   it.each(DISPLAY_MAPS)("%s renders every status", (file) => {
     const src = read(file);
+    // A surface that takes its words from the shared map, and keeps no status
+    // map of its own, is covered by that map's entry in this list — which must
+    // name every status. A surface that imports it AND keeps its own map (the
+    // board's aviation words, the drawer's explanations) is still checked.
+    const derivesOnly =
+      file !== SHARED_MAP &&
+      src.includes(`from "@/lib/call-outcome"`) &&
+      !/Record<(LogEntry\["status"\]|StatusType)/.test(src);
+    if (derivesOnly) {
+      expect(src).toMatch(/CALL_OUTCOME|callOutcome/);
+      return;
+    }
     const missing = logStatuses().filter((s) => !new RegExp(`\\b${s}\\b`).test(src));
     expect(
       missing,
@@ -113,7 +132,12 @@ describe("no_provider_key is not reported as a provider failure", () => {
     ).toBe(false);
   });
 
-  it.each(DISPLAY_MAPS)("%s does not describe it as an upstream/provider fault", (file) => {
+  // Every surface that still words this status itself — the shared map
+  // included, which is asserted rather than assumed.
+  const wordsNoKey = DISPLAY_MAPS.filter((file) => /\bno_provider_key\b/.test(read(file)));
+  it("checks the shared map among them", () => expect(wordsNoKey).toContain(SHARED_MAP));
+
+  it.each(wordsNoKey)("%s does not describe it as an upstream/provider fault", (file) => {
     const src = read(file);
     const idx = src.indexOf("no_provider_key");
     expect(idx, `${file} has no no_provider_key entry`).toBeGreaterThan(-1);

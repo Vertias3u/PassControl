@@ -75,6 +75,7 @@ export default async function ControlGraphPage() {
     shadowRevisions: Object.fromEntries(
       (agentsResult.data ?? []).map((agent) => [agent.id, shadowRevision(agent.policy_shadow ?? null)])
     ),
+    agentNames: Object.fromEntries((agentsResult.data ?? []).map((agent) => [agent.id, String(agent.name ?? "")])),
   };
 
   return (

@@ -65,3 +65,87 @@ describe("agent policy evaluation", () => {
     ).toEqual({ allowed: true, maxRequestsPerHour: 100 });
   });
 });
+
+// K2 — the output ceiling. Refused, never rewritten: a request is admitted only
+// if the limit it states for its own shape is at or under the ceiling.
+describe("agent policy output ceiling (max_output_tokens)", () => {
+  const policy = { max_output_tokens: 1000 };
+  const stated = (tokens: number) => ({ kind: "stated" as const, tokens });
+
+  it("admits a request at or under the ceiling", () => {
+    expect(evaluateAgentPolicy(policy, "openai", "gpt-4.1", MONDAY_MORNING, stated(1000))).toEqual({
+      allowed: true,
+      maxRequestsPerHour: null,
+    });
+    expect(evaluateAgentPolicy(policy, "openai", "gpt-4.1", MONDAY_MORNING, stated(1))).toMatchObject({ allowed: true });
+  });
+
+  it("refuses a request over the ceiling, and names the ceiling", () => {
+    expect(evaluateAgentPolicy(policy, "openai", "gpt-4.1", MONDAY_MORNING, stated(1001))).toEqual({
+      allowed: false,
+      reason: "output_limit",
+      rule: "max_output_tokens:exceeded",
+      limit: 1000,
+    });
+  });
+
+  it("refuses a request that states no limit, or an unreadable one", () => {
+    expect(evaluateAgentPolicy(policy, "openai", "gpt-4.1", MONDAY_MORNING, { kind: "absent" })).toMatchObject({
+      allowed: false,
+      rule: "max_output_tokens:missing",
+    });
+    expect(
+      evaluateAgentPolicy(policy, "openai", "gpt-4.1", MONDAY_MORNING, { kind: "invalid", field: "max_tokens" })
+    ).toMatchObject({ allowed: false, rule: "max_output_tokens:invalid" });
+  });
+
+  it("reads a caller that supplied no request facts as stating no limit, never as exempt", () => {
+    expect(evaluateAgentPolicy(policy, "openai", "gpt-4.1", MONDAY_MORNING)).toMatchObject({
+      allowed: false,
+      rule: "max_output_tokens:missing",
+    });
+  });
+
+  it("exempts a request that runs no inference (null facts)", () => {
+    expect(evaluateAgentPolicy(policy, "openai", "", MONDAY_MORNING, null)).toMatchObject({ allowed: true });
+  });
+
+  it("leaves requests alone when no ceiling is configured, whatever they ask for", () => {
+    expect(evaluateAgentPolicy({}, "openai", "gpt-4.1", MONDAY_MORNING, { kind: "absent" })).toMatchObject({
+      allowed: true,
+    });
+    expect(evaluateAgentPolicy(null, "openai", "gpt-4.1", MONDAY_MORNING, stated(10_000_000))).toMatchObject({
+      allowed: true,
+    });
+  });
+
+  it("is decided after deny and windows, and before the hourly cap is even asked for", () => {
+    const all = {
+      deny: [{ provider: "openai", models: ["gpt-4*"] }],
+      max_output_tokens: 10,
+      max_requests_per_hour: 5,
+    };
+    expect(evaluateAgentPolicy(all, "openai", "gpt-4.1", MONDAY_MORNING, stated(99))).toMatchObject({ reason: "deny" });
+    const windowed = {
+      windows: [{ days: ["mon"], start: "09:00", end: "18:00", tz: "UTC" }],
+      max_output_tokens: 10,
+    };
+    expect(evaluateAgentPolicy(windowed, "openai", "gpt-4.1", MONDAY_EVENING, stated(99))).toMatchObject({
+      reason: "window",
+    });
+    // A refused ceiling returns no hourly requirement, so no counter is spent.
+    const capped = { max_output_tokens: 10, max_requests_per_hour: 5 };
+    const refused = evaluateAgentPolicy(capped, "openai", "gpt-4.1", MONDAY_MORNING, stated(99));
+    expect(refused).not.toHaveProperty("maxRequestsPerHour");
+    expect(evaluateAgentPolicy(capped, "openai", "gpt-4.1", MONDAY_MORNING, stated(10))).toEqual({
+      allowed: true,
+      maxRequestsPerHour: 5,
+    });
+  });
+
+  it.each([0, -5, 1.5, "1000", 10_000_001, null])("reads a ceiling of %s as a malformed policy", (value) => {
+    expect(
+      evaluateAgentPolicy({ max_output_tokens: value }, "openai", "gpt-4.1", MONDAY_MORNING, stated(1))
+    ).toEqual({ allowed: false, reason: "malformed", rule: "policy:malformed" });
+  });
+});

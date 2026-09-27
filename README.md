@@ -60,6 +60,16 @@ Setup starts Supabase (Postgres + Auth + Vault) and Redis with a REST adapter, a
 migrations, seeds a local account and opens the dashboard. There are no shared default
 credentials. This is a **local development setup**, not a production deployment.
 
+**Updating.** `passcontrol update` updates the CLI and the checkout `setup` made. It shows the
+plan first (`--check` stops there), asks once (`--yes` for scripts), then updates an npm global
+install of the CLI to the exact version it found and lets the new CLI finish. For the app it
+fast-forwards to the public repo's `main`, runs `npm ci`, applies new migrations (listed in the
+plan; they only go forward), and restarts the dashboard if it was running. It leaves a checkout
+alone, and says why, if it has local changes, has diverged, is not a clone of the public repo,
+or was moved since setup (re-running the stack there would start an empty database). npx, pnpm,
+yarn, bun and volta installs get the right command printed instead. If an update stops part way,
+`passcontrol update --app-only` finishes it.
+
 1. **Make a Passport call.** Add a non-critical provider key in **Provider Keys**. Issue a
    Passport with a matching provider/model scope and budgets. Choose the dashboard's
    Sidecar or MCP configuration flow, copy its generated Passport import command into
@@ -104,6 +114,11 @@ See [SECURITY.md](./SECURITY.md) and [LICENSE](./LICENSE) for security guidance 
 Use the dashboard's generated provider-native configuration: gateway base URL, Direct
 Agent Key and model. Anthropic uses its native base URL and key variables. Never paste
 a Passport private key into an API-key field.
+
+To see the whole integration run once, [`examples/direct-key-worker.mjs`](./examples/direct-key-worker.mjs)
+is an ordinary OpenAI-SDK worker configured only by the agent's Setup file
+(`passcontrol.env`). It makes one governed call and prints its receipt ID, then asks for a
+model outside the agent's access and shows PassControl refusing it before the provider.
 
 Add a provider credential in the dashboard and give the agent a concrete model within
 its scope and suitable budgets. Choose by what your client supports:
@@ -245,6 +260,10 @@ are separate from signature verification.
 - Platform/tenant kill switches and per-agent suspension/revocation.
 - Provider failover within supported request families and each attempt's authorization
   and budget checks; it is not arbitrary API translation.
+- The injected provider key is removed from what comes back: if an upstream echoes it in
+  an error body, a JSON answer or an event stream (even split across chunks), the agent
+  receives `[REDACTED_PROVIDER_KEY]` instead. This covers the exact key, not a key an
+  upstream has transformed.
 
 Passport scopes are snapshots in visas; scope edits can take up to the configured visa
 TTL to replace those snapshots. Other live controls have their own cache/invalidation
@@ -265,12 +284,21 @@ ending never runs leaves an open hold that does not expire. `may_have_dispatched
 means dispatch permission was claimed, not that billing is proven. Such a hold cannot
 be released as `not_spent` through recovery.
 
+An agent can also have a **daily or monthly spend limit** (calendar UTC), checked in the
+same reservation as its cumulative caps and refused with `402 blocked_budget_period` and a
+`retry-after` to the next reset. A call counts toward the period it finishes in; spend
+earlier in the period counts when the limit is set; an attempt that never settles keeps
+counting until an operator resolves it. An **output ceiling** (`max_output_tokens` in the
+agent's policy) refuses any request whose stated output limit is missing or larger — it is
+never rewritten to fit.
+
 Lost or mismatched established budget generations cause `503 blocked_budget_state`,
 not a fresh allowance. Recovery is an explicit operator action over retained logs and
 adjustments; it cannot reconstruct missing evidence. See [Budget recovery](./docs/budget-recovery.md).
 
-Prices are an in-code estimate table. Unknown models on built-in endpoints use a
-provider fallback rate. **Custom endpoints are unpriced**, even when the model name
+Prices are an in-code estimate table, one row per model, read from each provider's pricing
+page. Under a dollar limit, a model with no row is refused `402 unpriced_model`; without one it
+is estimated at the provider's highest listed rate. **Custom endpoints are unpriced**, even when the model name
 matches: logs mark cost unknown, receipts carry `unp`, and token accounting continues.
 The cost budget retains a proxy estimate; it does not become knowledge of actual dollars.
 Known/table-priced cost, conservative enforced spend, and open holds are different figures.
@@ -295,7 +323,9 @@ All paths below are relative to `/api/v1/<provider>`. SDK base URLs and aliases 
 
 Gemini's native `generateContent` API is not supported. Responses support is OpenAI-only;
 response retrieval/deletion, embeddings, files, fine-tuning, batches, and token-counting
-endpoints are not proxied. Model availability still depends on your provider account.
+endpoints are not proxied. OpenAI's hosted tools (web search, file search, code interpreter
+and others billed outside tokens) and its search models are refused, because no token budget can
+hold their fees. Model availability still depends on your provider account.
 
 Custom provider base URLs support compatible deployments such as Ollama, vLLM, or
 LiteLLM without adding provider IDs. They require operator opt-in:

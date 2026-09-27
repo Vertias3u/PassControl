@@ -4,6 +4,7 @@ import { StatusPill, type StatusType } from "./StatusPill";
 import type { DepartureRow } from "@/lib/departures";
 import { CallDetailDrawer, type CallContext } from "@/components/dashboard/CallDetailDrawer";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
+import { callOutcome, reportedTokens, reportedTokensText, wasForwarded } from "@/lib/call-outcome";
 
 export type AuditLogRow = DepartureRow;
 
@@ -20,18 +21,27 @@ export function AuditLogTable({
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<AuditLogRow | null>(null);
   const { format, zoneLabel } = useDashboardTime();
+  const nameOf = (row: AuditLogRow) => (row.agent_id ? callContext.agentNames[row.agent_id] : undefined);
   const shown = logs.filter((l) =>
     !filter
       ? true
-      : [l.passport_id ?? "", l.jti ?? "", l.agent_access_key_id ?? "", l.credential_use_id ?? "", l.status ?? "", l.model ?? ""].some((f) =>
-          f.toLowerCase().includes(filter.toLowerCase())
-        )
+      : [
+          nameOf(l) ?? "",
+          l.agent_id ?? "",
+          l.passport_id ?? "",
+          l.jti ?? "",
+          l.agent_access_key_id ?? "",
+          l.credential_use_id ?? "",
+          l.status ?? "",
+          callOutcome(l.status).label,
+          l.model ?? "",
+        ].some((f) => f.toLowerCase().includes(filter.toLowerCase()))
   );
 
   return (
     <div className="grid">
       <input
-        placeholder="Filter by identity / request / status / model…"
+        placeholder="Filter by agent name / request / outcome / model…"
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
       />
@@ -54,12 +64,12 @@ export function AuditLogTable({
         <thead>
           <tr>
             <th>Time · {zoneLabel}</th>
-            <th>Identity</th>
+            <th>Agent</th>
             <th>Request</th>
             <th>Model</th>
-            <th>Tokens</th>
-            <th>Cost</th>
-            <th>Status</th>
+            <th>Reported tokens</th>
+            <th>Est. cost</th>
+            <th>Outcome</th>
           </tr>
         </thead>
         <tbody>
@@ -67,6 +77,7 @@ export function AuditLogTable({
             <tr
               key={l.id}
               className="pc-call-row"
+              data-outcome-category={callOutcome(l.status).category}
               data-call-state={selected?.id === l.id ? "selected" : "idle"}
               role="button"
               tabIndex={0}
@@ -81,21 +92,28 @@ export function AuditLogTable({
               <td className="muted">
                 <time dateTime={l.created_at ?? undefined}>{format(l.created_at, "time")}</time>
               </td>
-              <td className="mono" title={l.passport_id ?? undefined}>
-                {l.passport_id
-                  ? `${l.passport_id.slice(0, 12)}…`
-                  : l.auth_method === "direct_key"
-                    ? `KEY ${l.agent_access_key_id?.slice(0, 8) ?? "recorded"}`
-                    : "—"}
+              <td title={l.passport_id ?? l.agent_access_key_id ?? undefined} data-agent-name={nameOf(l) ?? ""}>
+                {nameOf(l) || (l.agent_id ? `Agent ${l.agent_id.slice(0, 8)}` : "—")}
+                <small className="mono block muted">
+                  {l.auth_method === "direct_key"
+                    ? `Direct Agent Key ${l.agent_access_key_id?.slice(0, 8) ?? ""}`
+                    : l.passport_id
+                      ? `Passport ${l.passport_id.slice(0, 12)}…`
+                      : ""}
+                </small>
               </td>
               <td className="mono" title={l.jti ?? undefined}>
                 {(l.jti ?? l.credential_use_id ?? "—").slice(0, 8)}
               </td>
               <td>{l.model ?? "—"}</td>
+              <td>{reportedTokensText(reportedTokens(l))}</td>
               <td>
-                {(l.input_tokens ?? 0) + (l.output_tokens ?? 0)}
+                {!wasForwarded(callOutcome(l.status).category)
+                  ? "—"
+                  : l.cost_microcents != null
+                    ? `$${(l.cost_microcents / 1e8).toFixed(6)}`
+                    : "no recorded cost"}
               </td>
-              <td>{l.cost_microcents != null ? `$${(l.cost_microcents / 1e8).toFixed(6)}` : "—"}</td>
               <td>
                 <StatusPill status={l.status as StatusType} />
               </td>
@@ -108,6 +126,7 @@ export function AuditLogTable({
         open={Boolean(selected)}
         onOpenChange={(open) => { if (!open) setSelected(null); }}
         currentShadowRevision={selected?.agent_id ? callContext.shadowRevisions[selected.agent_id] ?? null : null}
+        agentName={selected?.agent_id ? callContext.agentNames[selected.agent_id] ?? null : null}
       />
     </div>
   );

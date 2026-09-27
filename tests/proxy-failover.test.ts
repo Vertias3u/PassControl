@@ -276,6 +276,35 @@ describe("a fallback is re-checked, never trusted", () => {
     expect(res.status).toBe(402);
   });
 
+  // Under a dollar limit a fallback's model must be priceable, as the primary's
+  // is (lib/gate.ts `endpoint:unpriced_model`); otherwise failover would be a way
+  // round the limit. The fixture's groq model has no price row.
+  it("skips a fallback whose model has no price, under a dollar limit", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, bc: 500 });
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
+
+    await callProxy();
+
+    expect(forwardedTo()).toEqual(["api.openai.com"]);
+  });
+
+  it("still fails over to a priced fallback under the same dollar limit", async () => {
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      bc: 500,
+      scope: [...baseClaims.scope, { provider: "groq", models: ["openai/gpt-oss-20b"] }],
+    });
+    readFallbacksMock.mockResolvedValue([{ provider: "groq", model: "openai/gpt-oss-20b" }]);
+    fetchMock
+      .mockResolvedValueOnce(upstream(QUOTA, 429))
+      .mockResolvedValueOnce(upstream(JSON.stringify({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 1 } }), 200));
+
+    const res = await callProxy();
+
+    expect(forwardedTo()).toEqual(["api.openai.com", "api.groq.com"]);
+    expect(res.status).toBe(200);
+  });
+
   // The security-grade case. A deny rule names a provider AND models, so a
   // fallback that bypassed it would silently defeat a rule the operator wrote.
   it("skips a fallback a policy deny rule forbids", async () => {

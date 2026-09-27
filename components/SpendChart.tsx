@@ -55,7 +55,7 @@ export function SpendChart({
     };
   }, [userId]);
 
-  const { totalTokens, totalCost, uncostedCalls, bars, providers, callCount } = useMemo(() => {
+  const { totalTokens, totalCost, uncostedCalls, unconfirmedCalls, bars, providers, callCount } = useMemo(() => {
     // A spend view has nothing to say about SDK housekeeping: a model-listing
     // probe carries no tokens and no cost, so it contributed only a zero-height
     // bar and inflated the per-provider call count. Filtered here rather than in
@@ -69,13 +69,23 @@ export function SpendChart({
       const provider = log.provider ?? "unknown";
       const current = byProvider.get(provider) ?? { calls: 0, cost: 0, tokens: 0 };
       current.calls += 1;
-      current.cost += log.cost_microcents ?? 0;
-      current.tokens += (log.input_tokens ?? 0) + (log.output_tokens ?? 0);
+      // Same rule as the headline totals below: unconfirmed usage is counted as
+      // a call, not added to reported tokens or calculated cost.
+      if (log.status !== "usage_unknown") {
+        current.cost += log.cost_microcents ?? 0;
+        current.tokens += (log.input_tokens ?? 0) + (log.output_tokens ?? 0);
+      }
       byProvider.set(provider, current);
     }
+    // A usage_unknown row's figures are what was seen before the report went
+    // missing — not a report. They are kept out of the "reported" totals and
+    // counted beside them instead, so the headline never passes a partial
+    // observation off as a measurement.
+    const reported = logs.filter((l) => l.status !== "usage_unknown");
     return {
-      totalTokens: logs.reduce((s, l) => s + (l.input_tokens ?? 0) + (l.output_tokens ?? 0), 0),
-      totalCost: logs.reduce((s, l) => s + (l.cost_microcents ?? 0), 0),
+      totalTokens: reported.reduce((s, l) => s + (l.input_tokens ?? 0) + (l.output_tokens ?? 0), 0),
+      totalCost: reported.reduce((s, l) => s + (l.cost_microcents ?? 0), 0),
+      unconfirmedCalls: logs.length - reported.length,
       // A null cost is UNKNOWN, not zero, so it cannot be added to a total —
       // but a total that silently drops rows is its own kind of wrong. Count
       // them and say so under the figure.
@@ -83,7 +93,7 @@ export function SpendChart({
       // Worded as "no recorded cost" rather than "unpriced" on purpose: rows
       // predating the unpriced distinction are also null, and this must not
       // retroactively relabel them as something they were never recorded as.
-      uncostedCalls: logs.reduce((n, l) => n + (l.cost_microcents == null ? 1 : 0), 0),
+      uncostedCalls: reported.reduce((n, l) => n + (l.cost_microcents == null ? 1 : 0), 0),
       bars: recent.map((log) => ({
         log,
         height: ((log.input_tokens ?? 0) + (log.output_tokens ?? 0)) / max,
@@ -107,17 +117,20 @@ export function SpendChart({
       )}
       <div className="pc-spend-view__summary">
         <div className="pc-spend-stat">
-          <div>Tokens in loaded window</div>
+          <div>Reported tokens in loaded window</div>
           <strong>{totalTokens.toLocaleString()}</strong>
-          <span>{callCount} agent call{callCount === 1 ? "" : "s"}</span>
+          <span data-unconfirmed-calls={unconfirmedCalls}>
+            {callCount} agent call{callCount === 1 ? "" : "s"}
+            {unconfirmedCalls ? ` · excludes ${unconfirmedCalls} with usage unconfirmed` : ""}
+          </span>
         </div>
         <div className="pc-spend-stat">
-          <div>Cost in loaded window</div>
+          <div>Calculated cost in loaded window</div>
           <strong>${(totalCost / 1e8).toFixed(4)}</strong>
           <span>
             {uncostedCalls
-              ? `Not an all-time total · excludes ${uncostedCalls} call${uncostedCalls === 1 ? "" : "s"} with no recorded cost`
-              : "Not an all-time total"}
+              ? `List-price estimate, not an invoice · not an all-time total · excludes ${uncostedCalls} call${uncostedCalls === 1 ? "" : "s"} with no recorded cost`
+              : "List-price estimate, not an invoice · not an all-time total"}
           </span>
         </div>
         <div className="pc-spend-stat">

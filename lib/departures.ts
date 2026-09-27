@@ -7,6 +7,7 @@ import type { LogEntry } from "@/lib/log";
 import type { AuthMethod } from "@/lib/log";
 import { classifyCall, housekeepingLabel, isHousekeeping } from "@/lib/call-class";
 import { readRecordedUpstreamStatus } from "@/lib/verify/receipt-view";
+import { callOutcome, isDeliberateRefusal, usageLabel } from "@/lib/call-outcome";
 
 export interface DepartureRow {
   id: string;
@@ -51,7 +52,10 @@ export const DEPARTURE_VERDICT: Record<
   { word: string; tone: DepartureTone }
 > = {
   ok: { word: "CLEARED", tone: "clear" },
-  upstream_error: { word: "DIVERTED", tone: "held" },
+  // Not "DIVERTED": nothing was diverted anywhere. The call reached the
+  // provider and the provider answered with an error — the board says so, and
+  // the HTTP code beside it says which one.
+  upstream_error: { word: "PROVIDER ERROR", tone: "held" },
   // The call went out and may well have been billed; what nobody can say is for
   // how much. NOT a variant of DIVERTED, which means the call failed — this one
   // arrived somewhere and left the accounting open.
@@ -65,6 +69,7 @@ export const DEPARTURE_VERDICT: Record<
   // handler may be holding this attempt's permission.
   dispatch_unavailable: { word: "NOT CLEARED", tone: "held" },
   blocked_budget: { word: "NO FUNDS", tone: "held" },
+  blocked_budget_period: { word: "LIMIT REACHED", tone: "held" },
   // Deliberately not a variant of NO FUNDS. That word means PassControl's own
   // budget stopped the call; this one means the call went out and the PROVIDER
   // said the account is empty. An operator who reads them as the same thing
@@ -81,7 +86,10 @@ export const DEPARTURE_VERDICT: Record<
   credential_state_unavailable: { word: "UNCHECKED", tone: "held" },
   credential_changed: { word: "ROTATED", tone: "held" },
   blocked_unpriced_endpoint: { word: "NO PRICE", tone: "held" },
-  blocked_scope: { word: "NO VISA", tone: "held" },
+  blocked_unpriced_model: { word: "UNPRICED", tone: "held" },
+  // Not "NO VISA": a Direct Agent Key call never presents a visa, and a visa
+  // call that is refused HAD one. What both lacked was access to this model.
+  blocked_scope: { word: "NOT ALLOWED", tone: "held" },
   blocked_endpoint: { word: "NO ROUTE", tone: "held" },
   blocked_policy: { word: "POLICY", tone: "held" },
   blocked_suspended: { word: "SUSPENDED", tone: "denied" },
@@ -181,10 +189,11 @@ export function budgetChargeTokens(
   );
 }
 
-export function usageStatusLabel(row: Pick<DepartureRow, "status">): string {
-  if (row.status === "usage_unknown") return "Unconfirmed · reserve charged";
-  if (row.status === "ok") return "Confirmed";
-  return "Not charged";
+/** See lib/call-outcome.ts `usageLabel`; kept as the board's name for it. */
+export function usageStatusLabel(
+  row: Pick<DepartureRow, "status" | "enforced_tokens" | "enforced_microcents">
+): string {
+  return usageLabel(row);
 }
 
 export function totalTokens(row: Pick<DepartureRow, "input_tokens" | "output_tokens">): number {
@@ -224,7 +233,10 @@ export function departureCounts(rows: readonly DepartureRow[]): {
   for (const row of rows) {
     if (isHousekeeping(row)) housekeeping += 1;
     else if (row.status === "ok") cleared += 1;
-    if ((row.status ?? "").startsWith("blocked")) refused += 1;
+    // Deliberate refusals only. `startsWith("blocked")` also counted
+    // blocked_budget_state — PassControl failing to read its own counters —
+    // as a refusal the operator's rules made.
+    if (isDeliberateRefusal(callOutcome(row.status).category)) refused += 1;
   }
   return { cleared, refused, housekeeping };
 }
@@ -245,16 +257,25 @@ export interface DepartureView {
  */
 export function visibleDepartures(
   rows: readonly DepartureRow[],
-  view: DepartureView
+  view: DepartureView,
+  /**
+   * The workspace's CURRENT agent names, by id. Matching on them is what lets
+   * an operator type the worker's name they see on the row. Resolved at
+   * presentation: the stored row keeps only the id, and a renamed agent's old
+   * calls match its new name.
+   */
+  agentNames: Readonly<Record<string, string>> = {}
 ): DepartureRow[] {
   const needle = view.query.trim().toLowerCase();
   return rows.filter((row) => {
     if (!view.showHousekeeping && isHousekeeping(row)) return false;
     const verdict = verdictFor(row.status);
     if (view.filter === "cleared" && verdict.tone !== "clear") return false;
-    if (view.filter === "refused" && !(row.status ?? "").startsWith("blocked_")) return false;
+    if (view.filter === "refused" && !isDeliberateRefusal(callOutcome(row.status).category)) return false;
     if (!needle) return true;
     return [
+      row.agent_id ? agentNames[row.agent_id] : null,
+      row.agent_id,
       row.provider,
       row.model,
       row.passport_id,

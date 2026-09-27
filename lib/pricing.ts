@@ -5,6 +5,7 @@
 // rounded up to an integer when a provider publishes fractional prices.
 // Patterns reuse the same wildcard semantics as scope matching. Versioned in code.
 import type { ProviderId } from "./providers";
+import { choiceCountForEstimate, largestStatedOutputLimit } from "./output-limit";
 
 interface Price {
   provider: ProviderId;
@@ -34,83 +35,152 @@ export interface TokenUsageEstimate {
 // are conservative and never under-reserve against the provider's published rate.
 const mc = (usdPerMillion: number) => Math.ceil(usdPerMillion * 100 - 1e-9);
 
+/**
+ * One model at one published rate: its exact id, and its dated snapshots
+ * (`<id>-20…`, e.g. `claude-haiku-4-5-20251001`, `gpt-4.1-2025-04-14`).
+ *
+ * Deliberately NOT a prefix wildcard. `gemini-2.5-flash*` also matched
+ * `gemini-2.5-flash-image` and `gemini-2.5-flash-preview-tts`, and `o3*` matched
+ * `o3-pro` at a tenth of its price: a loose pattern prices a model it has never
+ * seen, which is exactly what an agent under a dollar limit must not get
+ * (lib/gate.ts refuses a model with no row of its own). A new model gets a row
+ * when someone reads its price.
+ */
+function model(provider: ProviderId, id: string, inputUsd: number, outputUsd: number): Price[] {
+  const rates = { inputMicrocentsPerToken: mc(inputUsd), outputMicrocentsPerToken: mc(outputUsd) };
+  return [
+    { provider, pattern: id, ...rates },
+    { provider, pattern: `${id}-20*`, ...rates },
+  ];
+}
+
+// Every rate below was read from the provider's own pricing page on 2026-09-27
+// (tests/pricing-table.test.ts pins each one with its source). Two rules apply
+// wherever a page offers more than one number, in the spirit of `mc()`'s rounding:
+// charge the HIGHER, because a budget that under-reserves does not hold.
+//   * Long-context rates (OpenAI above 272K, Gemini 3.1 Pro above 200K) are used
+//     for every call: the table has no context dimension.
+//   * Input is the higher of the input and cache-WRITE rates where a cache write
+//     costs more than input (OpenAI GPT-6 and GPT-5.6), since `prompt_tokens`
+//     does not say which of its tokens were written to cache.
+//   * Where input varies by modality (Gemini audio), the highest is used.
+// Request-level multipliers (a paid service tier, Anthropic fast mode, US-only
+// inference) are not in this table at all; under a dollar limit such a request
+// is refused instead (lib/gate.ts).
 const PRICES: Price[] = [
-  // Anthropic
-  { provider: "anthropic", pattern: "claude-fable-5*", inputMicrocentsPerToken: mc(10), outputMicrocentsPerToken: mc(50) },
-  { provider: "anthropic", pattern: "claude-opus-4-8*", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(25) },
-  { provider: "anthropic", pattern: "claude-opus-4-7*", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(25) },
-  { provider: "anthropic", pattern: "claude-opus-4-6*", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(25) },
-  { provider: "anthropic", pattern: "claude-opus-4-5*", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(25) },
-  { provider: "anthropic", pattern: "claude-3-5-sonnet*", inputMicrocentsPerToken: mc(3), outputMicrocentsPerToken: mc(15) },
-  { provider: "anthropic", pattern: "claude-3-5-haiku*", inputMicrocentsPerToken: mc(0.8), outputMicrocentsPerToken: mc(4) },
-  { provider: "anthropic", pattern: "claude-haiku-4*", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(5) },
-  { provider: "anthropic", pattern: "claude-3-opus*", inputMicrocentsPerToken: mc(15), outputMicrocentsPerToken: mc(75) },
-  { provider: "anthropic", pattern: "claude-opus-4*", inputMicrocentsPerToken: mc(15), outputMicrocentsPerToken: mc(75) },
-  { provider: "anthropic", pattern: "claude-sonnet-4*", inputMicrocentsPerToken: mc(3), outputMicrocentsPerToken: mc(15) },
-  { provider: "anthropic", pattern: "claude-*", inputMicrocentsPerToken: mc(15), outputMicrocentsPerToken: mc(75) },
-  // OpenAI
-  { provider: "openai", pattern: "gpt-4o-mini*", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
-  { provider: "openai", pattern: "gpt-4o*", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(10) },
-  { provider: "openai", pattern: "gpt-4.1*", inputMicrocentsPerToken: mc(2), outputMicrocentsPerToken: mc(8) },
-  { provider: "openai", pattern: "o3*", inputMicrocentsPerToken: mc(2), outputMicrocentsPerToken: mc(8) },
-  // Groq
-  { provider: "groq", pattern: "llama-3.1-8b-instant", inputMicrocentsPerToken: mc(0.05), outputMicrocentsPerToken: mc(0.08) },
-  { provider: "groq", pattern: "llama-3.3-70b-versatile", inputMicrocentsPerToken: mc(0.59), outputMicrocentsPerToken: mc(0.79) },
-  { provider: "groq", pattern: "meta-llama/llama-4-scout-17b-16e-instruct", inputMicrocentsPerToken: mc(0.11), outputMicrocentsPerToken: mc(0.34) },
-  { provider: "groq", pattern: "openai/gpt-oss-20b", inputMicrocentsPerToken: mc(0.075), outputMicrocentsPerToken: mc(0.3) },
+  // Anthropic — platform.claude.com/docs/en/about-claude/pricing
+  ...model("anthropic", "claude-fable-5-1", 10, 50),
+  ...model("anthropic", "claude-fable-5", 10, 50),
+  ...model("anthropic", "claude-opus-5-5", 4, 20),
+  ...model("anthropic", "claude-opus-5", 5, 25),
+  ...model("anthropic", "claude-opus-4-8", 5, 25),
+  ...model("anthropic", "claude-opus-4-7", 5, 25),
+  ...model("anthropic", "claude-opus-4-6", 5, 25),
+  ...model("anthropic", "claude-opus-4-5", 5, 25),
+  ...model("anthropic", "claude-opus-4-1", 15, 75),
+  ...model("anthropic", "claude-opus-4-0", 15, 75),
+  ...model("anthropic", "claude-opus-4", 15, 75),
+  ...model("anthropic", "claude-sonnet-5", 2, 10),
+  ...model("anthropic", "claude-sonnet-4-6", 3, 15),
+  ...model("anthropic", "claude-sonnet-4-5", 3, 15),
+  ...model("anthropic", "claude-sonnet-4-0", 3, 15),
+  ...model("anthropic", "claude-sonnet-4", 3, 15),
+  ...model("anthropic", "claude-haiku-4-5", 1, 5),
+  ...model("anthropic", "claude-3-5-haiku", 0.8, 4),
+  ...model("anthropic", "claude-3-5-haiku-latest", 0.8, 4),
+  // OpenAI — developers.openai.com/api/docs/pricing, Standard tier.
+  ...model("openai", "gpt-6-astra", 25, 75),
+  ...model("openai", "gpt-6-sol", 5, 15),
+  ...model("openai", "gpt-6-luna", 0.25, 0.75),
+  // GPT-5.6 Sol is promotional "at least through November 21, 2026".
+  ...model("openai", "gpt-5.6-sol", 10, 30),
+  ...model("openai", "gpt-5.6-terra", 5, 18),
+  ...model("openai", "gpt-5.6-luna", 0.5, 1.8),
+  ...model("openai", "gpt-5.6-cyber", 15.625, 75),
+  ...model("openai", "gpt-5.5-cyber", 12.5, 75),
+  ...model("openai", "gpt-5.5-pro", 60, 270),
+  ...model("openai", "gpt-5.5", 10, 45),
+  ...model("openai", "gpt-5.4-pro", 60, 270),
+  ...model("openai", "gpt-5.4-mini", 0.75, 4.5),
+  ...model("openai", "gpt-5.4-nano", 0.2, 1.25),
+  ...model("openai", "gpt-5.4", 5, 22.5),
+  ...model("openai", "gpt-5.2-pro", 21, 168),
+  ...model("openai", "gpt-5.2", 1.75, 14),
+  ...model("openai", "gpt-5.1", 1.25, 10),
+  ...model("openai", "gpt-5-pro", 15, 120),
+  ...model("openai", "gpt-5-mini", 0.25, 2),
+  ...model("openai", "gpt-5-nano", 0.05, 0.4),
+  ...model("openai", "gpt-5", 1.25, 10),
+  ...model("openai", "gpt-4.1-mini", 0.4, 1.6),
+  ...model("openai", "gpt-4.1-nano", 0.1, 0.4),
+  ...model("openai", "gpt-4.1", 2, 8),
+  // A dated gpt-4o snapshot priced above the alias: listed before `gpt-4o-20*`.
+  { provider: "openai", pattern: "gpt-4o-2024-05-13", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(15) },
+  ...model("openai", "gpt-4o-mini", 0.15, 0.6),
+  ...model("openai", "gpt-4o", 2.5, 10),
+  ...model("openai", "o1-pro", 150, 600),
+  ...model("openai", "o1", 15, 60),
+  ...model("openai", "o3-pro", 20, 80),
+  ...model("openai", "o3-mini", 1.1, 4.4),
+  ...model("openai", "o3", 2, 8),
+  ...model("openai", "o4-mini", 1.1, 4.4),
+  { provider: "openai", pattern: "gpt-4-turbo-2024-04-09", inputMicrocentsPerToken: mc(10), outputMicrocentsPerToken: mc(30) },
+  { provider: "openai", pattern: "gpt-4-0613", inputMicrocentsPerToken: mc(30), outputMicrocentsPerToken: mc(60) },
+  { provider: "openai", pattern: "gpt-3.5-turbo-1106", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(2) },
+  { provider: "openai", pattern: "gpt-3.5-turbo-0125", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
+  { provider: "openai", pattern: "gpt-3.5-turbo", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
+  // Groq — console.groq.com/docs/models. Its Llama models are now Enterprise,
+  // "Contact Sales", with no published price, so they have no row.
   { provider: "groq", pattern: "openai/gpt-oss-120b", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
-  // Mistral
+  { provider: "groq", pattern: "openai/gpt-oss-20b", inputMicrocentsPerToken: mc(0.075), outputMicrocentsPerToken: mc(0.3) },
+  { provider: "groq", pattern: "openai/gpt-oss-safeguard-20b", inputMicrocentsPerToken: mc(0.075), outputMicrocentsPerToken: mc(0.3) },
+  { provider: "groq", pattern: "qwen/qwen3.8-27b", inputMicrocentsPerToken: mc(0.8), outputMicrocentsPerToken: mc(4) },
+  // Mistral — docs.mistral.ai/models/pricing and the model cards' API names.
+  { provider: "mistral", pattern: "mistral-large-latest", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
+  { provider: "mistral", pattern: "mistral-large-2512", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
   { provider: "mistral", pattern: "mistral-medium-latest", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(7.5) },
   { provider: "mistral", pattern: "mistral-small-latest", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
-  { provider: "mistral", pattern: "mistral-large-latest", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
-  { provider: "mistral", pattern: "devstral-medium-latest", inputMicrocentsPerToken: mc(0.4), outputMicrocentsPerToken: mc(2) },
-  { provider: "mistral", pattern: "devstral-small-latest", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: mc(0.3) },
-  { provider: "mistral", pattern: "codestral-latest", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.9) },
-  { provider: "mistral", pattern: "magistral-medium-latest", inputMicrocentsPerToken: mc(2), outputMicrocentsPerToken: mc(5) },
-  { provider: "mistral", pattern: "magistral-small-latest", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
-  { provider: "mistral", pattern: "ministral-3b-latest", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: mc(0.1) },
-  { provider: "mistral", pattern: "ministral-8b-latest", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.15) },
+  { provider: "mistral", pattern: "mistral-small-2603", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
   { provider: "mistral", pattern: "ministral-14b-latest", inputMicrocentsPerToken: mc(0.2), outputMicrocentsPerToken: mc(0.2) },
-  { provider: "mistral", pattern: "open-mistral-nemo", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.15) },
-  { provider: "mistral", pattern: "open-mixtral-8x7b", inputMicrocentsPerToken: mc(0.7), outputMicrocentsPerToken: mc(0.7) },
-  { provider: "mistral", pattern: "open-mixtral-8x22b", inputMicrocentsPerToken: mc(2), outputMicrocentsPerToken: mc(6) },
-  // Together AI
-  { provider: "together", pattern: "openai/gpt-oss-20b", inputMicrocentsPerToken: mc(0.05), outputMicrocentsPerToken: mc(0.2) },
-  { provider: "together", pattern: "OpenAI/gpt-oss-20B", inputMicrocentsPerToken: mc(0.05), outputMicrocentsPerToken: mc(0.2) },
+  { provider: "mistral", pattern: "ministral-14b-2512", inputMicrocentsPerToken: mc(0.2), outputMicrocentsPerToken: mc(0.2) },
+  { provider: "mistral", pattern: "ministral-8b-latest", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.15) },
+  { provider: "mistral", pattern: "ministral-8b-2512", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.15) },
+  { provider: "mistral", pattern: "ministral-3b-latest", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: mc(0.1) },
+  { provider: "mistral", pattern: "ministral-3b-2512", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: mc(0.1) },
+  { provider: "mistral", pattern: "codestral-latest", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.9) },
+  { provider: "mistral", pattern: "codestral-2508", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.9) },
+  // Together AI — together.ai/pricing, Serverless. The page names models by
+  // display name; only those whose API id is unambiguous have a row.
   { provider: "together", pattern: "openai/gpt-oss-120b", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
   { provider: "together", pattern: "OpenAI/gpt-oss-120B", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
-  { provider: "together", pattern: "meta-llama/Llama-3.3-70B*", inputMicrocentsPerToken: mc(1.04), outputMicrocentsPerToken: mc(1.04) },
+  { provider: "together", pattern: "meta-llama/Llama-3.3-70B-Instruct-Turbo", inputMicrocentsPerToken: mc(1.04), outputMicrocentsPerToken: mc(1.04) },
   { provider: "together", pattern: "MiniMaxAI/MiniMax-M3", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(1.2) },
-  // DeepSeek. Uses cache-miss input pricing so reservations are conservative.
-  { provider: "deepseek", pattern: "deepseek-v4-flash", inputMicrocentsPerToken: mc(0.14), outputMicrocentsPerToken: mc(0.28) },
-  { provider: "deepseek", pattern: "deepseek-v4-pro", inputMicrocentsPerToken: mc(0.435), outputMicrocentsPerToken: mc(0.87) },
-  { provider: "deepseek", pattern: "deepseek-chat", inputMicrocentsPerToken: mc(0.14), outputMicrocentsPerToken: mc(0.28) },
-  { provider: "deepseek", pattern: "deepseek-reasoner", inputMicrocentsPerToken: mc(0.435), outputMicrocentsPerToken: mc(0.87) },
-  // Gemini (Google's OpenAI-compatibility endpoint). Two of Google's published
-  // rates do not fit a flat per-model table, and both are resolved the same way
-  // this file resolves everything else — round UP, never under-reserve:
-  //   * 2.5 Pro is tiered by prompt length (<=200k vs >200k). The >200k rate is
-  //     used, because the cheaper one would under-reserve every long prompt and
-  //     a budget cap that under-reserves does not hold. Do NOT "correct" these
-  //     down to the headline $1.25/$10 figures.
-  //   * Flash and Flash-Lite price audio input above text/image/video. There is
-  //     no modality dimension here either, so the audio rate is used.
-  // Most-specific pattern first: flash-lite must precede flash, or `*` in
-  // "gemini-2.5-flash*" swallows it.
-  { provider: "gemini", pattern: "gemini-2.5-flash-lite*", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.4) },
-  { provider: "gemini", pattern: "gemini-2.5-flash*", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(2.5) },
-  { provider: "gemini", pattern: "gemini-2.5-pro*", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(15) },
-  { provider: "gemini", pattern: "gemini-3.5-flash-lite*", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(2.5) },
-  { provider: "gemini", pattern: "gemini-3.5-flash*", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(9) },
-  // 3.6 / 3.7 Flash carry promotional rates Google lists as running through
-  // 2026-12-31. They revert to something higher afterwards, so these two rows
-  // have an expiry the others do not — re-check them before that date.
-  { provider: "gemini", pattern: "gemini-3.6-flash*", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
-  { provider: "gemini", pattern: "gemini-3.7-flash*", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
-  // Conservative catch-all, mirroring the `claude-*` row: an unlisted Gemini
-  // model bills at the most expensive verified Gemini rate rather than falling
-  // through to 0 and billing nothing.
-  { provider: "gemini", pattern: "gemini-*", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(15) },
+  // DeepSeek — api-docs.deepseek.com/quick_start/pricing. PEAK rates (off-peak
+  // is half; the table has no clock). `deepseek-v4-flash` is a legacy name
+  // "billed at the Flash price"; `deepseek-chat` / `deepseek-reasoner` were
+  // discontinued on 2026-07-24 and have no row.
+  { provider: "deepseek", pattern: "deepseek-flash", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(1.2) },
+  { provider: "deepseek", pattern: "deepseek-v4-flash", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(1.2) },
+  { provider: "deepseek", pattern: "deepseek-v4-flash-vision-exp", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(1.2) },
+  { provider: "deepseek", pattern: "deepseek-v4-pro", inputMicrocentsPerToken: mc(1.32), outputMicrocentsPerToken: mc(3.96) },
+  // Gemini — ai.google.dev/gemini-api/docs/pricing, Standard, paid tier.
+  // 3.6 / 3.7 / 3.8 Flash are promotional "through December 31, 2026", then
+  // $1.50 in / $7.50 out; tests/pricing-table.test.ts goes red before that date.
+  { provider: "gemini", pattern: "gemini-3.8-flash", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
+  { provider: "gemini", pattern: "gemini-3.7-flash", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
+  { provider: "gemini", pattern: "gemini-3.6-flash", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
+  { provider: "gemini", pattern: "gemini-3.5-flash", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(9) },
+  { provider: "gemini", pattern: "gemini-3.5-flash-lite", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(2.5) },
+  { provider: "gemini", pattern: "gemini-3.1-flash-lite", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
+  { provider: "gemini", pattern: "gemini-3.1-pro-preview", inputMicrocentsPerToken: mc(4), outputMicrocentsPerToken: mc(18) },
+  { provider: "gemini", pattern: "gemini-3.1-pro-preview-customtools", inputMicrocentsPerToken: mc(4), outputMicrocentsPerToken: mc(18) },
+  { provider: "gemini", pattern: "gemini-3-flash-preview", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(3) },
+  // Omni's output is $9 for text and $17.50 for video; the higher is used.
+  { provider: "gemini", pattern: "gemini-omni-1.1-flash", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(17.5) },
+  { provider: "gemini", pattern: "gemini-omni-flash-preview", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(17.5) },
+  { provider: "gemini", pattern: "gemini-2.5-pro", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(15) },
+  { provider: "gemini", pattern: "gemini-2.5-flash", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(2.5) },
+  { provider: "gemini", pattern: "gemini-2.5-flash-lite", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.4) },
 ];
 
 const FALLBACK_PRICES = PRICES.reduce<Partial<Record<ProviderId, Price>>>((acc, price) => {
@@ -132,11 +202,19 @@ function matches(pattern: string, model: string): boolean {
   return new RegExp(`^${escaped}$`).test(model);
 }
 
+/**
+ * The row that prices this model, if one does. Gemini's model listing spells ids
+ * `models/gemini-…` and a client may send either spelling, so the prefix is
+ * dropped before matching — in this one place, so the estimate, the settle and
+ * the dollar-limit refusal can never disagree about a model.
+ */
+function listedPrice(model: string, provider?: ProviderId): Price | undefined {
+  const id = model.startsWith("models/") ? model.slice("models/".length) : model;
+  return PRICES.find((x) => (!provider || x.provider === provider) && matches(x.pattern, id));
+}
+
 function priceFor(model: string, provider?: ProviderId): Price | undefined {
-  return (
-    PRICES.find((x) => (!provider || x.provider === provider) && matches(x.pattern, model)) ??
-    (provider ? FALLBACK_PRICES[provider] : undefined)
-  );
+  return listedPrice(model, provider) ?? (provider ? FALLBACK_PRICES[provider] : undefined);
 }
 
 /**
@@ -178,6 +256,49 @@ export const DEMO_MICROCENTS_PER_TOKEN = 1;
 /** What a demo call of this size costs, for whoever needs to charge or project it. */
 export function demoCostMicrocents(totalTokens: number): number {
   return Math.max(0, Math.trunc(totalTokens)) * DEMO_MICROCENTS_PER_TOKEN;
+}
+
+/**
+ * Whether a model has a row of its own, rather than billing at its provider's
+ * fallback (the highest listed rate, which exists only so that an unlisted model
+ * never bills 0). Under a dollar limit, a model without one is refused.
+ */
+export function hasListedPrice(model: string, provider: ProviderId): boolean {
+  return listedPrice(model, provider) !== undefined;
+}
+
+/**
+ * Service tiers the table's rates describe. `flex` bills below Standard (the
+ * table over-charges it, the safe direction); `auto` is each provider's default
+ * routing. Anything else — OpenAI Fast/"priority" (~2x), Gemini and Mistral
+ * Priority, OpenAI `scale`, a value nobody documented — is priced above its row.
+ */
+const TABLE_SERVICE_TIERS: ReadonlySet<string> = new Set(["auto", "default", "standard", "standard_only", "flex"]);
+
+/**
+ * The request field that would make this call cost more than its table row, or
+ * null. Under a dollar limit the proxy refuses such a request (409
+ * `unpriced_option`), for the reason an unpriced model is refused.
+ *
+ * Known gap, stated rather than guessed at: an OpenAI project whose default
+ * service tier is set to Fast in OpenAI's settings bills requests that send no
+ * `service_tier` at the Fast rate, and nothing in the request shows it. The
+ * response's own `service_tier` does; pricing from it is a follow-up.
+ */
+export function unpricedRequestOption(provider: ProviderId, body: unknown): string | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const b = body as Record<string, unknown>;
+  const set = (v: unknown) => v !== undefined && v !== null;
+  if (set(b.service_tier) && !(typeof b.service_tier === "string" && TABLE_SERVICE_TIERS.has(b.service_tier))) {
+    return "service_tier";
+  }
+  if (provider === "anthropic") {
+    // platform.claude.com pricing: fast mode on Opus 5.5 / 5 / 4.8 at 2x;
+    // `inference_geo: "us"` at 1.1x on Claude 4.6 and later.
+    if (set(b.speed) && b.speed !== "standard") return "speed";
+    if (set(b.inference_geo) && b.inference_geo !== "global") return "inference_geo";
+  }
+  return null;
 }
 
 export function costMicrocents(
@@ -249,21 +370,51 @@ export function costMicrocentsForUsage(
   );
 }
 
+/**
+ * Every top-level request field a provider bills as INPUT, across the body
+ * shapes the gateway routes: chat `messages`, Responses `input` and
+ * `instructions`, Anthropic `system`, tool definitions (`tools`, and OpenAI's
+ * legacy `functions`), plus Gemini-native `contents`/`systemInstruction`.
+ *
+ * The native Gemini API is not a routed shape today — Gemini goes through its
+ * OpenAI-compatible endpoint — so those two only keep the estimate from being
+ * blind to such a body if one ever arrives.
+ *
+ * This used to read `messages ?? input` alone, so a request whose weight was a
+ * large `system` prompt or tool list reserved as if it were a one-line chat,
+ * and an agent near its cap was admitted for a call its budget could not cover.
+ * The estimate decides admission and the hold's size only; settlement still
+ * charges the provider's reported usage, so a larger estimate refuses a
+ * near-cap agent sooner and never over-charges one.
+ */
+const PROMPT_FIELDS = [
+  "messages",
+  "input",
+  "instructions",
+  "system",
+  "tools",
+  "functions",
+  "contents",
+  "systemInstruction",
+] as const;
+
 /** Cheap pre-flight usage estimate from a request body. */
 export function estimateTokenUsage(body: unknown, fallback = 1000): TokenUsageEstimate {
   try {
-    const b = body as {
-      max_tokens?: number;
-      max_completion_tokens?: number;
-      max_output_tokens?: number;
-      messages?: unknown;
-      input?: unknown;
-    };
-    const rawMax = b.max_tokens ?? b.max_completion_tokens ?? b.max_output_tokens;
-    const max = typeof rawMax === "number" && Number.isFinite(rawMax) ? rawMax : 0;
-    const promptChars = JSON.stringify(b.messages ?? b.input ?? "").length;
+    const b = body as Partial<Record<(typeof PROMPT_FIELDS)[number], unknown>>;
+    // The LARGEST stated alias, times the choices asked for. This used to take
+    // the first alias present and ignore `n`, and both under-reserve: a small
+    // deprecated `max_tokens` beside a large `max_completion_tokens`, or `n: 4`
+    // reserving one completion's worth. See lib/output-limit.ts.
+    const max = largestStatedOutputLimit(body) ?? 0;
+    const present = PROMPT_FIELDS.filter((field) => b[field] !== undefined && b[field] !== null);
+    // No prompt field at all keeps the old `JSON.stringify("")` floor (2 chars,
+    // 1 token), so an empty body and the decision-trace projection are unchanged.
+    const promptChars = present.length
+      ? present.reduce((sum, field) => sum + JSON.stringify(b[field]).length, 0)
+      : JSON.stringify("").length;
     const promptTokens = Math.ceil(promptChars / 4);
-    const outputTokens = Math.max(0, Math.floor(max || 1024));
+    const outputTokens = Math.max(0, Math.floor(max || 1024)) * choiceCountForEstimate(body);
     const totalTokens = promptTokens + outputTokens;
     if (totalTokens > 0) return { inputTokens: promptTokens, outputTokens, totalTokens };
   } catch {

@@ -130,6 +130,10 @@ export async function runReconcile(
         agentId,
         tokens: Number(row.spent_tokens) || 0,
         microcents: Number(row.spent_microcents) || 0,
+        // What the RPC folded is everything up to now − lag. Spend recovered
+        // from before that must not land in a period the agent has since
+        // entered — the cron runs at midnight UTC, exactly on a boundary.
+        cutoffMs: Date.now() - Math.max(0, opts.lagSeconds) * 1000,
       },
       r
     );

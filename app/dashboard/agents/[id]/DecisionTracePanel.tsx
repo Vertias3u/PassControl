@@ -1,6 +1,7 @@
 "use client";
 
-import { useFormState, useFormStatus } from "react-dom";
+import { useActionState } from "react";
+import { useFormStatus } from "react-dom";
 import { SCOPE_PROVIDERS, type ScopeProviderId } from "@/lib/providers";
 import type { GateStepResult } from "@/lib/gate";
 import {
@@ -94,7 +95,7 @@ export function DecisionTracePanel({
 }) {
   const { format } = useDashboardTime();
   const action = runDecisionTrace.bind(null, agentId);
-  const [state, formAction] = useFormState<DecisionTraceActionState | undefined, FormData>(
+  const [state, formAction] = useActionState<DecisionTraceActionState | undefined, FormData>(
     action,
     undefined
   );

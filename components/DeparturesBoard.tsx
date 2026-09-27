@@ -15,7 +15,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Pause, Play, Search, Radio, WifiOff } from "lucide-react";
 import { browserClient } from "@/lib/supabase/client";
 import {
-  budgetChargeMicrocents,
   departureCounts,
   departureDestination,
   groupDepartures,
@@ -26,14 +25,13 @@ import {
   fare,
   flightCode,
   mergeDeparture,
-  totalTokens,
-  usageStatusLabel,
   verdictFor,
   visibleDepartures,
   type DepartureRow,
   type DepartureTone,
 } from "@/lib/departures";
 import { isHousekeeping } from "@/lib/call-class";
+import { callOutcome, capCharge, reportedTokens, reportedTokensText, usageLabel, type CapCharge } from "@/lib/call-outcome";
 import { describeUpstreamStatus } from "@/lib/verify/receipt-view";
 import { CallDetailDrawer, type CallContext } from "@/components/dashboard/CallDetailDrawer";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
@@ -43,6 +41,28 @@ export type { DepartureRow };
 const MAX_ROWS = 40;
 const PAGE_ROWS = 40;
 const DEPARTURE_COLUMNS = "id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would";
+
+/** The board's cap-charge cell. A row that cannot say what it was charged says so. */
+function capChargeText(charge: CapCharge): string {
+  if (charge.kind === "charged") return fare(charge.microcents);
+  if (charge.kind === "not_recorded") return "not recorded";
+  if (charge.kind === "held") return "held";
+  return "—";
+}
+
+/** Worker name first; the credential that authenticated is secondary detail. */
+export function departureIdentity(
+  row: Pick<DepartureRow, "agent_id" | "passport_id" | "auth_method" | "agent_access_key_id">,
+  agentNames: Readonly<Record<string, string>>
+): { name: string; credential: string } {
+  const name = (row.agent_id && agentNames[row.agent_id]) || (row.agent_id ? `Agent ${row.agent_id.slice(0, 8)}` : "Unknown agent");
+  const credential = row.auth_method === "direct_key"
+    ? `Direct Agent Key ${row.agent_access_key_id?.slice(0, 8) ?? ""}`.trim()
+    : row.passport_id
+      ? `Passport ${row.passport_id.slice(0, 10)}…`
+      : "Credential not recorded";
+  return { name, credential };
+}
 
 const TONE_CLASS: Record<DepartureTone, string> = {
   clear: "text-emerald-400",
@@ -139,8 +159,8 @@ export function DeparturesBoard({
   const { cleared, refused, housekeeping } = useMemo(() => departureCounts(rows), [rows]);
 
   const visibleRows = useMemo(
-    () => visibleDepartures(rows, { filter, query, showHousekeeping }),
-    [filter, query, rows, showHousekeeping]
+    () => visibleDepartures(rows, { filter, query, showHousekeeping }, callContext.agentNames),
+    [filter, query, rows, showHousekeeping, callContext.agentNames]
   );
   // Group AFTER filtering: a hidden probe between two refusals must not split a
   // burst that the operator sees as continuous.
@@ -261,7 +281,7 @@ export function DeparturesBoard({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Agent identity, provider, model, status…"
+            placeholder="Agent name, provider, model, status…"
           />
         </label>
         <div className="pc-segmented" aria-label="Call outcome filter">
@@ -308,14 +328,14 @@ export function DeparturesBoard({
               <th scope="col">Time</th>
               <th scope="col">Flight</th>
               <th scope="col">Destination</th>
-              <th scope="col">Identity</th>
+              <th scope="col">Agent</th>
               <th scope="col" className="text-right">
-                Tokens
+                Reported tokens
               </th>
               <th scope="col" className="text-right">
-                Observed cost
+                Est. cost
               </th>
-              <th scope="col" className="text-right">Budget charge</th>
+              <th scope="col" className="text-right">Charged to cap</th>
               <th scope="col">Usage status</th>
               <th scope="col">Outcome</th>
             </tr>
@@ -342,9 +362,11 @@ export function DeparturesBoard({
                 const verdict = verdictFor(row.status);
                 const upstreamStatus = groupUpstreamStatus(group);
                 const refusedRow = verdict.tone === "denied";
+                const identity = departureIdentity(row, callContext.agentNames);
                 return (
                   <tr
                     key={row.id}
+                    data-outcome-category={callOutcome(row.status).category}
                     className={`pc-call-row ${
                       refusedRow ? "is-refused" : ""
                     } ${arrived.current.has(row.id) ? "pc-departure-new" : ""}`}
@@ -352,7 +374,7 @@ export function DeparturesBoard({
                     data-call-class={isHousekeeping(row) ? "housekeeping" : "inference"}
                     role="button"
                     tabIndex={0}
-                    aria-label={`Open recorded call ${flightCode(row)}`}
+                    aria-label={`Open recorded call ${flightCode(row)} from ${identity.name}`}
                     onClick={() => setSelected(row)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
@@ -371,24 +393,21 @@ export function DeparturesBoard({
                       {row.provider ?? "—"}
                       <span> / {departureDestination(row)}</span>
                     </td>
-                    <td className="pc-live-calls__passport" title={row.passport_id ?? ""}>
-                      {row.passport_id
-                        ? `${row.passport_id.slice(0, 10)}…`
-                        : row.auth_method === "direct_key"
-                          ? `KEY ${row.agent_access_key_id?.slice(0, 8) ?? "recorded"}`
-                          : "—"}
+                    <td className="pc-live-calls__passport" title={`${identity.name} · ${identity.credential}`} data-agent-name={identity.name}>
+                      {identity.name}
+                      <small className="block opacity-60">{identity.credential}</small>
                     </td>
                     <td className="pc-live-calls__number">
-                      {totalTokens(row) || "—"}
+                      {reportedTokensText(reportedTokens(row))}
                     </td>
                     <td className="pc-live-calls__number">
-                      {fare(row.cost_microcents)}
+                      {row.status === "ok" && row.cost_microcents == null ? "no recorded cost" : fare(row.cost_microcents)}
                     </td>
-                    <td className="pc-live-calls__number">
-                      {fare(budgetChargeMicrocents(row))}
+                    <td className="pc-live-calls__number" data-cap-charge={capCharge(row).kind}>
+                      {capChargeText(capCharge(row))}
                     </td>
                     <td className="pc-live-calls__usage" data-state={row.status === "usage_unknown" ? "unconfirmed" : undefined}>
-                      {usageStatusLabel(row)}
+                      {usageLabel(row)}
                     </td>
                     <td className={`pc-live-calls__verdict ${TONE_CLASS[verdict.tone]}`}>
                       {verdict.word}
@@ -441,9 +460,11 @@ export function DeparturesBoard({
             const span = groupSpan(group);
             const verdict = verdictFor(row.status);
             const upstreamStatus = groupUpstreamStatus(group);
+            const identity = departureIdentity(row, callContext.agentNames);
             return (
               <li
                 key={row.id}
+                data-outcome-category={callOutcome(row.status).category}
                 className={`pc-call-row ${verdict.tone === "denied" ? "is-refused" : ""}`}
                 data-call-state={selected?.id === row.id ? "selected" : "idle"}
                 data-call-class={isHousekeeping(row) ? "housekeeping" : "inference"}
@@ -458,8 +479,8 @@ export function DeparturesBoard({
                 }}
               >
                 <div>
-                  <strong>{row.provider ?? "Unknown provider"}</strong>
-                  <span>{departureDestination(row)}</span>
+                  <strong>{identity.name}</strong>
+                  <span>{row.provider ?? "Unknown provider"} / {departureDestination(row)}</span>
                 </div>
                 <span className={TONE_CLASS[verdict.tone]}>
                   {verdict.word}
@@ -485,11 +506,11 @@ export function DeparturesBoard({
                 </span>
                 <dl>
                   <div><dt>{zoneLabel}</dt><dd>{format(row.created_at, "time")}</dd></div>
-                  <div><dt>Identity</dt><dd>{row.passport_id ? row.passport_id.slice(0, 10) : row.auth_method === "direct_key" ? "Direct key" : "—"}</dd></div>
-                  <div><dt>Tokens</dt><dd>{totalTokens(row) || "—"}</dd></div>
-                  <div><dt>Observed cost</dt><dd>{fare(row.cost_microcents)}</dd></div>
-                  <div><dt>Budget charge</dt><dd>{fare(budgetChargeMicrocents(row))}</dd></div>
-                  <div><dt>Usage status</dt><dd>{usageStatusLabel(row)}</dd></div>
+                  <div><dt>Agent</dt><dd>{identity.name}</dd></div>
+                  <div><dt>Reported tokens</dt><dd>{reportedTokensText(reportedTokens(row))}</dd></div>
+                  <div><dt>Est. cost</dt><dd>{row.status === "ok" && row.cost_microcents == null ? "no recorded cost" : fare(row.cost_microcents)}</dd></div>
+                  <div><dt>Charged to cap</dt><dd>{capChargeText(capCharge(row))}</dd></div>
+                  <div><dt>Usage status</dt><dd>{usageLabel(row)}</dd></div>
                 </dl>
               </li>
             );
@@ -511,6 +532,7 @@ export function DeparturesBoard({
         open={Boolean(selected)}
         onOpenChange={(open) => { if (!open) setSelected(null); }}
         currentShadowRevision={selected?.agent_id ? callContext.shadowRevisions[selected.agent_id] ?? null : null}
+        agentName={selected?.agent_id ? callContext.agentNames[selected.agent_id] ?? null : null}
       />
     </div>
   );

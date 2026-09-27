@@ -32,7 +32,9 @@ import {
   touchLastSeen,
   claimNonce,
   purgeAgentPolicy,
+  flagPassportSecretExposed,
 } from "@/lib/state/redis";
+import { passportIdIfSecret } from "@/lib/auth/passport-secret-detect";
 import {
   openHold,
   settleKnown,
@@ -66,9 +68,13 @@ import {
   estimateTokenUsage,
   isPricedEndpoint,
   MICROCENTS_PER_CENT,
+  unpricedRequestOption,
 } from "@/lib/pricing";
 import { createUsageTransform, usageFromJson, NO_USAGE, type Usage } from "@/lib/usage/parseStream";
 import { writeLog, mirrorSpend, type AuthMethod } from "@/lib/log";
+import { outputLimitShape, requestedOutputTokens } from "@/lib/output-limit";
+import { serverSideToolUse } from "@/lib/providers/server-side-tools";
+import { periodStart, secondsUntilPeriodEnd, type PeriodKind, type PeriodLimit } from "@/lib/period";
 import { livePolicyRevision, shadowRevision, stampShadowVerdict } from "@/lib/policy-shadow";
 import { signReceipt, type OwnerClaim } from "@/lib/receipt";
 import { readCurrentOwner } from "@/lib/owner/current";
@@ -95,6 +101,7 @@ import {
 import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
+import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 
 // Per-agent request-rate cap (independent of the token budget): bounds raw call
 // volume so a runaway/abusive agent can't flood the gateway or upstream. Generous
@@ -106,6 +113,11 @@ const PROXY_RATE_WINDOW_S = Number(process.env.PROXY_RATE_WINDOW_S ?? "60");
 // purpose is protecting the shared database from unauthenticated work.
 const DIRECT_KEY_IP_LIMIT = Number(process.env.DIRECT_KEY_IP_LIMIT ?? "60");
 const DIRECT_KEY_IP_WINDOW_S = Number(process.env.DIRECT_KEY_IP_WINDOW_S ?? "60");
+// C2: FAILED visa authentications per client IP. Counted only on failure, so it
+// never throttles valid traffic; it bounds the security events and the C1
+// lookup an unauthenticated flood would otherwise buy.
+const VISA_FAIL_IP_LIMIT = Number(process.env.VISA_FAIL_IP_LIMIT ?? "60");
+const VISA_FAIL_IP_WINDOW_S = Number(process.env.VISA_FAIL_IP_WINDOW_S ?? "60");
 
 const KEY_CACHE_TTL_S = 60;
 const POLICY_RATE_WINDOW_S = 60 * 60;
@@ -526,6 +538,42 @@ function stampLastSeen(agentId: string): void {
   }
 }
 
+/**
+ * Whether the durable record says this agent is suspended.
+ *
+ * Only a Direct Agent Key carries it: its lookup reads `agents.status` on every
+ * call. It is OR-ed with the Redis flag at every revocation read, so either
+ * record of a suspension refuses on its own — Redis is the hot-path copy and can
+ * be lost; the row is the one an operator's suspend always leaves behind.
+ */
+function principalSuspended(principal: GatewayPrincipal): boolean {
+  // Strictly boolean, never `undefined`: to `evaluateGate`, `suspended:
+  // undefined` means "not read yet", which marks the chain pending and skips
+  // scope, policy and budget — and a skipped chain has no `deniedBy`. A
+  // principal that somehow lacked this field must not switch enforcement off.
+  return principal.kind === "direct_key" && principal.suspended === true;
+}
+
+/**
+ * The agent whose CURRENT passport key is `passportId`, or null — including on
+ * any read failure, because this only decides between two 401 bodies. Current
+ * keys are globally unique (0035), so more than one row is treated as none.
+ */
+async function findAgentByPassportId(passportId: string): Promise<string | null> {
+  try {
+    const { data, error } = await serviceClient()
+      .from("agents")
+      .select("id")
+      .eq("passport_pubkey", passportId)
+      .limit(2);
+    if (error || !Array.isArray(data) || data.length !== 1) return null;
+    const id = (data[0] as { id?: unknown }).id;
+    return typeof id === "string" ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Authenticate either door without letting one format fall through to the other. */
 async function authenticateGatewayRequest(
   req: Request,
@@ -611,6 +659,62 @@ async function authenticateGatewayRequest(
 
   const claims = await verifyVisa(credential.token);
   if (!claims) {
+    // C2. The Direct Agent Key door is limited before any work; this one only
+    // after a verification FAILS, so a valid visa is never counted or throttled
+    // here (it has its per-agent limit). What is bounded is the unauthenticated
+    // work a failure triggers: a security event, and the C1 lookup below.
+    // Fail closed, like the direct-key edge: an unreadable counter must not
+    // license unbounded database work. The answer itself does not change — an
+    // invalid visa is a 401 whether or not Redis is up.
+    const failures = await rateLimitFailClosed(
+      `visa-fail-ip:${clientIp(req)}`,
+      VISA_FAIL_IP_LIMIT,
+      VISA_FAIL_IP_WINDOW_S
+    );
+    if (!failures.success && !failures.unreadable) {
+      return {
+        ok: false,
+        response: new Response(JSON.stringify({ error: "rate_limited" }), {
+          status: 429,
+          headers: { "content-type": "application/json", "retry-after": String(VISA_FAIL_IP_WINDOW_S) },
+        }),
+      };
+    }
+    // C1. A Passport SECRET pasted into a client's API-key field arrives here.
+    // Deriving its public key and finding it on an agent is proof, not a guess,
+    // that this agent's private key was just transmitted. Never echo or log the
+    // token; name the agent. Detection only — the key is already exposed.
+    const exposedPassportId = failures.success ? passportIdIfSecret(credential.token) : null;
+    if (exposedPassportId) {
+      const exposed = await findAgentByPassportId(exposedPassportId);
+      if (exposed) {
+        waitUntil(
+          Promise.all([
+            captureSecurityEvent("proxy.passport_secret_presented", {
+              route: "api.proxy",
+              method: req.method,
+              status: 401,
+              provider,
+              agentId: exposed,
+              code: "passport_secret_presented_as_bearer",
+            }),
+            // Deferred so even a synchronous throw (redis() constructing its
+            // client) cannot turn this 401 into a 500 — same guard as stampLastSeen.
+            Promise.resolve()
+              .then(() => flagPassportSecretExposed(exposed, exposedPassportId))
+              .catch(() => undefined),
+          ])
+        );
+        return {
+          ok: false,
+          response: errMessage(
+            401,
+            "passport_secret_presented_as_bearer",
+            "This token is an agent's PRIVATE passport key, not an API key. Treat it as exposed: rotate that agent's passport now. A client that can only send a static API key needs a Direct Agent Key, or the local passport sidecar."
+          ),
+        };
+      }
+    }
     waitUntil(
       captureSecurityEvent("proxy.invalid_visa", {
         route: "api.proxy",
@@ -727,7 +831,7 @@ async function evaluateCurrentPolicyGate(
   userId: string,
   agentId: string,
   base: GateBaseInput,
-  budget: { tokens: number | null; microcents: number | null },
+  budget: { tokens: number | null; microcents: number | null; period?: { kind: PeriodKind; microcents: number } },
   current?: Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>>,
   policyFailClosed = process.env.POLICY_FAIL_CLOSED === "true"
 ): Promise<{
@@ -818,7 +922,11 @@ async function evaluateCurrentPolicyGate(
 function effectiveLivePolicyRevision(
   policy: unknown,
   scopes: readonly VisaScope[],
-  budget: { tokens: number | null; microcents: number | null },
+  budget: {
+    tokens: number | null;
+    microcents: number | null;
+    period?: { kind: PeriodKind; microcents: number };
+  },
   policyFailClosed: boolean
 ): string {
   return livePolicyRevision({
@@ -832,13 +940,69 @@ function effectiveLivePolicyRevision(
   });
 }
 
+/**
+ * The ledger's spend so far this period, in micro-cents, for the one open that
+ * finds no period snapshot (K1). Service role: agent_period_spend is not granted
+ * to tenants. Null on ANY failure — every caller refuses rather than guesses.
+ */
+async function readLedgerPeriodSpend(agentId: string, kind: PeriodKind, nowMs: number): Promise<number | null> {
+  try {
+    const { data, error } = await serviceClient().rpc("agent_period_spend", {
+      p_agent_id: agentId,
+      p_since: periodStart(kind, nowMs).toISOString(),
+    });
+    if (error) return null;
+    const row = (Array.isArray(data) ? data[0] : data) as { spent_microcents?: unknown } | undefined;
+    const value = Number(row?.spent_microcents);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The live row's periodic limit, as the hold script's vocabulary. */
+function periodFromRead(
+  read: { known: true; kind: PeriodKind | null; cents: number | null } | { known: false } | undefined
+): Exclude<PeriodLimit, { mode: "skip" }> {
+  if (!read || !read.known) return { mode: "unknown" };
+  if (read.kind === null || read.cents === null) return { mode: "none" };
+  return {
+    mode: "set",
+    kind: read.kind,
+    capMicrocents: Math.round(read.cents * MICROCENTS_PER_CENT),
+  };
+}
+
+/**
+ * The caps a receipt's `pol` attests to, with the periodic limit ADDED ONLY
+ * WHEN SET — so every agent without one keeps a byte-identical revision.
+ */
+function withPeriod(
+  budget: { tokens: number | null; microcents: number | null },
+  period: PeriodLimit
+): { tokens: number | null; microcents: number | null; period?: { kind: PeriodKind; microcents: number } } {
+  return period.mode === "set"
+    ? { ...budget, period: { kind: period.kind, microcents: period.capMicrocents } }
+    : budget;
+}
+
 function policyBlockDetails(gate: ReturnType<typeof evaluateGate>): {
-  reason: "deny" | "window" | "malformed" | "rate_limit" | "unreadable";
+  reason: "deny" | "window" | "malformed" | "rate_limit" | "unreadable" | "output_limit";
   rule: string;
   status: 403 | 429;
+  /** The output ceiling, on an `output_limit` refusal only. */
+  limit?: number;
 } {
   const step = gate.steps.find((candidate) => candidate.name === "policy");
   const rule = step?.rule ?? "policy:malformed";
+  if (rule.startsWith("max_output_tokens:")) {
+    return {
+      reason: "output_limit",
+      rule,
+      status: 403,
+      ...(step?.limit !== undefined ? { limit: step.limit } : {}),
+    };
+  }
   const reason =
     rule === "policy:unreadable"
       ? "unreadable"
@@ -850,6 +1014,36 @@ function policyBlockDetails(gate: ReturnType<typeof evaluateGate>): {
             ? "window"
             : "deny";
   return { reason, rule, status: step?.httpStatus === 429 ? 429 : 403 };
+}
+
+/**
+ * The one policy refusal that names its rule to the agent (owner decision D3,
+ * 2026-09-26). A deny rule or a window stays opaque — the caller learns only
+ * `blocked_policy` — but an output ceiling is a CONTRACT the request has to
+ * meet, and an agent told nothing cannot meet it: it would resend the same body
+ * forever. So this says which rule, why, and the ceiling.
+ */
+function outputLimitRefusal(
+  policy: ReturnType<typeof policyBlockDetails>,
+  receiptId: string
+): Response {
+  const why = policy.rule.slice("max_output_tokens:".length);
+  return new Response(
+    JSON.stringify({
+      error: "blocked_policy",
+      rule: "max_output_tokens",
+      reason: why,
+      ...(policy.limit !== undefined ? { limit: policy.limit } : {}),
+    }),
+    {
+      status: policy.status,
+      headers: {
+        "content-type": "application/json",
+        "x-passcontrol-receipt-id": receiptId,
+        "x-passcontrol-policy-rule": "max_output_tokens",
+      },
+    }
+  );
 }
 
 export async function POST(req: Request, ctx: Ctx) {
@@ -1054,10 +1248,19 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       ? null
       : Math.round(Number(liveBudget.cents) * MICROCENTS_PER_CENT)
     : visaCapMicrocents;
+  // The periodic limit (K1). No credential carries it, so an unreadable row has
+  // no snapshot to fall back to here — the hold script falls back to the last
+  // limit its own period snapshot enforced instead (see PeriodLimit).
+  const livePeriod = periodFromRead(currentPolicySnapshot.period);
+  // A DOLLAR limit, as opposed to a token cap: the cost cap or a periodic limit.
+  // Two refusals hang off it and must agree — an unpriced model (the gate's
+  // `endpoint:unpriced_model`) and an unpriced custom endpoint (step 5b) — so
+  // both read this one value.
+  const dollarLimited = capMicrocents != null || livePeriod.mode === "set";
   const policyRevision = effectiveLivePolicyRevision(
     currentPolicySnapshot.policy,
     scopes,
-    { tokens: capTokens, microcents: capMicrocents },
+    withPeriod({ tokens: capTokens, microcents: capMicrocents }, livePeriod),
     policyFailClosed
   );
 
@@ -1122,7 +1325,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     );
 
   // ── 2. Kill switch (Redis: platform + this tenant + denylist; Redis per-agent suspend) ──
-  const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
+  const [kill, redisSuspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
+  const suspended = redisSuspended || principalSuspended(principal);
   const revocationGate = evaluateGate({
     agentId,
     killState: kill,
@@ -1219,12 +1423,28 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     path,
     model,
     now: new Date(),
+    // For the policy's output ceiling (K2). Read from the client's own body for
+    // the shape this route serves; the last path segment names it on every
+    // allowlisted spelling. The gate exempts model listings by path.
+    requestedOutput: requestedOutputTokens(outputLimitShape(provider, path), bodyObj),
+    dollarLimited,
   };
   const prePolicyGate = evaluateGate(gateBase);
   if (prePolicyGate.deniedBy === "scope") {
     logBlocked("blocked_scope", model);
     captureBlocked("blocked_scope", 403);
     return errR(403, "blocked_scope");
+  }
+  if (
+    prePolicyGate.deniedBy === "endpoint" &&
+    prePolicyGate.steps.some((step) => step.rule === "endpoint:unpriced_model")
+  ) {
+    // A model with no price row under a dollar limit (lib/gate.ts). Logged, like
+    // its sibling `blocked_unpriced_endpoint`, so an operator sees which model
+    // the agent tried and can add a price or change the limit.
+    logBlocked("blocked_unpriced_model", model);
+    captureBlocked("blocked_unpriced_model", 402);
+    return errR(402, "unpriced_model");
   }
   if (prePolicyGate.deniedBy === "endpoint") {
     logBlocked("blocked_endpoint", model);
@@ -1239,6 +1459,26 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     captureBlocked("blocked_endpoint", 403);
     return errR(403, "blocked_endpoint");
   }
+  // Hosted tools (OpenAI web search, file search, code interpreter, …) are
+  // billed per call or per session, outside token usage, so no budget here could
+  // hold them. Refused as a request this gateway does not carry — before policy
+  // and hold, and unlogged like `invalid_body` (lib/providers/server-side-tools.ts).
+  if (serverSideToolUse(provider, bodyObj) !== null) {
+    return err(400, "server_side_tools_unsupported");
+  }
+  // A request option that bills above the model's table row (a paid service
+  // tier, Anthropic fast mode or US-only inference) cannot be held to a dollar
+  // limit either (lib/pricing.ts unpricedRequestOption). Refused before policy
+  // and hold, unlogged like the hosted-tools refusal above, and named so the
+  // agent's developer knows which field to drop. Every fallback shares this
+  // body and its shape family, so checking it once covers failover too.
+  const pricedAbove = dollarLimited && isProvider(provider) ? unpricedRequestOption(provider, bodyObj) : null;
+  if (pricedAbove !== null) {
+    return new Response(JSON.stringify({ error: "unpriced_option", field: pricedAbove }), {
+      status: 402,
+      headers: { "content-type": "application/json" },
+    });
+  }
 
   // ── 4. Current per-agent policy ────────────────────────────────────────────
   // Policy is deliberately not a visa claim: an owner's change takes effect on
@@ -1248,7 +1488,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     userId,
     agentId,
     gateBase,
-    { tokens: capTokens, microcents: capMicrocents },
+    withPeriod({ tokens: capTokens, microcents: capMicrocents }, livePeriod),
     currentPolicySnapshot,
     policyFailClosed
   );
@@ -1257,7 +1497,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const policy = policyBlockDetails(currentPolicyGate.gate);
     logBlocked(BLOCKED_POLICY_STATUS, model, policy.status);
     captureBlocked(`blocked_policy_${policy.reason}`, policy.status, policy.rule);
-    return errR(policy.status, "blocked_policy");
+    return policy.reason === "output_limit"
+      ? outputLimitRefusal(policy, receiptId)
+      : errR(policy.status, "blocked_policy");
   }
 
   // ── 5–9, once per attempt ───────────────────────────────────────────────────
@@ -1290,8 +1532,33 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // and a disagreeing epoch means loss, which is refused rather than guessed at.
   // The check rides into the open script as an argument, so it costs no extra
   // round trip and cannot race a concurrent flush.
-  const budgeted = capTokens != null || capMicrocents != null;
+  // A periodic limit alone makes an agent budgeted: its period is fenced to a
+  // generation exactly like the cumulative counters it is derived from, so it
+  // needs the same epoch and presence checks. An UNKNOWN periodic limit does not
+  // on its own — with no cap to protect, "unknown" must not become a new
+  // denial path — but a budgeted agent passes it on, so the script can apply
+  // the last limit it enforced.
+  const budgeted = capTokens != null || capMicrocents != null || livePeriod.mode === "set";
   const budgetState = budgeted ? currentPolicyGate.budgetState : undefined;
+  const periodLimit: PeriodLimit | undefined = budgeted ? livePeriod : undefined;
+
+  const readPeriodSeed = (kind: PeriodKind, nowMs: number): Promise<number | null> =>
+    readLedgerPeriodSpend(agentId, kind, nowMs);
+
+  // 402, never 429: the SDKs retry 429 (and 409) on their own, and a spent
+  // period is not something a retry a second later can fix. `retry-after` says
+  // when it can — the next UTC boundary.
+  const periodRefusal = (nowMs: number): Response =>
+    new Response(JSON.stringify({ error: "blocked_budget_period" }), {
+      status: 402,
+      headers: {
+        "content-type": "application/json",
+        "x-passcontrol-receipt-id": receiptId,
+        "retry-after": String(
+          secondsUntilPeriodEnd(livePeriod.mode === "set" ? livePeriod.kind : "day", nowMs)
+        ),
+      },
+    });
 
 
   interface Settlement {
@@ -1429,7 +1696,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     );
 
     // ── 5. Open the attempt's hold (atomic) ────────────────────────────────────
-    const reserve = await openHold({
+    // One clock per attempt: it decides the period the hold is judged in, and
+    // the ledger window a period seed is read over, so the two cannot disagree.
+    const attemptNowMs = Date.now();
+    const holdArgs: Parameters<typeof openHold>[0] = {
       agentId,
       attemptId,
       estimate,
@@ -1444,7 +1714,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       provider: attemptProvider,
       ...(attemptModel ? { model: attemptModel } : {}),
       ...(budgetState ? { budgetState } : {}),
-    });
+      ...(periodLimit ? { periodLimit } : {}),
+      nowMs: attemptNowMs,
+    };
+    let reserve = await openHold(holdArgs);
 
     // First budgeted call of this agent's life: Redis minted an epoch and
     // Postgres has to learn it, or the loss check can never fire. Purging the
@@ -1452,8 +1725,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // which a flush would go undetected to this one call rather than to a full
     // cache TTL, because every read until then would keep reporting
     // `established: false` and skip the check entirely.
-    if (reserve.epochToPersist) {
-      const epoch = reserve.epochToPersist;
+    //
+    // A closure because a period seed (K1) can mean a second open, and that
+    // reply owes Postgres the same thing on the same terms.
+    const persistEpoch = async (epoch: string): Promise<AttemptOutcome | null> => {
       // AWAITED, NOT SCHEDULED. This used to run inside `waitUntil`, which calls
       // it before the send but does not wait for it — so a call could be
       // forwarded and billed with the marker still unwritten.
@@ -1502,7 +1777,52 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // The purge stays scheduled: it bounds how long a stale `established:
       // false` can be read from cache, but the request does not depend on it
       // and a failed purge must not refuse a call whose epoch is durable.
+      // The purge stays scheduled: it bounds how long a stale `established:
+      // false` can be read from cache, but the request does not depend on it
+      // and a failed purge must not refuse a call whose epoch is durable.
       waitUntil(purgeAgentPolicy(userId, agentId));
+      return null;
+    };
+    if (reserve.epochToPersist) {
+      const refused = await persistEpoch(reserve.epochToPersist);
+      if (refused) return refused;
+    }
+
+    // ── 5a. The periodic limit has no snapshot yet (K1) ────────────────────────
+    //
+    // The open reserved nothing: the agent has a periodic limit and no record of
+    // what this period has already spent — a newly set limit, a changed period,
+    // a new generation, or a lost key. Reading that as zero would hand the
+    // period's spend back as capacity, so the ledger is asked instead, ONCE,
+    // and the open retried with its answer. A ledger that cannot answer refuses
+    // the call: the gateway does not invent a starting balance here either.
+    if (reserve.needsPeriodSeed) {
+      const seed =
+        periodLimit?.mode === "set" ? await readPeriodSeed(periodLimit.kind, attemptNowMs) : null;
+      if (seed !== null) {
+        reserve = await openHold({ ...holdArgs, periodSeedMicrocents: seed });
+        if (reserve.epochToPersist) {
+          const refused = await persistEpoch(reserve.epochToPersist);
+          if (refused) return refused;
+        }
+      }
+      if (seed === null || reserve.needsPeriodSeed) {
+        if (!primary) return { kind: "skipped" };
+        waitUntil(
+          captureError(new Error("period spend unavailable"), {
+            route: "api.proxy",
+            method: req.method,
+            status: 503,
+            provider: attemptProvider,
+            agentId,
+            jti,
+            code: "blocked_budget_state",
+          })
+        );
+        logBlocked("blocked_budget_state", attemptModel, 503);
+        captureBlocked("blocked_budget_state", 503);
+        return { kind: "response", response: errR(503, "blocked_budget_state") };
+      }
     }
 
     // A LOST-STATE REFUSAL IS NOT A CAP DENIAL, and it returns before the gate
@@ -1549,7 +1869,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         // budget contract is deliberate, so `deniedBy === "budget"` keeps
         // meaning exactly "a cap denied this". If this union grows again,
         // narrow it here too rather than teaching lib/gate.ts a third meaning.
-        ...(reserve.reason === "tokens" || reserve.reason === "cost"
+        ...(reserve.reason === "tokens" || reserve.reason === "cost" || reserve.reason === "period"
           ? { reason: reserve.reason }
           : {}),
         estimateTokens: estimate,
@@ -1563,6 +1883,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // A failed reserve rolls both dimensions back inside the Lua script, so
       // there is nothing held to release here.
       if (!primary) return { kind: "skipped" };
+      if (reserve.reason === "period" && periodLimit?.mode !== "none") {
+        logBlocked("blocked_budget_period", attemptModel, 402);
+        captureBlocked("blocked_budget_period", 402);
+        return { kind: "response", response: periodRefusal(attemptNowMs) };
+      }
       logBlocked("blocked_budget", attemptModel, 402);
       captureBlocked("blocked_budget", 402);
       return { kind: "response", response: errR(402, "blocked_budget") };
@@ -1897,10 +2222,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // be known any earlier without moving `resolveEndpoint` above `openHold` —
     // and that ordering is load-bearing elsewhere. `not_dispatched` releases the
     // reservation in full, so the momentary hold costs the agent nothing.
-    if (custom && capMicrocents != null) {
+    if (custom && dollarLimited) {
       return terminal(
-        errR(409, "unpriced_endpoint"),
-        reconcile(NO_USAGE, "blocked_unpriced_endpoint", "not_dispatched", 409)
+        errR(402, "unpriced_endpoint"),
+        reconcile(NO_USAGE, "blocked_unpriced_endpoint", "not_dispatched", 402)
       );
     }
 
@@ -2101,6 +2426,33 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     for (const [h, v] of Object.entries(authHeaders(attemptProvider, providerKey))) {
       fwdHeaders.set(h, v);
     }
+    // Invariant 4 on the way BACK (C3 / S-02): every upstream body below passes
+    // through these before it reaches the agent, so an upstream that echoes the
+    // key it was sent cannot hand it over. See lib/providers/secret-redaction.ts.
+    const echoSecrets = secretsToRedact(providerKey);
+    let reflectionReported = false;
+    const reportReflection = () => {
+      if (reflectionReported) return;
+      reflectionReported = true;
+      waitUntil(
+        captureSecurityEvent("proxy.provider_key_reflected", {
+          route: "api.proxy",
+          method: req.method,
+          provider: attemptProvider,
+          agentId,
+          jti,
+          // Never the key, and never the body that carried it.
+          code: "provider_key_reflected",
+        })
+      );
+    };
+    const redactText = (text: string) => {
+      const out = redactSecretsInText(text, echoSecrets);
+      if (out.redacted) reportReflection();
+      return out.text;
+    };
+    const redactBody = (body: ReadableStream<Uint8Array>) =>
+      echoSecrets.length ? body.pipeThrough(redactingStream(echoSecrets, reportReflection)) : body;
 
 
     // ── THE DISPATCH BOUNDARY ────────────────────────────────────────────────
@@ -2291,7 +2643,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       const why = failoverReasonFor(attemptProvider, upstream.status, errorBody ?? "");
 
       const passthrough = () =>
-        new Response(inspectable ? errorBody : upstream.body, {
+        new Response(inspectable ? (errorBody === null ? null : redactText(errorBody)) : upstream.body && redactBody(upstream.body), {
           status: upstream.status,
           headers: {
             "content-type": contentType || "application/json",
@@ -2411,7 +2763,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       );
       return {
         kind: "response",
-        response: new Response(upstream.body.pipeThrough(stream), {
+        response: new Response(redactBody(upstream.body).pipeThrough(stream), {
           status: 200,
           headers: {
             "content-type": "text/event-stream; charset=utf-8",
@@ -2461,7 +2813,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         ? filterModelListingToScope(json, attemptProvider, scopes)
         : json;
     return terminal(
-      new Response(JSON.stringify(forwarded), {
+      new Response(redactText(JSON.stringify(forwarded)), {
         status: 200,
         headers: {
           "content-type": "application/json",
@@ -2489,10 +2841,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // the next call going out, so an operator who arms the switch mid-failover
     // must not have it go out. One Redis round-trip, on a call that has already
     // failed.
-    const [freshKill, freshSuspended] = await Promise.all([
+    const [freshKill, freshRedisSuspended] = await Promise.all([
       readKillState(userId),
       isSuspended(agentId),
     ]);
+    const freshSuspended = freshRedisSuspended || principalSuspended(principal);
     const revocation = evaluateGate({
       agentId,
       killState: freshKill,
@@ -2518,6 +2871,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       path,
       model: fallback.model,
       now: new Date(),
+      requestedOutput: requestedOutputTokens(outputLimitShape(fallback.provider, path), bodyObj),
+      // A fallback's model must be priceable too, or failover would be a way
+      // round the dollar limit the primary was held to.
+      dollarLimited,
     };
     const gate = evaluateGate({
       ...fallbackBase,
@@ -2536,6 +2893,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // provider AND models, so this is what stops a fallback from silently
     // bypassing a rule the operator wrote.
     if (gate.deniedBy) return { verdict: "skip" };
+    // The tool rule is per provider, so a request the primary may carry can be
+    // one a fallback must not.
+    if (serverSideToolUse(fallback.provider, bodyObj) !== null) return { verdict: "skip" };
 
     // Same threaded observation, for the same reason: measuring must not charge
     // the counter. shadowVerdict declines to answer rather than reusing a
@@ -2842,7 +3202,8 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     );
 
   // 2. Kill switch (platform + tenant + denylist; per-agent suspend).
-  const [kill, suspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
+  const [kill, redisSuspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
+  const suspended = redisSuspended || principalSuspended(principal);
   const revocationGate = evaluateGate({
     agentId,
     killState: kill,
@@ -2896,10 +3257,11 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       ? null
       : Math.round(Number(liveBudget.cents) * MICROCENTS_PER_CENT)
     : visaCapMicrocents;
+  const livePeriod = periodFromRead(currentPolicySnapshot.period);
   policyRevision = effectiveLivePolicyRevision(
     currentPolicySnapshot.policy,
     scopes,
-    { tokens: capTokens, microcents: capMicrocents },
+    withPeriod({ tokens: capTokens, microcents: capMicrocents }, livePeriod),
     policyFailClosed
   );
 
@@ -2936,6 +3298,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     path,
     model,
     now: new Date(),
+    requestedOutput: requestedOutputTokens(outputLimitShape("demo", path), bodyObj),
   };
   const prePolicyGate = evaluateGate(gateBase);
   if (prePolicyGate.deniedBy === "scope") {
@@ -2953,7 +3316,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     userId,
     agentId,
     gateBase,
-    { tokens: capTokens, microcents: capMicrocents },
+    withPeriod({ tokens: capTokens, microcents: capMicrocents }, livePeriod),
     currentPolicySnapshot,
     policyFailClosed
   );
@@ -2962,7 +3325,9 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     const policy = policyBlockDetails(currentPolicyGate.gate);
     logBlocked(BLOCKED_POLICY_STATUS, model, policy.status);
     capturePolicyBlocked(policy.reason, policy.status, policy.rule);
-    return errR(policy.status, "blocked_policy");
+    return policy.reason === "output_limit"
+      ? outputLimitRefusal(policy, receiptId)
+      : errR(policy.status, "blocked_policy");
   }
 
   // 6. Budget reserve (atomic) — real, so the budget/kill demos are honest.
@@ -2974,9 +3339,12 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   // it, rather than keeping a second, simpler accounting that could drift from
   // the one under test.
   const attemptId = crypto.randomUUID();
-  const demoBudgetState =
-    capTokens != null || capMicrocents != null ? currentPolicyGate.budgetState : undefined;
-  const reserve = await openHold({
+  // The same budgeted rule as the billed path: a periodic limit alone counts.
+  const demoBudgeted = capTokens != null || capMicrocents != null || livePeriod.mode === "set";
+  const demoBudgetState = demoBudgeted ? currentPolicyGate.budgetState : undefined;
+  const demoPeriod: PeriodLimit | undefined = demoBudgeted ? livePeriod : undefined;
+  const demoNowMs = Date.now();
+  const demoHoldArgs: Parameters<typeof openHold>[0] = {
     agentId,
     attemptId,
     estimate,
@@ -2986,7 +3354,36 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     provider: "demo",
     ...(model ? { model } : {}),
     ...(demoBudgetState ? { budgetState: demoBudgetState } : {}),
-  });
+    ...(demoPeriod ? { periodLimit: demoPeriod } : {}),
+    nowMs: demoNowMs,
+  };
+  let reserve = await openHold(demoHoldArgs);
+  // A periodic limit with no snapshot: seed from the ledger once, exactly as
+  // the billed path does. The epoch a first open minted is persisted by the
+  // block below from whichever reply carries it.
+  if (reserve.needsPeriodSeed) {
+    const firstEpoch = reserve.epochToPersist;
+    const seed =
+      demoPeriod?.mode === "set" ? await readLedgerPeriodSpend(agentId, demoPeriod.kind, demoNowMs) : null;
+    if (seed === null) {
+      if (firstEpoch) {
+        try {
+          await establishBudgetState(agentId, firstEpoch);
+          waitUntil(purgeAgentPolicy(userId, agentId));
+        } catch {
+          // Refused either way, below.
+        }
+      }
+      logBlocked("blocked_budget_state", model, 503);
+      return errR(503, "blocked_budget_state");
+    }
+    reserve = await openHold({ ...demoHoldArgs, periodSeedMicrocents: seed });
+    if (!reserve.epochToPersist && firstEpoch) reserve = { ...reserve, epochToPersist: firstEpoch };
+    if (reserve.needsPeriodSeed) {
+      logBlocked("blocked_budget_state", model, 503);
+      return errR(503, "blocked_budget_state");
+    }
+  }
   if (reserve.epochToPersist) {
     const epoch = reserve.epochToPersist;
     // THE SAME TWO-SIDED CONTRACT AS THE BILLED PATH: a matching durable
@@ -3051,7 +3448,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       ok: reserve.ok,
       // Cap reasons only; `state` was answered above. Same narrowing as the real
       // path, for the same reason.
-      ...(reserve.reason === "tokens" || reserve.reason === "cost"
+      ...(reserve.reason === "tokens" || reserve.reason === "cost" || reserve.reason === "period"
         ? { reason: reserve.reason }
         : {}),
       estimateTokens: estimate,
@@ -3062,6 +3459,17 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     },
   });
   if (finalGate.deniedBy === "budget") {
+    if (reserve.reason === "period" && demoPeriod?.mode === "set") {
+      logBlocked("blocked_budget_period", model, 402);
+      return new Response(JSON.stringify({ error: "blocked_budget_period" }), {
+        status: 402,
+        headers: {
+          "content-type": "application/json",
+          "x-passcontrol-receipt-id": receiptId,
+          "retry-after": String(secondsUntilPeriodEnd(demoPeriod.kind, demoNowMs)),
+        },
+      });
+    }
     logBlocked("blocked_budget", model, 402);
     return errR(402, "blocked_budget");
   }

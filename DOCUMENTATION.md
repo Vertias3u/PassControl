@@ -40,7 +40,10 @@ optional expiry and independent revocation; only its hash is stored. It is check
 against durable credential/agent state on use, without a credential lookup cache.
 Unreadable credential state or its pre-auth protection fails closed. It cannot mint a
 visa or authenticate to `/api/control/v1`. Dashboard **Connect an agent** emits the
-matching provider-native configuration. DAK and Passport may coexist on one agent.
+matching provider-native configuration, and refuses to create a key for a provider with
+no stored provider key. The agent page's **Setup** section rebuilds that configuration
+later with a placeholder for the key, since only its hash exists; a lost key is replaced
+with a new installation key, never recovered. DAK and Passport may coexist on one agent.
 
 ### Work-visas (data plane)
 
@@ -97,6 +100,23 @@ path shape real SDKs send, then forwards to the provider's canonical upstream pa
 | `deepseek` | `POST /chat/completions` or `/v1/chat/completions` | `/chat/completions` |
 | `gemini` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/chat/completions`; `/models`; `/models/{id}`, appended to `https://generativelanguage.googleapis.com/v1beta/openai` |
 
+**OpenAI server-side tools are refused.** OpenAI bills its hosted tools per call or per
+session, outside token usage: web search, file search, code interpreter containers, and the
+others. A budget that counts tokens cannot hold those charges, and a receipt would understate the
+call. So an `openai` request is refused with 400 `server_side_tools_unsupported` before anything
+is reserved or sent when it carries any of these:
+- a `tools` entry that is not one the agent runs itself. Allowed: `function`, `custom`,
+  `namespace` (of functions and custom tools), `computer`, `computer_use_preview`, `local_shell`,
+  `apply_patch`, `shell` with `environment: {"type": "local"}`, and `tool_search` with
+  `execution: "client"`. Anything else is refused, including a tool type OpenAI adds later;
+- Chat Completions' `web_search_options`;
+- a stored Responses `prompt`, which carries its own tools that PassControl cannot see.
+
+The search models, `gpt-4o-search-preview` and `gpt-4o-mini-search-preview`, search on every call
+and are refused as `blocked_endpoint`, including in the decision trace. A failover into OpenAI is
+skipped for any such request. The refusal is answered, not logged, like any other malformed
+request, so it does not appear in the activity feed.
+
 OpenAI Responses supports buffered and streaming POST requests. It uses `input` and
 `max_output_tokens`; terminal completion and valid usage determine whether accounting
 is complete. Retrieval/deletion of stored responses is not allowlisted. Gemini uses
@@ -137,9 +157,11 @@ embeddings, files, fine-tuning, batches, response retrieval/deletion, or token-c
 verifies the visa → checks kill switch → checks scope → checks endpoint allowlist → reserves
 budget → injects your real provider key → streams the response back, and attempts to log the call. It does not return the injected provider key.
 
-Errors: `401 missing_visa | invalid_visa | invalid_credential`, `503 blocked_budget_state`, `402 blocked_budget`, `403 blocked_suspended |
+Errors: `401 missing_visa | invalid_visa | invalid_credential | passport_secret_presented_as_bearer`, `503 blocked_budget_state`, `402 blocked_budget`, `402 blocked_budget_period` (with `retry-after` to the next UTC period boundary), `403 blocked_policy` (an output-ceiling refusal adds `rule: "max_output_tokens"`, `reason` and `limit` to the body and an `x-passcontrol-policy-rule` header), `403 blocked_suspended |
 blocked_scope | blocked_endpoint`, `404 unknown_provider`, `413 payload_too_large`,
-`429 rate_limited`, `502 upstream_unreachable`.
+`429 rate_limited`, `502 upstream_unreachable`. `429 rate_limited` also answers a client IP that
+has sent too many FAILED visas in a window (`VISA_FAIL_IP_LIMIT`, default 60 per 60 s); valid visas
+are never counted by that limiter.
 
 The proxy kill/suspend gate answers `403 blocked_suspended` for either cause, so a caller cannot
 probe which control stopped it. Your **audit log** does distinguish them:
@@ -273,7 +295,7 @@ includes tenant-scoped agent lifecycle, logs, audit, spend, and kill-switch endp
 | GET | `/agents` | read | List agents (filter `?status=`). |
 | POST | `/agents` | write | Create. Body: `name`, `passportPubkey`, `scopes`, `budget_tokens?`, `budget_cents?`, `expiresAt?`. **You generate the Ed25519 keypair and send only the public key.** |
 | GET | `/agents/{id}` | read | Fetch one. |
-| PATCH | `/agents/{id}` | write | Update name / scopes / budgets. |
+| PATCH | `/agents/{id}` | write | Update name / scopes / budgets. A periodic limit is `budget_period` (`"day"`/`"month"`) with `budget_period_cents`, sent together; both null removes it. Write-only for now: GET does not return it. |
 | POST | `/agents/{id}/suspend` · `/resume` | write | Per-agent kill toggle. |
 | DELETE | `/agents/{id}` | write | Revoke (history preserved). |
 
@@ -567,6 +589,25 @@ Unlike receipts, agent tokens **do** carry `exp` and are checked for expiry and 
   token-counting endpoints.
 - Pricing is a best-effort in-code table and can lag provider price changes. Use it for
   budgets and monitoring, not as billing reconciliation against provider invoices.
+- **Gemini thinking tokens are charged as output, from `total_tokens`.** Google bills thinking at
+  the output rate, but its OpenAI-compatible endpoint, which PassControl proxies, leaves thinking
+  out of `usage.completion_tokens`. A real call checked on 2026-09-27 reported prompt 13,
+  completion 127, total 304. So for Gemini PassControl charges output as
+  `total_tokens − prompt_tokens` (never less than `completion_tokens`). A Gemini usage report
+  whose `total_tokens` is missing, malformed or below the input settles as `usage_unknown`,
+  which charges the larger of what was reported and the reservation. A stated output limit caps
+  thinking and visible output together, approximately: streamed calls at
+  `reasoning_effort: "medium"` stopped with `finish_reason: "length"` at 46 and 396 billed output
+  tokens for `max_tokens` 50 and 400, and at **51** for `max_completion_tokens` 50. So a
+  reservation or output-token ceiling bounds a Gemini thinking call to within about one token of
+  the stated limit, and the call is charged what Gemini reports, even when that is over. Not
+  checked: other effort levels. A request that states no limit is reserved at the 1024-token
+  default, which thinking can exceed.
+- **A streamed Gemini call is complete on its last chunk before `[DONE]`.** Gemini sends usage
+  on its content chunks rather than on a separate `choices: []` chunk, so its report counts as
+  final only when it rides on the last data chunk before `[DONE]` and every choice on it has a
+  `finish_reason`. A stream that ends without `[DONE]`, or continues after that chunk, settles
+  as `usage_unknown`. Other OpenAI-compatible providers still need the `choices: []` chunk.
 - Instant revocation assumes Redis is configured for persistence/no-eviction behavior. If
   Redis evicts suspend/kill keys, enforcement falls back to short visa TTLs and durable agent
   status checks at the next mint.
@@ -676,6 +717,42 @@ models. Custom endpoints are unpriced: `cost_microcents: null`, `unpriced: true`
 uses a provider-table reservation estimate even there, not an actual custom price.
 `enforced_*` accounting can differ from reported usage/cost. A spend figure must be read
 alongside unknown pricing, uncertain usage, and reserved headroom.
+
+**Periodic limits.** An agent may also have one spend limit per calendar UTC day or month.
+It is derived from the same cumulative counter, checked in the same atomic reservation, after
+the cumulative caps, and refused with `402 blocked_budget_period` plus `retry-after`. A call
+counts toward the period in which it finishes; reservations still in flight count against the
+current period, and one that never settles keeps counting until an operator resolves it. When
+the gateway has no record of the current period (a new limit, a changed period, a rebuild, a
+lost key) it reads the audit log's spend for the period once, so spend earlier that day or
+month counts; if that read fails the call is refused `503 blocked_budget_state`. A periodic
+limit on a custom endpoint is refused `402 unpriced_endpoint`, like a cost cap.
+
+**Models PassControl cannot price.** Prices come from an in-code table, one row per model id
+(plus its dated snapshots), each read from the provider's own pricing page; the read date is
+pinned in `tests/pricing-table.test.ts`. Where a page gives two rates, the higher is used:
+long-context rates, cache writes above input, audio input, DeepSeek's peak hours. Under a dollar
+limit (a cost cap or a periodic limit), a call to a model with **no row of its own** is refused
+`402 unpriced_model` before anything is reserved or sent, and logged `blocked_unpriced_model`:
+its cost could only be a fallback, and a limit enforced with a number that is not the model's
+price does not hold. The same applies to a fallback model during failover. Without a dollar
+limit the call proceeds and is estimated at the provider's highest listed rate. Model
+listings and the demo provider are exempt; Gemini's `models/` spelling prices as the bare id.
+Under a dollar limit, a request option that bills above the model's row is refused the same
+way, `402 {"error":"unpriced_option","field":…}`, before anything is reserved: a `service_tier`
+other than `auto`, `default`, `standard`, `standard_only` or `flex` (OpenAI Fast/`priority`,
+Gemini and Mistral Priority), and Anthropic `speed` (fast mode) or a non-global
+`inference_geo`. That refusal is not written to the activity feed, like the hosted-tools
+refusal. All three unpriced refusals are `402`, like a spent budget, and not `409`: the OpenAI
+and Anthropic SDKs retry `409` on their own, which would send (and log) each refused call up
+to three times, and a retry cannot price anything. Read the `error` field to tell them apart
+from `blocked_budget`: raising the budget fixes none of them. Not covered: an OpenAI project whose *default* tier is set to Fast in OpenAI's
+settings bills plain requests at the Fast rate, which nothing in the request shows.
+
+**Output ceiling.** A policy's `max_output_tokens` refuses (never shortens) any inference
+request whose stated output limit — `max_tokens`, `max_completion_tokens` or
+`max_output_tokens` as the request's shape uses them, times `n` — is missing or above it.
+Combined with `max_requests_per_hour` it bounds requested output per hour.
 
 Established budgets carry generations across Postgres and Redis. Missing counters or
 mismatched generations refuse with `503 blocked_budget_state`; cap exhaustion is

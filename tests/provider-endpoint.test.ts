@@ -102,6 +102,14 @@ describe("what each mode admits", () => {
       ["a fragment", "http://10.1.2.3:8000/v1#x"],
       ["a control character", "http://10.1.2.3:8000/v1\nX-Injected: 1"],
       ["a parent segment", "http://10.1.2.3:8000/v1/../../admin"],
+      // C4 (S-03): the WHATWG parser resolves these exactly like "..", so each
+      // stored `/admin` while the operator saw `/v1/…`.
+      ["a percent-encoded parent segment", "http://10.1.2.3:8000/v1/%2e%2e/admin"],
+      ["an upper-case encoded parent segment", "http://10.1.2.3:8000/v1/%2E%2E/admin"],
+      ["a half-encoded parent segment", "http://10.1.2.3:8000/v1/.%2e/admin"],
+      ["the other half-encoded parent segment", "http://10.1.2.3:8000/v1/%2e./admin"],
+      ["an encoded current-directory segment", "http://10.1.2.3:8000/v1/%2e/admin"],
+      ["a backslash traversal", "http://10.1.2.3:8000/v1\\..\\admin"],
       ["nothing at all", ""],
       ["not a URL", "just some text"],
     ])("refuses %s even in selfhost", (_label, url) => {
@@ -128,6 +136,28 @@ describe("normalising what gets stored", () => {
   it("returns null for anything it would not admit", () => {
     process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
     expect(normalizeEndpoint("http://10.1.2.3:8000/v1?k=1")).toBeNull();
+  });
+
+  // What the guard is FOR: the stored endpoint must be the one the operator
+  // read. Before C4 each of these normalised to "http://10.1.2.3:8000/admin".
+  it("never stores a different path from the one typed", () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    for (const typed of [
+      "http://10.1.2.3:8000/v1/%2e%2e/admin",
+      "http://10.1.2.3:8000/v1/.%2E/admin",
+      "http://10.1.2.3:8000/v1\\..\\admin",
+    ]) {
+      expect(normalizeEndpoint(typed), typed).toBeNull();
+    }
+    // An encoded character that the parser does NOT resolve stays admissible
+    // and is stored exactly as typed.
+    expect(normalizeEndpoint("http://10.1.2.3:8000/team%20a/v1")).toBe("http://10.1.2.3:8000/team%20a/v1");
+  });
+
+  it("applies the same refusal on the hosted allowlist", () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "gateway.company.com";
+    expect(normalizeEndpoint("https://gateway.company.com/v1/%2e%2e/admin")).toBeNull();
+    expect(normalizeEndpoint("https://gateway.company.com/v1")).toBe("https://gateway.company.com/v1");
   });
 });
 
@@ -161,6 +191,12 @@ describe("joining an upstream path onto a base", () => {
   it("refuses to join a traversal segment", () => {
     expect(() => joinUpstream("https://h/v1", ["..", "admin"])).toThrow();
     expect(() => joinUpstream("https://h/v1", ["a", ".", "b"])).toThrow();
+  });
+
+  it("refuses a percent-encoded traversal segment, which fetch would resolve", () => {
+    for (const seg of ["%2e%2e", "%2E%2E", ".%2e", "%2E.", "%2e"]) {
+      expect(() => joinUpstream("https://h/v1", ["models", seg, "admin"]), seg).toThrow();
+    }
   });
 
   it("refuses a segment carrying its own separator or control characters", () => {

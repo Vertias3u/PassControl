@@ -259,7 +259,7 @@ const STEP_TO_STATUS: Record<string, string> = {
 };
 
 /** Collapse a trace result to the same vocabulary. */
-async function traceVerdict(w: World): Promise<string> {
+async function traceVerdict(w: World, maxOutputTokens?: number): Promise<string> {
   const builder = applyWorld(w);
   const result = await evaluateDecisionTrace({
     db: { from: () => builder } as never,
@@ -267,6 +267,7 @@ async function traceVerdict(w: World): Promise<string> {
     agentId: AGENT_ID,
     provider: PROVIDER,
     model: MODEL,
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
     evaluatedAt: AT,
     policyAt: AT,
   });
@@ -327,6 +328,19 @@ describe("proxy and decision trace agree", () => {
     expect(fromProxy).toBe(expected);
     expect(fromTrace).toBe(expected);
     expect(fromTrace).toBe(fromProxy);
+  });
+
+  // K2. The proxy's request states `max_tokens: 10`; asked about the same size,
+  // the trace must reach the same answer on both sides of the ceiling. Asked
+  // about no size, it must refuse as the gateway refuses a body stating none.
+  it("agrees on the output ceiling when asked about the same request size", async () => {
+    const under = { ...base(), policy: { max_output_tokens: 50 } };
+    expect(await proxyVerdict(under)).toBe("allow");
+    expect(await traceVerdict(under, 10)).toBe("allow");
+    const over = { ...base(), policy: { max_output_tokens: 5 } };
+    expect(await proxyVerdict(over)).toBe("blocked_policy");
+    expect(await traceVerdict(over, 10)).toBe("blocked_policy");
+    expect(await traceVerdict(under)).toBe("blocked_policy");
   });
 
   // The posture that only exists since the review fix: an unreadable policy row
@@ -469,4 +483,101 @@ it("agrees with the gateway on a default-shaped demo call, and says what it assu
     if (previousDemo === undefined) delete process.env.PASSCONTROL_DEMO;
     else process.env.PASSCONTROL_DEMO = previousDemo;
   }
+});
+
+// OpenAI search models run a web search on every call, billed outside tokens.
+// The gate refuses them at the endpoint step, and the trace must say the same.
+describe("trace/gateway agreement for an OpenAI search model", () => {
+  const SEARCH_MODEL = "gpt-4o-search-preview";
+
+  it("refuses at the endpoint step on both paths", async () => {
+    const w = base();
+    applyWorld(w);
+    h.writeLogMock.mockClear();
+    const res = await POST(
+      new Request(`https://gateway.test/api/v1/${PROVIDER}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: SEARCH_MODEL, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      }),
+      { params: Promise.resolve({ provider: PROVIDER, path: ["chat", "completions"] }) }
+    );
+    expect(res.status).toBe(403);
+    expect((h.writeLogMock.mock.calls.at(-1)?.[0] as { status?: string }).status).toBe("blocked_endpoint");
+
+    const builder = applyWorld(w);
+    const trace = await evaluateDecisionTrace({
+      db: { from: () => builder } as never,
+      userId: USER_ID,
+      agentId: AGENT_ID,
+      provider: PROVIDER,
+      model: SEARCH_MODEL,
+      maxOutputTokens: 10,
+      evaluatedAt: AT,
+      policyAt: AT,
+    });
+    expect(trace.ok).toBe(true);
+    if (!trace.ok) return;
+    expect(trace.trace.verdict).toBe("deny");
+    expect(trace.trace.steps.find((s) => s.status === "fail")?.name).toBe("endpoint");
+  });
+});
+
+// Owner decision 2026-09-27: under a dollar limit, a model with no price row is
+// refused at the endpoint step. The trace must refuse it too, and must allow the
+// same model when the agent has no dollar limit.
+describe("trace/gateway agreement for an unpriced model under a dollar limit", () => {
+  const UNLISTED = "gpt-5.4-codex";
+
+  function dollarLimited(cents: number | null) {
+    const builder = applyWorld(base());
+    h.verifyVisaMock.mockResolvedValue({
+      sub: "passport-id", agid: AGENT_ID, uid: USER_ID, jti: "jti-1",
+      bt: null, bc: cents, st: 0, sc: 0, ver: 1,
+      scope: [{ provider: PROVIDER, models: ["*"] }],
+    });
+    const row = {
+      id: AGENT_ID, status: "active", allowed_scopes: [{ provider: PROVIDER, models: ["*"] }],
+      budget_tokens: null, budget_cents: cents, spent_tokens: 0, spent_microcents: 0, policy: {},
+    };
+    (builder as unknown as { maybeSingle: () => Promise<unknown> }).maybeSingle = async () => ({ data: row, error: null });
+    h.openHoldMock.mockResolvedValue({ ok: true });
+    return builder;
+  }
+
+  async function both(cents: number | null) {
+    dollarLimited(cents);
+    h.writeLogMock.mockClear();
+    const res = await POST(
+      new Request(`https://gateway.test/api/v1/${PROVIDER}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: UNLISTED, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      }),
+      { params: Promise.resolve({ provider: PROVIDER, path: ["chat", "completions"] }) }
+    );
+    const builder = dollarLimited(cents);
+    const trace = await evaluateDecisionTrace({
+      db: { from: () => builder } as never,
+      userId: USER_ID, agentId: AGENT_ID, provider: PROVIDER, model: UNLISTED,
+      maxOutputTokens: 10, evaluatedAt: AT, policyAt: AT,
+    });
+    return { res, trace };
+  }
+
+  it("refuses on both paths with a cost cap", async () => {
+    const { res, trace } = await both(500);
+    expect(res.status).toBe(402);
+    expect((h.writeLogMock.mock.calls.at(-1)?.[0] as { status?: string }).status).toBe("blocked_unpriced_model");
+    expect(trace.ok).toBe(true);
+    if (!trace.ok) return;
+    expect(trace.trace.verdict).toBe("deny");
+    expect(trace.trace.steps.find((s) => s.status === "fail")).toMatchObject({ name: "endpoint", rule: "endpoint:unpriced_model" });
+  });
+
+  it("allows on both paths without one", async () => {
+    const { res, trace } = await both(null);
+    expect(res.status).toBe(200);
+    expect(trace.ok && trace.trace.verdict).toBe("allow");
+  });
 });

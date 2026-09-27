@@ -44,6 +44,7 @@ vi.mock("server-only", () => ({}));
 vi.mock("@/lib/mfa", () => ({ needsMfaStepUp: async () => false }));
 vi.mock("@/lib/state/killswitch", () => ({
   readKillState: async () => ({ userKill: false, platformKill: false }),
+  observeKillState: async () => ({ tenant: false, platform: false }),
 }));
 vi.mock("@/lib/state/redis", () => ({ redis: () => ({}) }));
 vi.mock("@/lib/key-storage", () => ({ readDeclaredKeyStorageMany: async () => ({}) }));

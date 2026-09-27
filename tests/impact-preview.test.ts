@@ -116,7 +116,7 @@ describe("impact preview placement and preserved security language", () => {
 
   it("keeps the existing warnings instead of replacing them with previews", () => {
     expect(read("components/ScopeEditor.tsx")).toContain(
-      "Saving this leaves no scopes — this passport will reach nothing."
+      "Saving this leaves no scopes — this agent will reach nothing."
     );
     expect(read("components/FallbackEditor.tsx")).toContain("One call can be billed twice.");
     expect(read("components/PolicyShadowPanel.tsx")).toContain(

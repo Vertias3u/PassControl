@@ -173,7 +173,8 @@ export function PassportStoreAndConnect({
         <strong>Shown once.</strong>
         <span>
           Save this only in the agent&apos;s private runtime or secret manager. Do not paste it into source code,
-          chat, tickets, logs or a browser-exposed environment variable.
+          chat, tickets, logs, a browser-exposed environment variable, or a client&apos;s API-key or token field —
+          it is a private key, not an API key, and the gateway will refuse it and flag it as exposed.
         </span>
       </div>
 
@@ -257,7 +258,12 @@ export function PassportStoreAndConnect({
               </label>
               <pre className="pc-secret-block is-public overflow-x-auto">{sidecarSnippet}</pre>
               {copyButton("sidecar", "Copy sidecar setup", sidecarSnippet)}
-              <p className="pc-field-note">Point the tool at the sidecar URL, not the PassControl gateway. Direct Agent Keys use the gateway directly and are issued through the separate Direct Agent Key flow.</p>
+              <p className="pc-field-note" data-sidecar-key-note>
+                Point the tool at the sidecar URL, not the PassControl gateway. The tool&apos;s API-key field takes the
+                placeholder in this setup, never the Passport secret — only the sidecar holds that. The sidecar is a
+                process running beside the tool; if you cannot run one there, use a Direct Agent Key, which goes to the
+                gateway directly and is issued through the separate Direct Agent Key flow.
+              </p>
             </section>
           ) : (
             <section className="grid gap-2" aria-labelledby="passport-mcp-heading">

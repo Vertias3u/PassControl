@@ -30,8 +30,17 @@ export function FleetOverviewCards(props: {
    * "0 refused calls" — a confident measurement of the fault itself.
    */
   logsAvailable: boolean;
+  /**
+   * Whether the agents read succeeded. Required for the same reason as
+   * `logsAvailable`: an unreadable agent list also arrives as an empty array,
+   * and Session 07 saw it render "0 of 0 · No passports issued" and "$0.00"
+   * with PostgREST down. The agent count, the settled charges (summed from the
+   * agents' own counters) and the attention queue all come from that read.
+   */
+  agentsAvailable: boolean;
 }) {
   const probes = props.housekeepingCalls ?? 0;
+  const agents = props.agentsAvailable;
   const scanNote = !props.logsAvailable
     ? "Call history unavailable"
     : `Latest ${props.recentCalls} agent call${props.recentCalls === 1 ? "" : "s"}` +
@@ -39,19 +48,22 @@ export function FleetOverviewCards(props: {
   // The queue itself is still true as far as it goes — expiry and status come
   // from the agent rows. What it can no longer see is anything call-derived
   // (recent refusals, burn rate), so an empty queue must not read as all clear.
-  const attentionNote = props.logsAvailable
-    ? props.attention.note
-    : props.attention.count
-      ? `${props.attention.note} · call signals unavailable`
-      : "Call signals unavailable";
+  const attentionNote = !agents
+    ? "Agent list unavailable"
+    : props.logsAvailable
+      ? props.attention.note
+      : props.attention.count
+        ? `${props.attention.note} · call signals unavailable`
+        : "Call signals unavailable";
   return (
     <div className="pc-metric-grid pc-overview-status-rail" aria-label="Fleet operational summary">
       <MetricCard
         label="Active agents"
-        value={props.activeAgents}
-        unit={`of ${props.totalAgents}`}
+        value={agents ? props.activeAgents : "—"}
+        unit={agents ? `of ${props.totalAgents}` : undefined}
+        state={agents ? undefined : "unavailable"}
         icon={<Users className="h-5 w-5" />}
-        note={props.totalAgents ? "Open the fleet" : "No passports issued"}
+        note={!agents ? "Agent list unavailable" : props.totalAgents ? "Open the fleet" : "No agents yet"}
         href="#fleet"
         tone="signal"
       />
@@ -65,9 +77,10 @@ export function FleetOverviewCards(props: {
         // receipt for that same call says the cost is unknown. Labelling it
         // "Tracked spend" made this card contradict a signed receipt.
         label="Settled budget charges"
-        value={`$${(props.spentMicrocents / 1e8).toFixed(2)}`}
+        value={agents ? `$${(props.spentMicrocents / 1e8).toFixed(2)}` : "—"}
+        state={agents ? undefined : "unavailable"}
         icon={<DollarSign className="h-5 w-5" />}
-        note="What was counted against caps"
+        note={agents ? "Counted against cumulative agent caps · all time" : "Agent counters unavailable"}
         href="#spend"
       />
       <MetricCard
@@ -84,8 +97,8 @@ export function FleetOverviewCards(props: {
       />
       <MetricCard
         label="Needs attention"
-        value={props.attention.count}
-        state={props.logsAvailable ? undefined : "unavailable"}
+        value={agents ? props.attention.count : "—"}
+        state={agents && props.logsAvailable ? undefined : "unavailable"}
         icon={<Activity className="h-5 w-5" />}
         note={attentionNote}
         href="#fleet"

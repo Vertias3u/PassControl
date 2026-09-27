@@ -549,6 +549,68 @@ describe("POST /agents/{id}/budget/rebuild", () => {
   // the cached policy, so a stale entry keeps the proxy comparing against the
   // generation this rebuild just replaced — every call refused, for a full TTL,
   // right after the operator was told the recovery succeeded.
+  // K1. The new epoch invalidates the period snapshot; the rebuild rewrites it
+  // from the ledger's total for the current period, so a rebuild never hands a
+  // period's spend back as capacity.
+  it("rebuilds the periodic limit's snapshot from the ledger's current-period total", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-26T15:30:00.000Z"));
+    try {
+      const fake = fakeDb({
+        row: { budget_epoch: "old-epoch", budget_period: "day", budget_period_cents: 2500 },
+        rpc: { spent_tokens: 4200, spent_microcents: 830 },
+      });
+      db.current = fake.client;
+      const res = await rebuildRoute(post(url, {}), ctx(params));
+      expect(res.status).toBe(200);
+      expect(fake.rpcCalls).toEqual([
+        { name: "rebuild_agent_spend", args: { p_agent_id: AGENT } },
+        { name: "agent_period_spend", args: { p_agent_id: AGENT, p_since: "2026-09-26T00:00:00.000Z" } },
+      ]);
+      expect(rebuildBudgetState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          period: { kind: "day", capMicrocents: 2500 * 1_000_000, spentMicrocents: 830 },
+          nowMs: Date.parse("2026-09-26T15:30:00.000Z"),
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses the whole rebuild, before writing anything, when the period total cannot be read", async () => {
+    const fake = fakeDb({ row: { budget_period: "month", budget_period_cents: 900 } });
+    const rpc = fake.client.rpc;
+    fake.client.rpc = async (name: string, args: unknown) =>
+      name === "agent_period_spend" ? { data: null, error: { message: "boom" } } : rpc(name, args);
+    db.current = fake.client;
+    const res = await rebuildRoute(post(url, {}), ctx(params));
+    expect(res.status).toBe(500);
+    expect(fake.updates).toEqual([]);
+    expect(rebuildBudgetState).not.toHaveBeenCalled();
+  });
+
+  it("still recovers an agent on a database that predates the periodic limit", async () => {
+    const fake = fakeDb({ row: { budget_epoch: "old-epoch" } });
+    const from = fake.client.from;
+    fake.client.from = () => {
+      const b = from();
+      const select = b.select;
+      b.select = (cols: string) => {
+        if (cols.includes("budget_period")) {
+          const refused: any = { eq: () => refused, maybeSingle: async () => ({ data: null, error: { code: "42703", message: "column agents.budget_period does not exist" } }) };
+          return refused;
+        }
+        return select(cols);
+      };
+      return b;
+    };
+    db.current = fake.client;
+    const res = await rebuildRoute(post(url, {}), ctx(params));
+    expect(res.status).toBe(200);
+    expect(rebuildBudgetState).toHaveBeenCalledWith(expect.not.objectContaining({ period: expect.anything() }));
+  });
+
   it("purges the policy cache for the agent it rebuilt", async () => {
     db.current = fakeDb({}).client;
     await rebuildRoute(post(url, {}), ctx(params));

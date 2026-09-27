@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PassControl Control-Plane API
-  version: "0.9.5"
+  version: "1.0.0"
   description: >
     Developer API for managing a PassControl agent fleet. Authenticated with a
     `pc_` API key (Authorization: Bearer). All access is tenant-isolated to the
@@ -396,6 +396,19 @@ components:
         scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
         budget_tokens: { type: [integer, "null"], minimum: 0 }
         budget_cents: { type: [integer, "null"], minimum: 0 }
+        budget_period:
+          type: [string, "null"]
+          enum: [day, month, null]
+          description: >-
+            Calendar UTC period of a periodic spend limit. Send together with
+            budget_period_cents; both null removes the limit. A call counts toward
+            the period in which it finishes. Write-only here, like fallbacks: GET
+            does not return it, so the list endpoint cannot depend on migration 0073.
+        budget_period_cents:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 2147483647
+          description: Most this agent may spend per budget_period, in cents. Send together with budget_period.
     GateStep:
       type: object
       required: [name, status, reason]

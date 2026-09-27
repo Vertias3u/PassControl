@@ -12,7 +12,7 @@ export type SystemHealthFunctionalityState = "full" | "partial" | "unavailable" 
 export type SystemHealthSecurityState = "nominal" | "protected" | "degraded" | "unknown";
 export type SystemHealthCheckId =
   | "database" | "migration_ledger" | "vault_wiring" | "redis" | "visa_signing"
-  | "cache_encryption" | "receipt_signing" | "build_identity";
+  | "cache_encryption" | "receipt_signing" | "build_identity" | "control_posture";
 
 export interface SystemHealthSnapshot {
   format_version: 1;

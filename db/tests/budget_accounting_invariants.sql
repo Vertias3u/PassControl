@@ -26,6 +26,8 @@ declare
   agent_unpriced constant uuid := '7c2e9a41-0000-4000-8000-0000000000b4';
   agent_excluded constant uuid := '7c2e9a41-0000-4000-8000-0000000000b5';
   agent_empty    constant uuid := '7c2e9a41-0000-4000-8000-0000000000b6';
+  -- 0073: limited only per period, with no cumulative cap at all.
+  agent_period   constant uuid := '7c2e9a41-0000-4000-8000-0000000000b7';
 
   -- Placed comfortably in the past so every cutoff below includes them, and so
   -- the half-open `created_at > reconciled_at` comparison against the epoch
@@ -98,6 +100,21 @@ begin
     raise exception 'reconcile_agent_spend must be service_role only';
   end if;
 
+  -- 0073. The ledger's period total seeds the gateway's period snapshot, so a
+  -- tenant must not be able to call it (it reads any agent by id), and the
+  -- tenant's own periodic limit must stay editable like its cumulative caps.
+  if has_function_privilege('anon', 'public.agent_period_spend(uuid, timestamptz)', 'execute')
+     or has_function_privilege('authenticated', 'public.agent_period_spend(uuid, timestamptz)', 'execute') then
+    raise exception 'agent_period_spend must be service_role only';
+  end if;
+  if not has_function_privilege('service_role', 'public.agent_period_spend(uuid, timestamptz)', 'execute') then
+    raise exception 'service_role must execute agent_period_spend';
+  end if;
+  if not has_column_privilege('authenticated', 'public.agents', 'budget_period', 'update')
+     or not has_column_privilege('authenticated', 'public.agents', 'budget_period_cents', 'update') then
+    raise exception 'authenticated must be able to edit its own periodic limit (0073)';
+  end if;
+
   -- The budget-state columns decide whether the gateway trusts its own counters.
   -- 0011 left `authenticated` a COLUMN ALLOWLIST on public.agents, so a column
   -- added later is excluded automatically — this asserts that still held, rather
@@ -132,6 +149,15 @@ begin
   -- swept agents the RPC had returned.
   insert into public.agents (id, user_id, name, budget_cents)
   values (agent_empty, test_user, 'budget-empty', 500);
+
+  -- 0073: a periodic limit and nothing else. One call inside the window the
+  -- period total is asked about, one two days before it.
+  insert into public.agents (id, user_id, name, budget_period, budget_period_cents)
+  values (agent_period, test_user, 'budget-period', 'day', 2500);
+  insert into public.agent_logs (user_id, agent_id, status, created_at, input_tokens, output_tokens, cost_microcents, passport_id, jti)
+  values (test_user, agent_period, 'ok', t0 - interval '2 days', 1, 1, 5000, 'cGFzc3BvcnQtYg', 'visa-p1');
+  insert into public.agent_logs (user_id, agent_id, status, created_at, input_tokens, output_tokens, cost_microcents, passport_id, jti)
+  values (test_user, agent_period, 'ok', t0, 10, 20, 700, 'cGFzc3BvcnQtYg', 'visa-p2');
 
   -- The boundary agent: one ordinary settled call.
   insert into public.agent_logs (user_id, agent_id, status, created_at, input_tokens, output_tokens, cost_microcents, passport_id, jti)
@@ -574,6 +600,53 @@ begin
      or explanation.attributable_microcents <> explanation.log_microcents + explanation.adjustment_microcents then
     raise exception 'workspace explanation equation does not add up';
   end if;
+
+  -- ── 13. A periodic limit alone makes an agent budgeted (0073) ─────────────
+  --
+  -- The gateway fences and counts a period-only agent like any other budgeted
+  -- one, so the checkpoint and the reconcile floor must cover it too.
+  select f.spent_tokens, f.spent_microcents into folded
+    from _pc_fold f where f.agent_id = agent_period;
+  if folded.spent_microcents is distinct from 5700::bigint then
+    raise exception 'a period-only agent must be folded like a budgeted one: got % microcents, expected 5700',
+      folded.spent_microcents;
+  end if;
+
+  -- ── 14. The period total is windowed on the ledger's own clock (0073) ─────
+  select p.spent_tokens, p.spent_microcents into rebuilt
+    from public.agent_period_spend(agent_period, t0 - interval '1 minute') p;
+  if rebuilt.spent_tokens <> 30 or rebuilt.spent_microcents <> 700 then
+    raise exception 'agent_period_spend must count only rows since the moment asked: got % / %, expected 30 / 700',
+      rebuilt.spent_tokens, rebuilt.spent_microcents;
+  end if;
+  select p.spent_microcents into seen
+    from public.agent_period_spend(agent_period, t0 - interval '3 days') p;
+  if seen <> 5700 then
+    raise exception 'agent_period_spend over the whole history must match the fold: got %', seen;
+  end if;
+  -- A window with no rows in it is zero, not nothing.
+  select p.spent_microcents into seen
+    from public.agent_period_spend(agent_period, now() + interval '1 hour') p;
+  if seen is distinct from 0::bigint then
+    raise exception 'agent_period_spend must return zero for an empty window, got %', seen;
+  end if;
+
+  -- ── 15. The limit is written whole or not at all (0073) ───────────────────
+  begin
+    update public.agents set budget_period = 'day', budget_period_cents = null where id = agent_empty;
+    raise exception 'a period with no amount was accepted';
+  exception when check_violation then null;
+  end;
+  begin
+    update public.agents set budget_period = 'week', budget_period_cents = 100 where id = agent_empty;
+    raise exception 'an unknown period was accepted';
+  exception when check_violation then null;
+  end;
+  begin
+    update public.agents set budget_period = 'month', budget_period_cents = -1 where id = agent_empty;
+    raise exception 'a negative periodic limit was accepted';
+  exception when check_violation then null;
+  end;
 
   raise notice 'Budget accounting invariants: PASS';
 end;

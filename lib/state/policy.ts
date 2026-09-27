@@ -13,6 +13,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { toSenderConstraintMode, type SenderConstraintMode } from "../sender-constraint";
 import { POLICY_UNREADABLE } from "../gate";
 import { getCachedAgentPolicy, readPolicyFence, setCachedAgentPolicy } from "./redis";
+import type { PeriodKind } from "../period";
 
 const POLICY_CACHE_TTL_S = 60;
 
@@ -71,6 +72,17 @@ export interface CurrentPolicyRead {
   budget:
     | { known: true; tokens: number | null; cents: number | null }
     | { known: false };
+  /**
+   * The agent's periodic spend limit (K1, migration 0073), as the row has it.
+   *
+   * `known: false` — an older schema, a cache entry written before this field,
+   * or a failed read. The gateway then enforces the last limit its Redis
+   * snapshot recorded, if any (lib/state/holds.ts, `unknown`), and never reads
+   * the absence as "no limit". `kind: null` is a real value: no periodic limit.
+   */
+  period:
+    | { known: true; kind: PeriodKind | null; cents: number | null }
+    | { known: false };
 }
 
 /** Cached shape. Short keys because this is written on every cache miss. */
@@ -107,6 +119,20 @@ interface CachedPolicy {
   bk?: boolean;
   bt?: number | null;
   bc?: number | null;
+  /**
+   * The periodic limit (0073), with its own known-flag for the reason `bk`
+   * has one: an entry written before this field has no `pdp`, and that must
+   * read as "unknown", never as "no periodic limit".
+   */
+  pdk?: boolean;
+  pdp?: PeriodKind | null;
+  pdc?: number | null;
+}
+
+const UNKNOWN_PERIOD = { known: false } as const;
+
+function periodKind(value: unknown): PeriodKind | null {
+  return value === "day" || value === "month" ? value : null;
 }
 
 /**
@@ -175,6 +201,10 @@ export async function readCurrentAgentPolicyAndShadow(
               parsed.bk === true
                 ? { known: true, tokens: parsed.bt ?? null, cents: parsed.bc ?? null }
                 : { known: false },
+            period:
+              parsed.pdk === true
+                ? { known: true, kind: periodKind(parsed.pdp), cents: parsed.pdc ?? null }
+                : UNKNOWN_PERIOD,
           };
         }
       } catch {
@@ -189,6 +219,7 @@ export async function readCurrentAgentPolicyAndShadow(
           // the rest of this branch takes: a malformed cache entry is malformed
           // POLICY, and must not silently become an absent budget.
           budget: { known: false },
+          period: UNKNOWN_PERIOD,
         };
       }
     }
@@ -213,14 +244,30 @@ export async function readCurrentAgentPolicyAndShadow(
   // Selecting one column or three costs the same round trip. This is why shadow
   // mode and the sender-proof opt-in stay free on the hot path. The complete
   // read stays first: on a current schema nothing below it runs.
-  const current = await db
+  // A RUNG OF ITS OWN for 0073's periodic limit, ABOVE the full select, for the
+  // same reason 0055 got one: added to the current first rung, a database that
+  // has not applied 0073 would fall to `withoutBudgetState` and silently lose
+  // the budget epoch — turning off loss detection because a new, optional
+  // column was missing. A schema that lacks it pays one extra round trip.
+  const withPeriod = await db
     .from("agents")
     .select(
-      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents"
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents"
     )
     .eq("user_id", userId)
     .eq("id", agentId)
     .maybeSingle();
+
+  const current = isMissingColumn(withPeriod.error)
+    ? await db
+        .from("agents")
+        .select(
+          "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents"
+        )
+        .eq("user_id", userId)
+        .eq("id", agentId)
+        .maybeSingle()
+    : withPeriod;
 
   // A deployment running this code before 0049 (or before 0020) does not get a
   // row with a missing selected column — PostgREST rejects the WHOLE query with
@@ -301,6 +348,7 @@ export async function readCurrentAgentPolicyAndShadow(
       senderConstraintMode: null,
       budgetState: { epoch: null, established: false },
       budget: { known: false },
+      period: UNKNOWN_PERIOD,
     };
   }
 
@@ -362,6 +410,23 @@ export async function readCurrentAgentPolicyAndShadow(
         }
       : { known: false };
 
+  // Known only when the row actually carried the 0073 columns — the top rung.
+  // The value is the row's, with anything that is not a valid pair read as no
+  // limit ONLY because the database's own check constraints make a half pair
+  // unwritable; a number that is not a number is refused the same way the caps
+  // above refuse one.
+  const periodRow = row as { budget_period?: unknown; budget_period_cents?: unknown };
+  const period: CurrentPolicyRead["period"] =
+    "budget_period" in periodRow
+      ? (() => {
+          const kind = periodKind(periodRow.budget_period);
+          const cents = budgetNumber(periodRow.budget_period_cents);
+          return kind !== null && cents !== null
+            ? { known: true as const, kind, cents }
+            : { known: true as const, kind: null, cents: null };
+        })()
+      : UNKNOWN_PERIOD;
+
   if (options.cacheOnMiss !== false) {
     waitUntil(
       setCachedAgentPolicy(
@@ -374,6 +439,7 @@ export async function readCurrentAgentPolicyAndShadow(
           be: budgetState.epoch,
           bs: budgetState.established,
           ...(budget.known ? { bk: true, bt: budget.tokens, bc: budget.cents } : {}),
+          ...(period.known ? { pdk: true, pdp: period.kind, pdc: period.cents } : {}),
         } satisfies CachedPolicy),
         POLICY_CACHE_TTL_S,
         // THE ARGUMENT THAT WAS MISSING. The previous fence had a parameter for
@@ -385,7 +451,7 @@ export async function readCurrentAgentPolicyAndShadow(
       )
     );
   }
-  return { policy, shadow, senderConstraintMode, budgetState, budget };
+  return { policy, shadow, senderConstraintMode, budgetState, budget, period };
 }
 
 /**

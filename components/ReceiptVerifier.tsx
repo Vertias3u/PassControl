@@ -22,6 +22,7 @@
 // The distinction matters more here than on most pages. On a product whose
 // entire pitch is "do not take our word for it", a progress bar that invents
 // duration to look busy is precisely the wrong lie to tell.
+import { issuerReach } from "@/lib/verify/issuer-reach";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPassportSigil } from "@/lib/passport-art";
 import {
@@ -499,6 +500,14 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
               using a key they publish, and nothing in it has been altered since. Whether you
               trust that issuer is your own judgement — this page does not vouch for them.
             </p>
+            {/* T3-1: a local issuer verified here because this browser can reach
+                it. That is real, and it is also the whole audience. */}
+            {issuerReach(String(claims.iss)) === "local" ? (
+              <p className="mt-2 mb-0 text-sm leading-6 text-muted-foreground" data-receipt-issuer-reach="local">
+                That issuer is a local address. The receipt verified in this browser because this machine can
+                reach it; someone on another machine cannot fetch its keys to check the same receipt.
+              </p>
+            ) : null}
             <p className="mt-3 mb-0 text-sm leading-6 text-muted-foreground">
               <strong className="font-semibold text-foreground">{authentication.label}.</strong>{" "}
               {authentication.detail}

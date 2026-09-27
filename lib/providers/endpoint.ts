@@ -105,11 +105,26 @@ function parseStructurally(value: unknown): URL | null {
   // — by the time it is a URL the traversal is gone and the value that would be
   // stored is a different endpoint from the one the operator typed, silently.
   // Refusing it here means what they see is what gets the credential.
+  //
+  // "Traversal" means whatever the parser will RESOLVE as one, not only the
+  // literal spelling (C4 / S-03): it decodes `%2e` in a dot segment, so
+  // `/v1/%2e%2e/admin` and `/v1/.%2E/admin` were stored as `/admin`; and for
+  // http(s) it reads `\` as `/`, so `/v1\..\admin` was too. A backslash has no
+  // legitimate place in a base path, so any backslash is refused outright.
   const rawPath = candidate.slice(candidate.indexOf(url.host) + url.host.length);
-  if (rawPath.split("/").some((segment) => segment === "." || segment === "..")) {
-    return null;
-  }
+  if (rawPath.includes("\\")) return null;
+  if (rawPath.split("/").some(isDotSegment)) return null;
   return url;
+}
+
+/**
+ * A path segment the WHATWG URL parser (and so `fetch`) treats as `.` or `..`,
+ * however it is spelled: `%2e` in either case stands for a dot there. Other
+ * percent-encodings are not resolved by the parser and are left alone.
+ */
+function isDotSegment(segment: string): boolean {
+  const dots = segment.toLowerCase().replaceAll("%2e", ".");
+  return dots === "." || dots === "..";
 }
 
 /** An IPv4 or bracketed IPv6 literal, which `isVerifiableDomain` also refuses. */
@@ -208,7 +223,7 @@ export function versionlessUpstreamPath(upstreamPath: readonly string[]): readon
 
 export function joinUpstream(base: string, upstreamPath: readonly string[]): string {
   for (const segment of upstreamPath) {
-    if (segment === "" || segment === "." || segment === "..") {
+    if (segment === "" || isDotSegment(segment)) {
       throw new Error("unsafe upstream path segment");
     }
     if (/[/\\]/u.test(segment) || UNSAFE_CHARS.test(segment)) {

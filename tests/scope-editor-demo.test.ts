@@ -18,6 +18,7 @@ it("renders the saved demo scope as the selected provider in a mixed agent", () 
         { provider: "anthropic", models: ["claude-*"] },
       ],
       ttlSeconds: 60,
+      hasPassport: false,
       onClose: () => {},
     }));
     const firstSelect = html.match(/<select\b[^>]*>([\s\S]*?)<\/select>/)?.[1];

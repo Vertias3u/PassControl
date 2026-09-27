@@ -44,7 +44,7 @@ const html = (initialLogs: ReturnType<typeof log>[]) =>
     <FirstCallActivation
       userId="u1"
       providerConfigured
-      controlExerciseAt={null}
+      refusalTest={null}
       initiallyHidden={false}
       agents={agents}
       initialLogs={initialLogs}
@@ -57,9 +57,9 @@ const steps = (markup: string) =>
   (markup.match(/<li data-state="([a-z]+)"/g) ?? []).map((li) => li.split('"')[1]);
 
 describe("first-call stepper markup", () => {
-  it("shows four steps, ending on proving the fleet can be stopped", () => {
+  it("shows four steps, ending on proving a refusal", () => {
     const out = html([]);
-    expect(out).toContain("Verify controls");
+    expect(out).toContain("Prove a refusal");
     expect(steps(out)).toHaveLength(4);
   });
 
@@ -74,15 +74,53 @@ describe("first-call stepper markup", () => {
   // a cold load. `renderToStaticMarkup` IS the first paint, so asserting the
   // markup here is exactly the check that was missing — a source-grep for the
   // guard could never see it.
-  it("renders the verified-call stage in the first paint, not after hydration", () => {
+  it("renders the refusal stage in the first paint, not after hydration", () => {
     const out = html([log("ok")]);
-    expect(out).toContain('data-stage="verify"');
-    expect(out).toContain('data-activation-state="verify"');
-    expect(out).toContain('data-control="kill"');
-    expect(out).toContain("Now close the path");
-    // The kill switch is reversible and independent of per-agent suspension,
-    // and it purges nothing. This copy sits beside the bar that said otherwise.
+    expect(out).toContain('data-stage="refuse"');
+    expect(out).toContain('data-activation-state="refuse"');
+    expect(out).toContain('data-refusal-test="not-started"');
+    expect(out).toContain('data-control="start-refusal-test"');
+    expect(out).toContain("Now prove PassControl can say no");
     expect(out).not.toMatch(/purge/i);
+  });
+
+  it("never renders complete from the browser's own derivation", () => {
+    // Completion waits on complete_onboarding(); the first paint of a proven
+    // pair is "confirming", never the completion panel.
+    const out = renderToStaticMarkup(
+      <FirstCallActivation
+        userId="u1"
+        providerConfigured
+        refusalTest={{ agentId: "agent-1", startedAt: "2026-08-20T10:05:00.000Z" }}
+        initiallyHidden={false}
+        agents={agents}
+        initialLogs={[
+          { ...log("blocked_scope"), id: "l2", model: "gpt-5", created_at: "2026-08-20T10:06:00.000Z" },
+          log("ok"),
+        ]}
+        integrations={["generic"]}
+        logsAvailable
+      />
+    );
+    expect(out).toContain('data-activation-state="proven"');
+    expect(out).not.toContain('data-stage="complete"');
+  });
+
+  it("says the refusal step is unavailable rather than guessing when its row cannot be read", () => {
+    const out = renderToStaticMarkup(
+      <FirstCallActivation
+        userId="u1"
+        providerConfigured
+        refusalTest="unavailable"
+        initiallyHidden={false}
+        agents={agents}
+        initialLogs={[log("ok")]}
+        integrations={["generic"]}
+        logsAvailable
+      />
+    );
+    expect(out).toContain('data-refusal-test-state="unavailable"');
+    expect(out).not.toContain('data-control="start-refusal-test"');
   });
 
   it("still hides a dismissed guide in the first paint", () => {
@@ -90,7 +128,7 @@ describe("first-call stepper markup", () => {
       <FirstCallActivation
         userId="u1"
         providerConfigured
-        controlExerciseAt={null}
+        refusalTest={null}
         initiallyHidden
         agents={agents}
         initialLogs={[log("ok")]}

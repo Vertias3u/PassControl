@@ -205,7 +205,46 @@ export function assertConfigLoaded() {
 }
 
 export function resolveModel(provider) {
-  return process.env.MODEL ?? defaultModelForProvider(provider);
+  // `||`, not `??`: the config writer emits every key, so a fresh login left
+  // `MODEL=` in the file, and an empty string is not a model.
+  return process.env.MODEL || defaultModelForProvider(provider);
+}
+
+/**
+ * Provider and gateway, with an EMPTY value treated as unset. The config writer
+ * emits every key, so a fresh `login` wrote `PROVIDER=` — and `??` kept the empty
+ * string, so bare `call` and `agent create` failed with `Unknown provider ""`
+ * (1.0.0 self-host E2E). Reading empty as unset also repairs the configs 0.9.x
+ * logins already wrote.
+ */
+export function resolveConfigDefaults(env = process.env) {
+  return {
+    provider: env.PROVIDER || DEFAULT_PROVIDER,
+    gateway: trimSlash(env.PASSCONTROL_GATEWAY || DEFAULT_GATEWAY),
+  };
+}
+
+/**
+ * What `setup` writes to the global config when it activates a local stack.
+ *
+ * Switching away from another gateway also forgets that gateway's credentials.
+ * Otherwise it still RECORDS the local gateway when the file names none: with no
+ * config the CLI's built-in default is already localhost, so setup used to think
+ * nothing needed writing — while `login`, which deliberately ignores that
+ * default, then went to Cloud. Null when the file already names a gateway.
+ */
+export function localActivationPatch({ switching, globalValues = {}, targetUrl }) {
+  if (switching) {
+    return {
+      PASSCONTROL_GATEWAY: targetUrl,
+      PASSPORT_ID: "",
+      PASSPORT_SECRET: "",
+      PASSPORT_KEY_STORAGE: "",
+      PASSCONTROL_API_KEY: "",
+    };
+  }
+  if (!String(globalValues.PASSCONTROL_GATEWAY ?? "").trim()) return { PASSCONTROL_GATEWAY: targetUrl };
+  return null;
 }
 
 export function resolvedConfig() {
@@ -214,7 +253,7 @@ export function resolvedConfig() {
 }
 
 function currentConfig() {
-  const provider = process.env.PROVIDER ?? DEFAULT_PROVIDER;
+  const { provider, gateway } = resolveConfigDefaults(process.env);
   const passportId = process.env.PASSPORT_ID ?? "";
   const fileSecret = process.env.PASSPORT_SECRET ?? "";
   const passportStorageMarker = process.env.PASSPORT_KEY_STORAGE ?? "";
@@ -234,7 +273,7 @@ function currentConfig() {
     return passport;
   };
   return {
-    gateway: trimSlash(process.env.PASSCONTROL_GATEWAY ?? DEFAULT_GATEWAY),
+    gateway,
     passportId,
     get passportSecret() {
       return resolvedPassport().secret;
@@ -598,8 +637,52 @@ export function formatChallengeError(status, body) {
   return `Challenge failed: ${status} ${detail}`;
 }
 
+/** The gateway's JSON error body, or {} when it is not one. */
+function errorBody(detail) {
+  try {
+    const parsed = JSON.parse(detail);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 export function formatProxyError(status, body) {
   const detail = String(body ?? "").trim();
+  const { error, rule, reason, limit } = errorBody(detail);
+  const blocked = `Proxy blocked the call with ${status}: ${detail}`;
+  if (status === 402 && error === "blocked_budget_period") {
+    return `${blocked}\n→ The agent's daily or monthly limit is spent; it resets at the next UTC day or month (see the retry-after header).\n→ Fix: wait for the reset, or raise the limit in the dashboard.`;
+  }
+  if (status === 403 && error === "blocked_policy" && rule === "max_output_tokens") {
+    const ceiling = Number.isSafeInteger(limit) ? ` (${limit})` : "";
+    return reason === "missing"
+      ? `${blocked}\n→ The agent's policy has an output ceiling${ceiling}, and this request did not state an output limit.\n→ Fix: state an output limit — max_tokens (or max_completion_tokens / max_output_tokens) no higher than the ceiling.`
+      : `${blocked}\n→ The request asked for more output than the agent's output ceiling${ceiling}.\n→ Fix: send a smaller max_tokens, or raise the ceiling in the agent's policy.`;
+  }
+  if (status === 403 && error === "blocked_policy") {
+    return `${blocked}\n→ A rule in the agent's live policy refused this call (a deny rule, time window or hourly cap).\n→ Fix: review the policy on the agent's page, or use its decision trace to see which rule.`;
+  }
+  if (status === 403 && error === "blocked_scope") {
+    return `${blocked}\n→ This provider and model are outside the agent's allowed models.\n→ Fix: call an allowed model, or widen the agent's scope in the dashboard.`;
+  }
+  if (status === 409 && error === "no_provider_key") {
+    return `${blocked}\n→ The workspace has no provider key stored for this provider.\n→ Fix: add one under Settings → Provider credentials in the dashboard.`;
+  }
+  if (status === 400 && error === "server_side_tools_unsupported") {
+    return `${blocked}\n→ The request uses a hosted tool (such as web search) that the provider bills outside tokens, which no budget here can hold.\n→ Fix: remove the hosted tool, or call that feature outside PassControl.`;
+  }
+  // 402 is also how the gateway refuses a call it cannot price under a dollar
+  // limit; a bigger budget fixes none of those, so each gets its own advice.
+  if (status === 402 && error === "unpriced_model") {
+    return `${blocked}\n→ PassControl has no price for this model, so the agent's dollar limit cannot be enforced against it.\n→ Fix: use a model PassControl prices, or remove the dollar limit (a token cap still works).`;
+  }
+  if (status === 402 && error === "unpriced_option") {
+    return `${blocked}\n→ The named request field bills above the model's listed price, so the agent's dollar limit cannot hold it.\n→ Fix: drop that field (e.g. service_tier), or remove the dollar limit.`;
+  }
+  if (status === 402 && error === "unpriced_endpoint") {
+    return `${blocked}\n→ This agent's provider goes through a custom endpoint PassControl cannot price, so its dollar limit cannot be enforced.\n→ Fix: remove the dollar limit (a token cap still works), or use the provider's own endpoint.`;
+  }
   if (status === 402) {
     return `Proxy blocked the call with 402: ${detail}\n→ Fix: raise or clear the agent budget in the dashboard, then retry.`;
   }

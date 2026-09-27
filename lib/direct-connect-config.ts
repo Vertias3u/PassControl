@@ -8,7 +8,26 @@ export interface DirectConnectSetup {
   example: string;
   smokeCommand: string;
   authNote: string;
+  /** The variable the SDK reads its key from — the Direct Agent Key goes here. */
+  keyVariable: "OPENAI_API_KEY" | "ANTHROPIC_API_KEY";
+  installCommand: "npm install openai" | "npm install @anthropic-ai/sdk";
+  envFileName: typeof ENV_FILE_NAME;
+  /** POSIX shell; exports every variable in the file to the process started after it. */
+  loadCommand: string;
+  runtimeNote: string;
 }
+
+/**
+ * Stands in for the key when the Setup view is reopened after the reveal.
+ * PassControl stores only a hash, so there is no key to show; the placeholder
+ * is a bare token so the file still sources cleanly, and a call made with it
+ * fails authentication loudly rather than doing anything else.
+ */
+export const DIRECT_KEY_PLACEHOLDER = "PASTE_YOUR_DIRECT_AGENT_KEY";
+const ENV_FILE_NAME = "passcontrol.env";
+const LOAD_COMMAND = `set -a; . ./${ENV_FILE_NAME}; set +a`;
+const RUNTIME_NOTE =
+  "In this worker's runtime, replace the provider key it used before with this Direct Agent Key. PassControl governs the model calls routed through it; it does not govern the worker process or any other API the worker calls.";
 
 export interface HermesCloudSetup {
   version: "0.18.2";
@@ -23,15 +42,18 @@ function shellQuote(value: string): string {
 export function buildDirectConnectSetup(input: {
   origin: string;
   provider: ProviderId;
-  key: string;
+  /** The newly revealed key, or null for a Setup view reopened later. */
+  key: string | null;
   model: string;
 }): DirectConnectSetup {
   const origin = input.origin.replace(/\/+$/, "");
   const family = requestShapeFamily(input.provider);
+  const key = input.key ?? DIRECT_KEY_PLACEHOLDER;
+  const shared = { envFileName: ENV_FILE_NAME, loadCommand: LOAD_COMMAND, runtimeNote: RUNTIME_NOTE } as const;
   if (family === "anthropic") {
     const envBlock = [
       `ANTHROPIC_BASE_URL=${origin}/api/v1/anthropic`,
-      `ANTHROPIC_API_KEY=${input.key}`,
+      `ANTHROPIC_API_KEY=${key}`,
       `ANTHROPIC_MODEL=${input.model}`,
     ].join("\n");
     return {
@@ -59,12 +81,15 @@ console.log(response.content);`,
         }))}`,
       ].join("\n"),
       authNote: "The Anthropic SDK sends this credential as x-api-key and uses the native Messages API. PassControl does not translate OpenAI request bodies into Anthropic request bodies.",
+      keyVariable: "ANTHROPIC_API_KEY",
+      installCommand: "npm install @anthropic-ai/sdk",
+      ...shared,
     };
   }
 
   const envBlock = [
     `OPENAI_BASE_URL=${origin}/api/v1/${input.provider}/v1`,
-    `OPENAI_API_KEY=${input.key}`,
+    `OPENAI_API_KEY=${key}`,
     `OPENAI_MODEL=${input.model}`,
   ].join("\n");
   return {
@@ -89,6 +114,9 @@ console.log(response.choices[0]?.message.content);`,
       }))}`,
     ].join("\n"),
     authNote: "The OpenAI SDK sends this credential as Bearer authentication. Some compatible clients use x-api-key instead; PassControl accepts either, and Bearer wins when both are present.",
+    keyVariable: "OPENAI_API_KEY",
+    installCommand: "npm install openai",
+    ...shared,
   };
 }
 

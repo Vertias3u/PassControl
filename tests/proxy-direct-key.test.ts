@@ -147,6 +147,7 @@ const directPrincipal = {
   budgetCents: null,
   spentTokens: 0,
   spentMicrocents: 0,
+  suspended: false,
 };
 
 function request(headers: Record<string, string> = { "x-api-key": DIRECT_KEY }) {
@@ -215,6 +216,37 @@ describe("Direct Agent Key gateway authentication", () => {
 
     expect(res.status).toBe(200);
     expect(verifyVisaMock).not.toHaveBeenCalled();
+  });
+
+  // POLICY_FAIL_CLOSED decides only this path: a passport call with an
+  // unreadable row is already refused by its sender-constraint read. Unset, an
+  // unreadable policy lets the call proceed; a deployment can choose to refuse.
+  describe("an unreadable policy row", () => {
+    const unreadablePolicyRow = () => {
+      const builder = {
+        select: vi.fn(() => builder),
+        eq: vi.fn(() => builder),
+        maybeSingle: vi.fn(async () => ({ data: null, error: { message: "timeout" } })),
+      };
+      serviceClientMock.mockReturnValue({
+        from: vi.fn(() => builder),
+        rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
+      });
+      getCachedAgentPolicyMock.mockResolvedValue(null);
+    };
+
+
+    it("still proceeds under the self-host default", async () => {
+      vi.stubEnv("POLICY_FAIL_CLOSED", undefined as unknown as string);
+      try {
+        unreadablePolicyRow();
+        const res = await call();
+        expect(res.status).toBe(200);
+        expect(fetchMock).toHaveBeenCalledOnce();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   it("rate-limits the client IP before the database lookup", async () => {
@@ -291,6 +323,61 @@ describe("Direct Agent Key gateway authentication", () => {
    * continued attacker traffic kept it there. That turns a kill switch into
    * something you cannot cleanly come back from.
    */
+  /**
+   * Found live 2026-09-21: a suspended agent's Direct Agent Key answered 401
+   * `invalid_credential` and wrote NO audit row, because the lookup RPC hid
+   * suspended agents. The durable record of a suspension is `agents.status`;
+   * the Redis flag is the hot-path copy. Either one alone must refuse.
+   */
+  it("refuses a suspended agent with 403 blocked_suspended and an audit row, even when Redis has no flag", async () => {
+    authenticateDirectAgentKeyMock.mockResolvedValue({ ...directPrincipal, suspended: true });
+    isSuspendedMock.mockResolvedValue(false);
+
+    const res = await call();
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "blocked_suspended" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "blocked_suspended",
+        agentId: directPrincipal.agentId,
+        userId: directPrincipal.userId,
+      })
+    );
+    const logged = writeLogMock.mock.calls[0]![0] as Record<string, unknown>;
+    expect(logged.inputTokens ?? 0).toBe(0);
+    expect(logged.outputTokens ?? 0).toBe(0);
+    expect(logged.costMicrocents ?? 0).toBe(0);
+  });
+
+  it("keeps enforcing scope for a principal that carries no suspended field", async () => {
+    // To the gate, `suspended: undefined` means "not read yet" and skips every
+    // later step. Folding the database flag in must never produce undefined.
+    const { suspended: _omitted, ...withoutField } = directPrincipal;
+    authenticateDirectAgentKeyMock.mockResolvedValue(withoutField);
+    const res = await POST(
+      new Request("https://gateway.test/api/v1/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": DIRECT_KEY },
+        body: JSON.stringify({ model: "gpt-4o", messages: [] }),
+      }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "blocked_scope" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still refuses on the Redis flag alone for a principal the database reports active", async () => {
+    authenticateDirectAgentKeyMock.mockResolvedValue({ ...directPrincipal, suspended: false });
+    isSuspendedMock.mockResolvedValue(true);
+    const res = await call();
+    expect(res.status).toBe(403);
+    expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ status: "blocked_suspended" }));
+  });
+
   it("does not spend the rate-limit allowance on a call revocation has already refused", async () => {
     for (const state of [
       { platformKill: true, userKill: false, denylist: [] as string[], suspended: false },

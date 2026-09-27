@@ -51,6 +51,8 @@ interface Draft {
   deny: DenyDraft[];
   windows: WindowDraft[];
   cap: string;
+  /** `max_output_tokens`. A string so a half-typed number is not lost. */
+  ceiling: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -58,7 +60,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** A stored policy → the form. Unreadable pieces become empty rather than throwing. */
-function toDraft(policy: unknown): Draft {
+export function toDraft(policy: unknown): Draft {
   const source = isRecord(policy) ? policy : {};
   const deny = Array.isArray(source.deny)
     ? source.deny.filter(isRecord).map((rule) => ({
@@ -76,7 +78,23 @@ function toDraft(policy: unknown): Draft {
       }))
     : [];
   const cap = typeof source.max_requests_per_hour === "number" ? String(source.max_requests_per_hour) : "";
-  return { deny, windows, cap };
+  // Round-tripped, so saving a draft that already carries a ceiling cannot drop
+  // it — this form is the only browser route to the live policy, via Promote.
+  const ceiling = typeof source.max_output_tokens === "number" ? String(source.max_output_tokens) : "";
+  return { deny, windows, cap, ceiling };
+}
+
+/**
+ * Where the form starts: the draft being measured if there is one, otherwise the
+ * LIVE policy (owner decision 2026-09-27). An empty start meant a draft written
+ * to add one rule dropped every other live rule on promotion, silently.
+ */
+export function initialDraft(shadowDraft: unknown, livePolicy: unknown, liveReadable: boolean): Draft {
+  if (shadowDraft !== null && shadowDraft !== undefined) return toDraft(shadowDraft);
+  // A live policy the gateway cannot read (policy:malformed) is not copied: the
+  // form would carry only its readable pieces, and promoting that partial copy
+  // would drop the rest without saying so.
+  return toDraft(liveReadable ? livePolicy : null);
 }
 
 /**
@@ -88,7 +106,7 @@ function toDraft(policy: unknown): Draft {
  * inverted from fallbacks, where `[]` is the value that means off. The server
  * normalises this too — the form is not the only writer.
  */
-function toPolicy(draft: Draft): unknown {
+export function toPolicy(draft: Draft): unknown {
   const policy: Record<string, unknown> = {};
 
   const deny = draft.deny
@@ -110,6 +128,11 @@ function toPolicy(draft: Draft): unknown {
   const cap = Number(draft.cap.trim());
   if (draft.cap.trim() && Number.isSafeInteger(cap) && cap > 0) {
     policy.max_requests_per_hour = cap;
+  }
+
+  const ceiling = Number(draft.ceiling.trim());
+  if (draft.ceiling.trim() && Number.isSafeInteger(ceiling) && ceiling > 0) {
+    policy.max_output_tokens = ceiling;
   }
 
   return Object.keys(policy).length === 0 ? null : policy;
@@ -212,16 +235,19 @@ export function PolicyShadowPanel({
   agentId,
   shadow,
   liveConfigured,
+  liveReadable = false,
   livePolicy = null,
 }: {
   agentId: string;
   shadow: ShadowState;
   liveConfigured: boolean;
+  /** The live policy parses. Absent reads as not, so a caller that forgets cannot seed a partial copy. */
+  liveReadable?: boolean;
   livePolicy?: unknown;
 }) {
   const active = shadow.draft !== null;
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<Draft>(() => toDraft(shadow.draft));
+  const [draft, setDraft] = useState<Draft>(() => initialDraft(shadow.draft, livePolicy, liveReadable));
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const promotionPreview = active && shadow.wellFormed
@@ -499,6 +525,26 @@ export function PolicyShadowPanel({
             </p>
           </div>
 
+          <div className="grid gap-1 border-t border-border pt-4" data-policy-field="max_output_tokens">
+            <label className="grid gap-1 text-sm">
+              <span className="text-sm font-semibold text-foreground">Output ceiling (tokens per request)</span>
+              <input
+                value={draft.ceiling}
+                onChange={(e) => setDraft((prev) => ({ ...prev, ceiling: e.target.value }))}
+                inputMode="numeric"
+                placeholder="Leave empty for no ceiling"
+                className="h-10 max-w-xs rounded-lg border border-border bg-background px-3 text-sm"
+              />
+            </label>
+            <p className="m-0 text-xs leading-5 text-muted-foreground">
+              Every request must then state its own limit — <code>max_tokens</code>,{" "}
+              <code>max_completion_tokens</code> or <code>max_output_tokens</code>, times <code>n</code> —
+              at or under this number. A request that states none, or a larger one, is refused and told
+              the ceiling; PassControl never shortens a request for you. Many SDKs omit the limit by
+              default, so watch this draft&rsquo;s counts before promoting it.
+            </p>
+          </div>
+
           <p className="m-0 rounded-lg border border-border bg-background p-3 text-xs leading-5 text-muted-foreground">
             Saving a draft changes nothing about enforcement. An empty draft turns shadow mode off.
             Takes effect within 60 seconds.
@@ -516,7 +562,7 @@ export function PolicyShadowPanel({
               className="ghost"
               disabled={pending}
               onClick={() => {
-                setDraft(toDraft(shadow.draft));
+                setDraft(initialDraft(shadow.draft, livePolicy, liveReadable));
                 setError(null);
                 setEditing(false);
               }}
@@ -544,7 +590,7 @@ export function PolicyShadowPanel({
           ) : null}
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" className="ghost" disabled={pending} onClick={() => setEditing(true)}>
-              {active ? "Edit draft" : "Write a draft policy"}
+              {active ? "Edit draft" : liveConfigured && liveReadable ? "Write a draft from the live policy" : "Write a draft policy"}
             </button>
             {active && shadow.wellFormed ? (
               <button type="button" disabled={pending} onClick={promote}>

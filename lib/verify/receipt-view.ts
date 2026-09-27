@@ -423,6 +423,12 @@ const VERDICTS: Record<string, VerdictPresentation> = {
     detail: "The call would have taken the agent past the spending limit set for it.",
     tone: "held",
   },
+  blocked_budget_period: {
+    label: "Refused — over its daily or monthly limit",
+    detail:
+      "The call would have taken the agent past the spending limit set for the current calendar day or month (UTC). The limit resets at the next period boundary.",
+    tone: "held",
+  },
   // A reader of this page is checking someone else's receipt, so the distinction
   // from blocked_budget carries real weight: one says the operator's own limit
   // stopped the call, the other says the call was permitted and the provider's
@@ -452,6 +458,12 @@ const VERDICTS: Record<string, VerdictPresentation> = {
   // misdelivered — which is the entire reason the call was refused.
   // A refusal a reader of someone else's receipt must not mistake for "out of
   // money". It says the opposite: the limit could not be applied at all.
+  blocked_unpriced_model: {
+    label: "Refused — the spending limit could not be applied to this model",
+    detail:
+      "This agent has a limit set in dollars, and the gateway has no price for the model the call asked for. Rather than enforce that limit with a fallback rate that need not resemble the bill, the gateway refused the call. It was never sent and nothing was charged. This is not a statement that the agent had run out.",
+    tone: "held",
+  },
   blocked_unpriced_endpoint: {
     label: "Refused — the spending limit could not be applied to this destination",
     detail:

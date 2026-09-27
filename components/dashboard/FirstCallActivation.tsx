@@ -6,11 +6,13 @@ import {
   ArrowRight,
   Check,
   Circle,
+  Copy,
   KeyRound,
   Radio,
   ReceiptText,
+  RefreshCw,
   ShieldAlert,
-  ShieldOff,
+  ShieldX,
   X,
 } from "lucide-react";
 
@@ -19,6 +21,7 @@ import { KeyImportOnramp } from "@/components/KeyImportOnramp";
 import { PassportIssuanceModal } from "@/components/PassportIssuanceModal";
 import { browserClient } from "@/lib/supabase/client";
 import type { ProviderId } from "@/lib/providers";
+import { buildDirectConnectSetup } from "@/lib/direct-connect-config";
 import {
   activationDiagnosis,
   authenticationProofLabel,
@@ -26,9 +29,12 @@ import {
   type FirstCallActivation,
   type FirstCallAgent,
   type FirstCallRow,
+  type RefusalTest,
 } from "@/lib/first-call-activation";
 
 const MAX_ACTIVATION_ROWS = 40;
+const REFUSAL_POLL_INTERVAL_MS = 4_000;
+const REFUSAL_POLL_WINDOW_MS = 10 * 60_000;
 
 
 function destinationFor(action: ReturnType<typeof activationDiagnosis>["action"], agentId: string) {
@@ -44,7 +50,7 @@ function destinationFor(action: ReturnType<typeof activationDiagnosis>["action"]
   }
 }
 
-type StepName = "provider" | "agent" | "call" | "verify";
+type StepName = "provider" | "agent" | "call" | "refuse";
 
 // `diagnose` stays in this list even though no step is named after it. It is a
 // position, not a label: drop it and indexOf returns -1 at that stage, so every
@@ -59,36 +65,49 @@ function callDestinationHint(identityKind: string | undefined): string {
     : "Use the Direct Agent Key configuration saved when the credential was revealed. The provider call goes through this PassControl gateway.";
 }
 
-const STEP_ORDER = ["provider", "agent", "call", "diagnose", "verify", "complete"];
+const STEP_ORDER = ["provider", "agent", "call", "diagnose", "refuse", "proven"];
 
 function stepState(current: string, step: StepName) {
   const currentIndex = STEP_ORDER.indexOf(current);
   const stepIndex = STEP_ORDER.indexOf(step);
   if (current === "diagnose" && step === "call") return "attention";
-  if (current === "complete" || stepIndex < currentIndex) return "complete";
+  // `proven` still waits on the server, so step 4 stays current until then.
+  if (current === "proven" && step === "refuse") return "current";
+  if (stepIndex < currentIndex) return "complete";
   return stepIndex === currentIndex ? "current" : "upcoming";
 }
+
+/** Server-side confirmation of the whole-flow milestone (complete_onboarding). */
+type Confirmation = "idle" | "confirming" | "confirmed" | "unconfirmed";
 
 export function FirstCallActivation({
   userId,
   providerConfigured,
-  controlExerciseAt,
+  refusalTest: initialRefusalTest,
   initiallyHidden,
   agents,
   initialLogs,
   integrations,
   defaultProvider,
+  configuredProviders,
   logsAvailable,
 }: {
   userId: string;
   providerConfigured: boolean;
-  controlExerciseAt: string | null;
+  /**
+   * The started refusal test, null when none was started, or "unavailable"
+   * when the row could not be read — for instance a database without 0072.
+   * Unavailable is never read as "not started": the step says it cannot run.
+   */
+  refusalTest: RefusalTest | null | "unavailable";
   /** Resolved from the tenant-scoped onboarding row before the first paint. */
   initiallyHidden: boolean;
   agents: FirstCallAgent[];
   initialLogs: FirstCallRow[];
   integrations: string[];
   defaultProvider?: ProviderId;
+  /** Providers with a stored key; null when that read failed. */
+  configuredProviders?: readonly ProviderId[] | null;
   /**
    * Whether the call log this rail reasons over was actually read. REQUIRED.
    *
@@ -96,9 +115,8 @@ export function FirstCallActivation({
    * made — correctly, because that is what an empty log means. With the read
    * FAILED it means nothing, and the rail would tell an established operator to
    * make their first call in the middle of a database fault. That is the mirror
-   * of the rule `controlExerciseAt` already states in lib/first-call-activation.ts:
-   * absent evidence must not read as verified, and it must not read as unmet
-   * either.
+   * of the rule `refusalTest` states in lib/first-call-activation.ts: absent
+   * evidence must not read as verified, and it must not read as unmet either.
    */
   logsAvailable: boolean;
 }) {
@@ -112,9 +130,22 @@ export function FirstCallActivation({
   // revalidatePath("/") from any unrelated action elsewhere on the dashboard,
   // which flips providerConfigured or refreshes `agents` underneath us.
   const [revealing, setRevealing] = useState<"provider" | "agent" | null>(null);
+  const [refusalTest, setRefusalTest] = useState(initialRefusalTest);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation>("idle");
+  const [copiedTest, setCopiedTest] = useState(false);
+  const [origin, setOrigin] = useState("https://YOUR-PASSCONTROL-HOST");
+  useEffect(() => setOrigin(window.location.origin), []);
+  const testAvailable = refusalTest !== "unavailable";
   const derived = useMemo(
-    () => deriveFirstCallActivation({ providerConfigured, controlExerciseAt, agents, logs }),
-    [providerConfigured, controlExerciseAt, agents, logs]
+    () => deriveFirstCallActivation({
+      providerConfigured,
+      agents,
+      logs,
+      refusalTest: refusalTest === "unavailable" ? null : refusalTest,
+    }),
+    [providerConfigured, agents, logs, refusalTest]
   );
   // Safe to pin by stage name alone: both held variants are field-free, so there
   // is no captured row or agent id that could go stale while the hold is active.
@@ -137,15 +168,92 @@ export function FirstCallActivation({
     setHidden(initiallyHidden);
   }, [initiallyHidden]);
 
-  // `complete` is still derived from the admitted call plus a real stop-control
-  // audit row. Persist only the whole-flow milestone after reality reaches it;
-  // provider/agent/call step flags would go stale when their source rows change.
   useEffect(() => {
-    if (state.stage !== "complete" || initiallyHidden) return;
-    void persistProgress("complete");
+    setRefusalTest(initialRefusalTest);
+  }, [initialRefusalTest]);
+
+  // The browser's `proven` is a copy of the rule, read from a bounded window.
+  // Completion is what complete_onboarding() re-derives from the authoritative
+  // history, so the guide shows "complete" only when the server agrees, and
+  // says so plainly when it does not (a failed read must not complete it).
+  const confirm = async () => {
+    setConfirmation("confirming");
+    setConfirmation((await persistProgress("complete")) ? "confirmed" : "unconfirmed");
+  };
+  useEffect(() => {
+    if (state.stage !== "proven" || initiallyHidden || confirmation !== "idle") return;
+    void confirm();
     // The current render keeps the proof visible. The durable timestamp hides
     // it on later loads and on other devices.
-  }, [initiallyHidden, state.stage, userId]);
+  }, [initiallyHidden, state.stage, confirmation, userId]);
+
+  // While a refusal test is waiting, read that one agent's rows since the test
+  // started on a short, bounded interval. Realtime is the fast path, but a
+  // missed or unsubscribed channel must not leave the operator watching a
+  // "waiting" step after the refusal was already recorded. Bounded in time and
+  // rows; stops the moment the stage moves on.
+  const waitingAgentId = state.stage === "refuse" && state.test ? state.test.agentId : null;
+  const waitingSince = state.stage === "refuse" && state.test ? state.test.startedAt : null;
+  useEffect(() => {
+    if (!waitingAgentId || !waitingSince) return;
+    let cancelled = false;
+    const deadline = Date.now() + REFUSAL_POLL_WINDOW_MS;
+    const poll = async () => {
+      const { data, error } = await browserClient()
+        .from("agent_logs")
+        .select("id, agent_id, provider, model, status, receipt, auth_method, agent_access_key_id, created_at")
+        .eq("agent_id", waitingAgentId)
+        .gte("created_at", waitingSince)
+        .order("created_at", { ascending: false })
+        .limit(10);
+      if (cancelled || error || !Array.isArray(data) || data.length === 0) return;
+      const fresh = data as FirstCallRow[];
+      setLogs((current) => {
+        const seen = new Set(current.map((row) => row.id));
+        const added = fresh.filter((row) => !seen.has(row.id));
+        return added.length ? [...added, ...current].slice(0, MAX_ACTIVATION_ROWS) : current;
+      });
+    };
+    const timer = window.setInterval(() => {
+      if (Date.now() > deadline) {
+        window.clearInterval(timer);
+        return;
+      }
+      void poll();
+    }, REFUSAL_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [waitingAgentId, waitingSince]);
+
+  const startRefusalTest = async (agentId: string) => {
+    setStarting(true);
+    setStartError(null);
+    try {
+      // The RPC binds the row to auth.uid() and refuses an agent this user
+      // does not own or that is revoked; it returns null for either.
+      const { data, error } = await browserClient().rpc("start_onboarding_refusal_test", { p_agent_id: agentId });
+      if (error || typeof data !== "string") {
+        setStartError("PassControl could not start the refusal test. Try again.");
+        return;
+      }
+      setConfirmation("idle");
+      setRefusalTest({ agentId, startedAt: data });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const copyTest = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedTest(true);
+      window.setTimeout(() => setCopiedTest(false), 1800);
+    } catch {
+      // Selecting the text by hand still works.
+    }
+  };
 
   useEffect(() => {
     const supabase = browserClient();
@@ -188,29 +296,36 @@ export function FirstCallActivation({
   // renders the moment this prop flips, which React tears the tree down for.
   if (!logsAvailable || hidden) return null;
 
-  if (state.stage === "complete") {
+  if (state.stage === "proven" && confirmation === "confirmed") {
     return (
       <section
         className="pc-first-call pc-first-call--proof"
-        aria-label="First governed call verified"
+        aria-label="First governed call and refusal verified"
         data-stage="complete"
         data-live={live ? "connected" : "connecting"}
       >
         <div className="pc-first-call__complete" data-activation-state="complete">
           <div className="pc-first-call__complete-copy">
             <span><Check aria-hidden="true" /> {authenticationProofLabel(state.row.auth_method)}</span>
-            <strong>{state.agentName || "The agent"} reached {state.row.provider ?? "the provider"}{state.row.model ? ` / ${state.row.model}` : ""}.</strong>
+            <strong>
+              {state.agentName || "The agent"} reached {state.row.provider ?? "the provider"}
+              {state.row.model ? ` / ${state.row.model}` : ""}, then was refused{" "}
+              {state.refusal.model ?? "a model"} outside its access.
+            </strong>
+            <small data-refusal-state="recorded">
+              <ShieldX aria-hidden="true" /> Refused as <code>blocked_scope</code> before the provider saw it — no provider call, no cost.
+            </small>
             <small data-receipt-state={state.receiptRecorded ? "recorded" : "missing"}>
               <ReceiptText aria-hidden="true" />
               {state.receiptRecorded
-                ? "Signed receipt attached to the stored call."
-                : "Stored call found; no receipt is attached, so it is not receipt-verified."}
+                ? "Signed receipt attached to the allowed call."
+                : "Allowed call stored; no receipt is attached, so it is not receipt-verified."}
             </small>
           </div>
-          <nav className="pc-first-call__controls" aria-label="First-call proof controls">
-            <Link href="/dashboard#activity" data-control="receipt">Inspect stored call</Link>
-            <Link href="/dashboard#fleet" data-control="suspend">Suspend agent</Link>
-            <Link href="/dashboard#fleet" data-control="budget">Set budget</Link>
+          <nav className="pc-first-call__controls" aria-label="Next steps">
+            <Link href={`/dashboard/agents/${state.agentId}`} data-control="agent">Operate {state.agentName || "this agent"}</Link>
+            <Link href="/dashboard#activity" data-control="receipt">Inspect stored calls</Link>
+            <DirectAgentConnect triggerLabel="Connect another worker" initialProvider={defaultProvider} configuredProviders={configuredProviders} />
           </nav>
           <button type="button" className="pc-first-call__dismiss" onClick={dismiss} aria-label="Dismiss completed first-call proof">
             <X aria-hidden="true" /> Dismiss
@@ -236,7 +351,8 @@ export function FirstCallActivation({
             Get one agent through the boundary.
           </h2>
           <p>
-            Configuration is not proof. This guide completes only after PassControl stores the call result in the tenant audit log.
+            Configuration is not proof. This guide completes when PassControl has stored one allowed call and one
+            deliberate refusal from the same worker.
           </p>
         </div>
         <span className={live ? "is-live" : "is-connecting"} role="status">
@@ -249,7 +365,7 @@ export function FirstCallActivation({
           ["provider", "1", "Provider key", "Stored server-side"],
           ["agent", "2", "Agent identity", "Scope and budget attached"],
           ["call", "3", "Governed call", "Stored result proves the path"],
-          ["verify", "4", "Verify controls", "Prove you can stop it"],
+          ["refuse", "4", "Prove a refusal", "Same worker, outside its access"],
         ].map(([step, number, label, detail]) => {
           const status = stepState(state.stage, step as StepName);
           return (
@@ -289,7 +405,7 @@ export function FirstCallActivation({
               <p>Use a Direct Agent Key for static-key tools, or a Passport for code that can sign challenges with the PassControl SDK.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <DirectAgentConnect triggerLabel="Direct Agent Key" initialProvider={defaultProvider} />
+              <DirectAgentConnect triggerLabel="Direct Agent Key" initialProvider={defaultProvider} configuredProviders={configuredProviders} />
               <PassportIssuanceModal
                 userId={userId}
                 integrations={integrations}
@@ -336,37 +452,76 @@ export function FirstCallActivation({
           </div>
         ) : null}
 
-        {state.stage === "verify" ? (
-          <div className="pc-first-call__action" data-activation-state="verify">
+        {state.stage === "refuse" ? (
+          <div className="pc-first-call__action" data-activation-state="refuse" data-refusal-test={state.test ? "started" : "not-started"}>
             <div>
               <strong>
                 {state.agentName || "The agent"} reached {state.row.provider ?? "the provider"}
-                {state.row.model ? ` / ${state.row.model}` : ""}. Now close the path.
+                {state.row.model ? ` / ${state.row.model}` : ""}. Now prove PassControl can say no.
               </strong>
-              {/* The honest framing of the last step. One admitted call proves the
-                  gateway will let traffic THROUGH; nothing so far proves this
-                  operator can stop it, and that is the half of the product worth
-                  trusting. So the guide points at the controls and lets the
-                  operator choose — it does not arm anything on their behalf. */}
-              <p>
-                An admitted call proves the path is open. It does not prove you can close it.
-                Exercise one stop control and this guide is done.
-              </p>
-              <small>
-                The fleet kill switch is at the top of this page. Arming it refuses new calls for
-                every agent in this workspace until you disarm it, and disarming restores them —
-                it does not change any agent you suspended separately.
-              </small>
+              {!testAvailable ? (
+                <p data-refusal-test-state="unavailable">
+                  The refusal step cannot run until this deployment&rsquo;s database is updated. Everything
+                  above is still recorded; you can dismiss this guide.
+                </p>
+              ) : state.testModel === null ? (
+                <p data-refusal-test-state="needs-narrower-access">
+                  This agent&rsquo;s access allows every model, so there is nothing for PassControl to refuse.{" "}
+                  <Link href={`/dashboard/agents/${state.agentId}#agent-policy`}>Narrow its access</Link> first, then come back.
+                </p>
+              ) : !state.test ? (
+                <>
+                  <p>
+                    An allowed call proves the path is open. The other half is a refusal: start the test, then
+                    have this same worker request <code>{state.testModel}</code>, a model outside its access.
+                    PassControl refuses it as <code>blocked_scope</code> before the provider sees it, so it costs
+                    nothing.
+                  </p>
+                  <small>
+                    Only a refusal from this worker after you start counts — not an older one, another
+                    agent&rsquo;s, or a kill switch.
+                  </small>
+                </>
+              ) : (
+                <>
+                  <p data-refusal-test-state="waiting">
+                    Waiting for {state.agentName || "the agent"} to request <code>{state.testModel}</code>…
+                  </p>
+                  {agents.find((agent) => agent.id === state.agentId)?.identityKind === "direct_key" && state.provider ? (
+                    <>
+                      <pre className="overflow-x-auto rounded-xl border border-border bg-black/30 p-4 text-xs leading-6 text-foreground">
+                        {buildDirectConnectSetup({ origin, provider: state.provider, key: null, model: state.testModel }).smokeCommand}
+                      </pre>
+                      <button
+                        type="button"
+                        className="ghost inline-flex items-center gap-2 justify-self-start"
+                        onClick={() => copyTest(buildDirectConnectSetup({ origin, provider: state.provider!, key: null, model: state.testModel! }).smokeCommand)}
+                      >
+                        {copiedTest ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+                        {copiedTest ? "Copied" : "Copy refusal test"}
+                      </button>
+                      <small>
+                        Run it where the worker&rsquo;s configuration is loaded, so it uses the same Direct Agent Key.
+                      </small>
+                    </>
+                  ) : (
+                    <small>Change the model this agent requests to <code>{state.testModel}</code> for one call.</small>
+                  )}
+                  <small>
+                    A <code>401 invalid_credential</code> means the key itself was not accepted, and nothing is
+                    recorded for it — that is not this test.
+                  </small>
+                </>
+              )}
+              {startError ? <p role="alert" className="pc-inline-error">{startError}</p> : null}
             </div>
-            <nav className="pc-first-call__controls" aria-label="Controls to verify">
-              <Link href="/dashboard#overview" data-control="kill">
-                <ShieldOff aria-hidden="true" /> Fleet kill switch
-              </Link>
-              <Link href="/dashboard#fleet" data-control="suspend">Suspend this agent</Link>
-              <Link href="/dashboard#fleet" data-control="budget">Set a budget</Link>
-              <Link href="/dashboard#activity" data-control="receipt">
-                {state.receiptRecorded ? "Inspect the signed receipt" : "Inspect the stored call"}
-              </Link>
+            <nav className="pc-first-call__controls" aria-label="Refusal test">
+              {testAvailable && state.testModel !== null ? (
+                <button type="button" className="inline-flex items-center gap-2" onClick={() => startRefusalTest(state.agentId)} disabled={starting} data-control="start-refusal-test">
+                  <ShieldX aria-hidden="true" /> {starting ? "Starting…" : state.test ? "Restart the test" : "Start the refusal test"}
+                </button>
+              ) : null}
+              <Link href={`/dashboard/agents/${state.agentId}#agent-setup`} data-control="setup">Worker setup</Link>
             </nav>
             <button
               type="button"
@@ -376,6 +531,28 @@ export function FirstCallActivation({
             >
               <X aria-hidden="true" /> Dismiss
             </button>
+          </div>
+        ) : null}
+
+        {state.stage === "proven" ? (
+          <div className="pc-first-call__action" data-activation-state="proven" data-confirmation={confirmation}>
+            <div>
+              <strong>
+                {state.agentName || "The agent"} was refused {state.refusal.model ?? "a model"} outside its access.
+              </strong>
+              {confirmation === "unconfirmed" ? (
+                <p>PassControl could not confirm this from its stored history yet, so the guide is not marked complete.</p>
+              ) : (
+                <p>Confirming from PassControl&rsquo;s stored history…</p>
+              )}
+            </div>
+            {confirmation === "unconfirmed" ? (
+              <nav className="pc-first-call__controls" aria-label="Confirmation">
+                <button type="button" className="inline-flex items-center gap-2" onClick={() => void confirm()} data-control="retry-confirmation">
+                  <RefreshCw aria-hidden="true" /> Try again
+                </button>
+              </nav>
+            ) : null}
           </div>
         ) : null}
 

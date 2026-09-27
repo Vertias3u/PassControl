@@ -620,12 +620,45 @@ describe("custom provider endpoints", () => {
       { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
     );
 
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(402);
     expect(await res.json()).toEqual({ error: "unpriced_endpoint" });
     // Never sent. The refusal is a configuration answer, not a spend answer.
     expect(fetchMock).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
     expect(writeLogMock.mock.calls.at(-1)?.[0]?.status).toBe("blocked_unpriced_endpoint");
+  });
+
+  // K1: a periodic limit is a dollar limit too, so the same rule holds for it.
+  it("refuses a call under a periodic limit to a custom endpoint, for the same reason", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      scope: [{ provider: "openai", models: ["gpt-4o-mini"] }],
+    });
+    getCachedAgentPolicyMock.mockResolvedValue(
+      JSON.stringify({
+        p: {},
+        s: null,
+        be: "epoch-1",
+        bs: true,
+        bk: true,
+        bt: null,
+        bc: null,
+        pdk: true,
+        pdp: "day",
+        pdc: 500,
+      })
+    );
+
+    const res = await POST(
+      req({ model: "gpt-4o-mini", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "unpriced_endpoint" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("still allows a TOKEN-capped call to a custom endpoint", async () => {
@@ -1293,5 +1326,86 @@ describe("framework routing parameters never reach the provider", () => {
 
     expect(res.status).toBe(200);
     expect(target()).toBe("https://api.openai.com/v1/models/gpt-5-mini");
+  });
+});
+
+// Owner decision 2026-09-27: under a dollar limit, a model with no price row of
+// its own is refused before anything is reserved (lib/gate.ts). Same answer
+// shape as `unpriced_endpoint`, its sibling.
+describe("an unpriced model under a dollar limit", () => {
+  const UNLISTED = "gpt-5.4-codex";
+
+  it("refuses a cost-capped call with 402 unpriced_model: no hold, no send", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: ["gpt-*"] }], bc: 500 });
+    const res = await POST(
+      req({ model: UNLISTED, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "unpriced_model" });
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+    expect(writeLogMock.mock.calls.at(-1)?.[0]).toMatchObject({ status: "blocked_unpriced_model", model: UNLISTED });
+  });
+
+  it("refuses under a periodic limit, and does not consume the hourly counter", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: ["gpt-*"] }] });
+    getCachedAgentPolicyMock.mockResolvedValue(
+      JSON.stringify({
+        p: { max_requests_per_hour: 5 },
+        s: null, be: "epoch-1", bs: true, bk: true, bt: null, bc: null,
+        pdk: true, pdp: "day", pdc: 500,
+      })
+    );
+    const res = await POST(
+      req({ model: UNLISTED, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "unpriced_model" });
+    expect(rateLimitMock.mock.calls.some((c) => String(c[0]).startsWith("policy-hour:"))).toBe(false);
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+
+  it("allows the same model under a token cap only", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: ["gpt-*"] }], bt: 10_000 });
+    const res = await POST(
+      req({ model: UNLISTED, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("allows a listed model under the same cost cap", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: ["gpt-*"] }], bc: 500 });
+    const res = await POST(
+      req({ model: "gpt-5.4", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("a price-raising request option under a dollar limit", () => {
+  const send = (body: Record<string, unknown>) =>
+    POST(req({ model: "gpt-5.4", max_tokens: 10, messages: [{ role: "user", content: "hi" }], ...body }), {
+      params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }),
+    });
+
+  it("refuses service_tier priority with 402 unpriced_option naming the field: no hold, no send", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: ["gpt-*"] }], bc: 500 });
+    const res = await send({ service_tier: "priority" });
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "unpriced_option", field: "service_tier" });
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("allows it without a dollar limit, and allows flex under one", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: ["gpt-*"] }] });
+    expect((await send({ service_tier: "priority" })).status).toBe(200);
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: ["gpt-*"] }], bc: 500 });
+    expect((await send({ service_tier: "flex" })).status).toBe(200);
   });
 });

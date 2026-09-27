@@ -156,6 +156,24 @@ describe("planAgentImports — the pure decision", () => {
     });
   });
 
+  // K1: optional in a file (older exports predate it), validated when present,
+  // and never dropped silently — a bad pair refuses the agent.
+  it("restores a periodic limit, and treats an older file without one as no limit", () => {
+    const withLimit = planAgentImports([agent({ budget_period: "day", budget_period_cents: 2500 })], []);
+    expect((withLimit[0] as { row: Record<string, unknown> }).row).toMatchObject({
+      budget_period: "day",
+      budget_period_cents: 2500,
+    });
+    const older = planAgentImports([agent()], []);
+    expect(older[0]).toMatchObject({ action: "create" });
+    expect((older[0] as { row: Record<string, unknown> }).row).not.toHaveProperty("budget_period");
+  });
+
+  it("refuses an agent whose periodic limit is half a pair, rather than dropping the limit", () => {
+    const plan = planAgentImports([agent({ budget_period: "day", budget_period_cents: null })], []);
+    expect(plan[0]).toMatchObject({ action: "reject", reason: "invalid_budget_period" });
+  });
+
   it("rejects a status outside the enum instead of falling back to the default", () => {
     const plan = planAgentImports([agent({ status: "godmode" })], []);
     expect(plan[0]).toMatchObject({ action: "reject" });
