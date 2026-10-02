@@ -1,10 +1,12 @@
 // Tools a provider runs on its own servers are billed per call, per item or per
 // session, outside token usage. OpenAI charges $10 per 1k web-search calls,
 // $2.50 per 1k file-search calls and per 20-minute session for code-interpreter
-// containers (developers.openai.com/api/docs/pricing, read 2026-09-27). A budget
+// containers (developers.openai.com/api/docs/pricing, read 2026-09-27); xAI charges
+// $5 per 1k web searches and $5 per 1k X posts fetched (docs.x.ai/developers/
+// pricing.md, read 2026-09-27). A budget
 // that counts tokens cannot hold those charges, and a receipt would understate
 // the call, so a request that could incur one is refused before anything is
-// reserved or sent. Owner decision, 2026-09-27.
+// reserved or sent. Owner decisions, 2026-09-27 (OpenAI; xAI as plan P2-5).
 //
 // Deny-by-default, per provider. For each provider with a rule, only the tool
 // types the AGENT executes pass; every other type, a tool with no type, a
@@ -51,6 +53,11 @@ interface ProviderRule {
   refusedFields: readonly string[];
 }
 
+/** xAI documents only functions as client tools ("only functions and web search"). */
+const XAI_CLIENT_TOOLS: Record<string, ToolCheck> = {
+  function: () => true,
+};
+
 const RULES: Readonly<Record<string, ProviderRule>> = {
   openai: {
     clientTools: OPENAI_CLIENT_TOOLS,
@@ -61,6 +68,20 @@ const RULES: Readonly<Record<string, ProviderRule>> = {
       // which PassControl cannot see from the request.
       "prompt",
     ],
+  },
+  // Azure's v1 API is OpenAI's wire format, and its Responses API hosts the same
+  // kinds of tool (MCP, code interpreter, image generation, web search), billed
+  // outside tokens. Same rule as OpenAI's (owner decision 2026-09-27).
+  azure: {
+    clientTools: OPENAI_CLIENT_TOOLS,
+    refusedFields: ["web_search_options", "prompt"],
+  },
+  xai: {
+    clientTools: XAI_CLIENT_TOOLS,
+    // xAI's older live-search switch. Refused whenever present, even
+    // `mode: "off"`: telling a harmless value from a costly one is the judgement
+    // this rule avoids making.
+    refusedFields: ["search_parameters"],
   },
 };
 

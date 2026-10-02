@@ -22,7 +22,13 @@
 // reference is ever named — only the provider and the agent's own scope entry.
 import type { ScopeEntry } from "../auth/visa";
 import { isProvider, requestShapeFamily, type ProviderId } from "../providers";
-import { advertisedClientPath, isModelListing } from "../scope";
+import {
+  advertisedClientPath,
+  canonicalEndpointPath,
+  isEmbeddingsEndpoint,
+  isModelListing,
+  isResponsesEndpoint,
+} from "../scope";
 
 export interface ProviderAlternative {
   provider: ProviderId;
@@ -45,7 +51,18 @@ export interface AlternativesInput {
 
 export function buildAlternatives(input: AlternativesInput): ProviderAlternative[] {
   const withKeys = new Set(input.providersWithKeys);
-  const operation = isModelListing(input.path) ? "models" : "chat";
+  // An embeddings call has no alternative. A chat endpoint cannot answer it, and
+  // another provider's embeddings endpoint answers with another model: vectors
+  // from a different space, which do not belong in the index the agent is
+  // building. Offering that as a base-URL swap would be the worst kind of
+  // answer — one that looks like it worked. Failover refuses it for the same reason.
+  if (isEmbeddingsEndpoint(input.failing, input.method, input.path)) return [];
+  const canonical = canonicalEndpointPath(input.failing, input.method, input.path);
+  const operation = isModelListing(input.path)
+    ? "models"
+    : canonical && isResponsesEndpoint(input.failing, canonical)
+      ? "responses"
+      : "chat";
   const failingFamily = requestShapeFamily(input.failing);
 
   const seen = new Set<string>();

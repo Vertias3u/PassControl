@@ -1,4 +1,5 @@
 import { requestShapeFamily, type ProviderId } from "@/lib/providers";
+import { servesResponsesOnly } from "@/lib/scope";
 import { RELEASE_VERSION } from "@/lib/version";
 
 export type PassportIntegration = "openai-js" | "anthropic-js";
@@ -88,7 +89,18 @@ const passcontrol = new PassControl({
 
 export const client = new OpenAI(passcontrol.clientOptions(${JSON.stringify(input.provider)}));`,
     smokeFilename: "passcontrol-smoke.mjs",
-    smokeCode: `import { client } from "./passcontrol-client.mjs";
+    // A Responses-only provider (xAI) refuses a chat call.
+    smokeCode: servesResponsesOnly(input.provider)
+      ? `import { client } from "./passcontrol-client.mjs";
+
+const response = await client.responses.create({
+  model: process.env.PASSCONTROL_MODEL,
+  input: "Reply with: PassControl connected",
+  max_output_tokens: 64,
+});
+
+console.log(response.output_text);`
+      : `import { client } from "./passcontrol-client.mjs";
 
 const response = await client.chat.completions.create({
   model: process.env.PASSCONTROL_MODEL,
@@ -97,5 +109,69 @@ const response = await client.chat.completions.create({
 
 console.log(response.choices[0]?.message.content);`,
     smokeCommand: "node passcontrol-smoke.mjs",
+  };
+}
+
+export interface PassportServiceSetup {
+  installCommand: string;
+  envBlock: string;
+  clientFilename: "passcontrol-services.mjs";
+  clientCode: string;
+  sidecarCommands: string;
+}
+
+/**
+ * Setup for a passport agent that calls services (GitHub, Telegram) and no
+ * model. The SDK's `fetch` mints and refreshes the visa on every call, so
+ * Octokit takes it as its transport and no token is configured at all. Proven
+ * with real Octokit through pc.fetch, pagination included, 2026-10-02. Only
+ * envBlock contains the private key.
+ */
+export function buildPassportServiceSetup(input: {
+  origin: string;
+  passportId: string;
+  passportSecret: string;
+}): PassportServiceSetup {
+  const origin = input.origin.replace(/\/+$/u, "");
+  return {
+    installCommand: `npm install passcontrol@^${RELEASE_VERSION} octokit`,
+    envBlock: [
+      `export PASSCONTROL_GATEWAY=${shellQuote(origin)}`,
+      `export PASSPORT_ID=${shellQuote(input.passportId)}`,
+      `export PASSPORT_SECRET=${shellQuote(input.passportSecret)}`,
+    ].join("\n"),
+    clientFilename: "passcontrol-services.mjs",
+    clientCode: `import { Octokit } from "octokit";
+import { PassControl } from "passcontrol/sdk";
+
+const passcontrol = new PassControl({
+  gateway: process.env.PASSCONTROL_GATEWAY,
+  passportId: process.env.PASSPORT_ID,
+  passportSecret: process.env.PASSPORT_SECRET,
+});
+
+// GitHub: PassControl adds a fresh visa to every request; the GitHub token stays in PassControl.
+export const github = new Octokit({
+  baseUrl: \`\${process.env.PASSCONTROL_GATEWAY}/api/v1/svc/github\`,
+  request: { fetch: passcontrol.fetch },
+});
+
+// Telegram: call a Bot API method by name; the bot token stays in PassControl.
+export const telegram = (method, body) =>
+  passcontrol.fetch(\`\${process.env.PASSCONTROL_GATEWAY}/api/v1/svc/telegram/\${method}\`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });`,
+    sidecarCommands: [
+      "# Leave running; it signs every request with the passport.",
+      "passcontrol sidecar",
+      "",
+      "# In the tool's shell: GitHub clients read GITHUB_API_URL.",
+      'eval "$(passcontrol env github)"',
+      "",
+      "# Telegram, by method name, through the same sidecar:",
+      "curl -s http://127.0.0.1:8788/api/v1/svc/telegram/getMe",
+    ].join("\n"),
   };
 }

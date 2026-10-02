@@ -1,6 +1,7 @@
 import type { DepartureRow } from "@/lib/departures";
 import type { LogEntry } from "@/lib/log";
 import { toScopeRows, type ScopeRow } from "@/lib/scope-rows";
+import { isServiceProviderId } from "@/lib/services/catalog";
 
 export type ControlGraphNodeKind = "agent" | "gate" | "provider" | "credential";
 export type ControlGraphEdgeKind = "identity" | "approval" | "dispatch" | "scope" | "elevation" | "fallback";
@@ -104,6 +105,8 @@ const EVENT_ROUTE: Record<
   // call never reached a provider. The key exists here — where it should go is
   // what could not be read.
   endpoint_unavailable: { stop: "credential", tone: "warning", label: "Endpoint lookup failed" },
+  // The key exists and the read answered: no address is stored with it.
+  endpoint_required: { stop: "credential", tone: "warning", label: "Key has no resource address" },
   credential_changed: { stop: "credential", tone: "warning", label: "Credential changed mid-call" },
   credential_state_unavailable: { stop: "credential", tone: "warning", label: "Credential check unavailable" },
   blocked_unpriced_endpoint: { stop: "gate", tone: "warning", label: "Cost cap cannot be priced here" },
@@ -152,6 +155,7 @@ const PRESENTATION_OUTCOMES: Record<LogEntry["status"], string> = {
   blocked_endpoint: "ENDPOINT",
   no_provider_key: "NO KEY",
   endpoint_unavailable: "NO ROUTE",
+  endpoint_required: "NO ADDRESS",
   credential_changed: "ROTATED",
   credential_state_unavailable: "UNCHECKED",
   blocked_unpriced_endpoint: "NO PRICE",
@@ -221,11 +225,14 @@ export function buildControlGraph(input: {
   now?: Date;
 }): ControlGraphSnapshot {
   const now = input.now ?? new Date();
-  const configured = new Set(input.providerCredentials);
+  // Service tokens and service calls are not LLM providers, and drawing
+  // `svc:github` as one would be a node with no scope edge and no meaning. The
+  // graph shows LLM routing; service destinations are a later phase.
+  const configured = new Set(input.providerCredentials.filter((p) => !isServiceProviderId(p)));
   const denylisted = new Set(input.denylistedAgentIds ?? []);
   const providerNames = new Set(configured);
   input.logs.forEach((row) => {
-    if (row.provider) providerNames.add(row.provider);
+    if (row.provider && !isServiceProviderId(row.provider)) providerNames.add(row.provider);
   });
   const nodes: ControlGraphNode[] = [
     {
@@ -436,7 +443,11 @@ export function mergeRealtimeStoredEvent(
     });
   }
 
-  if (row.provider && !nodes.some((node) => node.id === providerNodeId(row.provider!))) {
+  if (
+    row.provider &&
+    !isServiceProviderId(row.provider) &&
+    !nodes.some((node) => node.id === providerNodeId(row.provider!))
+  ) {
     nodes.push({
       id: providerNodeId(row.provider),
       kind: "provider",

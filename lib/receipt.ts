@@ -87,6 +87,12 @@ interface ReceiptInputBase {
    * See `isPricedEndpoint` in lib/pricing.ts, which is where the decision is made.
    */
   unpriced?: boolean;
+  /**
+   * `svc` for a call to a non-LLM API through the service route (0074). Signed
+   * as `cls`, additive exactly like `unp`: absent on an LLM receipt, so those
+   * stay byte-identical and `ver` does not move.
+   */
+  callClass?: "svc";
   status: LogEntry["status"];
   httpStatus: number;
   startedAt: number;
@@ -187,6 +193,7 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
     // as required, so dropping it would break published verifiers. The claim is
     // that the number is not meaningful, and this is what says so.
     ...(input.unpriced ? { unp: true } : {}),
+    ...(input.callClass ? { cls: input.callClass } : {}),
     res: { status: input.status, http: input.httpStatus },
     t0: input.startedAt,
     lat: input.latencyMs,

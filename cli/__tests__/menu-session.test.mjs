@@ -75,8 +75,30 @@ describe("asynchronous menu status", () => {
 
   it("does not probe authenticated endpoints without a control key", async () => {
     const request = vi.fn();
-    const status = await collectMenuRemoteStatus({ hasApiKey: false, gatewayStatus: vi.fn(), request });
+    const status = await collectMenuRemoteStatus({
+      hasApiKey: false,
+      gatewayStatus: vi.fn(async () => ({ label: "online (200, PassControl 1.1.0)", ok: true })),
+      request,
+    });
     expect(request).not.toHaveBeenCalled();
-    expect(status.gateway).toBe("not authenticated");
+    expect(status.account).toBeNull();
+  });
+
+  // A machine holding only a passport (a sidecar host) has no control key, and
+  // its menu said "Gateway: not checked" forever. The gateway probe reads the
+  // public /api/version and carries no credential, so it runs without a key.
+  it("still checks the gateway without a control key", async () => {
+    const gatewayStatus = vi.fn(async () => ({ label: "online (200, PassControl 1.1.0)", ok: true }));
+    const status = await collectMenuRemoteStatus({ hasApiKey: false, gatewayStatus, request: vi.fn() });
+    expect(gatewayStatus).toHaveBeenCalledTimes(1);
+    expect(status.gateway).toBe("online (200, PassControl 1.1.0)");
+  });
+
+  it("reports an unreachable gateway without a control key", async () => {
+    const gatewayStatus = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    const status = await collectMenuRemoteStatus({ hasApiKey: false, gatewayStatus, request: vi.fn() });
+    expect(status.gateway).toBe("unavailable");
   });
 });

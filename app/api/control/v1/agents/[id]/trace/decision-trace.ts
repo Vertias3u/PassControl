@@ -16,6 +16,7 @@ import {
   MICROCENTS_PER_CENT,
 } from "@/lib/pricing";
 import { isProvider, type ScopeProviderId } from "@/lib/providers";
+import { advertisedClientPath } from "@/lib/scope";
 import type { ScopeEntry } from "@/lib/auth/visa";
 import { readLiveGrant, unionScopes } from "@/lib/break-glass";
 import { readPeriodUsageMany } from "@/lib/state/holds";
@@ -148,8 +149,16 @@ function scopes(value: unknown): ScopeEntry[] {
   });
 }
 
+/**
+ * The inference path the trace projects: the provider's advertised chat path,
+ * or its Responses path where it serves no chat (xAI). Derived from the
+ * allowlist, so a provider added there cannot be traced against a path the
+ * gateway would refuse. The keyless demo serves chat completions.
+ */
 function defaultChatPath(provider: ScopeProviderId): string[] {
-  return provider === "anthropic" ? ["v1", "messages"] : ["chat", "completions"];
+  if (!isProvider(provider)) return ["chat", "completions"];
+  const path = advertisedClientPath(provider, "chat") ?? advertisedClientPath(provider, "responses");
+  return path ? [...path] : ["chat", "completions"];
 }
 
 function projectBudget(

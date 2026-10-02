@@ -107,6 +107,7 @@ describe("content security policy", () => {
         "/learn/mcp-server-security",
         "/learn/ai-agent-budget-controls",
         "/learn/ai-agent-access-revocation",
+        "/learn/github-access-for-ai-agents",
       ]);
       expect(isPrerenderedPublicPath("/")).toBe(true);
       expect(isPrerenderedPublicPath("/updates")).toBe(false);

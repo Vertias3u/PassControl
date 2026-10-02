@@ -14,10 +14,13 @@ import { describe, expect, it } from "vitest";
 import { costMicrocents, hasListedPrice } from "../lib/pricing";
 import type { ProviderId } from "../lib/providers";
 
-const mc = (usd: number) => Math.ceil(usd * 100 - 1e-9);
+// `+ 0` turns the -0 that Math.ceil gives a zero rate into 0; toBe tells them apart.
+const mc = (usd: number) => Math.ceil(usd * 100 - 1e-9) + 0;
 type Row = [id: string, inputUsd: number, outputUsd: number];
 
-const TABLE: Record<ProviderId, { source: string; rows: Row[] }> = {
+// Every provider with a price page. Azure has none to pin: its `model` is a
+// deployment name, so it is unpriced by design (see the test at the bottom).
+const TABLE: Record<Exclude<ProviderId, "azure">, { source: string; rows: Row[] }> = {
   anthropic: {
     source: "platform.claude.com/docs/en/about-claude/pricing (Base input, Output)",
     rows: [
@@ -46,6 +49,8 @@ const TABLE: Record<ProviderId, { source: string; rows: Row[] }> = {
       ["o1", 15, 60], ["o1-pro", 150, 600], ["o3-pro", 20, 80], ["o3", 2, 8], ["o4-mini", 1.1, 4.4], ["o3-mini", 1.1, 4.4],
       ["gpt-4-turbo-2024-04-09", 10, 30], ["gpt-4-0613", 30, 60],
       ["gpt-3.5-turbo", 0.5, 1.5], ["gpt-3.5-turbo-0125", 0.5, 1.5], ["gpt-3.5-turbo-1106", 1, 2],
+      // Embeddings (same page, read 2026-09-27): input only.
+      ["text-embedding-3-small", 0.02, 0], ["text-embedding-3-large", 0.13, 0], ["text-embedding-ada-002", 0.1, 0],
     ],
   },
   groq: {
@@ -65,6 +70,9 @@ const TABLE: Record<ProviderId, { source: string; rows: Row[] }> = {
       ["ministral-8b-latest", 0.15, 0.15], ["ministral-8b-2512", 0.15, 0.15],
       ["ministral-3b-latest", 0.1, 0.1], ["ministral-3b-2512", 0.1, 0.1],
       ["codestral-latest", 0.3, 0.9], ["codestral-2508", 0.3, 0.9],
+      // Embeddings: mistral.ai/pricing/api, read 2026-09-27. Input only.
+      ["mistral-embed", 0.1, 0], ["mistral-embed-23-12", 0.1, 0], ["mistral-embed-2312", 0.1, 0],
+      ["codestral-embed", 0.15, 0], ["codestral-embed-25-05", 0.15, 0], ["codestral-embed-2505", 0.15, 0],
     ],
   },
   together: {
@@ -93,9 +101,19 @@ const TABLE: Record<ProviderId, { source: string; rows: Row[] }> = {
       ["gemini-2.5-pro", 2.5, 15], ["gemini-2.5-flash", 1, 2.5], ["gemini-2.5-flash-lite", 0.3, 0.4],
     ],
   },
+  xai: {
+    // Read 2026-09-27. Every row at the >=200k-prompt rate, which xAI applies to
+    // ALL tokens of such a request (lib/pricing.ts).
+    source: "docs.x.ai/developers/models.md (>=200k prompt rate)",
+    rows: [
+      ["grok-4.7", 4, 12], ["grok-4.6", 4, 12], ["grok-4.5", 4, 12], ["grok-4.3", 2.5, 5],
+      ["grok-4.20-0309-reasoning", 2.5, 5], ["grok-4.20-0309-non-reasoning", 2.5, 5],
+      ["grok-4.20-multi-agent-0309", 2.5, 5], ["grok-build-0.1", 2, 4],
+    ],
+  },
 };
 
-describe.each(Object.entries(TABLE) as [ProviderId, (typeof TABLE)[ProviderId]][])(
+describe.each(Object.entries(TABLE) as [ProviderId, (typeof TABLE)[keyof typeof TABLE]][])(
   "%s prices",
   (provider, { source, rows }) => {
     it.each(rows)(`%s is $%s in / $%s out per 1M (${source})`, (id, inUsd, outUsd) => {
@@ -145,10 +163,17 @@ describe("Gemini's models/ spelling prices the same model", () => {
 });
 
 describe("an unlisted model bills at its provider's highest listed rate", () => {
-  it.each(Object.entries(TABLE) as [ProviderId, (typeof TABLE)[ProviderId]][])("%s", (provider, { rows }) => {
+  it.each(Object.entries(TABLE) as [ProviderId, (typeof TABLE)[keyof typeof TABLE]][])("%s", (provider, { rows }) => {
     const maxIn = Math.max(...rows.map((r) => mc(r[1])));
     const maxOut = Math.max(...rows.map((r) => mc(r[2])));
     expect(costMicrocents("passcontrol-unlisted-zz", 1, 0, provider)).toBe(maxIn);
     expect(costMicrocents("passcontrol-unlisted-zz", 0, 1, provider)).toBe(maxOut);
+  });
+});
+
+describe("azure has no price rows", () => {
+  it("prices nothing, so a dollar limit refuses it rather than guessing", () => {
+    expect(hasListedPrice("gpt-4o-mini", "azure")).toBe(false);
+    expect(costMicrocents("gpt-4o-mini", 1, 1, "azure")).toBe(0);
   });
 });

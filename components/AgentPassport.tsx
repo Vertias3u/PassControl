@@ -862,8 +862,15 @@ export function AgentPassport({
   passport,
   visaTtlSeconds,
   accent = DEFAULT_ACCENT,
+  services = [],
 }: {
   passport: AgentPassportView;
+  /**
+   * Services this agent has rules for, by label ("GitHub"). With no model scope
+   * such an agent still reaches something, so the empty card must not say
+   * "nothing".
+   */
+  services?: readonly string[];
   // Passed in rather than read here: this is a client component and the TTL
   // comes from a server-side env var. See ScopeEditor for why it is never typed
   // as a literal.
@@ -1178,8 +1185,17 @@ export function AgentPassport({
             hasPassport={Boolean(passport.agent.passportId)}
             onClose={() => setEditingScopes(false)}
           />
+        ) : passport.visas.length === 0 && services.length > 0 ? (
+          <div className="rounded-lg border border-border bg-secondary/40 p-4" data-scopes="services-only">
+            <p className="m-0 font-semibold">No model access.</p>
+            <p className="m-0 mt-1 text-sm text-muted-foreground">
+              This {passport.agent.passportId ? "passport" : "agent"} reaches only{" "}
+              {services.length === 1 ? services[0] : `${services.slice(0, -1).join(", ")} and ${services.at(-1)}`},
+              through its service access below. Every model call is refused.
+            </p>
+          </div>
         ) : passport.visas.length === 0 ? (
-          <div className="rounded-lg border border-warning/30 bg-warning/10 p-4">
+          <div className="rounded-lg border border-warning/30 bg-warning/10 p-4" data-scopes="none">
             <p className="m-0 font-semibold text-warning">
               {passport.agent.passportId
                 ? "No scopes — this passport can reach nothing."

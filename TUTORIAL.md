@@ -266,7 +266,7 @@ part, the UI says unavailable rather than showing zero.
 
 **Scope is capability, not just a model.** An agent scoped to chat can only reach the chat
 and model-listing endpoints — it **cannot** use your key for `/v1/files`, fine-tuning,
-batches, embeddings, etc. Try it (via the sidecar in §6) and you'll get
+batches, etc. Try it (via the sidecar in §6) and you'll get
 `403 blocked_endpoint`. That's what turns "here's a key" into "here's a key that can only do
 one thing."
 
@@ -520,13 +520,22 @@ passcontrol env open-webui
 passcontrol env librechat
 ```
 
+Two presets point a client at a service other than a model provider, through the same sidecar.
+The service's token stays in PassControl, and what the agent may call is set on its page in the
+dashboard:
+
+```bash
+passcontrol env github         # prints GITHUB_API_URL for Octokit and other GitHub clients
+passcontrol env telegram       # prints TELEGRAM_API_URL; call $TELEGRAM_API_URL/<method>
+```
+
 For other clients that use the supported provider endpoints, `passcontrol env generic` prints connection settings.
 `passcontrol env` with an unknown name prints the full, current list of presets.
 
 Compatibility: OpenAI Chat Completions and POST `/responses` are supported, including
 streaming. Other providers support their documented chat/messages paths. Gemini uses
-the OpenAI-compatible API, not `generateContent`. Embeddings/files/fine-tuning remain
-blocked. `useResponsesApi: false` in your own Continue config is now just a compatibility
+the OpenAI-compatible API, not `generateContent`. Files and fine-tuning remain blocked;
+embeddings are served on OpenAI, Mistral and Azure only. `useResponsesApi: false` in your own Continue config is now just a compatibility
 choice, not a requirement — the CLI preset does not set it, and it never meant OpenAI
 Responses was unsupported.
 

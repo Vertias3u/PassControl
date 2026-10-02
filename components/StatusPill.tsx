@@ -44,6 +44,7 @@ const CONFIG: Record<StatusType, { Icon: typeof CheckCircle2; tone: Tone }> = {
   // the allowed route set. This means we could not read WHERE this credential
   // goes, so the call was refused rather than aimed at a guess.
   endpoint_unavailable: { Icon: AlertCircle, tone: "warning" },
+  endpoint_required: { Icon: AlertCircle, tone: "warning" },
   credential_state_unavailable: { Icon: AlertCircle, tone: "warning" },
   // Warning, not danger. Nothing was refused on the agent's account and nothing
   // failed: an operator changed the credential while this call was being

@@ -16,6 +16,7 @@ import { bytesToBase64url } from "@/lib/encoding";
 import {
   PROVIDERS,
   detectProviderFromKey,
+  providerRequiresEndpoint,
   resolveProviderSelection,
   type ProviderId,
 } from "@/lib/providers";
@@ -25,6 +26,8 @@ import { DirectAgentKeyReveal, type RevealedDirectAgent } from "@/components/Dir
 import { scopeAllows } from "@/lib/scope";
 
 type Stage = "key" | "scope" | "done";
+/** Providers whose key alone is enough to import; see the picker below. */
+const IMPORTABLE_PROVIDERS = PROVIDERS.filter((p) => !providerRequiresEndpoint(p));
 /**
  * Which credential the worker gets. A Direct Agent Key is the default because
  * it is what an existing SDK can use unchanged — replace the provider key with
@@ -302,12 +305,17 @@ export function KeyImportOnramp({
                 setProviderOverridden(true);
               }}
             >
-              {PROVIDERS.map((candidate) => (
+              {/* Not Azure: its key is only usable with the resource address, which
+                  this on-ramp does not ask for. Settings adds the two together. */}
+              {IMPORTABLE_PROVIDERS.map((candidate) => (
                 <option key={candidate} value={candidate}>
                   {candidate}
                 </option>
               ))}
             </select>
+            <span className="text-xs text-muted-foreground">
+              Azure OpenAI keys are added under Settings, Provider credentials, together with the resource address.
+            </span>
             {key ? (
               <span className="text-xs text-muted-foreground" aria-live="polite">
                 {guess.ambiguous

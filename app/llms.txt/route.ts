@@ -43,9 +43,11 @@ is trusted. Requests that bypass this gateway are outside its controls.
   expiry, suspension and kill-switch state.
 
 ## Capabilities and limits
-- Providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek, Gemini.
-- OpenAI POST Responses and Chat Completions; Anthropic Messages; other providers use
-  OpenAI-compatible chat. Gemini native generateContent is not supported.
+- Providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek, Gemini, xAI, Azure OpenAI.
+- OpenAI POST Responses and Chat Completions; Anthropic Messages; xAI POST Responses only;
+  other providers use OpenAI-compatible chat. Gemini native generateContent is not supported.
+- Azure OpenAI uses its v1 API at the resource address stored with the key (Microsoft-owned
+  hosts only, every deployment mode). Azure calls are unpriced; a dollar limit refuses them.
 - Custom endpoints require operator opt-in. Selfhost mode permits private HTTP services;
   hostname-list validation is not full SSRF prevention. Provider redirects are refused.
 - Budgets reserve estimates. Unknown usage retains conservative charges; abandoned holds

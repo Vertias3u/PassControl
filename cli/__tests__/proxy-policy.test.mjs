@@ -188,3 +188,31 @@ describe("PROVIDER_UPSTREAMS", () => {
     expect(new Set(hosts).size).toBe(hosts.length);
   });
 });
+
+// Any-API phase 1. A service host is governed exactly like a provider host: its
+// token lives in the gateway, so a CONNECT tunnel to it would be an ungoverned
+// call wearing a governed badge — and `--allow-connect` must not reopen it.
+describe("service hosts (any-API)", () => {
+  const gatewayOrigin = "https://gw.example";
+
+  it("refuses to tunnel GitHub, and names the governed base URL instead", () => {
+    const verdict = classifyConnect({ target: "api.github.com:443", gatewayOrigin, localBaseUrl: "http://127.0.0.1:8788" });
+    expect(verdict).toMatchObject({ allow: false, status: 403, code: "provider_tunnel_not_governed" });
+    expect(verdict.help).toContain("http://127.0.0.1:8788/api/v1/svc/github");
+  });
+
+  it("does not let --allow-connect re-open a GitHub tunnel", () => {
+    const verdict = classifyConnect({ target: "api.github.com:443", gatewayOrigin, allowHosts: ["api.github.com"] });
+    expect(verdict.allow).toBe(false);
+  });
+
+  it("routes an absolute-form GitHub request onto the governed service path", () => {
+    const verdict = classifyProxyRequest({ url: "http://api.github.com/repos/acme/web/issues?per_page=2", gatewayOrigin });
+    expect(verdict).toEqual({ allow: true, path: "/api/v1/svc/github/repos/acme/web/issues?per_page=2", reason: "provider" });
+  });
+
+  it("matches the host exactly, not by suffix", () => {
+    expect(classifyConnect({ target: "evil-api.github.com:443", gatewayOrigin }).code).toBe("host_not_allowed");
+    expect(classifyConnect({ target: "api.github.com.:443", gatewayOrigin }).code).toBe("provider_tunnel_not_governed");
+  });
+});

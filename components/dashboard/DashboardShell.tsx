@@ -9,6 +9,7 @@ import {
   LogOut,
   MessageSquareWarning,
   Network,
+  Plug,
   Settings,
   Stethoscope,
 } from "lucide-react";
@@ -32,7 +33,7 @@ import { MigrationBanner } from "@/components/dashboard/MigrationBanner";
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import type { SystemHealthSnapshot } from "@/lib/system-health";
 
-export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "statements" | "settings" | "beta" | "operator" | "system" | "report";
+export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "statements" | "services" | "settings" | "beta" | "operator" | "system" | "report";
 
 const NAV: Array<{
   id: DashboardArea;
@@ -45,6 +46,8 @@ const NAV: Array<{
   { id: "fleet", label: "Fleet", href: "/dashboard#fleet", Icon: Bot },
   { id: "activity", label: "Activity", href: "/dashboard#activity", Icon: Activity },
   { id: "spend", label: "Spend", href: "/dashboard#spend", Icon: BarChart3 },
+  // Any-API: the non-LLM services agents reach, and the stop for each.
+  { id: "services", label: "Services", href: "/dashboard/services", Icon: Plug },
   { id: "settings", label: "Settings", href: "/dashboard/settings", Icon: Settings },
 ];
 

@@ -3,9 +3,9 @@ export const runtime = "edge";
 
 import { control } from "@/lib/control/handler";
 import { jsonResponse, errorResponse } from "@/lib/control/respond";
-import { LOG_COLS } from "@/lib/control/columns";
+import { LOG_COLS, LOG_COLS_WITH_SERVICE } from "@/lib/control/columns";
 import { clampLimit } from "@/lib/control/params";
-import { isHousekeeping, isInference } from "@/lib/call-class";
+import { classifyCall, isHousekeeping, isInference, type ClassifiableCall } from "@/lib/call-class";
 import { base64urlToBytes, bytesToUtf8, jsonToBase64url } from "@/lib/encoding";
 
 function decodeCursor(value: string | null): { created_at: string; id: string } | null {
@@ -24,6 +24,8 @@ function decodeCursor(value: string | null): { created_at: string; id: string } 
   }
 }
 
+type LogRow = ClassifiableCall & { id?: string; created_at?: string } & Record<string, unknown>;
+
 const handler = control("read", async ({ req, userId, db, requestId }) => {
   const url = new URL(req.url);
   const agentId = url.searchParams.get("agent_id");
@@ -33,22 +35,32 @@ const handler = control("read", async ({ req, userId, db, requestId }) => {
   const cursor = decodeCursor(rawCursor);
   if (rawCursor && !cursor) return errorResponse(400, "invalid_cursor", requestId);
 
-  let q = db
-    .from("agent_logs")
-    .select(LOG_COLS)
-    .eq("user_id", userId) // tenant boundary
-    .order("created_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(limit + 1);
-  if (agentId) q = q.eq("agent_id", agentId);
-  if (status) q = q.eq("status", status);
-  if (cursor) {
-    q = q.or(
-      `created_at.lt.${cursor.created_at},and(created_at.eq.${cursor.created_at},id.lt.${cursor.id})`
-    );
-  }
+  const query = (columns: string) => {
+    let q = db
+      .from("agent_logs")
+      .select(columns)
+      .eq("user_id", userId) // tenant boundary
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(limit + 1);
+    if (agentId) q = q.eq("agent_id", agentId);
+    if (status) q = q.eq("status", status);
+    if (cursor) {
+      q = q.or(
+        `created_at.lt.${cursor.created_at},and(created_at.eq.${cursor.created_at},id.lt.${cursor.id})`
+      );
+    }
+    return q;
+  };
 
-  const { data, error } = await q;
+  // A database without 0074 refuses a select naming call_kind/endpoint
+  // (42703). Such a database has no service calls to describe, so the record
+  // is complete without them; `class=service` still finds any by provider.
+  // Typed by hand: a column list chosen at run time defeats the client's
+  // select-string inference.
+  type Read = { data: LogRow[] | null; error: { code?: string } | null };
+  let { data, error } = (await query(LOG_COLS_WITH_SERVICE)) as unknown as Read;
+  if (error?.code === "42703") ({ data, error } = (await query(LOG_COLS)) as unknown as Read);
   if (error) return errorResponse(500, "query_failed", requestId);
 
   // `class` is additive and the default is unchanged: with no parameter this
@@ -69,7 +81,9 @@ const handler = control("read", async ({ req, userId, db, requestId }) => {
       ? rows.filter(isInference)
       : requested === "housekeeping"
         ? rows.filter(isHousekeeping)
-        : rows;
+        : requested === "service"
+          ? rows.filter((row) => classifyCall(row).klass === "service")
+          : rows;
 
   const last = rows.at(-1);
   const nextCursor = hasMore && last?.created_at && last?.id

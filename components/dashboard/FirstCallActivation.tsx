@@ -388,6 +388,11 @@ export function FirstCallActivation({
               <div>
                 <strong>Start with the provider credential.</strong>
                 <p>PassControl stores it in Vault and uses it only after an agent call clears the gate.</p>
+                <p data-activation-services-note>
+                  This guide walks through a model call. If your agents will only call GitHub or Telegram, add the
+                  token under <a href="/dashboard/settings#services">Settings, Services</a>, create the agent with
+                  &ldquo;Only GitHub or Telegram&rdquo;, and dismiss this guide.
+                </p>
               </div>
             </div>
             <KeyImportOnramp

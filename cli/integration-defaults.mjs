@@ -12,6 +12,12 @@ export const DEFAULT_ALLOWED_MODELS = Object.freeze({
   together: "openai/gpt-oss-*",
   deepseek: "deepseek-*",
   gemini: "gemini-*",
+  xai: "grok-*",
+  // An Azure `model` is a DEPLOYMENT name the customer chose, not a model id.
+  // `gpt-*` covers deployments named after their model and nothing wider: a bare
+  // `*` would widen an allowlist to whatever a resource ever deploys. An operator
+  // whose deployments are named otherwise edits the scope.
+  azure: "gpt-*",
 });
 
 export const DEFAULT_CLIENT_MODELS = Object.freeze({
@@ -22,6 +28,11 @@ export const DEFAULT_CLIENT_MODELS = Object.freeze({
   together: "openai/gpt-oss-120b",
   deepseek: "deepseek-flash",
   gemini: "gemini-3.8-flash",
+  // The cheapest listed model that does not reason (docs.x.ai/developers/models.md,
+  // 2026-09-27): xAI's reasoning models cannot turn reasoning off.
+  xai: "grok-4.20-0309-non-reasoning",
+  // A deployment name, so only a guess until the operator names theirs.
+  azure: "gpt-4.1-mini",
 });
 
 export function defaultAllowedModelForProvider(provider) {

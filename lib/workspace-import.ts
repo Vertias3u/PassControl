@@ -11,6 +11,8 @@
 // lenient default below is that rule applied.
 import { validateAgentInput, validateFallbacks, validatePeriodBudget } from "@/lib/validate";
 import { policyIsWellFormed } from "@/lib/scope";
+import { isServiceId } from "@/lib/services/catalog";
+import { parseServiceRules } from "@/lib/services/rules";
 
 // `agents.status` is an enum in 0001_init.sql:12. An unknown value must not
 // fall through to the column default, which is 'active'.
@@ -193,6 +195,25 @@ export function planAgentImports(agents: unknown, existingPubkeys: Iterable<stri
       }
     }
 
+    // An agent's access to non-LLM APIs (0074). Optional, like the period
+    // pair: an older file has none. Checked by the gateway's own parser, so an
+    // import cannot store rules the gateway would refuse — and refused, not
+    // dropped: an agent restored without the access its file names would look
+    // restored while quietly doing less. A service this build does not know is
+    // refused for the same reason.
+    let serviceRules: Record<string, unknown> | null = null;
+    if (Object.hasOwn(entry, "service_rules") && entry.service_rules !== null) {
+      const raw = entry.service_rules;
+      if (!isRecord(raw)) return { action: "reject", name, reason: "service_rules_malformed" };
+      for (const service of Object.keys(raw)) {
+        if (!isServiceId(service)) return { action: "reject", name, reason: "service_rules_unknown_service" };
+        if (parseServiceRules(raw, service).kind !== "rules") {
+          return { action: "reject", name, reason: "service_rules_malformed" };
+        }
+      }
+      serviceRules = raw;
+    }
+
     let expiresAt: string | null;
     if (entry.expires_at !== null) {
       if (typeof entry.expires_at !== "string" || Number.isNaN(Date.parse(entry.expires_at))) {
@@ -223,6 +244,8 @@ export function planAgentImports(agents: unknown, existingPubkeys: Iterable<stri
       // Written only when set, so restoring into a database without 0073 still
       // works for every agent that has no periodic limit.
       ...(period.budget_period !== null ? period : {}),
+      // Written only when set, for a database without 0074 (same reason).
+      ...(serviceRules !== null ? { service_rules: serviceRules } : {}),
       // All config fields are emitted explicitly. A database default is not a
       // restore value, even where today's default happens to agree with null.
       policy: entry.policy,

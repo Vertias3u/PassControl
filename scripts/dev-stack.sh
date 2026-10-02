@@ -96,6 +96,11 @@ PASSCONTROL_ISSUER=http://localhost:${PORT:-3000}
 INVITE_CODE=local-dev
 PASSCONTROL_DEMO=${PASSCONTROL_DEMO:-0}
 EOF
+# An offset install's dashboard port, so `npm run dev:docker` by hand serves it
+# where the issuer above and Supabase's site URL say it is. Only for an offset:
+# scripts/dev-docker.mjs lets the file win over the environment, and a default
+# install must keep honouring a PORT someone sets on purpose.
+[[ "$OFFSET" == "0" ]] || echo "PORT=${PORT:-3000}" >> "$ENVF"
 echo "→ Wrote .env.docker"
 
 # ── 5. Migrations — run INSIDE the Supabase DB container (no host psql needed) ─
@@ -249,7 +254,7 @@ cat <<DONE
 ✅ Local stack is up.
    Supabase API    : ${API_URL}   (Studio UI is excluded — use the PassControl dashboard)
    Start the app   : npm run dev:docker
-                     → http://localhost:3000  (log in with the account you just created)
+                     → http://localhost:${PORT:-3000}  (log in with the account you just created)
    Invite code     : ${INVITE_CODE}   (for signing up more local accounts)
 
    Then: add a provider key + issue a passport in the dashboard, and run:

@@ -60,7 +60,10 @@ describe("the first-call guide reuses the first-run provider read", () => {
   it("threads provider readiness into the activation state without a new query", () => {
     expect(dashboard).toContain("<FirstCallActivation");
     expect(dashboard).toMatch(/providerConfigured=\{!needsFirstKey\}/);
-    expect(dashboard).toMatch(/const needsFirstKey = \(providerKeys\.count \?\? 1\) === 0/);
+    // LLM provider keys only (0074): a workspace holding just a GitHub token has
+    // not stored a provider key. A failed read still counts as "set up".
+    expect(dashboard).toMatch(/const storedLlmProviders = llmCredentialProviders\(providerKeys\.data \?\? \[\]\)/);
+    expect(dashboard).toMatch(/const needsFirstKey = !providerKeys\.error && storedLlmProviders\.length === 0/);
   });
 
   it("reads only bounded provider labels and treats a failed count as set up", () => {
@@ -71,7 +74,7 @@ describe("the first-call guide reuses the first-run provider read", () => {
     // provider has NO key, and six rows of one provider must not hide another.
     expect(dashboard).toMatch(/from\("provider_credentials"\)[\s\S]{0,160}select\("provider"[\s\S]{0,80}limit\(200\)/);
     expect(dashboard).not.toMatch(/from\("provider_credentials"\)[\s\S]{0,120}vault_secret_id/);
-    expect(dashboard).toMatch(/\?\? 1/);
+    expect(dashboard).toMatch(/needsFirstKey = !providerKeys\.error &&/);
   });
 
   it("joins the count into the existing Promise.all rather than awaiting after it", () => {

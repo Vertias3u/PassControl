@@ -31,7 +31,7 @@ import { onboardingStateHidden, type RefusalTest } from "@/lib/first-call-activa
 import { buildCloudSupportBundle, type CloudOperationsSignals } from "@/lib/cloud-operations";
 import { loadInstanceSigner, instanceIssuer } from "@/lib/crypto/instanceKey";
 import { isSentryConfigured } from "@/lib/observability";
-import { isProvider } from "@/lib/providers";
+import { llmCredentialProviders } from "@/lib/providers/available";
 import { operatorEmails } from "@/lib/operator-allowlist";
 import { redis } from "@/lib/state/redis";
 import { readPeriodUsageMany } from "@/lib/state/holds";
@@ -140,7 +140,7 @@ export default async function ControlTowerPage() {
     db.from("agents").select("*").order("created_at", { ascending: false }),
     db
       .from("agent_logs")
-      .select("id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would")
+      .select("id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would, call_kind, endpoint")
       .gte("created_at", attentionCutoff)
       .order("created_at", { ascending: false })
       .limit(ATTENTION_SCAN_LIMIT),
@@ -249,7 +249,11 @@ export default async function ControlTowerPage() {
   // every row — nothing is filtered out of the fetch, so the window does not
   // silently shrink, and the departures board below still receives all of it.
   // What changes is only what the headline counts call "agent activity".
-  const { housekeeping: housekeepingLogs, inference: inferenceLogs } = partitionByClass(displayLogs);
+  const {
+    housekeeping: housekeepingLogs,
+    inference: inferenceLogs,
+    service: serviceLogs,
+  } = partitionByClass(displayLogs);
   const callContext = {
     shadowRevisions: Object.fromEntries(
       agentList.map((agent) => [agent.id, shadowRevision(agent.policy_shadow ?? null)])
@@ -259,9 +263,12 @@ export default async function ControlTowerPage() {
     // shows its current name, and a deleted agent's rows fall back to the id.
     agentNames: Object.fromEntries(agentList.map((agent) => [agent.id, String(agent.name ?? "")])),
   };
-  // A count of null (the query errored) is treated as "set up": showing a
-  // getting-started card because a count failed is the more annoying wrong guess.
-  const needsFirstKey = (providerKeys.count ?? 1) === 0;
+  // LLM provider keys only: a workspace holding just a GitHub token (0074) has
+  // not stored a provider key, and must still be shown the first-key step.
+  const storedLlmProviders = llmCredentialProviders(providerKeys.data ?? []);
+  // A failed read is treated as "set up": showing a getting-started card
+  // because a read failed is the more annoying wrong guess.
+  const needsFirstKey = !providerKeys.error && storedLlmProviders.length === 0;
   // The guide's refusal test (0072). Completion persistence re-checks the full
   // ordered history inside complete_onboarding(); this only says which worker
   // the test is for and when it started.
@@ -273,16 +280,14 @@ export default async function ControlTowerPage() {
           startedAt: refusalTestRead.data.refusal_test_started_at,
         }
       : null;
-  const firstStoredProvider = providerKeys.data?.map((row) => row.provider).find(isProvider);
+  const firstStoredProvider = storedLlmProviders[0];
   // null = the read failed, which the connect form reports as "could not
   // confirm" rather than as "no key stored".
-  const configuredProviders = providerKeys.error
-    ? null
-    : [...new Set((providerKeys.data ?? []).map((row) => row.provider).filter(isProvider))];
+  const configuredProviders = providerKeys.error ? null : storedLlmProviders;
   const operationsSignals: CloudOperationsSignals = {
     providerCredentials: providerKeys.error
       ? "unavailable"
-      : (providerKeys.count ?? 0) > 0
+      : storedLlmProviders.length > 0
         ? "configured"
         : "missing",
     receiptSigning: loadInstanceSigner() && instanceIssuer() ? "configured" : "missing",
@@ -354,7 +359,7 @@ export default async function ControlTowerPage() {
           totalAgents={agentList.length}
           spentMicrocents={agentList.reduce((s, a) => s + (a.spent_microcents ?? 0), 0)}
           blockedCalls={blockedCalls}
-          recentCalls={inferenceLogs.length}
+          recentCalls={inferenceLogs.length + serviceLogs.length}
           housekeepingCalls={housekeepingLogs.length}
           attention={summariseFleetAttention(attentionQueue)}
           logsAvailable={logsAvailable}

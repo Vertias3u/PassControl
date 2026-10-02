@@ -14,6 +14,7 @@ export type FirstCallStatus =
   | "blocked_policy"
   | "provider_exhausted"
   | "no_provider_key"
+  | "endpoint_required"
   | "upstream_error";
 
 export interface FirstCallRow {
@@ -141,6 +142,11 @@ const REFUSAL_TEST_CANDIDATES: Readonly<Record<ProviderId, readonly string[]>> =
   together: ["meta-llama/Llama-3.3-70B-Instruct-Turbo"],
   deepseek: ["deepseek-reasoner"],
   gemini: ["gemini-2.5-pro"],
+  xai: ["grok-4.7", "grok-4.3"],
+  // Azure's `model` is a deployment name the customer chose. These fall outside
+  // the default `gpt-*` grant, so the demonstration works on the default scope;
+  // a grant that covers them falls through to the synthetic id below.
+  azure: ["o3", "o4-mini"],
 };
 const SYNTHETIC_REFUSAL_MODEL = "passcontrol-refusal-test";
 
@@ -305,6 +311,12 @@ export function activationDiagnosis(row: FirstCallRow): ActivationDiagnosis {
   }
 
   switch (row.status) {
+    case "endpoint_required":
+      return {
+        title: "Add the key's resource address",
+        detail: "The key is stored, but not the address of the resource it belongs to, so PassControl had nowhere to send it. Set the address on that key rather than adding another one.",
+        action: "settings",
+      };
     case "no_provider_key":
       return {
         title: "Store the provider key",

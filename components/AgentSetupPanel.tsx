@@ -5,6 +5,7 @@ import { Check, Copy, Wrench } from "lucide-react";
 
 import { setupExampleModel } from "@/lib/agent-connect";
 import { buildDirectConnectSetup } from "@/lib/direct-connect-config";
+import { buildServiceConnectSetup } from "@/lib/service-connect";
 import { isProvider, type ProviderId } from "@/lib/providers";
 
 export interface AgentSetupKey {
@@ -114,7 +115,22 @@ export function AgentSetupPanel({
         <p className="m-0 text-sm text-muted-foreground">This agent is revoked. Its credentials no longer authenticate, so there is nothing to connect.</p>
       ) : null}
       {state === "no-provider" ? (
-        <p className="m-0 text-sm text-muted-foreground">This agent is not allowed any provider yet. Add a provider and model to its access before connecting a worker.</p>
+        <div className="grid gap-1.5" data-setup-services-only>
+          <p className="m-0 text-sm text-muted-foreground">
+            This agent has no model access, so every model call is refused. It can call GitHub or Telegram
+            through the rules under <a href="#agent-services">GitHub access</a> and{" "}
+            <a href="#agent-services-telegram">Telegram access</a>; to let it call a model, add a provider and
+            model to its access.
+          </p>
+          {usable.length > 0 && status !== "revoked" ? (
+            <>
+              <span className={`${label} mt-2`}>Configuration for the worker</span>
+              <pre className={block}>{buildServiceConnectSetup({ origin, key: null }).envBlock}</pre>
+              <span className={`${label} mt-2`}>GitHub with Octokit</span>
+              <pre className={block}>{buildServiceConnectSetup({ origin, key: null }).octokit}</pre>
+            </>
+          ) : null}
+        </div>
       ) : null}
       {state === "no-active-key" ? (
         <p className="m-0 text-sm text-muted-foreground">

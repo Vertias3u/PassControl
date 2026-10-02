@@ -5,7 +5,8 @@ import path from "node:path";
 import { fare } from "@/lib/departures";
 import { formatCost } from "@/lib/verify/receipt-view";
 import { costMicrocents } from "@/lib/pricing";
-import { PROVIDERS } from "@/lib/providers";
+import { PROVIDERS, providerRequiresEndpoint } from "@/lib/providers";
+import { evaluateGate } from "@/lib/gate";
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (rel: string) => fs.readFileSync(path.join(ROOT, rel), "utf8");
@@ -193,7 +194,7 @@ describe("an unknown cost is never presented as a zero cost", () => {
  * shipped green. Adding a provider now fails here instead.
  */
 describe("every provider can be priced", () => {
-  it.each([...PROVIDERS])("%s has a usable fallback price", (provider) => {
+  it.each([...PROVIDERS].filter((p) => !providerRequiresEndpoint(p)))("%s has a usable fallback price", (provider) => {
     const cost = costMicrocents("a-model-nobody-has-a-row-for", 1_000, 1_000, provider);
 
     expect(
@@ -203,4 +204,27 @@ describe("every provider can be priced", () => {
         `then spend without limit: the reserve is zero, so the cap never denies.`
     ).toBeGreaterThan(0);
   });
+
+  // The exception, and why the danger above cannot reach it: a provider with no
+  // host of its own (Azure) is never priced, and a dollar limit REFUSES it at the
+  // gate, before any reserve exists to be zero.
+  it.each([...PROVIDERS].filter((p) => providerRequiresEndpoint(p)))(
+    "%s is refused under a dollar limit instead",
+    (provider) => {
+      const gate = evaluateGate({
+        agentId: "agent",
+        killState: { platformKill: false, tenantKill: false, denylist: [] },
+        suspended: false,
+        scopes: [{ provider, models: ["*"] }],
+        provider,
+        method: "POST",
+        path: ["chat", "completions"],
+        model: "any-deployment",
+        now: new Date("2026-09-29T12:00:00Z"),
+        requestedOutput: null,
+        dollarLimited: true,
+      } as never);
+      expect(gate.deniedBy).toBe("endpoint");
+    }
+  );
 });

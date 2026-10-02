@@ -10,8 +10,15 @@
 // event without that flag. Anthropic emits usage natively in
 // message_start/message_delta.
 import { usesOpenAiUsageShape, type ProviderId } from "../providers";
+import { TopLevelUsageScanner } from "./topLevelUsage";
 
-export type UsageProtocol = "provider" | "responses";
+/**
+ * Which usage report a response carries. `embeddings` is the OpenAI-shaped
+ * embeddings response: it reports `prompt_tokens` (and `total_tokens`) and no
+ * `completion_tokens`, because nothing is generated. Under the chat rule that
+ * is an incomplete report and the call would be charged its whole estimate.
+ */
+export type UsageProtocol = "provider" | "responses" | "embeddings";
 
 /**
  * What one call consumed.
@@ -68,6 +75,33 @@ const token = (v: unknown): number | null =>
 
 function optionalToken(obj: Record<string, unknown>, key: string): number | null {
   return obj[key] === undefined ? 0 : token(obj[key]);
+}
+
+/**
+ * Input and output from a Responses usage object.
+ *
+ * OpenAI's `output_tokens` includes reasoning. xAI's may not: its REST reference
+ * describes `output_tokens` as "Completion + reasoning tokens", but its own
+ * example reports input 32, output 9, reasoning 110, total 151 — and
+ * 32 + 9 + 110 = 151, so there reasoning sits OUTSIDE `output_tokens`. Reading
+ * `output_tokens` alone would bill 9 tokens for 119 generated. So for xAI the
+ * output is everything that is not input, `total_tokens − input_tokens`, which is
+ * right under either reading (and never less than `output_tokens`). A report
+ * missing any of the three, or whose total is below its input, yields no output
+ * figure, so the call cannot read as complete.
+ */
+function responsesTokens(
+  provider: ProviderId,
+  u: any
+): { input: number | null; output: number | null } {
+  const input = token(u?.input_tokens);
+  const output = token(u?.output_tokens);
+  if (provider !== "xai") return { input, output };
+  const total = token(u?.total_tokens);
+  if (input === null || output === null || total === null || total < input) {
+    return { input, output: null };
+  }
+  return { input, output: Math.max(output, total - input) };
 }
 
 /**
@@ -151,11 +185,13 @@ class Tally {
       // usage so incomplete/failed terminal responses cannot become free if
       // OpenAI includes their partial tally too.
       const u = obj?.response?.usage;
-      const input = token(u?.input_tokens);
-      const output = token(u?.output_tokens);
+      const { input, output } = responsesTokens(provider, u);
+      // A partial xAI report still counts what it did say, so an incomplete
+      // response bills its reported output rather than nothing.
+      const reportedOutput = output ?? token(u?.output_tokens);
       if (u) this.sawUsage = true;
       if (input !== null) this.input = input;
-      if (output !== null) this.output = output;
+      if (reportedOutput !== null) this.output = reportedOutput;
       if (input !== null && output !== null) {
         // Only response.completed with a completed response is authoritative.
         // Failed/incomplete events can carry a partial tally.
@@ -271,14 +307,94 @@ export interface UsageTransform {
   settled: Promise<StreamSettlement>;
 }
 
-/** Build a pass-through transform that tallies SSE usage and reports how it ended. */
+/**
+ * Build a pass-through transform that reads usage and reports how it ended.
+ *
+ * SSE bodies are tallied line by line. An `embeddings` body is one JSON
+ * document with no line structure worth splitting on — buffering "until the
+ * next newline" would hold the whole thing — so it is read by a forward scanner
+ * that keeps only the top-level `usage` value (lib/usage/topLevelUsage.ts).
+ */
 export function createUsageTransform(
   provider: ProviderId,
   protocol: UsageProtocol = "provider"
 ): UsageTransform {
+  if (protocol === "embeddings") return createTopLevelUsageTransform(provider);
+
   const tally = new Tally();
   const decoder = new TextDecoder();
   let buffer = "";
+  return settlingPassThrough(
+    (chunk) => {
+      buffer += decoder.decode(chunk, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (line) tally.feedLine(provider, line, protocol);
+      }
+    },
+    (end) => {
+      // The trailing buffer is fed here, not in flush(), because flush() is exactly
+      // what does not run on the two abnormal endings. On a break it is a truncated
+      // fragment, which feedLine drops on its JSON parse — harmless, and cheaper
+      // than a second code path to decide whether to bother.
+      if (buffer.trim()) tally.feedLine(provider, buffer, protocol);
+      return {
+        usage: {
+          inputTokens: tally.input,
+          outputTokens: tally.output,
+          cacheReadTokens: tally.cacheRead,
+          cacheWriteTokens: tally.cacheWrite,
+        },
+        end,
+        sawUsage: tally.sawUsage,
+        complete: tally.complete,
+      };
+    }
+  );
+}
+
+/**
+ * The embeddings reader: complete only when the document closed AND carried
+ * exactly one usable top-level `usage`. Anything else is charged as uncertain.
+ */
+function createTopLevelUsageTransform(provider: ProviderId): UsageTransform {
+  const scanner = new TopLevelUsageScanner();
+  const decoder = new TextDecoder();
+  return settlingPassThrough(
+    (chunk) => scanner.feed(decoder.decode(chunk, { stream: true })),
+    (end) => {
+      scanner.feed(decoder.decode());
+      const found = scanner.finish();
+      const observed = usageFromJson(
+        provider,
+        found.usage === undefined ? {} : { usage: found.usage },
+        "embeddings"
+      );
+      return {
+        usage: {
+          inputTokens: observed.inputTokens,
+          outputTokens: observed.outputTokens,
+          cacheReadTokens: observed.cacheReadTokens,
+          cacheWriteTokens: observed.cacheWriteTokens,
+        },
+        end,
+        sawUsage: found.usageCount > 0,
+        complete: found.documentComplete && observed.complete,
+      };
+    }
+  );
+}
+
+/**
+ * Forward every chunk unchanged, feed it to `observe`, and settle exactly once
+ * on whichever ending happens, with the settlement `conclude` builds.
+ */
+function settlingPassThrough(
+  observe: (chunk: Uint8Array) => void,
+  conclude: (end: StreamEnd) => StreamSettlement
+): UsageTransform {
   let done = false;
   let resolveSettled!: (s: StreamSettlement) => void;
   const settled = new Promise<StreamSettlement>((r) => (resolveSettled = r));
@@ -288,34 +404,13 @@ export function createUsageTransform(
   const settle = (end: StreamEnd) => {
     if (done) return;
     done = true;
-    // The trailing buffer is fed here, not in flush(), because flush() is exactly
-    // what does not run on the two abnormal endings. On a break it is a truncated
-    // fragment, which feedLine drops on its JSON parse — harmless, and cheaper
-    // than a second code path to decide whether to bother.
-    if (buffer.trim()) tally.feedLine(provider, buffer, protocol);
-    resolveSettled({
-      usage: {
-        inputTokens: tally.input,
-        outputTokens: tally.output,
-        cacheReadTokens: tally.cacheRead,
-        cacheWriteTokens: tally.cacheWrite,
-      },
-      end,
-      sawUsage: tally.sawUsage,
-      complete: tally.complete,
-    });
+    resolveSettled(conclude(end));
   };
 
   const inner = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       controller.enqueue(chunk); // forward unchanged FIRST (no added latency)
-      buffer += decoder.decode(chunk, { stream: true });
-      let nl: number;
-      while ((nl = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + 1);
-        if (line) tally.feedLine(provider, line, protocol);
-      }
+      observe(chunk);
     },
     flush() {
       settle("close");
@@ -394,16 +489,31 @@ export function usageFromJson(
   protocol: UsageProtocol = "provider"
 ): ObservedUsage {
   if (protocol === "responses") {
-    const input = token(body?.usage?.input_tokens);
-    const output = token(body?.usage?.output_tokens);
+    const { input, output } = responsesTokens(provider, body?.usage);
     const sawUsage = body?.usage != null;
     return {
       inputTokens: input ?? 0,
-      outputTokens: output ?? 0,
+      outputTokens: output ?? token(body?.usage?.output_tokens) ?? 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       sawUsage,
       complete: input !== null && output !== null && body?.status === "completed",
+    };
+  }
+  if (protocol === "embeddings") {
+    // Complete on `prompt_tokens` alone. A reported `completion_tokens` is still
+    // charged (never less than reported); a malformed one leaves it incomplete.
+    const input = token(body?.usage?.prompt_tokens);
+    const reportedOutput = body?.usage && typeof body.usage === "object"
+      ? optionalToken(body.usage as Record<string, unknown>, "completion_tokens")
+      : null;
+    return {
+      inputTokens: input ?? 0,
+      outputTokens: reportedOutput ?? 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      sawUsage: body?.usage != null,
+      complete: input !== null && reportedOutput !== null,
     };
   }
   if (usesOpenAiUsageShape(provider)) {

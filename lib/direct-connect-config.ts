@@ -1,4 +1,5 @@
 import { requestShapeFamily, type ProviderId } from "@/lib/providers";
+import { servesResponsesOnly } from "@/lib/scope";
 export { clientModelIsUsable as directClientModelIsUsable } from "@/lib/agent-connect";
 
 export interface DirectConnectSetup {
@@ -38,6 +39,14 @@ export interface HermesCloudSetup {
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
+
+/**
+ * Azure's own SDK class sends the credential as `api-key`, which the gateway does
+ * not read an agent credential from, so an agent built on it is refused 401. The
+ * plain OpenAI client pointed at the gateway is the supported shape.
+ */
+const AZURE_CLIENT_NOTE =
+  " For Azure, use the plain OpenAI client shown here, not AzureOpenAI, and set the model to your Azure deployment name. PassControl sends the call to the resource address stored with your Azure key.";
 
 export function buildDirectConnectSetup(input: {
   origin: string;
@@ -92,11 +101,24 @@ console.log(response.content);`,
     `OPENAI_API_KEY=${key}`,
     `OPENAI_MODEL=${input.model}`,
   ].join("\n");
+  // A provider served only through Responses (xAI) refuses a chat call, so its
+  // first example and smoke test must not be one.
+  const responsesOnly = servesResponsesOnly(input.provider);
   return {
     family,
     label: "OpenAI-compatible SDK configuration",
     envBlock,
-    example: `import OpenAI from "openai";
+    example: responsesOnly
+      ? `import OpenAI from "openai";
+
+const client = new OpenAI();
+const response = await client.responses.create({
+  model: process.env.OPENAI_MODEL,
+  input: "Hello",
+  max_output_tokens: 256,
+});
+console.log(response.output_text);`
+      : `import OpenAI from "openai";
 
 const client = new OpenAI();
 const response = await client.chat.completions.create({
@@ -105,15 +127,18 @@ const response = await client.chat.completions.create({
 });
 console.log(response.choices[0]?.message.content);`,
     smokeCommand: [
-      `curl --fail-with-body ${shellQuote(`${origin}/api/v1/${input.provider}/v1/chat/completions`)} \\`,
+      `curl --fail-with-body ${shellQuote(`${origin}/api/v1/${input.provider}/v1/${responsesOnly ? "responses" : "chat/completions"}`)} \\`,
       `  -H "Authorization: Bearer $OPENAI_API_KEY" \\`,
       `  -H ${shellQuote("content-type: application/json")} \\`,
-      `  --data ${shellQuote(JSON.stringify({
-        model: input.model,
-        messages: [{ role: "user", content: "Reply with: PassControl connected" }],
-      }))}`,
+      `  --data ${shellQuote(JSON.stringify(
+        responsesOnly
+          ? { model: input.model, input: "Reply with: PassControl connected", max_output_tokens: 64 }
+          : { model: input.model, messages: [{ role: "user", content: "Reply with: PassControl connected" }] }
+      ))}`,
     ].join("\n"),
-    authNote: "The OpenAI SDK sends this credential as Bearer authentication. Some compatible clients use x-api-key instead; PassControl accepts either, and Bearer wins when both are present.",
+    authNote:
+      "The OpenAI SDK sends this credential as Bearer authentication. Some compatible clients use x-api-key instead; PassControl accepts either, and Bearer wins when both are present." +
+      (input.provider === "azure" ? AZURE_CLIENT_NOTE : ""),
     keyVariable: "OPENAI_API_KEY",
     installCommand: "npm install openai",
     ...shared,
@@ -130,6 +155,8 @@ export function buildHermesCloudSetup(input: {
   model: string;
 }): HermesCloudSetup | null {
   if (requestShapeFamily(input.provider) !== "openai") return null;
+  // Hermes speaks Chat Completions; a Responses-only provider would refuse it.
+  if (servesResponsesOnly(input.provider)) return null;
   const origin = input.origin.replace(/\/+$/u, "");
   const yaml = (value: string) => JSON.stringify(value);
   return {

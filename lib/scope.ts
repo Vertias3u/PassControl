@@ -437,8 +437,9 @@ function timeToMinute(value: string): number {
  * The clock is injectable so window decisions are deterministic in tests.
  *
  * `output` is what the request asks the provider to generate, read strictly for
- * its shape (lib/output-limit.ts). `null` means the request runs no inference —
- * a model listing — and is exempt from an output ceiling. UNDEFINED IS NOT
+ * its shape (lib/output-limit.ts). `null` means the request generates no output —
+ * a model listing, or an embeddings call — and is exempt from an output ceiling.
+ * UNDEFINED IS NOT
  * EXEMPT: it reads as "no limit stated", so a caller that forgets to supply the
  * facts is refused by a configured ceiling rather than silently admitted.
  */
@@ -510,6 +511,14 @@ export function evaluateAgentPolicy(
 // (/v1/files, /v1/fine_tuning, /v1/batches, …). Chat is POST-only; the
 // read-only model-listing endpoint is GET-only.
 interface EndpointRule {
+  /**
+   * `embeddings` marks a rule whose calls turn input into vectors and generate
+   * nothing. Everything that treats embeddings differently from chat — the
+   * estimate, the usage report, the output ceiling, the stream refusal, the
+   * streamed response path, the advertised path — asks `isEmbeddingsEndpoint`,
+   * which reads this flag, so no caller re-derives it from a path spelling.
+   */
+  readonly kind?: "embeddings";
   readonly method: string;
   readonly path: readonly string[];
   readonly upstreamPath: readonly string[];
@@ -547,6 +556,7 @@ function isSafeParamSegment(segment: string | undefined): segment is string {
 const OPENAI_CHAT_PATH = ["v1", "chat", "completions"] as const;
 const OPENAI_RESPONSES_PATH = ["v1", "responses"] as const;
 const OPENAI_MODELS_PATH = ["v1", "models"] as const;
+const OPENAI_EMBEDDINGS_PATH = ["v1", "embeddings"] as const;
 const ANTHROPIC_MESSAGES_PATH = ["v1", "messages"] as const;
 // The versionless spellings, for providers whose base URL already carries its
 // own version segment (deepseek, and gemini's OpenAI-compat base `/v1beta/openai`).
@@ -559,6 +569,10 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
     { method: "POST", path: ["responses"], upstreamPath: OPENAI_RESPONSES_PATH },
     { method: "POST", path: OPENAI_RESPONSES_PATH, upstreamPath: OPENAI_RESPONSES_PATH },
+    // Embeddings, served only where the provider's own docs confirm a usage
+    // report the gateway can settle on. Both spellings, as for chat.
+    { method: "POST", path: ["embeddings"], upstreamPath: OPENAI_EMBEDDINGS_PATH, kind: "embeddings" },
+    { method: "POST", path: OPENAI_EMBEDDINGS_PATH, upstreamPath: OPENAI_EMBEDDINGS_PATH, kind: "embeddings" },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
@@ -593,11 +607,18 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
   mistral: [
     { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    // docs.mistral.ai/api/endpoint/embeddings, read 2026-09-27: `POST /v1/embeddings`,
+    // and `usage` (with `prompt_tokens`) is a required response field.
+    { method: "POST", path: ["embeddings"], upstreamPath: OPENAI_EMBEDDINGS_PATH, kind: "embeddings" },
+    { method: "POST", path: OPENAI_EMBEDDINGS_PATH, upstreamPath: OPENAI_EMBEDDINGS_PATH, kind: "embeddings" },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH, param: true },
   ],
+  // No embeddings row: Together's embeddings response reports no usage (its
+  // OpenAPI schema and both SDKs, read 2026-09-27), so every call would be charged
+  // a characters ÷ 4 guess that can fall below the real bill.
   together: [
     { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
@@ -628,6 +649,35 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: VERSIONLESS_MODELS_PATH },
     { method: "GET", path: VERSIONLESS_MODELS_PATH, upstreamPath: VERSIONLESS_MODELS_PATH, param: true },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: VERSIONLESS_MODELS_PATH, param: true },
+  ],
+  // xAI: Responses and model discovery only (plan P2-5). Its Chat Completions
+  // endpoint is the legacy API; on it, whether `max_completion_tokens` bounds
+  // reasoning is undocumented, so neither the output ceiling nor the hold could
+  // be relied on. Responses documents `max_output_tokens` as covering reasoning.
+  // Retrieval, deletion and compaction of stored responses are not allowlisted.
+  xai: [
+    { method: "POST", path: ["responses"], upstreamPath: OPENAI_RESPONSES_PATH },
+    { method: "POST", path: OPENAI_RESPONSES_PATH, upstreamPath: OPENAI_RESPONSES_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH, param: true },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH, param: true },
+  ],
+  // Azure OpenAI's v1 API, OpenAI's paths under the resource's own `/openai/v1`
+  // (the stored address carries the version, so `versionlessUpstreamPath` drops
+  // ours). Chat, Responses, embeddings (with a deployment name, like chat) and
+  // model discovery; no files, fine-tuning, batches or stored-response reads.
+  // The legacy `/openai/deployments/<name>/…` shape is not offered: it needs an
+  // `api-version`, and the deployment in the path would bypass the model scope.
+  azure: [
+    { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: ["responses"], upstreamPath: OPENAI_RESPONSES_PATH },
+    { method: "POST", path: OPENAI_RESPONSES_PATH, upstreamPath: OPENAI_RESPONSES_PATH },
+    { method: "POST", path: ["embeddings"], upstreamPath: OPENAI_EMBEDDINGS_PATH, kind: "embeddings" },
+    { method: "POST", path: OPENAI_EMBEDDINGS_PATH, upstreamPath: OPENAI_EMBEDDINGS_PATH, kind: "embeddings" },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
   ],
 };
 
@@ -694,12 +744,35 @@ export function canonicalEndpointPath(
   return [...match.rule.upstreamPath, encodeURIComponent(match.param)];
 }
 
-/** Whether a canonical attempt is using OpenAI's endpoint-specific Responses wire shape. */
-export function isOpenAiResponsesEndpoint(
+/**
+ * Whether this (method, path) is an allowlisted embeddings call on this provider.
+ *
+ * Keyed on the provider as well as the path because the same spelling is
+ * denied on a provider with no embeddings row, and a denied call must not pick
+ * up an embeddings exemption on its way to being refused.
+ */
+export function isEmbeddingsEndpoint(
+  provider: ProviderId,
+  method: string,
+  path: readonly string[]
+): boolean {
+  return endpointRuleFor(provider, method, path)?.kind === "embeddings";
+}
+
+/**
+ * Whether a canonical attempt speaks the Responses wire shape: OpenAI's, or
+ * xAI's, which follows it (`input`, `max_output_tokens`, a terminal
+ * `response.completed` carrying `response.usage`). The usage report differs in
+ * one respect, handled where usage is read (lib/usage/parseStream.ts).
+ */
+export function isResponsesEndpoint(
   provider: ProviderId,
   upstreamPath: readonly string[]
 ): boolean {
-  return provider === "openai" && pathEquals(upstreamPath, OPENAI_RESPONSES_PATH);
+  return (
+    (provider === "openai" || provider === "xai" || provider === "azure") &&
+    pathEquals(upstreamPath, OPENAI_RESPONSES_PATH)
+  );
 }
 
 /** The model-listing endpoints (GET /models or /v1/models) carry no model, so the
@@ -732,6 +805,15 @@ export function isModelListing(path: readonly string[]): boolean {
 }
 
 /**
+ * A provider PassControl serves for inference only through Responses — it has a
+ * Responses endpoint and no Chat Completions endpoint. Derived from the
+ * allowlist, so onboarding copy cannot drift from what the gateway admits.
+ */
+export function servesResponsesOnly(provider: ProviderId): boolean {
+  return advertisedClientPath(provider, "chat") === null && advertisedClientPath(provider, "responses") !== null;
+}
+
+/**
  * The client path to advertise for a provider — what an SDK pointed at
  * `/api/v1/<provider>` would actually send.
  *
@@ -743,19 +825,24 @@ export function isModelListing(path: readonly string[]): boolean {
  */
 export function advertisedClientPath(
   provider: ProviderId,
-  operation: "chat" | "models"
+  operation: "chat" | "models" | "embeddings" | "responses"
 ): readonly string[] | null {
-  const wantModels = operation === "models";
-  const candidates = ENDPOINT_ALLOWLIST[provider].filter(
+  const candidates = ENDPOINT_ALLOWLIST[provider].filter((rule) => {
     // Parameterised rules are excluded: what is advertised is a BASE path an SDK
     // is pointed at, and `/v1/models/{id}` is not one.
+    if (rule.param) return false;
+    // Embeddings rows are advertised only as embeddings. They are also the
+    // SHORTEST non-listing rows (`embeddings`), so without this the chat base
+    // would be advertised as the embeddings endpoint.
+    if (operation === "embeddings") return rule.kind === "embeddings";
+    if (rule.kind === "embeddings") return false;
     // Responses is also an inference endpoint, but it is not the Chat
-    // Completions base this two-operation helper promises to advertise.
-    (rule) =>
-      !rule.param &&
-      !isOpenAiResponsesEndpoint(provider, rule.upstreamPath) &&
-      isModelListing(rule.path) === wantModels
-  );
+    // Completions base; it is advertised only as itself.
+    const responses = isResponsesEndpoint(provider, rule.upstreamPath);
+    if (operation === "responses") return responses;
+    if (responses) return false;
+    return isModelListing(rule.path) === (operation === "models");
+  });
   if (candidates.length === 0) return null;
   return candidates.reduce((shortest, rule) =>
     rule.path.length < shortest.path.length ? rule : shortest

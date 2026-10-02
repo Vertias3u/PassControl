@@ -111,7 +111,7 @@ export async function proveItWorks({
     });
     const visa = await visas.getVisa();
     proof.visa = true;
-    ok("minted a visa with the passport this machine just created");
+    ok("minted a visa with this passport");
 
     const res = await fetchImpl(`${origin}/api/v1/demo/chat/completions`, {
       method: "POST",
@@ -124,6 +124,16 @@ export async function proveItWorks({
     });
 
     if (!res.ok) {
+      // A passport with no model scope (an agent made for GitHub or Telegram
+      // only) is refused here by design. Telling it to add a provider key would
+      // be advice about a different agent.
+      const refusal = res.status === 403 ? await res.json().catch(() => null) : null;
+      if (refusal?.error === "blocked_scope") {
+        proof.reason = "no_model_scope";
+        step("This passport has no model access, so the demo model call was refused, as it should be for an");
+        step("agent that calls only GitHub or Telegram. Its service access is set on its page in the dashboard.");
+        return proof;
+      }
       // 404 is the ordinary answer from a self-hosted gateway that has not set
       // PASSCONTROL_DEMO=1 — a correctly configured gateway, not a fault. Say so
       // in those words, because "404" here would read as something being broken.

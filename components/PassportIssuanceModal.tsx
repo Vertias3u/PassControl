@@ -29,6 +29,11 @@ export function PassportIssuanceModal({
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  // "services": GitHub or Telegram only. The passport is issued with NO model
+  // access (any model call is refused), and model, budget and MCP options do
+  // not apply: MCP serves model calls only.
+  const [target, setTarget] = useState<"models" | "services">("models");
+  const servicesOnly = target === "services";
   const [provider, setProvider] = useState<ProviderId>("anthropic");
   const [models, setModels] = useState(DEFAULT_ALLOWED_MODELS.anthropic);
   const [clientModel, setClientModel] = useState(DEFAULT_CLIENT_MODELS.anthropic);
@@ -55,6 +60,7 @@ export function PassportIssuanceModal({
   const reset = () => {
     setOpen(false);
     setName("");
+    setTarget("models");
     setProvider("anthropic");
     setModels(DEFAULT_ALLOWED_MODELS.anthropic);
     setClientModel(DEFAULT_CLIENT_MODELS.anthropic);
@@ -78,7 +84,7 @@ export function PassportIssuanceModal({
       const budget_cents = parseUsdBudgetToCents(costBudgetUsd);
       const allowedModels = models.split(",").map((m) => m.trim()).filter(Boolean);
       const concreteModel = clientModel.trim();
-      if (!clientModelIsUsable(concreteModel) || !scopeAllows([{ provider, models: allowedModels }], provider, concreteModel)) {
+      if (!servicesOnly && (!clientModelIsUsable(concreteModel) || !scopeAllows([{ provider, models: allowedModels }], provider, concreteModel))) {
         throw new Error("Model to call must be a concrete provider model id covered by the allowed patterns.");
       }
       const pub = ed25519.getPublicKey(priv);
@@ -86,9 +92,9 @@ export function PassportIssuanceModal({
       const created = await createAgent({
         name,
         passportPubkey: passportId,
-        scopes: [{ provider, models: allowedModels }],
-        budget_tokens,
-        budget_cents,
+        scopes: servicesOnly ? [] : [{ provider, models: allowedModels }],
+        budget_tokens: servicesOnly ? null : budget_tokens,
+        budget_cents: servicesOnly ? null : budget_cents,
       });
       setPubkey(passportId);
       setAgentId(created.agentId);
@@ -154,6 +160,34 @@ export function PassportIssuanceModal({
               <span className={labelText}>Agent name</span>
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="prod-summarizer" autoFocus />
             </label>
+            <fieldset className="grid gap-2 text-sm" data-field="agent-target">
+              <legend className={labelText}>What will this agent call?</legend>
+              <label className="flex items-start gap-2">
+                <input type="radio" className="mt-1 w-auto" name="passport-target" checked={!servicesOnly} onChange={() => setTarget("models")} />
+                <span>AI models <span className="text-muted-foreground">(and GitHub or Telegram too, if you add rules later)</span></span>
+              </label>
+              <label className="flex items-start gap-2">
+                <input
+                  type="radio"
+                  className="mt-1 w-auto"
+                  name="passport-target"
+                  checked={servicesOnly}
+                  onChange={() => {
+                    setTarget("services");
+                    if (runtime === "mcp") setRuntime("sdk");
+                  }}
+                  data-target="services"
+                />
+                <span>Only GitHub or Telegram <span className="text-muted-foreground">(no model access; every model call is refused)</span></span>
+              </label>
+            </fieldset>
+            {servicesOnly ? (
+              <p className="m-0 text-sm text-muted-foreground" data-services-only-note>
+                After issuing it, give it access on its page, under GitHub access or Telegram access. It can call nothing
+                until you do.
+              </p>
+            ) : null}
+            {!servicesOnly ? (<>
             <label className={labelCls}>
               <span className={labelText}>Provider</span>
               <select
@@ -182,24 +216,32 @@ export function PassportIssuanceModal({
               <input value={clientModel} onChange={(e) => setClientModel(e.target.value)} />
               <span className="text-xs text-muted-foreground">This exact value is sent to the provider. Wildcards are rejected.</span>
             </label>
+            </>) : null}
             <fieldset className="grid gap-2">
               <legend className={labelText}>Runtime integration</legend>
               <label className="rounded-md border border-border bg-secondary/30 p-3 text-sm">
                 <input type="radio" className="mr-2 w-auto" checked={runtime === "sdk"} onChange={() => setRuntime("sdk")} />
                 <strong>JavaScript / TypeScript application · Passport SDK</strong>
-                <span className="mt-1 block text-muted-foreground">Recommended. The SDK signs locally and routes every provider call through PassControl Cloud.</span>
+                <span className="mt-1 block text-muted-foreground">
+                  {servicesOnly
+                    ? "Recommended. The SDK signs locally and gives Octokit or your Telegram calls a fresh visa on every request."
+                    : "Recommended. The SDK signs locally and routes every provider call through PassControl Cloud."}
+                </span>
               </label>
               <label className="rounded-md border border-border bg-secondary/30 p-3 text-sm">
                 <input type="radio" className="mr-2 w-auto" checked={runtime === "sidecar"} onChange={() => setRuntime("sidecar")} />
                 <strong>Static-key application · local Passport sidecar</strong>
                 <span className="mt-1 block text-muted-foreground">The CLI stores this Passport locally and the sidecar attaches per-request sender proof at http://127.0.0.1:8788.</span>
               </label>
+              {!servicesOnly ? (
               <label className="rounded-md border border-border bg-secondary/30 p-3 text-sm">
                 <input type="radio" className="mr-2 w-auto" checked={runtime === "mcp"} onChange={() => setRuntime("mcp")} />
                 <strong>MCP client · Passport visa</strong>
                 <span className="mt-1 block text-muted-foreground">Import into the CLI, then configure the MCP client. Current MCP uses a bearer visa and does not satisfy required sender-proof mode.</span>
               </label>
+              ) : null}
             </fieldset>
+            {!servicesOnly ? (
             <div className="grid gap-3 sm:grid-cols-2">
               <label className={labelCls}>
                 <span className={labelText}>Token budget</span>
@@ -222,6 +264,7 @@ export function PassportIssuanceModal({
                 <span className="text-xs text-muted-foreground">Example: 5.00. Blank means unlimited.</span>
               </label>
             </div>
+            ) : null}
             {error ? <p role="alert" className="pc-inline-error">{error}</p> : null}
             <div className="flex justify-end gap-3">
               <button
@@ -231,7 +274,11 @@ export function PassportIssuanceModal({
                 Cancel
               </button>
               <button
-                disabled={!name.trim() || !models.split(",").some((model) => model.trim()) || !clientModelIsUsable(clientModel) || busy}
+                disabled={
+                  !name.trim() ||
+                  busy ||
+                  (!servicesOnly && (!models.split(",").some((model) => model.trim()) || !clientModelIsUsable(clientModel)))
+                }
                 onClick={issue}
                 className={buttonVariants({ size: "lg" })}
               >
@@ -252,8 +299,8 @@ export function PassportIssuanceModal({
               userId={userId}
               agentId={agentId}
               issuedAt={issuedAt}
-              provider={provider}
-              model={clientModel.trim()}
+              provider={servicesOnly ? null : provider}
+              model={servicesOnly ? null : clientModel.trim()}
               passportId={pubkey}
               passportSecret={secret}
               initialMode={runtime}

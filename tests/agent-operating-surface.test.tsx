@@ -161,3 +161,37 @@ describe("agent page wording", () => {
     expect(providers).toMatch(/Every agent in this workspace that calls/);
   });
 });
+
+// Any-API slice B: an agent with no model access but service rules is not
+// "allowed nothing", and saying so would send an operator the wrong way.
+describe("the access summary with services", () => {
+  const props = {
+    agentId: "a1",
+    agentName: "triage",
+    status: "active",
+    hasPassport: false,
+    activeDirectKeys: 1,
+    budgets: { tokens: { spentTokens: 0, capTokens: null }, cost: { spentCents: 0, capCents: null } },
+    visaTtlSeconds: 900,
+  };
+  const access = (html: string) => html.match(/data-operate="access">([^<]*)</)?.[1];
+
+  it("names service access when there is no model access", () => {
+    const html = renderToStaticMarkup(
+      <AgentOperatingHeader {...props} scopes={[]} serviceAccess={[{ label: "GitHub", rules: 3 }, { label: "Telegram", rules: 0 }]} />
+    );
+    expect(access(html)).toBe("No model access · GitHub: 3 rules");
+  });
+
+  it("still says nothing is allowed when there is neither", () => {
+    const html = renderToStaticMarkup(<AgentOperatingHeader {...props} scopes={[]} serviceAccess={[{ label: "GitHub", rules: 0 }]} />);
+    expect(access(html)).toBe("Nothing — no provider, model or service is allowed.");
+  });
+
+  it("adds services after models", () => {
+    const html = renderToStaticMarkup(
+      <AgentOperatingHeader {...props} scopes={[{ provider: "openai", models: ["gpt-4.1-mini"] }]} serviceAccess={[{ label: "GitHub", rules: 1 }]} />
+    );
+    expect(access(html)).toBe("openai: gpt-4.1-mini · GitHub: 1 rule");
+  });
+});

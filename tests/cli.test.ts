@@ -293,6 +293,38 @@ describe("passcontrol CLI", () => {
     expect(output).toContain("Local stack ports");
   }, DOCKER_BOUND_MS);
 
+  // Found in the 2026-10-02 Cloud E2E: a CLI pointed at Cloud, with no local
+  // app, was shown a failing "Local stack ports" line and told receipts were
+  // disabled for want of a signing key in its shell. Neither is a Cloud user's
+  // concern: there is no local stack, and the remote gateway signs receipts.
+  it("skips self-host checks in doctor --deep when the gateway is remote and there is no local app", async () => {
+    const { stdout, stderr } = await runCli(["doctor", "--deep"], {
+      env: { PASSCONTROL_GATEWAY: "https://gateway.invalid" },
+    });
+    const output = `${stdout}\n${stderr}`;
+    expect(output).toMatch(/Local prerequisites skipped: this CLI uses a remote gateway/);
+    expect(output).not.toContain("Local stack ports");
+    expect(output).not.toContain("Instance signing key not set");
+    expect(output).toMatch(/Receipts are signed by the gateway/);
+  }, DOCKER_BOUND_MS);
+
+  // 1.0.0 known issue: doctor checked the stack's ports at offset 0 whatever
+  // setup used, so an install made with --port-offset was reported as
+  // "unavailable" (another project's ports) while status said it was online.
+  // The offset is read back from supabase/config.toml, as `update` does.
+  it("checks the local stack at the port offset setup baked into config.toml", async () => {
+    const checkout = await makeCheckout(path.join(tmp, "offset-install"));
+    await fs.mkdir(path.join(checkout, "supabase"), { recursive: true });
+    await fs.writeFile(
+      path.join(checkout, "supabase", "config.toml"),
+      'project_id = "offset-install-500"\n\n[api]\nenabled = true\nport = 54821\n'
+    );
+    const { stdout, stderr } = await runCli(["doctor", "--deep"], { env: { PASSCONTROL_APP_ROOT: checkout } });
+    const output = `${stdout}\n${stderr}`;
+    expect(output).toMatch(/Local stack ports \(offset 500\)/);
+    expect(output).not.toMatch(/ports 54321\b/);
+  }, DOCKER_BOUND_MS);
+
   it("bounds the Docker daemon probe so doctor cannot hang on a wedged Desktop socket", () => {
     const source = readFileSync(path.join(process.cwd(), "bin/passcontrol.mjs"), "utf8");
     const start = source.indexOf("function checkDockerDaemon");

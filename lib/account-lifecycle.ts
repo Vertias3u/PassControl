@@ -13,12 +13,28 @@ export const ACCOUNT_EXPORT_TABLES = [
   {
     key: "agents",
     table: "agents",
-    columns: "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label",
+    // `budget_period` + `budget_period_cents` (0073): the agent's daily or
+    // monthly spending limit. `service_rules` (0074): its access to non-LLM
+    // APIs, no secret.
+    columns: "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label,budget_period,budget_period_cents,service_rules",
+    // A database missing a migration refuses the select (42703) and has nothing
+    // in that column to export, so it steps down ONE migration at a time, the
+    // workspace export's ladder: a database with 0073 but not 0074 keeps the
+    // periodic limit.
+    fallbackColumns: [
+      "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label,budget_period,budget_period_cents",
+      "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label",
+    ],
   },
   {
     key: "agentLogs",
     table: "agent_logs",
-    columns: "id,agent_id,user_id,passport_id,jti,provider,model,input_tokens,output_tokens,cost_microcents,status,latency_ms,created_at,receipt,policy_shadow_would,auth_method,agent_access_key_id,credential_use_id",
+    // `call_kind` and `endpoint` (0074): what a service call was, and the rule
+    // that admitted it. Same fallback, same reason.
+    columns: "id,agent_id,user_id,passport_id,jti,provider,model,input_tokens,output_tokens,cost_microcents,status,latency_ms,created_at,receipt,policy_shadow_would,auth_method,agent_access_key_id,credential_use_id,call_kind,endpoint",
+    fallbackColumns: [
+      "id,agent_id,user_id,passport_id,jti,provider,model,input_tokens,output_tokens,cost_microcents,status,latency_ms,created_at,receipt,policy_shadow_would,auth_method,agent_access_key_id,credential_use_id",
+    ],
   },
   {
     key: "providerCredentials",
@@ -65,16 +81,21 @@ async function readAllRows(
 ): Promise<unknown[]> {
   const rows: unknown[] = [];
   for (let start = 0; ; start += PAGE_SIZE) {
-    // Supabase's generated overload expands every table × selected column
-    // combination in this data-driven allowlist into a union too large for TS.
+    // Typed by hand: the column list is chosen at run time (a fallback may
+    // replace it), which the generated select-string inference cannot follow.
     // Runtime names and columns remain the explicit constants above.
-    // @ts-expect-error generated query union is too complex to represent
-    const { data, error } = await db
-      .from(spec.table)
-      .select(spec.columns)
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: true })
-      .range(start, start + PAGE_SIZE - 1);
+    const page_ = (columns: string) =>
+      db
+        .from(spec.table)
+        .select(columns)
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: true })
+        .range(start, start + PAGE_SIZE - 1) as unknown as Promise<{ data: unknown[] | null; error: { code?: string } | null }>;
+    let { data, error } = await page_(spec.columns);
+    for (const fallback of "fallbackColumns" in spec ? spec.fallbackColumns : []) {
+      if (error?.code !== "42703") break;
+      ({ data, error } = await page_(fallback));
+    }
     if (error) throw new Error(`account_export_${spec.key}_unavailable`);
     const page = data ?? [];
     rows.push(...page);

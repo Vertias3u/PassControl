@@ -30,6 +30,17 @@ export function isGuiPreset(name) {
   return Object.hasOwn(GUI_PRESET_LABELS, String(name ?? "").toLowerCase());
 }
 
+/**
+ * Non-LLM APIs a client can be pointed at through the sidecar (any-API). The
+ * preset prints the governed base URL for that service; what the agent may call
+ * there is set per agent in the dashboard.
+ */
+export const SERVICE_PRESETS = ["github", "telegram"];
+
+export function isServicePreset(name) {
+  return SERVICE_PRESETS.includes(String(name ?? "").toLowerCase());
+}
+
 /** Presets that print settings pointing an agent at the local sidecar bridge. */
 export const SIDECAR_PRESETS = [
   "generic",
@@ -38,6 +49,7 @@ export const SIDECAR_PRESETS = [
   "aider",
   "hermes",
   ...Object.keys(GUI_PRESET_LABELS),
+  ...SERVICE_PRESETS,
 ];
 
 /** MCP client targets. Shares the set the MCP config writer dispatches on. */

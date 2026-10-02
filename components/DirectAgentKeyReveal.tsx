@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Check, Copy } from "lucide-react";
 
 import { buildDirectConnectSetup, buildHermesCloudSetup } from "@/lib/direct-connect-config";
+import { buildServiceConnectSetup } from "@/lib/service-connect";
 import type { ProviderId } from "@/lib/providers";
 import { buttonVariants } from "@/components/ui/button";
 
@@ -15,11 +16,12 @@ export interface RevealedDirectAgent {
   name: string;
   keyName: string;
   expiresAt: string | null;
-  provider: ProviderId;
-  model: string;
+  /** Null for an agent created to call services only (no model access). */
+  provider: ProviderId | null;
+  model: string | null;
 }
 
-type CopyKind = "key" | "install" | "env" | "load" | "smoke" | "code" | "hermes";
+type CopyKind = "key" | "install" | "env" | "load" | "smoke" | "code" | "hermes" | "svc-env" | "octokit" | "telegram";
 
 function gatewayOrigin(): string {
   return typeof window === "undefined" ? "https://YOUR-PASSCONTROL-HOST" : window.location.origin;
@@ -74,18 +76,15 @@ export function DirectAgentKeyReveal({
       document.removeEventListener("click", warnBeforeLinkNavigation, true);
     };
   }, [stored]);
-  const setup = buildDirectConnectSetup({
-    origin: gatewayOrigin(),
-    provider: issued.provider,
-    key: issued.key,
-    model: issued.model,
-  });
-  const hermesSetup = buildHermesCloudSetup({
-    origin: gatewayOrigin(),
-    provider: issued.provider,
-    key: issued.key,
-    model: issued.model,
-  });
+  const setup =
+    issued.provider && issued.model
+      ? buildDirectConnectSetup({ origin: gatewayOrigin(), provider: issued.provider, key: issued.key, model: issued.model })
+      : null;
+  const hermesSetup =
+    issued.provider && issued.model
+      ? buildHermesCloudSetup({ origin: gatewayOrigin(), provider: issued.provider, key: issued.key, model: issued.model })
+      : null;
+  const serviceSetup = setup ? null : buildServiceConnectSetup({ origin: gatewayOrigin(), key: issued.key });
   const label = "text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground";
   const block = "overflow-x-auto rounded-xl border border-border bg-black/30 p-4 text-xs leading-6 text-foreground";
 
@@ -125,7 +124,28 @@ export function DirectAgentKeyReveal({
         <pre className="pc-secret-block is-secret whitespace-pre-wrap break-all">{issued.key}</pre>
         <CopyButton kind="key" value={issued.key} text="Copy credential" />
       </div>
-      <div className="grid gap-1.5" data-client-family={setup.family}>
+      {serviceSetup ? (
+        <div className="grid gap-1.5" data-client-family="services">
+          <p className="m-0 text-sm leading-6" data-setup-note="services-only">
+            This agent has no model access. It can call GitHub or Telegram once you give it rules on{" "}
+            {/* A new tab: navigating THIS tab away would destroy an unacknowledged key. */}
+            <Link href={`/dashboard/agents/${issued.agentId}#agent-services`} target="_blank" rel="noreferrer">
+              its page
+            </Link>
+            ; until then every call is refused.
+          </p>
+          <span className={`${label} mt-2`}>1 · Configuration for the worker</span>
+          <pre className={block}>{serviceSetup.envBlock}</pre>
+          <CopyButton kind="svc-env" value={serviceSetup.envBlock} text="Copy configuration" />
+          <span className={`${label} mt-2`}>2 · GitHub with Octokit</span>
+          <pre className={block}>{serviceSetup.octokit}</pre>
+          <CopyButton kind="octokit" value={serviceSetup.octokit} text="Copy Octokit example" />
+          <span className={`${label} mt-2`}>3 · Telegram</span>
+          <pre className={block}>{serviceSetup.telegram}</pre>
+          <CopyButton kind="telegram" value={serviceSetup.telegram} text="Copy Telegram example" />
+        </div>
+      ) : null}
+      {setup ? <div className="grid gap-1.5" data-client-family={setup.family}>
         <p className="m-0 text-sm leading-6" data-setup-note="runtime">{setup.runtimeNote}</p>
         <span className={`${label} mt-2`}>1 · Install the SDK</span>
         <pre className={block}>{setup.installCommand}</pre>
@@ -146,7 +166,7 @@ export function DirectAgentKeyReveal({
         <pre className={block}>{setup.example}</pre>
         <CopyButton kind="code" value={setup.example} text="Copy SDK example" />
         <p className="m-0 text-xs leading-5 text-muted-foreground">{setup.authNote}</p>
-      </div>
+      </div> : null}
       {hermesSetup ? <div className="grid gap-1.5" data-first-class-integration="hermes">
         <span className={label}>Hermes Agent {hermesSetup.version}</span>
         <p className="m-0 text-xs leading-5 text-muted-foreground">

@@ -224,7 +224,10 @@ describe("first-call failure language", () => {
   // "signature accepted" wording would become correct and should be revisited.
   it("ties the passport-mode label to the real verifyVisa path", () => {
     const challenge = read("app/api/auth/challenge/route.ts");
-    const proxy = read("app/api/v1/[provider]/[...path]/route.ts");
+    const route = read("app/api/v1/[provider]/[...path]/route.ts");
+    // Every data-plane route authenticates through this one module (moved out of
+    // the provider route for the service route, 2026-09-29).
+    const proxy = read("lib/gateway/authenticate.ts");
 
     // The Ed25519 signature check lives at the challenge/mint boundary only.
     expect(challenge).toContain("verifySignature(");
@@ -232,6 +235,9 @@ describe("first-call failure language", () => {
 
     // The provider path authenticates a passport principal with verifyVisa, and
     // never re-checks the passport signature that minted it.
+    expect(route).toContain('from "@/lib/gateway/authenticate"');
+    expect(route).toContain("await authenticateGatewayRequest(req, provider)");
+    expect(route).not.toMatch(/verifySignature\(/);
     expect(proxy).toContain("const claims = await verifyVisa(credential.token);");
     expect(proxy).not.toMatch(/verifySignature\(/);
 

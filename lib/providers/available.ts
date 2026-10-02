@@ -15,6 +15,7 @@ import { waitUntil } from "@vercel/functions";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getCachedProviderKeys, readProviderKeysFence, setCachedProviderKeys } from "../state/redis";
+import { isProvider, type ProviderId } from "../providers";
 
 const PROVIDER_KEYS_CACHE_TTL_S = 300;
 
@@ -22,7 +23,18 @@ type ProviderKeysDatabase = Pick<SupabaseClient, "from">;
 
 function toProviders(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.filter((entry): entry is string => typeof entry === "string"))];
+  // LLM providers only: a stored service token (`svc:github`) is not somewhere
+  // an LLM call could fail over to.
+  return [...new Set(value.filter((entry): entry is string => typeof entry === "string" && isProvider(entry)))];
+}
+
+/**
+ * The LLM providers among stored credential rows, unique, in row order. Every
+ * reader that asks "does this tenant have a provider key" goes through this, so
+ * a workspace holding only a GitHub token is not read as having one.
+ */
+export function llmCredentialProviders(rows: readonly { provider?: unknown }[]): ProviderId[] {
+  return [...new Set(rows.map((row) => row.provider).filter((p): p is ProviderId => typeof p === "string" && isProvider(p)))];
 }
 
 export async function readProvidersWithKeys(

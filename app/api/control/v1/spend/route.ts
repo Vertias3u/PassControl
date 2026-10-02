@@ -23,8 +23,9 @@
 // being fixed. `basis` states what the number is instead, so a consumer that
 // persists it cannot read it as money a provider actually charged.
 //
-// Unpriced calls are reachable only where custom endpoints are enabled, which is
-// self-host: Cloud leaves `PROVIDER_ENDPOINT_MODE` unset. An agent with a DOLLAR
+// Unpriced calls are reachable where custom endpoints are enabled (self-host:
+// Cloud leaves `PROVIDER_ENDPOINT_MODE` unset) and, on every deployment, through
+// Azure OpenAI, which is never priced (package 2, step 5). An agent with a DOLLAR
 // cap can no longer make one at all — the gateway refuses rather than enforce a
 // limit it cannot compute — so `basis` differs from observed cost only for
 // agents with no cost cap, or a token-only one.

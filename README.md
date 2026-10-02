@@ -161,7 +161,7 @@ API key. Treat access to that local listener as access to the configured agent. 
 not a sandbox against other processes running as you. Its provider CONNECT requests are
 refused; use base URLs rather than TLS interception.
 
-Presets (from `cli/presets.mjs`): `generic`, `openhands`, `litellm`, `aider`, `hermes`, `cline`, `continue`, `chatbox`, `jan`, `msty`, `cherry-studio`, `open-webui`, `librechat`; MCP presets: `claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
+Presets (from `cli/presets.mjs`): `generic`, `openhands`, `litellm`, `aider`, `hermes`, `cline`, `continue`, `chatbox`, `jan`, `msty`, `cherry-studio`, `open-webui`, `librechat`; service presets: `github`, `telegram`; MCP presets: `claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
 supported paths. [Hermes configuration](./docs/integrations/hermes.md).
 
 ## CLI configuration and key storage
@@ -259,7 +259,7 @@ are separate from signature verification.
 - Token and cost admission limits through atomic reservations and settlement.
 - Platform/tenant kill switches and per-agent suspension/revocation.
 - Provider failover within supported request families and each attempt's authorization
-  and budget checks; it is not arbitrary API translation.
+  and budget checks; it is not arbitrary API translation. Embeddings never fail over.
 - The injected provider key is removed from what comes back: if an upstream echoes it in
   an error body, a JSON answer or an event stream (even split across chunks), the agent
   receives `[REDACTED_PROVIDER_KEY]` instead. This covers the exact key, not a key an
@@ -315,15 +315,19 @@ All paths below are relative to `/api/v1/<provider>`. SDK base URLs and aliases 
 
 | Provider ID | Inference | Discovery |
 |---|---|---|
-| `openai` | Chat Completions and **POST Responses** | Models list/detail |
+| `openai` | Chat Completions, **POST Responses** and **POST Embeddings** | Models list/detail |
 | `anthropic` | Messages | Models list/detail |
-| `groq`, `mistral`, `together` | OpenAI-compatible Chat Completions | Models list/detail |
+| `mistral` | OpenAI-compatible Chat Completions and **POST Embeddings** | Models list/detail |
+| `groq`, `together` | OpenAI-compatible Chat Completions | Models list/detail |
 | `deepseek` | OpenAI-compatible Chat Completions | Not proxied |
 | `gemini` | Google's **OpenAI-compatible** Chat Completions | Models list/detail |
+| `xai` | **POST Responses** only (legacy Chat Completions refused) | Models list/detail |
+| `azure` | Azure OpenAI v1: Chat Completions, **POST Responses** and **POST Embeddings**, at the resource address stored with the key | Models list |
 
-Gemini's native `generateContent` API is not supported. Responses support is OpenAI-only;
-response retrieval/deletion, embeddings, files, fine-tuning, batches, and token-counting
-endpoints are not proxied. OpenAI's hosted tools (web search, file search, code interpreter
+Gemini's native `generateContent` API is not supported. Responses is served for OpenAI,
+xAI and Azure; embeddings for OpenAI, Mistral and Azure, and an embeddings call never fails over, because
+another model's vectors would not match the ones already stored. Response retrieval/deletion,
+files, fine-tuning, batches, and token-counting endpoints are not proxied. OpenAI's hosted tools (web search, file search, code interpreter
 and others billed outside tokens) and its search models are refused, because no token budget can
 hold their fees. Model availability still depends on your provider account.
 

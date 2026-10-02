@@ -158,9 +158,12 @@ The full reference lives in [the public OpenAPI document](https://github.com/Ver
 ## Compatibility and assurance
 
 `clientOptions` accepts `openai`, `anthropic`, `groq`, `mistral`, `together`, `deepseek`,
-and `gemini`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
-Chat Completions. Gemini uses Google's OpenAI-compatible endpoint; native
-`generateContent` is not supported. See [accepted paths](https://github.com/Vertias3u/PassControl/blob/main/DOCUMENTATION.md#data-plane--proxy-a-model-call).
+`gemini`, `xai` and `azure`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
+Chat Completions. xAI is served through its Responses API only (`client.responses.create`);
+its legacy Chat Completions endpoint is refused. Gemini uses Google's OpenAI-compatible endpoint; native
+`generateContent` is not supported. Azure OpenAI takes the plain OpenAI client (not
+`AzureOpenAI`), with `model` set to your deployment name; the gateway sends the call to the
+resource address stored with your Azure key. See [accepted paths](https://github.com/Vertias3u/PassControl/blob/main/DOCUMENTATION.md#data-plane--proxy-a-model-call).
 
 The TypeScript SDK **does not attach sender proofs**. Its provider requests use
 bearer visas: they work with sender-proof mode off/observe, but required mode refuses

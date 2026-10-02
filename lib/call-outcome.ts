@@ -71,6 +71,7 @@ export const CALL_OUTCOME: Record<LogEntry["status"], { category: OutcomeCategor
   // A setup gap here, not a fault out there — the call never left.
   no_provider_key: { category: "setup_incomplete", label: "No provider key stored" },
   endpoint_unavailable: { category: "passcontrol_side", label: "Not sent: endpoint lookup failed" },
+  endpoint_required: { category: "setup_incomplete", label: "Not sent: this key has no resource address" },
   credential_state_unavailable: { category: "passcontrol_side", label: "Not sent: credential check unavailable" },
   // An observation, not a failure: an operator changed the credential while
   // this call was being assembled. A retry gets a matching pair.

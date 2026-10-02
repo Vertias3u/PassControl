@@ -27,6 +27,8 @@ export const AUDIT_ACTIONS = [
   "provider_key.activate",
   "provider_key.delete",
   "killswitch.master",
+  // One service's stop for the whole workspace ("stop all GitHub, keep Claude").
+  "killswitch.service",
   // Budget-accounting recovery. Both move money, and neither is reachable from
   // the hot path — `budget.hold_resolve` decides what an attempt that never
   // finished actually cost, and `budget.rebuild` is the ONLY sanctioned lowering
@@ -55,6 +57,9 @@ export const AUDIT_ACTIONS = [
   // second, independent opt-in, and an audit trail that conflated them could
   // not answer "when did this agent become visible to strangers".
   "agent.publish",
+  // Which non-LLM API calls an agent may make with the tenant's token (0074).
+  // It widens or narrows what a credential can reach, like a scope edit.
+  "agent.service_rules",
   "apikey.create",
   "apikey.revoke",
   // The workspace's stated key-custody expectation. In the trail because it is

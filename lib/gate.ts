@@ -4,10 +4,11 @@
 // shared by live proxy calls and owner-facing traces.
 import type { ScopeEntry } from "./auth/visa";
 import type { KillState } from "./state/killswitch";
-import { isProvider } from "./providers";
+import { isProvider, providerRequiresEndpoint } from "./providers";
 import {
   endpointAllows,
   evaluateAgentPolicy,
+  isEmbeddingsEndpoint,
   isModelListing,
   scopeRuleMatch,
 } from "./scope";
@@ -157,6 +158,15 @@ function headroomSuffix(budget: GateBudgetInput): string {
  * route preserve its historical error/side-effect order while still delegating
  * every gate decision to this function. A trace always supplies every input.
  */
+/**
+ * Whether the call generates nothing, and so is exempt from an output ceiling:
+ * a model listing, or an embeddings call on a provider that serves one.
+ */
+function generatesNoOutput(input: Pick<GateInput, "provider" | "method" | "path">): boolean {
+  if (isModelListing(input.path)) return true;
+  return isProvider(input.provider) && isEmbeddingsEndpoint(input.provider, input.method, input.path);
+}
+
 export function evaluateGate(input: GateInput): GateEvaluation {
   const steps: GateStepResult[] = [];
   let deniedBy: GateStepName | undefined;
@@ -279,6 +289,24 @@ export function evaluateGate(input: GateInput): GateEvaluation {
   } else if (
     input.dollarLimited === true &&
     isProvider(input.provider) &&
+    providerRequiresEndpoint(input.provider)
+  ) {
+    // A provider with no host of its own (Azure) is always a custom endpoint and
+    // never priced: its `model` is a deployment name that says nothing about the
+    // model behind it. Refused here with S3-03's own answer, `unpriced_endpoint`,
+    // rather than `unpriced_model` — "add a price for this model" is advice no
+    // operator can follow for a deployment name. Model listings included: the
+    // proxy's step 5b refuses them on every custom endpoint under a dollar limit,
+    // and this must agree with it for the decision trace to.
+    fail(
+      "endpoint",
+      `${input.provider} calls cannot be priced, so they cannot be held to a dollar limit.`,
+      "endpoint:unpriced_endpoint",
+      402
+    );
+  } else if (
+    input.dollarLimited === true &&
+    isProvider(input.provider) &&
     !isModelListing(input.path) &&
     !hasListedPrice(input.model, input.provider)
   ) {
@@ -341,7 +369,7 @@ export function evaluateGate(input: GateInput): GateEvaluation {
       input.provider,
       input.model,
       input.now,
-      isModelListing(input.path) ? null : input.requestedOutput
+      generatesNoOutput(input) ? null : input.requestedOutput
     );
     if (!decision.allowed) {
       policy = { outcome: "deny_by_rule" };

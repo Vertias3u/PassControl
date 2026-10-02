@@ -23,7 +23,9 @@ describe("hasListedPrice", () => {
 });
 
 describe("default client models are priced by a specific row", () => {
-  it.each(Object.entries(DEFAULT_CLIENT_MODELS) as [ProviderId, string][])(
+  // Azure's default is a deployment-name guess on a provider that is never
+  // priced (tests/azure-provider.test.ts), so it has no row to check.
+  it.each((Object.entries(DEFAULT_CLIENT_MODELS) as [ProviderId, string][]).filter(([p]) => p !== "azure"))(
     "%s default %s",
     (provider, model) => {
       expect(hasListedPrice(model, provider)).toBe(true);

@@ -183,21 +183,23 @@ export class ControlClient {
   readonly logs = {
     /**
      * `class` selects a view, never a different record: omitted returns every
-     * call, `inference` drops SDK housekeeping (startup model-listing probes),
-     * `housekeeping` returns only those. The limit is applied before the
-     * filter, so a filtered page can be shorter than the limit asked for.
+     * call, `inference` returns model calls only (no SDK housekeeping — startup
+     * model-listing probes — and no service calls), `housekeeping` returns only
+     * those probes, and `service` returns only calls to a non-LLM API such as
+     * GitHub. The limit is applied before the filter, so a filtered page can be
+     * shorter than the limit asked for.
      */
     list: (params?: {
       agent_id?: string;
       status?: string;
-      class?: "inference" | "housekeeping";
+      class?: "inference" | "housekeeping" | "service";
       limit?: number;
       cursor?: string;
     }) => this.req<any[]>("GET", "/logs", { query: params }),
     page: (params?: {
       agent_id?: string;
       status?: string;
-      class?: "inference" | "housekeeping";
+      class?: "inference" | "housekeeping" | "service";
       limit?: number;
       cursor?: string;
     }) => this.request("GET", "/logs", { query: params }) as Promise<{

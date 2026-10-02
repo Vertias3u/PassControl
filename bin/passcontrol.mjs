@@ -67,6 +67,7 @@ import {
   integrationChoices,
   isGuiPreset,
   isIntegration,
+  isServicePreset,
   supportsWrite,
 } from "../cli/presets.mjs";
 import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
@@ -83,6 +84,8 @@ import {
   stackFromConfig,
   writeMarker,
 } from "../cli/update.mjs";
+import { isLocalGatewayOrigin, probeGatewayVersion, probeTimeoutMs } from "../cli/gateway-probe.mjs";
+import { dashboardOriginForOffset } from "../cli/local-stack.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
@@ -324,20 +327,7 @@ async function gatewayStatus(noNetwork = false, gateway = config.gateway) {
   if (noNetwork) return { label: "not checked", ok: null };
   const origin = probeGatewayOrigin({ gateway });
   if (!origin) return { label: "invalid configuration", ok: false };
-  try {
-    const res = await fetchWithTimeout(`${origin}/api/version`, {
-      method: "GET",
-      headers: { accept: "application/json" },
-    });
-    if (!res.ok) return { label: `unhealthy (${res.status})`, ok: false };
-    const body = await res.json().catch(() => null);
-    const version = typeof body?.version === "string" && body.version.trim() ? body.version.trim() : null;
-    return version
-      ? { label: `online (${res.status}, PassControl ${version})`, ok: true, version }
-      : { label: "unhealthy (not a PassControl version response)", ok: false };
-  } catch {
-    return { label: "offline or unreachable", ok: false };
-  }
+  return probeGatewayVersion(origin);
 }
 
 async function printCockpit({ noNetwork = false, json = false } = {}) {
@@ -1238,14 +1228,35 @@ async function assertLocalStackPortsAvailable(offset = 0) {
 }
 
 async function checkLocalStackPorts(offset = 0) {
+  // Named in the line, so an install made with --port-offset can see which
+  // ports were actually checked.
+  const label = offset ? `Local stack ports (offset ${offset})` : "Local stack ports";
   try {
     await assertLocalStackPortsAvailable(offset);
-    return { ok: true, message: "Local stack ports: available." };
+    return { ok: true, message: `${label}: available.` };
   } catch (error) {
     return {
       ok: false,
-      message: `Local stack ports: unavailable. Fix: stop the conflicting project or rerun setup with --port-offset N. Details: ${error.message}`,
+      message: `${label}: unavailable. Fix: stop the conflicting project or rerun setup with --port-offset N. Details: ${error.message}`,
     };
+  }
+}
+
+/**
+ * The port offset `setup` baked into this checkout's supabase/config.toml, or 0
+ * when it was never set up. Read back, as `update` does (stackFromConfig),
+ * because the offset is a setup-time flag nobody passes again: checking at 0
+ * reported a working --port-offset install as "ports unavailable".
+ */
+function installedStackOffset() {
+  try {
+    const root = appRoot ?? resolveAppRoot();
+    if (!root) return 0;
+    const configPath = path.join(root, "supabase", "config.toml");
+    if (!fs.existsSync(configPath)) return 0;
+    return stackFromConfig(fs.readFileSync(configPath, "utf8"))?.offset ?? 0;
+  } catch {
+    return 0;
   }
 }
 
@@ -1808,18 +1819,26 @@ async function updateCommand(opts = {}) {
 }
 
 async function setupLocal(opts = {}) {
-  const dashboard = canonicalLocalDashboard();
-  const activation = await prepareLocalActivation(dashboard, opts);
   const offset = opts.portOffset === undefined ? 0 : Number(opts.portOffset);
   if (!Number.isInteger(offset) || offset < 0 || offset > 10000) {
     throw new Error("--port-offset must be an integer from 0 to 10000.");
   }
+  // The dashboard moves with the offset, like Supabase and Redis: a second
+  // install on :3000 would collide with the first one's dashboard. Saved as the
+  // gateway by the activation below, so `start`, `stop` and `status` follow it.
+  const dashboard = parseLocalDashboard(
+    dashboardOriginForOffset(offset),
+    offset ? "the offset local dashboard" : "the canonical local dashboard"
+  );
+  const activation = await prepareLocalActivation(dashboard, opts);
   await runLocalPrerequisiteChecks({ offset, enforce: true });
   await ensureAppRoot({ clone: true, appDir: opts.appDir, yes: opts.yes });
   step("Preparing the local Supabase, Redis, migrations, and dev user…");
   await runLocalCommand(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev:stack"], {
     ...process.env,
     PASSCONTROL_PORT_OFFSET: String(offset),
+    // Supabase's site URL and the receipt issuer are written from PORT.
+    PORT: String(dashboard.port),
     PASSCONTROL_VIA_CLI: "1",
   });
   // dev:stack has just brought Supabase and Redis up (and would have exited
@@ -2386,6 +2405,11 @@ function printAgentPreset(name = "generic", opts = {}) {
     return;
   }
 
+  if (isServicePreset(preset)) {
+    printServicePreset(preset, opts);
+    return;
+  }
+
   const { provider, model, apiKey, baseUrl, port } = sidecarBaseUrl(opts);
   const modelWithProvider = `${provider}/${model}`;
   const sidecarStart = opts.port != null || process.env.SIDECAR_PORT != null
@@ -2447,6 +2471,34 @@ function printAgentPreset(name = "generic", opts = {}) {
         ["PASSCONTROL_SIDECAR_API_KEY", apiKey],
         ["PASSCONTROL_MODEL", modelWithProvider],
       ]);
+      break;
+    default:
+      throw new Error(`Usage: passcontrol env <${integrationChoices()}>`);
+  }
+}
+
+// A service preset has no provider and no model: the client is pointed at the
+// governed service route and sends no service token at all — the gateway
+// injects the workspace's, and only for calls the agent's rules admit.
+function printServicePreset(service, opts = {}) {
+  const host = String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1");
+  const port = sidecarPort(opts);
+  const sidecarStart = opts.port != null || process.env.SIDECAR_PORT != null
+    ? cliCommand(`sidecar --port ${port}`)
+    : cliCommand("sidecar");
+  console.log(`# Start the bridge first: ${sidecarStart}`);
+  switch (service) {
+    case "github":
+      console.log("# GitHub REST through PassControl. What this agent may do is set on its page in the");
+      console.log("# dashboard, under GitHub access; the workspace's GitHub token stays in PassControl.");
+      printExports([["GITHUB_API_URL", `http://${host}:${port}/api/v1/svc/github`]]);
+      console.log("# Octokit: new Octokit({ baseUrl: process.env.GITHUB_API_URL }) — and no auth option.");
+      break;
+    case "telegram":
+      console.log("# Telegram Bot API through PassControl. What this agent may do is set on its page in the");
+      console.log("# dashboard, under Telegram access; the bot token stays in PassControl.");
+      printExports([["TELEGRAM_API_URL", `http://${host}:${port}/api/v1/svc/telegram`]]);
+      console.log('# Call a method by name, with no token in the URL: curl "$TELEGRAM_API_URL/getMe"');
       break;
     default:
       throw new Error(`Usage: passcontrol env <${integrationChoices()}>`);
@@ -2560,7 +2612,7 @@ async function serverVersion() {
   const origin = probeGatewayOrigin();
   if (!origin) return { version: null, detail: "the configured gateway is not a bare origin" };
   try {
-    const res = await fetchWithTimeout(`${origin}/api/version`);
+    const res = await fetchWithTimeout(`${origin}/api/version`, {}, probeTimeoutMs(origin));
     // A gateway that predates this endpoint is a real PassControl gateway, and
     // saying "unreachable" about one that answered would send an operator to
     // debug their network instead of deploying.
@@ -2711,7 +2763,25 @@ async function doctorCommand(opts = {}) {
   // One authenticated request for this command. Its failure is a failed
   // diagnostic, not a CLI crash: remaining local checks are still useful.
   printSystemHealthDiagnostic(await fetchSystemHealth());
-  await runLocalPrerequisiteChecks({ report: true });
+  // Docker, Supabase and the stack's ports matter only where a stack runs. A CLI
+  // pointed at a remote gateway (Cloud) with no app checkout here has none, and
+  // a failing "Local stack ports" line would send that user hunting for one.
+  const probeOrigin = probeGatewayOrigin();
+  const remoteGateway = probeOrigin !== null && !isLocalGatewayOrigin(probeOrigin);
+  let localApp = null;
+  try {
+    localApp = resolveAppRoot();
+  } catch {
+    localApp = null;
+  }
+  if (remoteGateway && !localApp) {
+    step(
+      `Local prerequisites skipped: this CLI uses a remote gateway (${probeOrigin}). Docker and the ` +
+        "local stack are needed only to self-host on this machine."
+    );
+  } else {
+    await runLocalPrerequisiteChecks({ offset: installedStackOffset(), report: true });
+  }
   if (config.passportId && config.passportSecret) {
     // The whole chain, not just the mint. "Visa mint works" proves the passport
     // authenticates and says nothing about scope, budget, the proxy or receipts —
@@ -2745,16 +2815,23 @@ async function doctorCommand(opts = {}) {
     step("Skipping control API check: no PASSCONTROL_API_KEY configured.");
   }
 
-  await checkInstanceSigningKey();
+  await checkInstanceSigningKey({ remoteOrigin: remoteGateway ? probeOrigin : null });
 }
 
 // Receipts and agent tokens are signed by a key the DEPLOYMENT owns. A missing
 // key is loud (nothing is signed), but a PASSCONTROL_ISSUER pointing somewhere
 // that does not serve this deployment's JWKS fails silently: every receipt then
 // carries an `iss` whose key set cannot verify it. Check it explicitly.
-async function checkInstanceSigningKey() {
+async function checkInstanceSigningKey({ remoteOrigin = null } = {}) {
   const seed = process.env.INSTANCE_SIGNING_KEY;
   const issuer = process.env.PASSCONTROL_ISSUER;
+
+  // The key belongs to the deployment. A remote gateway signs with its own, so
+  // its absence from this shell disables nothing.
+  if (!seed && remoteOrigin) {
+    step(`Receipts are signed by the gateway (${remoteOrigin}); its public keys are at ${remoteOrigin}/.well-known/jwks.json.`);
+    return;
+  }
 
   if (!seed) {
     step(
@@ -3423,7 +3500,9 @@ function keyTone(storage) {
   if (storage?.fallback) return ["warn", "file fallback", "the OS store was unavailable"];
   if (storage?.available !== true) return ["idle", "not configured", ""];
   if (storage?.tier === 1) return ["ok", "ready", String(storage.source ?? "OS store")];
-  return ["ok", "ready", "file"];
+  // Tier 0 is a config file or the operator's environment; saying "file" for a
+  // key that came from PASSPORT_SECRET sends them looking for a file to clean up.
+  return ["ok", "ready", storage?.source === "environment variable" ? "env var" : "file"];
 }
 
 /**

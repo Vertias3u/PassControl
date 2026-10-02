@@ -37,6 +37,7 @@ import { isSentryConfigured } from "@/lib/observability";
 import { RELEASE_VERSION } from "@/lib/version";
 import { releaseChannel, releaseCommit } from "@/lib/system-health/build-identity-values";
 import { getCachedMigrationHealth } from "@/lib/system-health/cache";
+import { llmCredentialProviders } from "@/lib/providers/available";
 
 export const DIAGNOSTIC_SCAN_DAYS = 7;
 export const DIAGNOSTIC_SCAN_LIMIT = 200;
@@ -298,14 +299,20 @@ export async function buildProblemDiagnostics(
         .gte("created_at", since)
         .order("created_at", { ascending: false })
         .limit(DIAGNOSTIC_SCAN_LIMIT),
-      db.from("provider_credentials").select("provider", { count: "exact", head: true }),
+      // Rows rather than a head count: only LLM provider keys count, and a
+      // stored service token (`svc:github`, 0074) must not read as one.
+      db.from("provider_credentials").select("provider").limit(200),
       selectedContributor.readQuota(user.id, now),
       readKillState(user.id),
     ]);
 
   const logRows = logs ?? [];
   const signals: ProblemDiagnosticSignals = {
-    providerCredentials: providerKeys.error ? "unavailable" : (providerKeys.count ?? 0) > 0 ? "configured" : "missing",
+    providerCredentials: providerKeys.error
+      ? "unavailable"
+      : llmCredentialProviders(providerKeys.data ?? []).length > 0
+        ? "configured"
+        : "missing",
     receiptSigning: loadInstanceSigner() && instanceIssuer() ? "configured" : "missing",
     observability: isSentryConfigured() ? "configured" : "missing",
     agentRegistry: agentsError ? "unavailable" : "available",

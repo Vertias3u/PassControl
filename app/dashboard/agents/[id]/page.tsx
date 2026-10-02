@@ -31,6 +31,9 @@ import {
   toDeclaredKeyStorageView,
 } from "@/lib/passport-key-storage";
 import { readKeyCustodyExpectation } from "@/lib/key-custody-expectation";
+import { AgentServiceAccess } from "@/components/AgentServiceAccess";
+import { ServiceLogo } from "@/components/ServiceLogo";
+import { readAgentServiceAccess } from "./service-access-data";
 
 export const dynamic = "force-dynamic";
 
@@ -185,6 +188,10 @@ export default async function AgentPassportPage({
     ? await readKeyCustodyExpectation(db, user.id)
     : null;
   const passportWithSourceSignals = { ...passport, sourceSignals };
+  const [githubAccess, telegramAccess] = await Promise.all([
+    readAgentServiceAccess(db, user.id, passport.agent.id, "github"),
+    readAgentServiceAccess(db, user.id, passport.agent.id, "telegram"),
+  ]);
   // C1 detection: the gateway proved this agent's private passport key was sent
   // to it as an API key. Shown only while it names the CURRENT key, so rotating
   // the passport clears it. Best-effort, like the source signals above.
@@ -233,6 +240,8 @@ export default async function AgentPassportPage({
           {passport.directKeys.length > 0 ? <a href="#agent-setup">Setup</a> : null}
           <a href="#agent-public">Public listing</a>
           <a href="#agent-policy">Live policy</a>
+          <a href="#agent-services">GitHub access</a>
+          <a href="#agent-services-telegram">Telegram access</a>
           <a href="#agent-policy-lab">Policy lab</a>
           <a href="#agent-activity">Activity</a>
           <a href="#agent-emergency">Temporary access (break glass)</a>
@@ -240,6 +249,10 @@ export default async function AgentPassportPage({
         </nav>
 
         <AgentOperatingHeader
+          serviceAccess={[
+            { label: "GitHub", rules: githubAccess.state === "ok" ? githubAccess.allow.length : 0 },
+            { label: "Telegram", rules: telegramAccess.state === "ok" ? telegramAccess.allow.length : 0 },
+          ]}
           agentId={passport.agent.id}
           agentName={passport.agent.name}
           status={passport.agent.status}
@@ -254,6 +267,10 @@ export default async function AgentPassportPage({
         <div id="agent-identity" className="scroll-mt-40">
         <AgentPassport
           passport={passportWithSourceSignals}
+          services={[
+            ...(githubAccess.state === "ok" && githubAccess.allow.length > 0 ? ["GitHub"] : []),
+            ...(telegramAccess.state === "ok" && telegramAccess.allow.length > 0 ? ["Telegram"] : []),
+          ]}
           visaTtlSeconds={visaTtlSeconds()}
         />
         </div>
@@ -333,6 +350,53 @@ export default async function AgentPassportPage({
         <div id="agent-policy" className="scroll-mt-40">
         <AgentPolicySummary policy={passport.policy} />
         </div>
+        {/* Beside the live policy, but not part of it: these rules ARE the scope
+            of a service call, and nothing in the policy above applies to one. */}
+        <section id="agent-services" className="pc-section scroll-mt-40">
+          <SectionHeader
+            eyebrow="Service access"
+            title="GitHub access"
+            icon={<ServiceLogo service="github" />}
+            description={<>
+            What this agent may do on GitHub with the workspace&apos;s GitHub token, which it never
+            holds. Nothing until you allow it, checked on every call: a choice you untick stops the next one.
+            </>}
+          />
+          <div className="pc-section__body">
+            <AgentServiceAccess
+              agentId={passport.agent.id}
+              service="github"
+              serviceLabel="GitHub"
+              initialAllow={githubAccess.state === "ok" ? githubAccess.allow : []}
+              initialCap={githubAccess.state === "ok" ? githubAccess.maxRequestsPerHour : null}
+              state={githubAccess.state}
+              tokenStored={githubAccess.state === "unavailable" ? null : githubAccess.tokenStored}
+            />
+          </div>
+        </section>
+        <section id="agent-services-telegram" className="pc-section scroll-mt-40">
+          <SectionHeader
+            eyebrow="Service access"
+            title="Telegram access"
+            icon={<ServiceLogo service="telegram" />}
+            description={<>
+            What this agent may do with the workspace&apos;s Telegram bot, whose token it never holds.
+            Nothing until you allow it, checked on every call.
+            </>}
+          />
+          <div className="pc-section__body">
+            <AgentServiceAccess
+              agentId={passport.agent.id}
+              service="telegram"
+              serviceLabel="Telegram"
+              ruleShape="call"
+              initialAllow={telegramAccess.state === "ok" ? telegramAccess.allow : []}
+              initialCap={telegramAccess.state === "ok" ? telegramAccess.maxRequestsPerHour : null}
+              state={telegramAccess.state}
+              tokenStored={telegramAccess.state === "unavailable" ? null : telegramAccess.tokenStored}
+            />
+          </div>
+        </section>
         {/* Directly below the live policy, because the pair is the point: what
             decides now, and what would decide if you promoted the draft. */}
         <div id="agent-policy-lab" className="scroll-mt-40">

@@ -148,10 +148,19 @@ export function createSidecar({
     return fetch(`${origin}${path}`, { method: req.method, headers, body: body ?? undefined });
   }
 
+  // A service call's pagination `link` and same-origin `location` name the
+  // GATEWAY (it builds them from its own origin), and following one directly
+  // would skip the visa only this sidecar adds. Point them back at the sidecar.
+  // Only the exact gateway origin followed by /api/v1/ is rewritten; any other
+  // URL — codeload for an archive download — passes through untouched.
+  const toLocal = (value) => value.split(`${origin}/api/v1/`).join(`${localBaseUrl()}/api/v1/`);
+
   function writeResponse(res, upstream) {
     const outHeaders = {};
     upstream.headers.forEach((v, k) => {
-      if (!STRIP_RES.has(k.toLowerCase())) outHeaders[k] = v;
+      const name = k.toLowerCase();
+      if (STRIP_RES.has(name)) return;
+      outHeaders[k] = name === "link" || name === "location" ? toLocal(v) : v;
     });
     res.writeHead(upstream.status, outHeaders);
     if (upstream.body) Readable.fromWeb(upstream.body).pipe(res);

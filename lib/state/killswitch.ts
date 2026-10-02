@@ -14,6 +14,9 @@ import { redis } from "./redis";
 const KEY = {
   platform: "killswitch:platform",
   tenant: (userId: string) => `killswitch:tenant:${userId}`,
+  // Any-API phase 2: one tenant's stop for one non-LLM service ("stop all GitHub
+  // access, keep Claude"). Read only when a service route names its service.
+  service: (userId: string, service: string) => `killswitch:tenant:${userId}:svc:${service}`,
   denylist: "killswitch:denylist",
 };
 
@@ -21,21 +24,37 @@ export interface KillState {
   platformKill: boolean;
   userKill: boolean;
   denylist: string[];
+  /**
+   * The tenant's per-service kill for the service the caller named. Only the
+   * service route asks, so it is absent on a model call and `isBlocked` — the
+   * model route's test — never reads it.
+   */
+  serviceKill?: boolean;
 }
 
-/** Resolve the kill state relevant to a single agent's owner. */
-export async function readKillState(userId: string | null): Promise<KillState> {
+/**
+ * Resolve the kill state relevant to a single agent's owner. A service route
+ * passes its service, and that tenant's per-service kill is read in the SAME
+ * round trip, so it shares this function's fail posture exactly (invariant 3's
+ * kill column): it is a kill switch, not a scope rule.
+ */
+export async function readKillState(
+  userId: string | null,
+  options: { service?: string } = {}
+): Promise<KillState> {
   try {
     const r = redis();
-    const [platform, tenant, denylist] = await Promise.all([
+    const [platform, tenant, denylist, service] = await Promise.all([
       r.get(KEY.platform),
       userId ? r.get(KEY.tenant(userId)) : Promise.resolve(null),
       r.smembers(KEY.denylist),
+      userId && options.service ? r.get(KEY.service(userId, options.service)) : Promise.resolve(null),
     ]);
     return {
       platformKill: Boolean(platform),
       userKill: Boolean(tenant),
       denylist: Array.isArray(denylist) ? (denylist as string[]) : [],
+      ...(options.service ? { serviceKill: Boolean(service) } : {}),
     };
   } catch {
     logFailOpen("kill_read");
@@ -44,10 +63,13 @@ export async function readKillState(userId: string | null): Promise<KillState> {
     // request elsewhere — we don't add a "block every tenant on a transient
     // blip" path by default. Operators who want the emergency stop to be strict
     // can set KILL_SWITCH_FAIL_CLOSED=true, and a read failure blocks instead.
+    // Same posture for a named service: under fail-closed the platform flag
+    // already blocks everything; fail-open leaves the service open too.
+    const service = options.service ? { serviceKill: false } : {};
     if (process.env.KILL_SWITCH_FAIL_CLOSED === "true") {
-      return { platformKill: true, userKill: false, denylist: [] };
+      return { platformKill: true, userKill: false, denylist: [], ...service };
     }
-    return { platformKill: false, userKill: false, denylist: [] };
+    return { platformKill: false, userKill: false, denylist: [], ...service };
   }
 }
 
@@ -147,4 +169,27 @@ export async function addToDenylist(agentId: string): Promise<void> {
 }
 export async function removeFromDenylist(agentId: string): Promise<void> {
   await redis().srem(KEY.denylist, agentId);
+}
+
+/**
+ * Arm or disarm one tenant's stop for one service. Like a real tenant's master
+ * kill, an arm is permanent until a human disarms it: no TTL.
+ */
+export async function armServiceKill(userId: string, service: string, on: boolean): Promise<void> {
+  const r = redis();
+  if (on) await r.set(KEY.service(userId, service), "1");
+  else await r.del(KEY.service(userId, service));
+}
+
+/**
+ * The per-service kill as OBSERVED, for the operator's toggle. `null` means the
+ * read failed: shown on a dashboard, the enforcement posture would turn "could
+ * not read" into "armed" or "clear" (see observeKillState).
+ */
+export async function observeServiceKill(userId: string, service: string): Promise<boolean | null> {
+  try {
+    return Boolean(await redis().get(KEY.service(userId, service)));
+  } catch {
+    return null;
+  }
 }

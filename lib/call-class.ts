@@ -53,9 +53,16 @@
  * is a budget bypass. `tests/call-class.test.ts` asserts that no file in the
  * check order imports this module.
  */
+import { isServiceProviderId } from "@/lib/services/catalog";
 
-/** A call the agent's operator would recognise as work it asked for. */
-export type CallClass = "inference" | "housekeeping";
+/**
+ * A call the agent's operator would recognise as work it asked for.
+ *
+ * `service` is a call to a non-LLM API through the service route (0074). It is
+ * agent activity — never hidden — but it is not inference: it spent no model
+ * tokens and has no model cost, so spend views that count inference leave it out.
+ */
+export type CallClass = "inference" | "housekeeping" | "service";
 
 /**
  * Why a row was filed as housekeeping — named, never a vague bucket.
@@ -81,10 +88,15 @@ export interface ClassifiableCall {
    *  caller does not carry is not one we may quietly file as chatter. */
   status?: string | null;
   model?: string | null;
+  /** `svc:<service>` marks a service call even when `call_kind` is absent. */
+  provider?: string | null;
+  /** `service` for a service call (0074). NULL on every LLM row. */
+  call_kind?: string | null;
 }
 
 const INFERENCE: CallClassification = { klass: "inference", reason: null };
 const MODEL_LISTING: CallClassification = { klass: "housekeeping", reason: "model_listing" };
+const SERVICE: CallClassification = { klass: "service", reason: null };
 
 /**
  * Classify one recorded call.
@@ -96,6 +108,12 @@ const MODEL_LISTING: CallClassification = { klass: "housekeeping", reason: "mode
  * an operator the one row they needed.
  */
 export function classifyCall(row: ClassifiableCall): CallClassification {
+  // FIRST, and on either signal. A successful service call is `ok` with no
+  // model — precisely the probe shape below — so without this every governed
+  // GitHub read would be filed as a capability probe and hidden by default.
+  // The provider prefix is checked as well as `call_kind` because a realtime
+  // payload or an older select may carry `provider` without the 0074 column.
+  if (row.call_kind === "service" || isServiceProviderId(row.provider)) return SERVICE;
   if (row.status !== "ok") return INFERENCE;
   // An ABSENT `model` key is not an empty model — it is a row we cannot judge.
   //
@@ -129,12 +147,16 @@ export function housekeepingLabel(reason: CallClassReason): string {
 /**
  * Split a list once, rather than filtering it twice at three call sites.
  * Order is preserved within each side.
+ *
+ * Service calls (any-API, 0074) get their own side. Folding them into
+ * `inference` let a GitHub call complete or diagnose the first-call guide,
+ * which is about a first MODEL call; a caller that means "every agent call"
+ * adds the two back together.
  */
 export function partitionByClass<T extends ClassifiableCall>(
   rows: readonly T[]
-): { inference: T[]; housekeeping: T[] } {
-  const inference: T[] = [];
-  const housekeeping: T[] = [];
-  for (const row of rows) (isHousekeeping(row) ? housekeeping : inference).push(row);
-  return { inference, housekeeping };
+): { inference: T[]; housekeeping: T[]; service: T[] } {
+  const sides: Record<CallClass, T[]> = { inference: [], housekeeping: [], service: [] };
+  for (const row of rows) sides[classifyCall(row).klass].push(row);
+  return sides;
 }

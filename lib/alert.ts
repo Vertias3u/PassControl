@@ -23,6 +23,7 @@ const SEVERITY: Record<string, Severity> = {
   "auth.login.ratelimited": "warning", // throttle tripped — burst of attempts
   "auth.mfa.failed": "warning", // a wrong TOTP / recovery code at login step-up
   "killswitch.master": "critical", // platform-wide kill toggled (see fields.on)
+  "killswitch.service": "warning", // one service stopped or resumed for a workspace (see fields.service, fields.on)
   "agent.suspend": "warning", // an agent was suspended
   // Which key can speak for an agent changed. An operator who did NOT do this
   // needs to hear about it now — a rotation an attacker performs hands them the

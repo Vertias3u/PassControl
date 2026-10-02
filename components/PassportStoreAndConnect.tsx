@@ -10,7 +10,8 @@ import {
   authenticationProofLabel,
   type FirstCallRow,
 } from "@/lib/first-call-activation";
-import { buildPassportConnectSetup } from "@/lib/passport-connect-config";
+import { buildPassportConnectSetup, buildPassportServiceSetup } from "@/lib/passport-connect-config";
+import { serviceCallExplanation, serviceLabelFor } from "@/lib/services/presentation";
 import type { ProviderId } from "@/lib/providers";
 import { browserClient } from "@/lib/supabase/client";
 
@@ -47,8 +48,9 @@ export function PassportStoreAndConnect({
    *  stored call older than this proves the previous key, so it must not count.
    *  Required rather than optional — a caller that has no floor has no proof. */
   issuedAt: string;
-  provider: ProviderId;
-  model: string;
+  /** Both null for a passport issued to call services only (no model access). */
+  provider: ProviderId | null;
+  model: string | null;
   passportId: string;
   passportSecret: string;
   initialMode: ConnectMode;
@@ -131,11 +133,16 @@ export function PassportStoreAndConnect({
     };
   }, [agentId, issuedAt, userId]);
 
+  const servicesOnly = provider === null || model === null;
   const setup = useMemo(
-    () => buildPassportConnectSetup({ origin, provider, passportId, passportSecret, model }),
+    () => (provider && model ? buildPassportConnectSetup({ origin, provider, passportId, passportSecret, model }) : null),
     [model, origin, passportId, passportSecret, provider]
   );
-  const sidecarSnippet = sidecarIntegration
+  const serviceSetup = useMemo(
+    () => (servicesOnly ? buildPassportServiceSetup({ origin, passportId, passportSecret }) : null),
+    [origin, passportId, passportSecret, servicesOnly]
+  );
+  const sidecarSnippet = sidecarIntegration && provider && model
     ? buildConfigureSnippet({
         gateway: origin,
         passportId,
@@ -146,7 +153,15 @@ export function PassportStoreAndConnect({
       })
     : "";
   const importCommand = buildPassportImportCommand({ gateway: origin, passportId });
-  const diagnosis = row && row.status !== "ok" ? activationDiagnosis(row) : null;
+  // A service call (svc:github, svc:telegram) is explained in service terms; the
+  // model-call diagnosis would send the operator to provider keys and models.
+  const isServiceRow = Boolean(row?.provider?.startsWith("svc:"));
+  const diagnosis =
+    row && row.status !== "ok"
+      ? isServiceRow
+        ? { title: `${serviceLabelFor(row.provider)} call not completed.`, detail: serviceCallExplanation(row.status, row.provider) ?? "" }
+        : activationDiagnosis(row)
+      : null;
   const verified = row?.status === "ok" && isPassportAuthMethod(row.auth_method);
   const proofedPerRequest = row?.auth_method === "passport_proof_per_request";
 
@@ -179,7 +194,7 @@ export function PassportStoreAndConnect({
       </div>
 
       <div className="pc-segmented" aria-label="Passport connection method">
-        {(["sdk", "sidecar", "mcp"] as const).map((option) => (
+        {(servicesOnly ? (["sdk", "sidecar"] as const) : (["sdk", "sidecar", "mcp"] as const)).map((option) => (
           <button key={option} type="button" aria-pressed={mode === option} onClick={() => setMode(option)}>
             {option === "sdk" ? "SDK" : option === "sidecar" ? "Sidecar / static-key tool" : "MCP"}
           </button>
@@ -189,14 +204,45 @@ export function PassportStoreAndConnect({
       <div className="pc-boundary-note">
         <ShieldCheck aria-hidden="true" />
         <span>
-          <strong>{mode === "sdk" ? setup.integrationLabel : mode === "sidecar" ? "Local Passport sidecar" : "Passport MCP"}.</strong>{" "}
+          <strong>{mode === "sdk" ? setup?.integrationLabel ?? "Passport SDK" : mode === "sidecar" ? "Local Passport sidecar" : "Passport MCP"}.</strong>{" "}
           {mode === "sidecar"
             ? "The sidecar listens on http://127.0.0.1:8788 and attaches per-request sender proof before forwarding to the PassControl gateway."
             : "The private key signs locally. PassControl receives the public Passport ID and signatures, never the secret."}
         </span>
       </div>
 
-      {mode === "sdk" ? (
+      {servicesOnly && serviceSetup ? (
+        <p className="m-0 text-sm text-muted-foreground" data-setup-note="services-only">
+          This passport has no model access. Give it rules on{" "}
+          <a href={`/dashboard/agents/${agentId}#agent-services`} target="_blank" rel="noreferrer">its page</a>, under
+          GitHub access or Telegram access, before its first call; until then every call is refused.
+        </p>
+      ) : null}
+      {mode === "sdk" && serviceSetup ? (
+        <>
+          <section className="grid gap-2" aria-labelledby="passport-svc-env-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><strong id="passport-svc-env-heading">1. Store in the private runtime</strong><small className="block text-muted-foreground">This is the only block containing the secret.</small></div>
+              {copyButton("env", "Copy private environment", serviceSetup.envBlock)}
+            </div>
+            <pre className="pc-secret-block is-secret">{serviceSetup.envBlock}</pre>
+          </section>
+          <section className="grid gap-2" aria-labelledby="passport-svc-install-heading">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <strong id="passport-svc-install-heading">2. Install the SDK and Octokit</strong>
+              {copyButton("install", "Copy install command", serviceSetup.installCommand)}
+            </div>
+            <pre className="pc-secret-block is-public">{serviceSetup.installCommand}</pre>
+          </section>
+          <section className="grid gap-2" aria-labelledby="passport-svc-client-heading" data-client-family="services">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div><strong id="passport-svc-client-heading">3. Connect GitHub and Telegram</strong><small className="block text-muted-foreground">Save as <code>{serviceSetup.clientFilename}</code>. This code contains no private key and no service token.</small></div>
+              {copyButton("client", "Copy application code", serviceSetup.clientCode)}
+            </div>
+            <pre className="pc-secret-block is-public overflow-x-auto">{serviceSetup.clientCode}</pre>
+          </section>
+        </>
+      ) : mode === "sdk" && setup ? (
         <>
           <section className="grid gap-2" aria-labelledby="passport-env-heading">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -247,7 +293,19 @@ export function PassportStoreAndConnect({
             </div>
             <pre className="pc-secret-block is-secret whitespace-pre-wrap break-all">{passportSecret}</pre>
           </section>
-          {mode === "sidecar" ? (
+          {mode === "sidecar" && serviceSetup ? (
+            <section className="grid gap-2" aria-labelledby="passport-svc-sidecar-heading">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <strong id="passport-svc-sidecar-heading">3. Start the sidecar and point the tool at it</strong>
+                {copyButton("sidecar", "Copy sidecar commands", serviceSetup.sidecarCommands)}
+              </div>
+              <pre className="pc-secret-block is-public overflow-x-auto">{serviceSetup.sidecarCommands}</pre>
+              <p className="pc-field-note">
+                The tool sends no GitHub or Telegram token: the sidecar adds the passport&apos;s proof and PassControl adds the
+                stored token.
+              </p>
+            </section>
+          ) : mode === "sidecar" ? (
             <section className="grid gap-2" aria-labelledby="passport-sidecar-heading">
               <label className="grid gap-1 text-sm">
                 <strong id="passport-sidecar-heading">3. Configure and start the sidecar</strong>
@@ -297,8 +355,10 @@ export function PassportStoreAndConnect({
               ) : (
                 <p>
                   The passport signed the challenge, PassControl issued a short-lived visa, and this call
-                  presented that bearer visa. Cloud then used the provider credential server-side and stored
-                  the governed call.
+                  presented that bearer visa.{" "}
+                  {isServiceRow
+                    ? `PassControl then added the stored ${serviceLabelFor(row?.provider)} token server-side and stored the governed call.`
+                    : "Cloud then used the provider credential server-side and stored the governed call."}
                 </p>
               )}
               <small data-receipt-state={row?.receipt ? "recorded" : "missing"}>

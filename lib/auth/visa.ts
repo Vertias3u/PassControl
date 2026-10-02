@@ -108,13 +108,23 @@ export function verifySenderProof(input: {
  *  Anthropic SDK sends `x-api-key: <key>`. Authorization Bearer is preferred;
  *  x-api-key is the fallback. The token is verified cryptographically afterwards,
  *  so accepting it from either header carries no extra trust. Returns "" if none. */
-export function extractVisaToken(headers: Headers): string {
+export function extractVisaToken(
+  headers: Headers,
+  // GitHub's clients (Octokit's `auth`, `gh`) send `Authorization: token <x>`.
+  // Only the service route opts in, and the scheme is read LAST: a request
+  // carrying Bearer or x-api-key reads exactly what it read before, so no
+  // request that authenticates today changes. Owner decision 2026-09-30.
+  options: { tokenScheme?: boolean } = {}
+): string {
   const auth = headers.get("authorization") ?? "";
   if (auth.toLowerCase().startsWith("bearer ")) {
     const t = auth.slice(7).trim();
     if (t) return t;
   }
-  return (headers.get("x-api-key") ?? "").trim();
+  const apiKey = (headers.get("x-api-key") ?? "").trim();
+  if (apiKey || !options.tokenScheme) return apiKey;
+  if (auth.toLowerCase().startsWith("token ")) return auth.slice(6).trim();
+  return "";
 }
 
 /**

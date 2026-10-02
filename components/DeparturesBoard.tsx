@@ -17,6 +17,8 @@ import { browserClient } from "@/lib/supabase/client";
 import {
   departureCounts,
   departureDestination,
+  departureProvider,
+  upstreamMeaningFor,
   groupDepartures,
   groupKey,
   groupSpan,
@@ -30,9 +32,8 @@ import {
   type DepartureRow,
   type DepartureTone,
 } from "@/lib/departures";
-import { isHousekeeping } from "@/lib/call-class";
+import { classifyCall } from "@/lib/call-class";
 import { callOutcome, capCharge, reportedTokens, reportedTokensText, usageLabel, type CapCharge } from "@/lib/call-outcome";
-import { describeUpstreamStatus } from "@/lib/verify/receipt-view";
 import { CallDetailDrawer, type CallContext } from "@/components/dashboard/CallDetailDrawer";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 
@@ -40,7 +41,7 @@ export type { DepartureRow };
 
 const MAX_ROWS = 40;
 const PAGE_ROWS = 40;
-const DEPARTURE_COLUMNS = "id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would";
+const DEPARTURE_COLUMNS = "id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would, call_kind, endpoint";
 
 /** The board's cap-charge cell. A row that cannot say what it was charged says so. */
 function capChargeText(charge: CapCharge): string {
@@ -371,7 +372,7 @@ export function DeparturesBoard({
                       refusedRow ? "is-refused" : ""
                     } ${arrived.current.has(row.id) ? "pc-departure-new" : ""}`}
                     data-call-state={selected?.id === row.id ? "selected" : "idle"}
-                    data-call-class={isHousekeeping(row) ? "housekeeping" : "inference"}
+                    data-call-class={classifyCall(row).klass}
                     role="button"
                     tabIndex={0}
                     aria-label={`Open recorded call ${flightCode(row)} from ${identity.name}`}
@@ -390,7 +391,7 @@ export function DeparturesBoard({
                       {flightCode(row)}
                     </td>
                     <td className="pc-live-calls__destination">
-                      {row.provider ?? "—"}
+                      {departureProvider(row) ?? "—"}
                       <span> / {departureDestination(row)}</span>
                     </td>
                     <td className="pc-live-calls__passport" title={`${identity.name} · ${identity.credential}`} data-agent-name={identity.name}>
@@ -417,7 +418,7 @@ export function DeparturesBoard({
                       {upstreamStatus !== null ? (
                         <span
                           className="pc-live-calls__upstream"
-                          title={describeUpstreamStatus(upstreamStatus) ?? `The provider returned HTTP ${upstreamStatus}.`}
+                          title={upstreamMeaningFor(row, upstreamStatus) ?? `The provider returned HTTP ${upstreamStatus}.`}
                         >
                           {upstreamStatus}
                         </span>
@@ -467,7 +468,7 @@ export function DeparturesBoard({
                 data-outcome-category={callOutcome(row.status).category}
                 className={`pc-call-row ${verdict.tone === "denied" ? "is-refused" : ""}`}
                 data-call-state={selected?.id === row.id ? "selected" : "idle"}
-                data-call-class={isHousekeeping(row) ? "housekeeping" : "inference"}
+                data-call-class={classifyCall(row).klass}
                 role="button"
                 tabIndex={0}
                 onClick={() => setSelected(row)}
@@ -480,14 +481,14 @@ export function DeparturesBoard({
               >
                 <div>
                   <strong>{identity.name}</strong>
-                  <span>{row.provider ?? "Unknown provider"} / {departureDestination(row)}</span>
+                  <span>{departureProvider(row) ?? "Unknown provider"} / {departureDestination(row)}</span>
                 </div>
                 <span className={TONE_CLASS[verdict.tone]}>
                   {verdict.word}
                   {upstreamStatus !== null ? (
                     <span
                       className="pc-live-calls__upstream"
-                      title={describeUpstreamStatus(upstreamStatus) ?? `The provider returned HTTP ${upstreamStatus}.`}
+                      title={upstreamMeaningFor(row, upstreamStatus) ?? `The provider returned HTTP ${upstreamStatus}.`}
                     >
                       {upstreamStatus}
                     </span>

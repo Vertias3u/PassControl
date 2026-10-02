@@ -129,6 +129,12 @@ const PRICES: Price[] = [
   { provider: "openai", pattern: "gpt-3.5-turbo-1106", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(2) },
   { provider: "openai", pattern: "gpt-3.5-turbo-0125", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
   { provider: "openai", pattern: "gpt-3.5-turbo", inputMicrocentsPerToken: mc(0.5), outputMicrocentsPerToken: mc(1.5) },
+  // Embeddings: input only, nothing is generated. developers.openai.com/api/docs/pricing,
+  // read 2026-09-27. Exact ids, like every row above: these rows sit below the
+  // provider's other rates, so they do not change FALLBACK_PRICES (each provider's maximum).
+  { provider: "openai", pattern: "text-embedding-3-small", inputMicrocentsPerToken: mc(0.02), outputMicrocentsPerToken: 0 },
+  { provider: "openai", pattern: "text-embedding-3-large", inputMicrocentsPerToken: mc(0.13), outputMicrocentsPerToken: 0 },
+  { provider: "openai", pattern: "text-embedding-ada-002", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: 0 },
   // Groq — console.groq.com/docs/models. Its Llama models are now Enterprise,
   // "Contact Sales", with no published price, so they have no row.
   { provider: "groq", pattern: "openai/gpt-oss-120b", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
@@ -149,6 +155,15 @@ const PRICES: Price[] = [
   { provider: "mistral", pattern: "ministral-3b-2512", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: mc(0.1) },
   { provider: "mistral", pattern: "codestral-latest", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.9) },
   { provider: "mistral", pattern: "codestral-2508", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.9) },
+  // Embeddings: input only. mistral.ai/pricing/api, read 2026-09-27. Exact ids per the
+  // docs' models overview (`mistral-embed-23-12`, `codestral-embed-25-05`), the Codestral
+  // Embed launch post (`codestral-embed-2505`) and the two aliases.
+  { provider: "mistral", pattern: "mistral-embed", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: 0 },
+  { provider: "mistral", pattern: "mistral-embed-23-12", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: 0 },
+  { provider: "mistral", pattern: "mistral-embed-2312", inputMicrocentsPerToken: mc(0.1), outputMicrocentsPerToken: 0 },
+  { provider: "mistral", pattern: "codestral-embed", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: 0 },
+  { provider: "mistral", pattern: "codestral-embed-25-05", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: 0 },
+  { provider: "mistral", pattern: "codestral-embed-2505", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: 0 },
   // Together AI — together.ai/pricing, Serverless. The page names models by
   // display name; only those whose API id is unambiguous have a row.
   { provider: "together", pattern: "openai/gpt-oss-120b", inputMicrocentsPerToken: mc(0.15), outputMicrocentsPerToken: mc(0.6) },
@@ -181,6 +196,22 @@ const PRICES: Price[] = [
   { provider: "gemini", pattern: "gemini-2.5-pro", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(15) },
   { provider: "gemini", pattern: "gemini-2.5-flash", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(2.5) },
   { provider: "gemini", pattern: "gemini-2.5-flash-lite", inputMicrocentsPerToken: mc(0.3), outputMicrocentsPerToken: mc(0.4) },
+  // xAI (docs.x.ai/developers/models.md, read 2026-09-27). Every row is the
+  // ≥200k-prompt rate: xAI bills ALL tokens of a request at the higher rate once its
+  // prompt reaches 200k, so the lower rate would under-reserve every long prompt.
+  // Cached-input discounts are not applied — over-counts, never under. Do NOT
+  // "correct" these down to the headline <200k figures. Output is billed as
+  // total − input (lib/usage/parseStream.ts), so reasoning is charged at the output
+  // rate, as xAI bills it. Exact ids, no `grok-*` catch-all: an unlisted Grok model
+  // under a dollar limit is refused (lib/gate.ts), like every other provider's.
+  { provider: "xai", pattern: "grok-4.7", inputMicrocentsPerToken: mc(4), outputMicrocentsPerToken: mc(12) },
+  { provider: "xai", pattern: "grok-4.6", inputMicrocentsPerToken: mc(4), outputMicrocentsPerToken: mc(12) },
+  { provider: "xai", pattern: "grok-4.5", inputMicrocentsPerToken: mc(4), outputMicrocentsPerToken: mc(12) },
+  { provider: "xai", pattern: "grok-4.3", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(5) },
+  { provider: "xai", pattern: "grok-4.20-0309-reasoning", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(5) },
+  { provider: "xai", pattern: "grok-4.20-0309-non-reasoning", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(5) },
+  { provider: "xai", pattern: "grok-4.20-multi-agent-0309", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(5) },
+  { provider: "xai", pattern: "grok-build-0.1", inputMicrocentsPerToken: mc(2), outputMicrocentsPerToken: mc(4) },
 ];
 
 const FALLBACK_PRICES = PRICES.reduce<Partial<Record<ProviderId, Price>>>((acc, price) => {
@@ -311,7 +342,10 @@ export function costMicrocents(
   if (!isPricedEndpoint(endpointBaseUrl)) return 0;
   const p = priceFor(model, provider);
   // A known provider should always have a fallback row. Returning 0 here means a
-  // provider was added without pricing rows, which should be treated as a bug.
+  // provider was added without pricing rows, which should be treated as a bug —
+  // except a provider with no host of its own (Azure), which is never priced by
+  // design and never reaches this line: it always has an endpoint, so it returns
+  // 0 above as unpriced, and a dollar limit refuses it at the gate.
   if (!p) return 0;
   return inputTokens * p.inputMicrocentsPerToken + outputTokens * p.outputMicrocentsPerToken;
 }
@@ -421,6 +455,39 @@ export function estimateTokenUsage(body: unknown, fallback = 1000): TokenUsageEs
     // fall through to fallback below
   }
   return { inputTokens: 0, outputTokens: fallback, totalTokens: fallback };
+}
+
+/** A pre-tokenised embeddings input: a non-empty array of whole numbers. */
+function isTokenArray(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length > 0 && value.every((t) => typeof t === "number" && Number.isInteger(t));
+}
+
+/**
+ * Pre-flight estimate for an embeddings request.
+ *
+ * An embedding generates nothing, so no output is reserved: `estimateTokenUsage`
+ * would reserve a stated limit or 1024 for every call, refusing an agent near
+ * its cap for a call its budget covers. Input is sized like chat (characters ÷
+ * 4 of the JSON text) except pre-tokenised input — `number[]` or `number[][]` —
+ * which is counted exactly, one token per number. Anything else (missing,
+ * malformed, mixed) is read as text; a body the provider will refuse keeps the
+ * same one-token floor an empty chat body gets.
+ */
+export function estimateEmbeddingUsage(body: unknown): TokenUsageEstimate {
+  const input = typeof body === "object" && body !== null ? (body as { input?: unknown }).input : undefined;
+  let inputTokens: number;
+  if (isTokenArray(input)) {
+    inputTokens = input.length;
+  } else if (Array.isArray(input) && input.length > 0 && input.every(isTokenArray)) {
+    inputTokens = input.reduce((sum, row) => sum + row.length, 0);
+  } else if (Array.isArray(input) && input.every((s) => typeof s === "string")) {
+    inputTokens = input.reduce((sum, s) => sum + Math.ceil(JSON.stringify(s).length / 4), 0);
+  } else {
+    const text = input === undefined || input === null ? "" : input;
+    inputTokens = Math.ceil((JSON.stringify(text) ?? "").length / 4);
+  }
+  inputTokens = Math.max(1, inputTokens);
+  return { inputTokens, outputTokens: 0, totalTokens: inputTokens };
 }
 
 /** Cheap pre-flight token estimate from a request body. */

@@ -14,7 +14,11 @@
 // concludes "PassControl prevents private-network SSRF" has read it wrong.
 //
 // THE CONTROL IS THE OPERATOR GATE, NOT THE REGEX. `PROVIDER_ENDPOINT_MODE` is
-// unset by default, which refuses every custom endpoint. What the shape checks
+// unset by default, which refuses every custom endpoint — with ONE exception,
+// Azure OpenAI, whose key has no host of ours and is admitted only to a closed
+// set of Microsoft-owned suffixes by its own rule below (`isEndpointAllowedFor`),
+// in every mode. That rule is a fixed allowlist, not a tenant-chosen host, which
+// is why it is safe where this gate is off. What the shape checks
 // below actually buy is narrower and still worth having: no credentials in the
 // URL, no scheme we do not speak, no query or fragment a caller could smuggle
 // state through, no control characters, and one canonical way to build the
@@ -152,6 +156,76 @@ export function isEndpointAllowed(value: unknown, policy: EndpointPolicy): boole
   // `gateway.company.com`, and a suffix match would hand a subdomain takeover
   // the same trust as the name the operator actually reviewed.
   return policy.hosts.includes(hostname);
+}
+
+// ── Azure OpenAI: an address that is part of the credential ──────────────────
+//
+// Azure has no host of ours. Each customer's resource is its own, so an Azure
+// key is useless without its address and dangerous with the wrong one. The rule
+// below is therefore NOT the operator gate above — it is admitted in every
+// `PROVIDER_ENDPOINT_MODE`, hosted Cloud included (owner decision P2-2), and it
+// is the ONLY rule an Azure key is checked against, so self-host's "any address"
+// does not extend to sending an Azure key to a server that is not Azure.
+//
+// What makes that safe on a multi-tenant deployment is that it is a closed set
+// of Microsoft-owned suffixes, not a tenant-chosen host: one DNS label, then
+// exactly `openai.azure.com` or `services.ai.azure.com` — the two spellings
+// Microsoft's v1 documentation names (learn.microsoft.com, api-version-lifecycle,
+// read 2026-09-27). `cognitiveservices.azure.com` is deliberately absent until a
+// Microsoft page names it for the v1 API. HTTPS on 443, no userinfo, query or
+// fragment, and the path is exactly `/openai/v1`: the v1 API needs no
+// `api-version`, and a deeper path would let a stored value pick the endpoint.
+const AZURE_HOST = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:openai\.azure\.com|services\.ai\.azure\.com)$/u;
+const AZURE_BASE_PATH = "/openai/v1";
+
+/** The canonical Azure v1 base for this value, or null if it is not one. */
+function azureEndpoint(value: unknown): string | null {
+  const url = parseStructurally(value);
+  if (!url || url.protocol !== "https:") return null;
+  if (url.port && url.port !== "443") return null;
+  const hostname = url.hostname.toLowerCase();
+  if (!AZURE_HOST.test(hostname)) return null;
+  if (url.pathname.replace(/\/+$/u, "") !== AZURE_BASE_PATH) return null;
+  return `https://${hostname}${AZURE_BASE_PATH}`;
+}
+
+/**
+ * The address to use instead, when an operator pasted the portal's bare
+ * resource endpoint (`https://<name>.openai.azure.com/`) or the pre-v1
+ * `/openai` base. Refused and named, never silently rewritten: what an operator
+ * sees stored is what they typed, and here they are told exactly what to type.
+ */
+export function azureEndpointSuggestion(value: unknown): string | null {
+  const url = parseStructurally(value);
+  if (!url || url.protocol !== "https:") return null;
+  if (url.port && url.port !== "443") return null;
+  const hostname = url.hostname.toLowerCase();
+  if (!AZURE_HOST.test(hostname)) return null;
+  const path = url.pathname.replace(/\/+$/u, "");
+  if (path !== "" && path !== "/openai") return null;
+  return `https://${hostname}${AZURE_BASE_PATH}`;
+}
+
+/**
+ * Whether a credential for THIS provider may be sent to this address.
+ *
+ * Azure answers from its own rule in every mode; every other provider answers
+ * exactly as `isEndpointAllowed` always has. Use this, not `isEndpointAllowed`,
+ * wherever the provider is known.
+ */
+export function isEndpointAllowedFor(provider: string, value: unknown, policy: EndpointPolicy): boolean {
+  if (provider === "azure") return azureEndpoint(value) !== null;
+  return isEndpointAllowed(value, policy);
+}
+
+/** `normalizeEndpoint`, per provider. See `isEndpointAllowedFor`. */
+export function normalizeEndpointFor(
+  provider: string,
+  value: unknown,
+  policy: EndpointPolicy = endpointPolicy()
+): string | null {
+  if (provider === "azure") return azureEndpoint(value);
+  return normalizeEndpoint(value, policy);
 }
 
 /**

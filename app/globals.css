@@ -2972,6 +2972,8 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 /* Settings controls use the same fields and consequence language as the rest
    of the operator shell, while leaving all mutations on their existing paths. */
 .pc-settings-manager { display: grid; gap: 1rem; }
+/* A checkbox sized as one, not as a 40px text field (.pc-app input sets that height). */
+.pc-app input.pc-check { min-height: 0; }
 .pc-settings-form {
   display: grid;
   gap: 1rem;

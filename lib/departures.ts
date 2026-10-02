@@ -6,8 +6,9 @@
 import type { LogEntry } from "@/lib/log";
 import type { AuthMethod } from "@/lib/log";
 import { classifyCall, housekeepingLabel, isHousekeeping } from "@/lib/call-class";
-import { readRecordedUpstreamStatus } from "@/lib/verify/receipt-view";
-import { callOutcome, isDeliberateRefusal, usageLabel } from "@/lib/call-outcome";
+import { describeUpstreamStatus, readRecordedUpstreamStatus } from "@/lib/verify/receipt-view";
+import { callOutcome, isDeliberateRefusal, usageLabel, wasForwarded } from "@/lib/call-outcome";
+import { serviceLabelFor, serviceUpstreamMeaning } from "@/lib/services/presentation";
 
 export interface DepartureRow {
   id: string;
@@ -37,6 +38,10 @@ export interface DepartureRow {
   latency_ms?: number | null;
   receipt?: string | null;
   policy_shadow_would?: string | null;
+  /** `service` for a call to a non-LLM API (0074); absent or null for an LLM call. */
+  call_kind?: string | null;
+  /** Service calls: METHOD + the matched rule's template. Null when no rule matched. */
+  endpoint?: string | null;
 }
 
 export type DepartureTone = "clear" | "held" | "denied";
@@ -82,6 +87,9 @@ export const DEPARTURE_VERDICT: Record<
   // NO ROUTE, which is blocked_endpoint below and means the requested path was
   // not permitted. Here the ADDRESS is what could not be read.
   endpoint_unavailable: { word: "NO ADDRESS", tone: "held" },
+  // Not NO ADDRESS: that one could not READ the address. Here the read answered
+  // and no address is stored with the key, so the fix is to set one.
+  endpoint_required: { word: "UNADDRESSED", tone: "held" },
   // Not "ROTATED". Nothing was observed to rotate — the check itself did not run.
   credential_state_unavailable: { word: "UNCHECKED", tone: "held" },
   credential_changed: { word: "ROTATED", tone: "held" },
@@ -208,9 +216,37 @@ export function totalTokens(row: Pick<DepartureRow, "input_tokens" | "output_tok
  * the thing instead: `housekeepingLabel` is the single source of that word, so
  * the board and the activation panel cannot drift apart about it.
  */
-export function departureDestination(row: Pick<DepartureRow, "status" | "model">): string {
+/**
+ * The provider column. An LLM row keeps its stored id, as it always has; a
+ * service row reads "GitHub" rather than the internal `svc:github`.
+ */
+export function departureProvider(
+  row: Pick<DepartureRow, "status" | "model" | "provider"> & Partial<Pick<DepartureRow, "call_kind">>
+): string | null {
+  if (classifyCall(row).klass === "service") return serviceLabelFor(row.provider);
+  return row.provider ?? null;
+}
+
+/** What the upstream's own status means for this row: GitHub's wording for a service call. */
+export function upstreamMeaningFor(
+  row: Pick<DepartureRow, "status" | "model" | "provider"> & Partial<Pick<DepartureRow, "call_kind">>,
+  status: number
+): string | null {
+  if (classifyCall(row).klass === "service") return serviceUpstreamMeaning(status, row.provider);
+  return describeUpstreamStatus(status);
+}
+
+export function departureDestination(
+  row: Pick<DepartureRow, "status" | "model"> & Partial<Pick<DepartureRow, "provider" | "call_kind" | "endpoint">>
+): string {
   const { klass, reason } = classifyCall(row);
   if (klass === "housekeeping" && reason) return housekeepingLabel(reason);
+  // A service call has no model; the rule that admitted it is what it reached.
+  // A scope refusal has no rule by definition, and says so rather than "—".
+  if (klass === "service") {
+    if (row.endpoint?.trim()) return row.endpoint.trim();
+    return row.status === "blocked_scope" ? "no matching rule" : "service call";
+  }
   return row.model?.trim() || "—";
 }
 
@@ -278,6 +314,7 @@ export function visibleDepartures(
       row.agent_id,
       row.provider,
       row.model,
+      row.endpoint,
       row.passport_id,
       row.jti,
       row.agent_access_key_id,
@@ -371,11 +408,25 @@ export function groupSpan(group: DepartureGroup): { from: string; to: string } |
  * single instant. A member that records nothing readable is a disagreement too:
  * a code covering only the rows we could decode is a guess about the rest.
  */
+/**
+ * The provider's own HTTP status for one row, or null.
+ *
+ * A receipt's `res.http` is the status PassControl RETURNED. It is the
+ * provider's only when the call was forwarded; on a refusal it is PassControl's
+ * own 403 or 402, and reporting it as "the provider answered" told an operator
+ * that a provider (or GitHub) saw a call nobody sent.
+ */
+export function recordedUpstreamStatus(row: Pick<DepartureRow, "status" | "receipt">): number | null {
+  if (!wasForwarded(callOutcome(row.status).category)) return null;
+  return readRecordedUpstreamStatus(row.receipt);
+}
+
 export function groupUpstreamStatus(group: DepartureGroup): number | null {
-  const first = readRecordedUpstreamStatus(group.members[0]?.receipt);
+  const lead = group.members[0];
+  const first = lead ? recordedUpstreamStatus(lead) : null;
   if (first === null) return null;
   for (const member of group.members) {
-    if (readRecordedUpstreamStatus(member.receipt) !== first) return null;
+    if (recordedUpstreamStatus(member) !== first) return null;
   }
   return first;
 }
@@ -386,7 +437,7 @@ export function groupDepartures(
 ): DepartureGroup[] {
   const groups: DepartureGroup[] = [];
   const kindOf = (r: DepartureRow) =>
-    `${r.agent_id ?? ""}\x00${r.status ?? ""}\x00${r.provider ?? ""}\x00${r.model ?? ""}`;
+    `${r.agent_id ?? ""}\x00${r.status ?? ""}\x00${r.provider ?? ""}\x00${r.model ?? ""}\x00${r.endpoint ?? ""}`;
   const timeOf = (r: DepartureRow) => {
     const parsed = r.created_at ? Date.parse(r.created_at) : NaN;
     return Number.isFinite(parsed) ? parsed : null;

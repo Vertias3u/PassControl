@@ -482,6 +482,12 @@ const VERDICTS: Record<string, VerdictPresentation> = {
       "Before sending, the gateway re-checks that the destination and the secret still come from the same version of the credential. That check could not be completed — not because anything had changed, but because the gateway could not read its own record of it. It refused rather than send on an unchecked pair. The provider never received this request, and this says nothing about the credential itself.",
     tone: "held",
   },
+  endpoint_required: {
+    label: "Refused — the credential has no destination",
+    detail:
+      "This provider has no fixed address: each customer's resource is its own, and the address is stored with the credential. None was stored, so the gateway refused the call rather than send the credential somewhere it chose. The provider never received this request.",
+    tone: "held",
+  },
   endpoint_unavailable: {
     label: "Refused — the destination could not be read",
     detail:

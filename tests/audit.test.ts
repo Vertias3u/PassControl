@@ -174,9 +174,12 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "agent.direct_key.create",
         "agent.direct_key.revoke",
         "agent.update",
+        "agent.service_rules",
         "agent.suspend",
         "agent.revoke",
         "killswitch.master",
+        // Any-API phase 2: one service stopped or resumed for the workspace.
+        "killswitch.service",
         "provider_key.add",
         "provider_key.endpoint",
         "provider_key.rotate",

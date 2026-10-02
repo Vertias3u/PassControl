@@ -485,6 +485,68 @@ it("agrees with the gateway on a default-shaped demo call, and says what it assu
   }
 });
 
+// Package 2, step 4: xAI is served through Responses only. A trace that projected
+// the chat path would deny every xAI call at the endpoint step while the gateway
+// admits it.
+describe("trace/gateway agreement for a Responses-only provider (xai)", () => {
+  const XAI_MODEL = "grok-4.3";
+
+  async function xaiProxyVerdict(w: World, maxOutputTokens: number): Promise<string> {
+    applyWorld(w);
+    h.writeLogMock.mockClear();
+    const res = await POST(
+      new Request("https://gateway.test/api/v1/xai/v1/responses", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: XAI_MODEL, input: "hi", max_output_tokens: maxOutputTokens }),
+      }),
+      { params: Promise.resolve({ provider: "xai", path: ["v1", "responses"] }) }
+    );
+    if (res.status === 200) return "allow";
+    const logged = h.writeLogMock.mock.calls.at(-1)?.[0] as { status?: string } | undefined;
+    if (logged?.status) return logged.status;
+    const body = (await res.json()) as { error?: string };
+    return body.error ?? `status_${res.status}`;
+  }
+
+  async function xaiTraceVerdict(w: World, maxOutputTokens: number): Promise<string> {
+    const builder = applyWorld(w);
+    const result = await evaluateDecisionTrace({
+      db: { from: () => builder } as never,
+      userId: USER_ID,
+      agentId: AGENT_ID,
+      provider: "xai",
+      model: XAI_MODEL,
+      maxOutputTokens,
+      evaluatedAt: AT,
+      policyAt: AT,
+    });
+    if (!result.ok) return `error_${result.code}`;
+    if (result.trace.verdict === "allow") return "allow";
+    const failed = result.trace.steps.find((s) => s.status === "fail")?.name ?? "unknown";
+    return STEP_TO_STATUS[failed] ?? `blocked_${failed}`;
+  }
+
+  const xaiWorld = (): World => ({ ...base(), scope: [{ provider: "xai", models: ["grok-*"] }] });
+
+  it("allows an in-scope xAI call on both paths", async () => {
+    expect(await xaiProxyVerdict(xaiWorld(), 10)).toBe("allow");
+    expect(await xaiTraceVerdict(xaiWorld(), 10)).toBe("allow");
+  });
+
+  it("refuses by the same output ceiling on both paths", async () => {
+    const w = { ...xaiWorld(), policy: { max_output_tokens: 5 } };
+    expect(await xaiProxyVerdict(w, 10)).toBe("blocked_policy");
+    expect(await xaiTraceVerdict(w, 10)).toBe("blocked_policy");
+  });
+
+  it("refuses out of scope on both paths", async () => {
+    const w = { ...xaiWorld(), scope: [{ provider: "xai", models: ["grok-4.7"] }] };
+    expect(await xaiProxyVerdict(w, 10)).toBe("blocked_scope");
+    expect(await xaiTraceVerdict(w, 10)).toBe("blocked_scope");
+  });
+});
+
 // OpenAI search models run a web search on every call, billed outside tokens.
 // The gate refuses them at the endpoint step, and the trace must say the same.
 describe("trace/gateway agreement for an OpenAI search model", () => {

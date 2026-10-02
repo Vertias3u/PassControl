@@ -160,6 +160,26 @@ describe("integration presets", () => {
     expect(out).not.toContain("OPENAI_BASE_URL");
   });
 
+  it("points a GitHub client at the governed service route, with no GitHub token", async () => {
+    const { out } = await runCli(["env", "github", "--port", "9123"]);
+    expect(out).toContain("export GITHUB_API_URL='http://127.0.0.1:9123/api/v1/svc/github'");
+    expect(out).toContain("passcontrol sidecar --port 9123");
+    expect(out).not.toMatch(/GITHUB_TOKEN|GH_TOKEN|ghp_|github_pat_/);
+  });
+
+  it("no longer calls GitHub access read-only (writes ship in 1.1.0)", async () => {
+    const { out } = await runCli(["env", "github"]);
+    expect(out).not.toMatch(/read-only/i);
+  });
+
+  it("points a Telegram client at the governed service route, with no bot token", async () => {
+    const { out } = await runCli(["env", "telegram", "--port", "9123"]);
+    expect(out).toContain("export TELEGRAM_API_URL='http://127.0.0.1:9123/api/v1/svc/telegram'");
+    expect(out).toContain("passcontrol sidecar --port 9123");
+    // The bot token lives in PassControl; nothing here carries one or a bot<token> path.
+    expect(out).not.toMatch(/TELEGRAM_BOT_TOKEN|\/bot[0-9]|api\.telegram\.org/);
+  });
+
   it("rejects a non-numeric port before printing a copyable sidecar command", async () => {
     const { out } = await runCli(
       ["env", "hermes", "--provider", "openai", "--model", "gpt-5-mini", "--port", "8788; id"],

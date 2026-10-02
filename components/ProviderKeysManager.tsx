@@ -23,7 +23,7 @@ import {
   setActiveProviderKey,
   setProviderEndpoint,
 } from "@/app/dashboard/actions";
-import { PROVIDERS } from "@/lib/providers";
+import { PROVIDERS, isProvider, providerRequiresEndpoint } from "@/lib/providers";
 import {
   AlertTriangle,
   Check,
@@ -52,6 +52,8 @@ export interface ProviderCredentialSummary {
 
 type Message = { ok: boolean; text: string } | null;
 
+const AZURE_ENDPOINT_PLACEHOLDER = "https://<resource>.openai.azure.com/openai/v1";
+
 /** A credential with no label is still identifiable by when it was stored. */
 function nickname(credential: ProviderCredentialSummary): string {
   const label = credential.label?.trim();
@@ -76,6 +78,10 @@ export function ProviderKeysManager({
   const [rotateKey, setRotateKey] = useState("");
   const [routing, setRouting] = useState<string | null>(null);
   const [endpoint, setEndpoint] = useState("");
+  // Only for a provider with no host of its own (Azure): the address is part of
+  // the credential, so it is asked for with the key rather than afterwards.
+  const [newEndpoint, setNewEndpoint] = useState("");
+  const needsEndpoint = isProvider(provider) && providerRequiresEndpoint(provider);
   const [msg, setMsg] = useState<Message>(null);
   const [pending, start] = useTransition();
 
@@ -103,9 +109,15 @@ export function ProviderKeysManager({
 
   const submitAdd = () =>
     run(async () => {
-      await addProviderKey({ provider, label: label.trim() || "default", key });
+      await addProviderKey({
+        provider,
+        label: label.trim() || "default",
+        key,
+        ...(needsEndpoint ? { endpoint: newEndpoint } : {}),
+      });
       setKey("");
       setLabel("");
+      setNewEndpoint("");
       setAdding(false);
     }, "Stored in Vault (encrypted). Not tested yet — PassControl does not call the provider to check it; the first governed call through it is the test.");
 
@@ -241,14 +253,26 @@ export function ProviderKeysManager({
               {routing === credential.id ? (
                 <div className="pc-credential__rotate" data-panel="endpoint">
                   <label className="pc-field">
-                    <span>Base URL</span>
+                    <span>{credential.provider === "azure" ? "Resource address" : "Base URL"}</span>
                     <input
                       value={endpoint}
                       onChange={(e) => setEndpoint(e.target.value)}
-                      placeholder={`https://api.${credential.provider}.example/v1`}
+                      placeholder={
+                        credential.provider === "azure"
+                          ? AZURE_ENDPOINT_PLACEHOLDER
+                          : `https://api.${credential.provider}.example/v1`
+                      }
                       spellCheck={false}
                     />
                   </label>
+                  {credential.provider === "azure" ? (
+                    <p className="m-0 text-xs leading-5 text-muted-foreground" data-endpoint-copy="azure">
+                      The Azure OpenAI resource this key belongs to. Calls through it are recorded
+                      with their token counts but <strong>no calculated cost</strong>, because a
+                      deployment name does not say which model, or which price, is behind it. An
+                      Azure key always needs this address, so it cannot be cleared.
+                    </p>
+                  ) : (
                   <p className="m-0 text-xs leading-5 text-muted-foreground">
                     Sends this credential to your own server instead of{" "}
                     {credential.provider}&rsquo;s. The endpoint must speak{" "}
@@ -258,6 +282,7 @@ export function ProviderKeysManager({
                     what your server charges. That is unknown, not free: your server may still
                     bill for them. Leave it empty to go back to {credential.provider}.
                   </p>
+                  )}
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
@@ -269,9 +294,11 @@ export function ProviderKeysManager({
                               credentialId: credential.id,
                               endpoint,
                             }),
-                          endpoint.trim()
-                            ? "This credential now goes to your endpoint."
-                            : `This credential goes to ${credential.provider} again.`
+                          credential.provider === "azure"
+                            ? "This key now goes to that Azure resource."
+                            : endpoint.trim()
+                              ? "This credential now goes to your endpoint."
+                              : `This credential goes to ${credential.provider} again.`
                         );
                         setRouting(null);
                       }}
@@ -363,12 +390,29 @@ export function ProviderKeysManager({
             </span>
             <small>The key is encrypted in Supabase Vault and is never shown again.</small>
           </label>
+          {needsEndpoint ? (
+            <label className="pc-field" data-field="azure-endpoint">
+              <span>Resource address</span>
+              <input
+                placeholder={AZURE_ENDPOINT_PLACEHOLDER}
+                value={newEndpoint}
+                onChange={(e) => setNewEndpoint(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <small>
+                Your Azure OpenAI resource, ending in <code>/openai/v1</code>. An Azure key is
+                only ever sent here. Calls through it have no calculated cost, so an agent with a
+                dollar limit cannot use it.
+              </small>
+            </label>
+          ) : null}
           <div className="pc-settings-form__actions">
             <span><LockKeyhole aria-hidden="true" /> Plaintext exists only for this write.</span>
             <button type="button" className="ghost" disabled={pending} onClick={() => setAdding(false)}>
               Cancel
             </button>
-            <button disabled={!key || pending} onClick={submitAdd}>
+            <button disabled={!key || (needsEndpoint && !newEndpoint.trim()) || pending} onClick={submitAdd}>
               {pending ? "Storing securely…" : "Store in Vault"}
             </button>
           </div>

@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { PROVIDERS, upstreamBaseUrl, type ProviderId } from "@/lib/providers";
+import { PROVIDERS, providerRequiresEndpoint, upstreamBaseUrl, type ProviderId } from "@/lib/providers";
+import { isEndpointAllowedFor } from "@/lib/providers/endpoint";
 // @ts-expect-error — plain .mjs CLI module, no types
-import { PROVIDER_UPSTREAMS } from "@/cli/proxy-policy.mjs";
+import { PROVIDER_UPSTREAMS, SERVICE_UPSTREAMS, providerForHost } from "@/cli/proxy-policy.mjs";
+import { SERVICE_CATALOG, SERVICE_IDS } from "@/lib/services/catalog";
+
+/** Providers with a fixed host of ours. Azure has none: it is matched by suffix. */
+const FIXED_HOST = PROVIDERS.filter((p) => !providerRequiresEndpoint(p));
 
 /**
  * `cli/` is plain .mjs run straight from the checkout and published as-is, so it
@@ -17,11 +22,11 @@ import { PROVIDER_UPSTREAMS } from "@/cli/proxy-policy.mjs";
  */
 describe("CLI provider host table", () => {
   it("covers exactly the providers the gateway supports", () => {
-    expect(Object.keys(PROVIDER_UPSTREAMS).sort()).toEqual([...PROVIDERS].sort());
+    expect(Object.keys(PROVIDER_UPSTREAMS).sort()).toEqual([...FIXED_HOST].sort());
   });
 
-  it.each([...PROVIDERS])("derives %s's host and base path from upstreamBaseUrl", (provider) => {
-    const upstream = new URL(upstreamBaseUrl(provider as ProviderId));
+  it.each([...FIXED_HOST])("derives %s's host and base path from upstreamBaseUrl", (provider) => {
+    const upstream = new URL(upstreamBaseUrl(provider as ProviderId)!);
     const entry = PROVIDER_UPSTREAMS[provider];
 
     expect(entry.hostname).toBe(upstream.hostname);
@@ -29,5 +34,41 @@ describe("CLI provider host table", () => {
     // off an absolute-form request before mapping it onto /api/v1/<provider>,
     // because the gateway re-adds it from upstreamBaseUrl.
     expect(entry.basePath).toBe(upstream.pathname === "/" ? "" : upstream.pathname.replace(/\/+$/, ""));
+  });
+
+  // The sidecar's Azure suffix rule is a second copy of the gateway's, for the
+  // same .mjs reason. Run both over one list, so they cannot drift: a host the
+  // gateway would send an Azure key to must be one the sidecar refuses to tunnel.
+  it.each([
+    "contoso.openai.azure.com",
+    "contoso-ai.services.ai.azure.com",
+    "a1.openai.azure.com",
+    "openai.azure.com",
+    "a.b.openai.azure.com",
+    "-x.openai.azure.com",
+    "x-.openai.azure.com",
+    "contoso.cognitiveservices.azure.com",
+    "contoso.openai.azure.com.evil.example",
+    "api.openai.com",
+  ])("agrees with the gateway about %s", (host) => {
+    const gateway = isEndpointAllowedFor("azure", `https://${host}/openai/v1`, { kind: "off" });
+    const sidecar = providerForHost(host)?.provider === "azure";
+    expect(sidecar).toBe(gateway);
+  });
+});
+
+// Any-API: the sidecar's service host table is a second copy of the gateway's
+// catalog. A service added there and missed here is a host the sidecar would
+// CONNECT-tunnel with nothing governing it.
+describe("CLI service host table", () => {
+  it("covers exactly the services the gateway serves", () => {
+    expect(Object.keys(SERVICE_UPSTREAMS).sort()).toEqual([...SERVICE_IDS].sort());
+  });
+
+  it.each([...SERVICE_IDS])("agrees with the catalog on %s's host, and governs it at /api/v1/svc", (service) => {
+    const origin = new URL(SERVICE_CATALOG[service].origin);
+    expect(SERVICE_UPSTREAMS[service].hostname).toBe(origin.hostname);
+    expect(SERVICE_UPSTREAMS[service].basePath).toBe(origin.pathname === "/" ? "" : origin.pathname);
+    expect(providerForHost(origin.hostname)).toMatchObject({ route: `svc/${service}` });
   });
 });

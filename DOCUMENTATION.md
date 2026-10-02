@@ -92,13 +92,15 @@ path shape real SDKs send, then forwards to the provider's canonical upstream pa
 
 | Provider | Accepted client paths | Canonical upstream path |
 |---|---|---|
-| `openai` | `POST /responses` or `/v1/responses`; `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/responses`; `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
+| `openai` | `POST /responses` or `/v1/responses`; `POST /chat/completions` or `/v1/chat/completions`; `POST /embeddings` or `/v1/embeddings`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/responses`; `/v1/chat/completions`; `/v1/embeddings`; `/v1/models`; `/v1/models/{id}` |
 | `groq` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
-| `mistral` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
+| `mistral` | `POST /chat/completions` or `/v1/chat/completions`; `POST /embeddings` or `/v1/embeddings`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/embeddings`; `/v1/models`; `/v1/models/{id}` |
 | `together` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/chat/completions`; `/v1/models`; `/v1/models/{id}` |
 | `anthropic` | `POST /v1/messages`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/messages`; `/v1/models`; `/v1/models/{id}` |
 | `deepseek` | `POST /chat/completions` or `/v1/chat/completions` | `/chat/completions` |
 | `gemini` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/chat/completions`; `/models`; `/models/{id}`, appended to `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `xai` | `POST /responses` or `/v1/responses`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/responses`; `/v1/models`; `/v1/models/{id}`, appended to `https://api.x.ai` |
+| `azure` | `POST /chat/completions` or `/v1/chat/completions`; `POST /responses` or `/v1/responses`; `POST /embeddings` or `/v1/embeddings`; `GET /models` or `/v1/models` | `/chat/completions`; `/responses`; `/embeddings`; `/models`, appended to the resource address stored with the key (`https://<resource>.openai.azure.com/openai/v1`) |
 
 **OpenAI server-side tools are refused.** OpenAI bills its hosted tools per call or per
 session, outside token usage: web search, file search, code interpreter containers, and the
@@ -122,6 +124,74 @@ OpenAI Responses supports buffered and streaming POST requests. It uses `input` 
 is complete. Retrieval/deletion of stored responses is not allowlisted. Gemini uses
 Google's OpenAI compatibility API, not native `generateContent`. DeepSeek model listing
 is not proxied even though credential setup may probe its upstream model endpoint.
+
+OpenAI, Mistral and Azure embeddings are governed like any other billed call. The request's `model` must be in
+the visa's scope, the budget hold reserves the input alone because nothing is generated, and
+the provider's `usage.prompt_tokens` settles it. The response is forwarded as it arrives rather
+than buffered, so a large batch is not held in the gateway; a body that ends without one
+top-level `usage` report is charged its estimate. `stream: true` is refused with 400
+`stream_unsupported`. A `max_output_tokens` policy ceiling does not apply to embeddings.
+
+An embeddings call **never fails over**, and a failed one names no alternative provider. A
+fallback runs with its own model, and vectors from a different model live in a different
+space (usually with a different length), so they would not match what the agent has already
+stored. The primary's own error is returned instead.
+
+Other providers' embeddings endpoints are not proxied. Together's and Gemini's
+OpenAI-compatible embeddings responses carry no usage report, so every call could only be
+charged a characters ÷ 4 guess, which can be below the real bill.
+
+xAI is served through its **Responses API only**; its legacy Chat Completions endpoint is
+refused as `blocked_endpoint`. Three things differ from OpenAI:
+- **Output is billed as `total_tokens − input_tokens`.** xAI's own reference example reports
+  reasoning tokens outside `output_tokens`, so reading `output_tokens` alone would miss most of a
+  reasoning call. A usage report without `total_tokens` is treated as unknown and charged its
+  estimate.
+- **Server-side tools are refused** with 400 `server_side_tools_unsupported`, before anything is
+  reserved or sent. That covers any `tools` entry whose `type` is not `function`, and any
+  `search_parameters`. xAI bills web search, X search and code execution per call or per item
+  fetched, outside tokens, so no budget here could hold them. Function tools, which the agent
+  runs itself, pass. A failover into xAI is skipped for such a request.
+- **Set `max_output_tokens`.** xAI defaults it to 128,000, and its reasoning models cannot turn
+  reasoning off. Without a stated limit, the pre-call reservation (1024 output tokens) is far
+  below what a call can generate, so a spend cap is only a reliable bound together with a policy
+  output ceiling, which xAI requests must then state in `max_output_tokens`.
+
+Not covered for xAI: an out-of-credit response is not recognised as one, so it never triggers
+the `provider_credit_exhausted` answer; the MCP server's chat tool does not support it; xAI's
+$0.05 usage-guideline violation fee has no token count and is not recorded. Prices use xAI's
+long-context (≥ 200k prompt) rates, without the cached-input discount.
+`grok-4.20-multi-agent` bills every agent's tokens in its `usage` (xAI's docs), but xAI does not
+say whether `max_output_tokens` bounds its sub-agents, so an output ceiling may not bound that
+model. Leave it out of an agent's scope if that matters (the default `grok-*` includes it).
+
+Azure OpenAI is served through its **v1 API** (`/openai/v1`, no `api-version` needed). It is the
+one provider with no host of PassControl's own: each Azure key is stored **with its resource
+address**, and the key is only ever sent there.
+- **The address rule.** `https://<resource>.openai.azure.com/openai/v1` or
+  `https://<resource>.services.ai.azure.com/openai/v1`: HTTPS on 443, one resource label, nothing
+  after `/openai/v1`. It is checked when the key is stored and again on every call, in every
+  `PROVIDER_ENDPOINT_MODE`, hosted Cloud included; self-host's wider custom-endpoint rules do not
+  apply to an Azure key. The portal's bare `https://<resource>.openai.azure.com/` is refused
+  with the full address to use instead.
+- **A key with no usable address is refused** with 409 `endpoint_required` before the key is
+  read, and logged as such. The gateway never picks a host for it. Set the address on that key
+  under Settings, Provider keys, Endpoint; do not add a second key. Azure keys are added there
+  too: the key-import on-ramp does not ask for an address, so it does not offer Azure.
+- **Unpriced.** A deployment name does not say which model or price is behind it, so Azure calls
+  are logged with token counts and no cost, and an agent with a dollar limit (cumulative or
+  periodic) is refused with 402 `unpriced_endpoint` before anything is reserved. Token limits
+  apply as usual.
+- **Scope matches the deployment name** the request sends as `model`. The default is `gpt-*`.
+- **Hosted tools are refused** exactly as for OpenAI. The key is injected as `api-key`, redirects
+  are refused, and a key echoed back is scrubbed.
+- **Client.** Use the plain OpenAI client with the base URL `…/api/v1/azure/v1`, not
+  `AzureOpenAI`: that class sends the credential as `api-key`, which the gateway does not read an
+  agent credential from.
+
+Not covered for Azure: Entra ID (bearer) authentication to the resource, the legacy
+`/openai/deployments/<name>/…` API, and an out-of-credit signature (a quota 429 is not
+recognised as one). An embeddings call still never fails over, including from OpenAI to Azure.
 
 The packaged SDK uses `/api/v1/<provider>` as its base. For a static OpenAI-compatible
 client, use the exact URL printed by **Connect an agent** or `passcontrol env`; the
@@ -153,7 +223,7 @@ runs no model and spends nothing, so being generous about how a client spells it
 being generous about how it spells inference would widen what actually bills.
 
 Endpoints outside that allowlist are denied by default. The gateway does **not** proxy
-embeddings, files, fine-tuning, batches, response retrieval/deletion, or token-counting endpoints. PassControl
+embeddings on providers other than OpenAI, Mistral and Azure, files, fine-tuning, batches, response retrieval/deletion, or token-counting endpoints. PassControl
 verifies the visa → checks kill switch → checks scope → checks endpoint allowlist → reserves
 budget → injects your real provider key → streams the response back, and attempts to log the call. It does not return the injected provider key.
 
@@ -168,6 +238,196 @@ probe which control stopped it. Your **audit log** does distinguish them:
 `blocked_killed` for the kill switch (platform, tenant, or denylist) and `blocked_suspended`
 for a per-agent suspend. Invalid/revoked Direct Agent Keys can instead fail authentication with `401 invalid_credential`. Check `passcontrol logs` or the Control Tower when you need to know
 which one fired.
+
+---
+
+## Data plane — call GitHub through the gateway
+
+An agent can call the GitHub REST API through PassControl the way it calls a model: the
+workspace's GitHub token is stored in Vault and injected by the gateway, so the agent never
+holds it, and every call goes through the agent's identity, the kill switch and a signed
+receipt.
+
+```
+GET|POST|PUT|PATCH|DELETE /api/v1/svc/github/<GitHub REST path>
+Authorization: Bearer <work-visa or Direct Agent Key>
+```
+
+Point a GitHub client's base URL at `https://<gateway>/api/v1/svc/github` and give it the
+agent's **PassControl** credential in place of a GitHub token. This route reads it from
+`Authorization: Bearer <key>`, `x-api-key: <key>`, or GitHub's own `Authorization: token <key>`
+(checked in that order, so `token` is used only when neither of the others is sent). With
+Octokit, the `auth` option is enough:
+
+```js
+const octokit = new Octokit({
+  baseUrl: "https://<gateway>/api/v1/svc/github",
+  auth: process.env.PASSCONTROL_AGENT_KEY, // the agent's key, not a GitHub token
+});
+```
+
+The `token` scheme is read on this route only; the model routes accept `Bearer` and
+`x-api-key` as before. A real GitHub token sent here is refused with `401` and never
+forwarded: the gateway sends GitHub only the workspace's stored token.
+
+Through the local sidecar, `passcontrol env github` prints `GITHUB_API_URL` for the bridge;
+there the client sends no credential at all, because the sidecar adds the visa.
+
+**Setup, in the dashboard:**
+1. **Settings → Services:** add a GitHub token. Use a fine-grained token limited to the
+   repositories your agents need, with read-only permissions unless an agent's rules need a
+   write (then grant just that permission, for example Issues: read and write). The token is
+   the ceiling of what any agent can reach.
+2. **Each agent's page → GitHub access:** name the repository (`owner/name`, or paste its
+   github.com link) and tick what the agent may do: *Read code, issues and pull requests*,
+   *Open issues*, *Comment on issues and pull requests*, *Open pull requests*. Each choice
+   writes ordinary rules, shown in the table below; anything else goes under **Advanced:
+   custom rules**, one method and path per rule. Access is **deny by default**: an agent
+   with no rules cannot make a single GitHub call.
+
+   | Choice | Rules it writes |
+   |---|---|
+   | Read code, issues and pull requests | `GET /repos/<owner>/<name>` and `GET /repos/<owner>/<name>/**` |
+   | Open issues | `POST /repos/<owner>/<name>/issues` |
+   | Comment on issues and pull requests | `POST /repos/<owner>/<name>/issues/*/comments` |
+   | Open pull requests | `POST /repos/<owner>/<name>/pulls` |
+
+**An agent that calls no model.** In **Connect an agent**, choose *Only GitHub or Telegram*.
+The agent is created with no model access, so every model call it makes is refused, and no
+provider key is needed. The key reveal and the agent's Setup show the configuration for
+GitHub and Telegram instead of a model SDK. **Issue passport** has the same choice: the
+passport is issued with no model access, and its setup wires Octokit through the SDK's
+visa-refreshing `fetch` (`new Octokit({ baseUrl, request: { fetch: passcontrol.fetch } })`)
+or points a static-key tool at the local sidecar (`passcontrol env github`). Its visa
+carries an empty scope, and its service rules decide.
+
+**Rules.** Each rule is a method and a path: `GET` (`HEAD` follows `GET`), `POST`, `PUT`,
+`PATCH` or `DELETE`. `*` matches exactly one path segment. `**` matches one or more trailing
+segments, only as the last segment and **only on a `GET` rule**: a write rule names its path
+exactly. Query strings are not matched. For example, `GET /repos/acme/*/issues` lets the
+agent list issues in any `acme` repository, and `POST /repos/acme/web/issues/*/comments`
+lets it comment on issues in `acme/web` and nothing else. A write rule admits only the
+method it names. Rules are read on
+every call, so removing one stops the next call. A rule set the gateway cannot read, or
+cannot validate, refuses every call to that service; it never falls back to allowing.
+
+**Limits.** Each agent has an hourly GitHub call cap (default 500, set with the rules). A
+GitHub call has no price, so it sits outside the agent's dollar limit and says so: its
+receipt carries `unp: true` and `cls: "svc"`. The agent's model policy (deny rules, time
+windows, its own hourly counter) does not apply to service calls; the GitHub rules are the
+whole scope. The per-agent gateway request limit is shared with model calls.
+
+**What the gateway does on the wire.** It sends only `accept`, `x-github-api-version`,
+`if-none-match` and `content-type` from the agent (never a method-override header), sets its
+own `User-Agent`, and never follows a redirect: a
+redirect to another host (archive downloads go to `codeload.github.com`) is handed to the
+agent to follow without the token. Pagination `link` URLs are rewritten to keep the path the
+agent asked for, so page 2 of an allowed list is allowed. Response headers are limited to
+content type, `etag`, `retry-after` and GitHub's rate-limit headers; `x-oauth-scopes`, which
+names everything the workspace token can do, is not passed back. A token that appears in a
+response body is redacted.
+
+**Writes.** A write's body is read only after the call is admitted, so a refused write is
+never read. It must be JSON (`415 unsupported_media_type` otherwise) and at most 1 MiB
+(`413 payload_too_large`). It is sent to GitHub exactly as received, once, with no retry,
+and its SHA-256 digest is signed into the receipt (`req`), so the receipt proves what was
+written. The body itself is never logged.
+
+**Refused whatever the rules say** (`403 service_endpoint_refused`):
+- GitHub's GraphQL API (`/graphql`). It is one endpoint that can do anything the token can,
+  so a path rule cannot scope it.
+- Writes that change who can reach your repositories or whether they exist: deleting a
+  repository, or changing its name, visibility, archive state or default branch
+  (`DELETE`/`PATCH /repos/{owner}/{repo}`); transfers, collaborators, invitations, deploy keys,
+  branch and tag protection, rulesets and environments.
+- Webhooks (`/repos/{owner}/{repo}/hooks`): one would send every event to an address the agent
+  chose.
+- Secrets and variables (Actions, Dependabot, Codespaces), Actions permissions, runners and
+  OIDC settings.
+- Dismissing security alerts or turning security features off (secret scanning, code
+  scanning, vulnerability alerts, automated security fixes, private vulnerability reporting).
+- Any write to an account, organization, team, OAuth app or token (`/user`, `/orgs`,
+  `/teams`, `/authorizations`, `/applications` and similar).
+- Writing anything under `.github/` through the contents API: workflow files run code with
+  the repository's secrets, and the folder also holds the local actions they run and
+  `CODEOWNERS`.
+- Updating, deleting or renaming an existing branch or tag (`PATCH`/`DELETE
+  /repos/{owner}/{repo}/git/refs/...`, including a force update, and `POST
+  .../branches/{branch}/rename`). Creating a branch (`POST .../git/refs`) is left to the rules.
+
+The git data API (trees, commits, new refs) can also carry a workflow file inside a new
+commit. GitHub requires the token's **Workflows** permission for that, so leave that
+permission off the token: it is the ceiling there.
+
+These are matched however the path is cased, and through both forms GitHub serves a
+repository by: `/repos/{owner}/{repo}` and the numeric `/repositories/{id}`. Reads of the same
+paths are not refused. The
+dashboard refuses to save a write rule that could only ever reach this list.
+
+**Known limits.** Next.js removes a client's own `path`
+and `service` query parameters before the gateway sees them, so those two GitHub parameters
+(for example the commits endpoint's `path` filter) cannot be sent through this route.
+
+## Data plane — call Telegram through the gateway
+
+An agent can call the Telegram Bot API through PassControl. The workspace's bot token is
+stored in Vault and put into the request by the gateway, so the agent never holds it.
+
+```
+GET|POST /api/v1/svc/telegram/<methodName>
+Authorization: Bearer <work-visa or Direct Agent Key>
+```
+
+Telegram puts the bot token in the URL (`https://api.telegram.org/bot<token>/<method>`), so
+the agent calls `/api/v1/svc/telegram/sendMessage` and the gateway builds that URL itself.
+Parameters go where Telegram accepts them: the query string, a JSON body, or a form body
+(`application/x-www-form-urlencoded`).
+
+Through the local sidecar, `passcontrol env telegram` prints `TELEGRAM_API_URL` for the bridge;
+the client then calls `$TELEGRAM_API_URL/<method>` with no credential at all.
+
+**Setup, in the dashboard:**
+1. **Settings → Services:** add the bot token BotFather gave you. It must have Telegram's
+   shape (the bot's number, a colon, then the secret); anything else is refused, because the
+   token goes into a URL. Use a bot made for your agents.
+2. **Each agent's page → Telegram access:** tick *Read messages sent to the bot* (`getMe`
+   and `getUpdates`) and *Send messages* (`sendMessage`), or add other Bot API methods under
+   **Advanced: custom rules**, one per rule.
+
+**Rules.** A Telegram rule names one method: `{ "call": "sendMessage" }`. Method names are
+matched in any case, as Telegram does, over `GET` or `POST`; the HTTP verb decides nothing,
+because Telegram accepts both for every method. There are no wildcards.
+
+**Refused whatever the rules say** (`403 service_endpoint_refused`): `setWebhook`,
+`deleteWebhook`, `logOut` and `close` (each would hand the bot's updates to someone else or end
+its session), and file downloads (`/file/...`), whose URL carries the token.
+
+**Known limits.**
+- A rule for `sendMessage` reaches any chat the bot is in: the chat is chosen in the request,
+  not the rule.
+- Agents that share one bot share its `getUpdates` queue, so one agent's call consumes updates
+  another was waiting for.
+- Uploads (`multipart/form-data`) are refused with `415`; send a file by URL or `file_id` in
+  JSON instead.
+- Only a request BODY is bound into the receipt (`req`). A call that passes its parameters in
+  the query string, such as `GET /sendMessage?chat_id=…&text=…`, is recorded and receipted,
+  but what it sent is not; use `POST` with a JSON body where that matters.
+- The gateway gives Telegram 30 seconds to answer. A `getUpdates` long poll longer than that
+  is cut off and recorded as an upstream error; keep its `timeout` parameter at 25 or less.
+- The `link` and `location` headers are never passed back, since Telegram's URLs carry the
+  token. A token that ever appears in a response body is redacted.
+
+Everything else is as for GitHub: the hourly call cap (default 500), the per-service stop on
+the Services page, and receipts with `cls: "svc"`, the request digest for a body, and the
+method name as the path, never the URL.
+
+Errors: `401` as for model calls, `403 blocked_suspended`, `403 service_call_not_allowed`
+(no rule matched; the body names the method and path), `403 service_rules_invalid`,
+`403 service_endpoint_refused`, `404 unknown_service`, `400 invalid_path`,
+`409 no_service_credential`, `429 service_rate_limited` (with `retry-after`),
+`429 rate_limited`, `503 service_rules_unavailable | service_rate_limit_unavailable |
+credential_unavailable`, `502 upstream_unreachable`. A GitHub error is passed through with
+GitHub's own status and body.
 
 ---
 
@@ -328,7 +588,7 @@ override the tenant default; changing that default does not override an agent se
 ### Observability
 | Method | Path | Scope | Description |
 |---|---|---|---|
-| GET | `/logs` | read | Gateway calls; filter by `agent_id`, `status`, and `limit`. Returns each call's `id`. |
+| GET | `/logs` | read | Gateway calls; filter by `agent_id`, `status`, `class` (`inference`, `housekeeping` or `service`) and `limit`. Returns each call's `id`; a service call also carries `call_kind: "service"` and `endpoint`, the rule that admitted it. |
 | GET | `/audit` | read | Admin-action trail. |
 | GET | `/spend` | read | Per-agent + fleet totals (micro-cents; $ = µ¢ / 100,000,000). |
 | GET | `/receipts/{id}` | read | One call **plus its signed receipt**. See [Receipts](#receipts--signed-issuer-records). |
@@ -448,6 +708,7 @@ Names are abbreviated deliberately — a receipt travels in URLs and QR codes.
 | `path` | string | Upstream path called. |
 | `use` | `{in,out}` | Input / output tokens. |
 | `unp` | boolean | True means unpriced. A numeric zero in `cost` then does not mean free. |
+| `cls` | string | `svc` on a call to a non-LLM service (GitHub) through `/api/v1/svc/…`. Omitted on model calls. |
 | `cost` | int | **Micro-cents.** $ = `cost` / 100,000,000. `61` is $0.00000061, not $61. |
 | `res` | `{status,http}` | The gateway's verdict and the HTTP status. |
 | `t0` | int | Call start (Unix **milliseconds**). |
@@ -585,8 +846,8 @@ Unlike receipts, agent tokens **do** carry `exp` and are checked for expiry and 
 - A visa is reusable until expiry in off/observe mode (default 5 minutes, configurable
   to 15). Required mode additionally enforces a fresh sender proof for every request.
 - The data-plane proxy covers the inference and model-listing endpoints listed
-  above. It does not proxy embeddings, files, fine-tuning, batches, response retrieval/deletion, or
-  token-counting endpoints.
+  above. It does not proxy embeddings on providers other than OpenAI, Mistral and Azure, files, fine-tuning, batches,
+  response retrieval/deletion, or token-counting endpoints.
 - Pricing is a best-effort in-code table and can lag provider price changes. Use it for
   budgets and monitoring, not as billing reconciliation against provider invoices.
 - **Gemini thinking tokens are charged as output, from `total_tokens`.** Google bills thinking at

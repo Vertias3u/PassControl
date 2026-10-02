@@ -34,6 +34,10 @@ export function DirectAgentConnect({
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [keyName, setKeyName] = useState(DEFAULT_INSTALLATION_NAME);
+  // What the worker calls. "services": GitHub or Telegram only, so the agent is
+  // created with NO model access at all (any model call is refused) and the
+  // provider, model and budget fields do not apply.
+  const [target, setTarget] = useState<"models" | "services">("models");
   const [provider, setProvider] = useState<ProviderId>(initialProvider);
   // The grant starts at the ONE concrete model this worker calls, not at a
   // family wildcard: widening is a deliberate edit, and a narrow grant is what
@@ -47,10 +51,12 @@ export function DirectAgentConnect({
   const [stored, setStored] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const availability = providerAvailability(configuredProviders, provider);
+  const servicesOnly = target === "services";
+  const availability = servicesOnly ? "ok" : providerAvailability(configuredProviders, provider);
 
   const reset = () => {
     setOpen(false);
+    setTarget("models");
     setName("");
     setKeyName(DEFAULT_INSTALLATION_NAME);
     setProvider(initialProvider);
@@ -68,6 +74,16 @@ export function DirectAgentConnect({
     setBusy(true);
     setError(null);
     try {
+      if (servicesOnly) {
+        const issued = await issueDirectAgent({
+          name,
+          keyName,
+          scopes: [],
+          expiresAt: expiresAt ? new Date(`${expiresAt}T23:59:59`).toISOString() : null,
+        });
+        setResult({ ...issued, provider: null, model: null });
+        return;
+      }
       const allowedModels = models.split(",").map((value) => value.trim()).filter(Boolean);
       const callableModel = clientModel.trim();
       if (!clientModelIsUsable(callableModel) || !scopeAllows([{ provider, models: allowedModels }], provider, callableModel)) {
@@ -147,6 +163,24 @@ export function DirectAgentConnect({
                   <span className="text-xs text-muted-foreground">Used for attribution. Create a separate key per installation.</span>
                 </label>
               </div>
+              <fieldset className="grid gap-2 text-sm" data-field="agent-target">
+                <legend className={label}>What will this agent call?</legend>
+                <label className="flex items-start gap-2">
+                  <input type="radio" className="mt-1 w-auto" name="agent-target" checked={!servicesOnly} onChange={() => setTarget("models")} />
+                  <span>AI models <span className="text-muted-foreground">(and GitHub or Telegram too, if you add rules later)</span></span>
+                </label>
+                <label className="flex items-start gap-2">
+                  <input type="radio" className="mt-1 w-auto" name="agent-target" checked={servicesOnly} onChange={() => setTarget("services")} data-target="services" />
+                  <span>Only GitHub or Telegram <span className="text-muted-foreground">(no model access; every model call is refused)</span></span>
+                </label>
+              </fieldset>
+              {servicesOnly ? (
+                <p className="m-0 text-sm leading-6 text-muted-foreground" data-services-only-note>
+                  After creating it, give it access on its page, under GitHub access or Telegram access. It can call
+                  nothing until you do.
+                </p>
+              ) : null}
+              {!servicesOnly ? (<>
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="grid gap-1.5 text-sm">
                   <span className={label}>Provider</span>
@@ -173,7 +207,9 @@ export function DirectAgentConnect({
                 <input value={clientModel} onChange={(event) => setClientModel(event.target.value)} />
                 <span className="text-xs text-muted-foreground">A concrete model the SDK will call. It must match one of the allowed patterns above; wildcards are authorization rules, not provider model names.</span>
               </label>
-              <div className="grid gap-4 sm:grid-cols-3">
+              </>) : null}
+              <div className={servicesOnly ? "grid gap-4" : "grid gap-4 sm:grid-cols-3"}>
+                {!servicesOnly ? (<>
                 <label className="grid gap-1.5 text-sm">
                   <span className={label}>Token budget</span>
                   <input value={tokenBudget} onChange={(event) => setTokenBudget(event.target.value)} inputMode="numeric" placeholder="Unlimited" />
@@ -182,15 +218,18 @@ export function DirectAgentConnect({
                   <span className={label}>Cost budget (USD)</span>
                   <input value={costBudgetUsd} onChange={(event) => setCostBudgetUsd(event.target.value)} inputMode="decimal" placeholder="Unlimited" />
                 </label>
+                </>) : null}
                 <label className="grid gap-1.5 text-sm">
                   <span className={label}>Optional expiry</span>
                   <input type="date" value={expiresAt} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setExpiresAt(event.target.value)} />
                   <span className="text-xs text-muted-foreground">Blank means no scheduled outage.</span>
                 </label>
               </div>
+              {!servicesOnly ? (
               <p className="m-0 text-xs leading-5 text-muted-foreground">
                 Blank budgets mean no PassControl cap on this worker. This flow never asks the worker to hold your provider key.
               </p>
+              ) : null}
               {availability === "missing" ? (
                 <div role="status" className="pc-inline-error" data-provider-availability="missing">
                   No {provider} key is stored in PassControl yet, so this worker&apos;s calls would have nothing to use.{" "}
@@ -211,7 +250,12 @@ export function DirectAgentConnect({
                 <button
                   type="button"
                   className={buttonVariants({ size: "lg" })}
-                  disabled={busy || availability === "missing" || availability === "unknown" || !name.trim() || !keyName.trim() || !clientModel.trim() || !models.split(",").some((value) => value.trim())}
+                  disabled={
+                    busy || availability === "missing" || availability === "unknown" ||
+                    !name.trim() ||
+                    !keyName.trim() ||
+                    (!servicesOnly && (!clientModel.trim() || !models.split(",").some((value) => value.trim())))
+                  }
                   onClick={issue}
                 >
                   <KeyRound aria-hidden="true" className="h-4 w-4" />

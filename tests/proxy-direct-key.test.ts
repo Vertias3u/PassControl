@@ -206,6 +206,39 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
 });
 
+// GitHub's clients send `Authorization: token <x>`; the GitHub route reads that
+// scheme (owner decision 2026-09-30). The model routes keep exactly the two
+// pockets they always had, so a key sent there is still no credential at all.
+describe("GitHub's `token` scheme is not read on model routes", () => {
+  it("answers the openai route as no credential, without looking the key up", async () => {
+    const res = await call({ authorization: `token ${DIRECT_KEY}` });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ error: "missing_visa" });
+    expect(authenticateDirectAgentKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("answers the keyless demo route the same way", async () => {
+    const previous = process.env.PASSCONTROL_DEMO;
+    process.env.PASSCONTROL_DEMO = "1";
+    try {
+      const res = await POST(
+        new Request("https://gateway.test/api/v1/demo/v1/chat/completions", {
+          method: "POST",
+          headers: { authorization: `token ${DIRECT_KEY}`, "content-type": "application/json" },
+          body: JSON.stringify({ model: "demo", messages: [{ role: "user", content: "hi" }] }),
+        }),
+        { params: Promise.resolve({ provider: "demo", path: ["v1", "chat", "completions"] }) }
+      );
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "missing_visa" });
+      expect(authenticateDirectAgentKeyMock).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.PASSCONTROL_DEMO;
+      else process.env.PASSCONTROL_DEMO = previous;
+    }
+  });
+});
+
 describe("Direct Agent Key gateway authentication", () => {
   it("stays bearer even when its shared agent row requires passport sender proofs", async () => {
     getCachedAgentPolicyMock.mockResolvedValueOnce(

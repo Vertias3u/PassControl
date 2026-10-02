@@ -47,6 +47,12 @@ const RULES: Record<ProviderId, readonly ExhaustionRule[]> = {
   // No verified credit-exhaustion signature for Gemini yet. Empty on purpose —
   // see the note above; a guessed pattern here would misclassify a real error.
   gemini: [],
+  // xAI documents no distinct out-of-credit error (docs.x.ai/developers/debugging.md
+  // lists 429 only as a rate limit), so it gets no rule rather than a guess.
+  xai: [],
+  // Azure answers quota and rate limits with 429s whose codes are not a verified
+  // out-of-credit signature, so it gets no rule rather than a guess.
+  azure: [],
 };
 
 function errorObject(body: string): Record<string, unknown> | null {

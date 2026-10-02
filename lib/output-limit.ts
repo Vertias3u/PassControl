@@ -95,7 +95,11 @@ export function outputLimitShape(
 ): OutputLimitShape {
   const last = upstreamPath[upstreamPath.length - 1];
   if (provider === "anthropic" && last === "messages") return "anthropic_messages";
-  if (provider === "openai" && last === "responses") return "openai_responses";
+  // xAI's Responses documents `max_output_tokens` as covering reasoning, and
+  // ignores the chat aliases, so it is judged by that field alone.
+  if ((provider === "openai" || provider === "xai" || provider === "azure") && last === "responses") {
+    return "openai_responses";
+  }
   return "chat_completions";
 }
 

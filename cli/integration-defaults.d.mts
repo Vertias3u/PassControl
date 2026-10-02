@@ -5,7 +5,9 @@ export type IntegrationProvider =
   | "mistral"
   | "together"
   | "deepseek"
-  | "gemini";
+  | "gemini"
+  | "xai"
+  | "azure";
 
 export const DEFAULT_ALLOWED_MODELS: Readonly<Record<IntegrationProvider, string>>;
 export const DEFAULT_CLIENT_MODELS: Readonly<Record<IntegrationProvider, string>>;

@@ -1,5 +1,5 @@
 // Upstream provider configuration: base URLs and auth-header injection.
-export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini"] as const;
+export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "azure"] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
 export function isProvider(p: string): p is ProviderId {
@@ -95,7 +95,22 @@ export function resolveProviderSelection(key: string, selected?: string | null):
   return detectProviderFromKey(key).suggested ?? "anthropic";
 }
 
-export function upstreamBaseUrl(provider: ProviderId): string {
+/**
+ * Providers with no host of ours: every customer's resource is its own, so the
+ * address is stored with the credential and a key without one is refused rather
+ * than sent anywhere (lib/providers/endpoint.ts `isEndpointAllowedFor`).
+ */
+export function providerRequiresEndpoint(provider: ProviderId): boolean {
+  return upstreamBaseUrl(provider) === null;
+}
+
+/**
+ * The provider's own base URL, or null for a provider that has none (Azure).
+ *
+ * Null rather than a placeholder host on purpose: a default for Azure would be a
+ * real hostname a real key could be sent to, and there is no right one.
+ */
+export function upstreamBaseUrl(provider: ProviderId): string | null {
   switch (provider) {
     case "openai":
       return "https://api.openai.com";
@@ -117,12 +132,21 @@ export function upstreamBaseUrl(provider: ProviderId): string {
     // `v1/chat/completions` — the deepseek case, not the openai one.
     case "gemini":
       return "https://generativelanguage.googleapis.com/v1beta/openai";
+    // xAI, through its Responses API only (plan P2-5). Its Chat Completions
+    // endpoint is the legacy API and is not allowlisted.
+    case "xai":
+      return "https://api.x.ai";
+    // Azure OpenAI: `https://<resource>.openai.azure.com/openai/v1`, per credential.
+    case "azure":
+      return null;
   }
 }
 
 /** Provider model-listing endpoint used by the dashboard import probe. */
-export function modelListingUrl(provider: ProviderId): string {
+export function modelListingUrl(provider: ProviderId): string | null {
   const base = upstreamBaseUrl(provider);
+  // No base, no probe: the import flow cannot know an Azure resource's address.
+  if (base === null) return null;
   // Providers whose base URL already ends in a version segment take `/models`
   // directly; everyone else needs the `/v1` hop. This was a ternary on deepseek
   // alone — gemini is the second such provider: its compat base already carries
@@ -146,9 +170,14 @@ export function authHeaders(provider: ProviderId, key: string): Record<string, s
     case "together":
     case "deepseek":
     case "gemini":
+    case "xai":
       return { authorization: `Bearer ${key}` };
     case "anthropic":
       return { "x-api-key": key, "anthropic-version": "2023-06-01" };
+    // Azure's key header (learn.microsoft.com, api-version-lifecycle, read
+    // 2026-09-27). Entra ID bearer tokens are out of scope.
+    case "azure":
+      return { "api-key": key };
   }
 }
 
@@ -174,6 +203,10 @@ export function requestShapeFamily(provider: ProviderId): "openai" | "anthropic"
     case "together":
     case "deepseek":
     case "gemini":
+    // OpenAI-style bodies and Bearer auth, on the Responses endpoint.
+    case "xai":
+    // Azure's v1 API is OpenAI's wire format; only the auth header differs.
+    case "azure":
       return "openai";
     case "anthropic":
       return "anthropic";
@@ -188,7 +221,12 @@ export function usesOpenAiUsageShape(provider: ProviderId): boolean {
     case "together":
     case "deepseek":
     case "gemini":
+    case "azure":
       return true;
+    // xAI is served on Responses only, whose usage is `input_tokens` /
+    // `output_tokens` / `total_tokens` (lib/usage/parseStream.ts), never the
+    // chat shape — and it must not get `stream_options.include_usage` injected.
+    case "xai":
     case "anthropic":
       return false;
   }

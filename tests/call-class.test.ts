@@ -116,6 +116,13 @@ describe("the classification stays out of the check order", () => {
     "lib/state/killswitch.ts",
     "lib/receipt.ts",
     "lib/auth/visa.ts",
+    // The service route's check order (any-API, 0074).
+    "app/api/v1/svc/[service]/[...path]/route.ts",
+    "lib/gateway/authenticate.ts",
+    "lib/services/catalog.ts",
+    "lib/services/rules.ts",
+    "lib/services/path.ts",
+    "lib/services/wire.ts",
   ];
 
   it.each(ENFORCEMENT_FILES)("%s does not import lib/call-class", (file) => {
@@ -146,6 +153,11 @@ describe("the derivation's standing assumption", () => {
     // housekeeping. An admitted call is model-bound by the same scope gate as
     // Chat Completions and its provider-reported tokens are reserved,
     // reconciled, logged, and receipted.
+    //
+    // Recorded decision (2026-09-27): OpenAI embeddings are billed work, not
+    // housekeeping. The request names a model, the scope gate matches it like
+    // chat (an empty model is refused `blocked_scope`), and its prompt tokens are
+    // reserved, reconciled, logged and receipted. So it is model-bound.
     const src = readFileSync(join(root, "lib/scope.ts"), "utf8");
     const block = src.slice(
       src.indexOf("const ENDPOINT_ALLOWLIST"),
@@ -159,6 +171,8 @@ describe("the derivation's standing assumption", () => {
       "DEEPSEEK_CHAT_PATH",
       '["chat", "completions"]',
       '["responses"]',
+      "OPENAI_EMBEDDINGS_PATH",
+      '["embeddings"]',
     ]);
     // Recorded decision (2026-08-25): `VERSIONLESS_MODELS_PATH` (= ["models"])
     // arrived with the gemini provider, whose OpenAI-compat base already carries

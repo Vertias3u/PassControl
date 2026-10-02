@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { endpointAllows, servesResponsesOnly } from "@/lib/scope";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
@@ -80,7 +81,11 @@ describe("Direct Agent setup output", () => {
       });
       expect(setup.envBlock).not.toContain("ANTHROPIC_");
       expect(setup.example).toContain('from "openai"');
-      expect(setup.smokeCommand).toContain(`/api/v1/${provider}/v1/chat/completions`);
+      // The smoke call must be one the gateway admits for this provider: chat
+      // where chat is served, Responses where only Responses is (xAI).
+      const inference = servesResponsesOnly(provider) ? "responses" : "chat/completions";
+      expect(setup.smokeCommand).toContain(`/api/v1/${provider}/v1/${inference}`);
+      expect(endpointAllows(provider, "POST", ["v1", ...inference.split("/")])).toBe(true);
       expect(setup.smokeCommand).toContain("Authorization: Bearer $OPENAI_API_KEY");
       expect(setup.smokeCommand).not.toContain(DIRECT_KEY);
       expect(setup.smokeCommand).toContain("callable-model");

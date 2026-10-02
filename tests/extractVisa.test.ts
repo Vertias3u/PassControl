@@ -39,3 +39,37 @@ describe("extractVisaToken — accept the visa from the provider's native header
     expect(extractVisaToken(new Headers({ "x-api-key": "   " }))).toBe("");
   });
 });
+
+// GitHub's clients (Octokit's `auth`, `gh`) send `Authorization: token <x>`.
+// The service route reads that scheme too — owner decision 2026-09-30 — and
+// ONLY as the last resort: a request that carries Bearer or x-api-key reads
+// exactly what it read before, so no request that authenticates today changes.
+describe("extractVisaToken — GitHub's `token` scheme, opt-in", () => {
+  it("is not read unless the route asks for it", () => {
+    expect(extractVisaToken(new Headers({ authorization: "token visa-abc" }))).toBe("");
+  });
+
+  it("is read when the route asks, case-insensitively, trimmed", () => {
+    const opt = { tokenScheme: true };
+    expect(extractVisaToken(new Headers({ authorization: "token visa-abc" }), opt)).toBe("visa-abc");
+    expect(extractVisaToken(new Headers({ authorization: "Token visa-abc" }), opt)).toBe("visa-abc");
+    expect(extractVisaToken(new Headers({ authorization: "TOKEN   visa-abc  " }), opt)).toBe("visa-abc");
+  });
+
+  it("is still no credential when empty", () => {
+    const opt = { tokenScheme: true };
+    expect(extractVisaToken(new Headers({ authorization: "token " }), opt)).toBe("");
+    expect(extractVisaToken(new Headers({ authorization: "token" }), opt)).toBe("");
+    expect(extractVisaToken(new Headers({ authorization: "tokenvisa-abc" }), opt)).toBe("");
+  });
+
+  it("never outranks x-api-key", () => {
+    const h = new Headers({ authorization: "token ghp_real_github_token", "x-api-key": "visa-key" });
+    expect(extractVisaToken(h, { tokenScheme: true })).toBe("visa-key");
+  });
+
+  it("leaves Bearer exactly as it was", () => {
+    const h = new Headers({ authorization: "Bearer visa-auth", "x-api-key": "visa-key" });
+    expect(extractVisaToken(h, { tokenScheme: true })).toBe("visa-auth");
+  });
+});

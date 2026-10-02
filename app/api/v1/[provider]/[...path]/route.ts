@@ -9,18 +9,7 @@
 export const runtime = "edge";
 
 import { waitUntil } from "@vercel/functions";
-import {
-  verifyVisa,
-  verifySenderProof,
-  extractVisaToken,
-  SENDER_PROOF_HEADER,
-  SENDER_PROOF_WINDOW_SECONDS,
-} from "@/lib/auth/visa";
-import {
-  authenticateDirectAgentKey,
-  classifyGatewayCredential,
-  type DirectKeyPrincipal,
-} from "@/lib/auth/direct-key";
+import { verifyVisa } from "@/lib/auth/visa";
 import { readKillState } from "@/lib/state/killswitch";
 import {
   isSuspended,
@@ -29,12 +18,8 @@ import {
   readCredentialFence,
   setCachedEndpoint,
   setCachedKey,
-  touchLastSeen,
-  claimNonce,
   purgeAgentPolicy,
-  flagPassportSecretExposed,
 } from "@/lib/state/redis";
-import { passportIdIfSecret } from "@/lib/auth/passport-secret-detect";
 import {
   openHold,
   settleKnown,
@@ -51,7 +36,8 @@ import { serviceClient } from "@/lib/supabase";
 import {
   canonicalEndpointPath,
   isModelListingIndex,
-  isOpenAiResponsesEndpoint,
+  isEmbeddingsEndpoint,
+  isResponsesEndpoint,
 } from "@/lib/scope";
 import { filterModelListingToScope } from "@/lib/providers/model-listing";
 import {
@@ -65,20 +51,34 @@ import {
   costMicrocents,
   costMicrocentsForUsage,
   demoCostMicrocents,
+  estimateEmbeddingUsage,
   estimateTokenUsage,
   isPricedEndpoint,
   MICROCENTS_PER_CENT,
   unpricedRequestOption,
 } from "@/lib/pricing";
-import { createUsageTransform, usageFromJson, NO_USAGE, type Usage } from "@/lib/usage/parseStream";
-import { writeLog, mirrorSpend, type AuthMethod } from "@/lib/log";
+import {
+  createUsageTransform,
+  usageFromJson,
+  NO_USAGE,
+  type Usage,
+  type UsageProtocol,
+} from "@/lib/usage/parseStream";
+import { writeLog, mirrorSpend } from "@/lib/log";
 import { outputLimitShape, requestedOutputTokens } from "@/lib/output-limit";
 import { serverSideToolUse } from "@/lib/providers/server-side-tools";
 import { periodStart, secondsUntilPeriodEnd, type PeriodKind, type PeriodLimit } from "@/lib/period";
 import { livePolicyRevision, shadowRevision, stampShadowVerdict } from "@/lib/policy-shadow";
 import { signReceipt, type OwnerClaim } from "@/lib/receipt";
 import { readCurrentOwner } from "@/lib/owner/current";
-import { isProvider, upstreamBaseUrl, authHeaders, usesOpenAiUsageShape, type ProviderId } from "@/lib/providers";
+import {
+  isProvider,
+  upstreamBaseUrl,
+  authHeaders,
+  usesOpenAiUsageShape,
+  providerRequiresEndpoint,
+  type ProviderId,
+} from "@/lib/providers";
 import { classifyUpstreamFailure, isClassifiableStatus } from "@/lib/providers/exhaustion";
 import { buildAlternatives } from "@/lib/providers/alternatives";
 import { readProvidersWithKeys } from "@/lib/providers/available";
@@ -94,30 +94,24 @@ import type { SenderProofObservation } from "@/lib/sender-constraint";
 import {
   endpointPolicy,
   forwardableUpstreamSearch,
-  isEndpointAllowed,
+  isEndpointAllowedFor,
   joinUpstream,
   versionlessUpstreamPath,
 } from "@/lib/providers/endpoint";
-import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
+import { rateLimit } from "@/lib/ratelimit";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
+import { err, errMessage } from "@/lib/gateway/responses";
+import {
+  authenticateGatewayRequest,
+  enforceSenderConstraint,
+  principalSuspended,
+  type PassportAuthMethod,
+  type VisaScope,
+} from "@/lib/gateway/authenticate";
+import { PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S } from "@/lib/gateway/limits";
 
-// Per-agent request-rate cap (independent of the token budget): bounds raw call
-// volume so a runaway/abusive agent can't flood the gateway or upstream. Generous
-// for normal fleets; tune via env. Returns 429 + Retry-After when exceeded.
-const PROXY_RATE_LIMIT = Number(process.env.PROXY_RATE_LIMIT ?? "600");
-const PROXY_RATE_WINDOW_S = Number(process.env.PROXY_RATE_WINDOW_S ?? "60");
-// This fires BEFORE a random pc_agent_ credential can cost a Supabase lookup.
-// Unlike the passport challenge limiter, Redis failure closes this edge: its
-// purpose is protecting the shared database from unauthenticated work.
-const DIRECT_KEY_IP_LIMIT = Number(process.env.DIRECT_KEY_IP_LIMIT ?? "60");
-const DIRECT_KEY_IP_WINDOW_S = Number(process.env.DIRECT_KEY_IP_WINDOW_S ?? "60");
-// C2: FAILED visa authentications per client IP. Counted only on failure, so it
-// never throttles valid traffic; it bounds the security events and the C1
-// lookup an unauthenticated flood would otherwise buy.
-const VISA_FAIL_IP_LIMIT = Number(process.env.VISA_FAIL_IP_LIMIT ?? "60");
-const VISA_FAIL_IP_WINDOW_S = Number(process.env.VISA_FAIL_IP_WINDOW_S ?? "60");
 
 const KEY_CACHE_TTL_S = 60;
 const POLICY_RATE_WINDOW_S = 60 * 60;
@@ -141,20 +135,6 @@ const MAX_ERROR_BODY_BYTES = 64 * 1024;
 // providers even if a longer list reaches the column some other way.
 const MAX_ATTEMPTS = 1 + MAX_FALLBACKS;
 
-function err(status: number, code: string) {
-  return new Response(JSON.stringify({ error: code }), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function errMessage(status: number, code: string, message: string) {
-  return new Response(JSON.stringify({ error: code, message }), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
 
 interface Ctx {
   params: Promise<{ provider: string; path: string[] }>;
@@ -167,148 +147,6 @@ type GateBaseInput = Omit<
 >;
 
 const BLOCKED_POLICY_STATUS = "blocked_policy" satisfies Parameters<typeof writeLog>[0]["status"];
-
-type PassportPrincipal = {
-  kind: "passport";
-  agentId: string;
-  userId: string;
-  scopes: VisaScope[];
-  budgetTokens: number | null;
-  budgetCents: number | null;
-  spentTokens: number;
-  spentMicrocents: number;
-  passportId: string;
-  visaJti: string;
-};
-
-type GatewayPrincipal = PassportPrincipal | DirectKeyPrincipal;
-type VisaScope = { provider: string; models: string[] };
-
-type GatewayAuthentication =
-  | { ok: true; principal: GatewayPrincipal; db: ServiceDatabase; credentialToken: string }
-  | { ok: false; response: Response };
-
-type PassportAuthMethod = Exclude<AuthMethod, "direct_key">;
-
-type SenderConstraintResult =
-  | { ok: true; authMethod: PassportAuthMethod; would?: SenderProofObservation }
-  | { ok: false; response: Response };
-
-/**
- * Evaluate the proof once, and let the caller decide what it costs.
- *
- * ── Why this is one function and not two ────────────────────────────────────
- *
- * `observe` only predicts `required` if it runs the identical check in the
- * identical order — the same verification, the same replay claim, the same key
- * and TTL. Two functions that happen to agree today are two functions that can
- * disagree after one edit, and then the mode an operator used to decide is not
- * the mode they switched on. The challenge route had exactly this shape: two
- * inline copies of one Ed25519 verification, folded into a single helper because
- * "two verifications of the same signature that can disagree" is the failure.
- *
- * So the verdict is computed here and nothing else. Whether a verdict blocks the
- * request is the caller's business, which is the only thing the two modes
- * actually differ on.
- *
- * `unavailable` is separate from every other verdict because it is not a
- * statement about the proof at all — the replay store could not answer. Under
- * enforcement that fails closed; under observation it is simply not recorded.
- */
-type SenderProofEvaluation =
-  | { verdict: SenderProofObservation }
-  | { verdict: "unavailable" };
-
-async function evaluateSenderProof(
-  req: Request,
-  credentialToken: string,
-  principal: PassportPrincipal
-): Promise<SenderProofEvaluation> {
-  const proof = verifySenderProof({
-    proof: req.headers.get(SENDER_PROOF_HEADER),
-    method: req.method,
-    url: req.url,
-    visa: credentialToken,
-    passportId: principal.passportId,
-  });
-  if (!proof.ok) {
-    if (proof.reason === "missing") return { verdict: "missing" };
-    if (proof.reason === "clock_skew") return { verdict: "clock_skew" };
-    return { verdict: "invalid" };
-  }
-
-  try {
-    // A future-dated proof accepted at one edge of the skew window remains
-    // time-valid until the opposite edge, hence 2x window plus one second.
-    const claimed = await claimNonce(
-      `sender-proof:${proof.jti}`,
-      SENDER_PROOF_WINDOW_SECONDS * 2 + 1
-    );
-    return { verdict: claimed ? "pass" : "replayed" };
-  } catch {
-    return { verdict: "unavailable" };
-  }
-}
-
-async function enforceSenderConstraint(
-  req: Request,
-  credentialToken: string,
-  principal: PassportPrincipal,
-  policy: Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>>
-): Promise<SenderConstraintResult> {
-  const mode = policy.senderConstraintMode;
-  if (mode === null) {
-    return { ok: false, response: err(503, "sender_constraint_state_unavailable") };
-  }
-  // Anything that is not one of the two proof modes takes the bearer path, and
-  // the test is written that way round on purpose: drift resolves DOWN here, as
-  // it does in toSenderConstraintMode. A value this build does not recognise
-  // must not become enforcement, because enforcement refuses every call for an
-  // agent whose operator configured something we have not shipped yet.
-  if (mode !== "observe" && mode !== "required") {
-    // An unsolicited proof is not inspected on this path. Recording the
-    // configured mode (or mere header presence) as enforcement would turn a
-    // receipt into a false assurance claim.
-    return { ok: true, authMethod: "passport" };
-  }
-
-  const { verdict } = await evaluateSenderProof(req, credentialToken, principal);
-
-  if (mode === "observe") {
-    // Admitted whatever the verdict, and `authMethod` stays `passport`: the
-    // credential that actually authenticated this call was a bearer visa, and a
-    // receipt goes to third parties. `unavailable` records nothing rather than
-    // guessing — there is no authentication to fail here, so a replay-store blip
-    // must not become a diagnostic that looks like a real failure.
-    return verdict === "unavailable"
-      ? { ok: true, authMethod: "passport" }
-      : { ok: true, authMethod: "passport", would: verdict };
-  }
-
-  switch (verdict) {
-    case "pass":
-      return { ok: true, authMethod: "passport_proof_per_request" };
-    case "missing":
-      return { ok: false, response: err(401, "missing_sender_proof") };
-    case "clock_skew":
-      return {
-        ok: false,
-        response: errMessage(
-          401,
-          "sender_proof_clock_skew",
-          `The sender proof is outside the ${SENDER_PROOF_WINDOW_SECONDS}-second window. Check the agent clock and NTP synchronization.`
-        ),
-      };
-    case "replayed":
-      return { ok: false, response: err(401, "sender_proof_replayed") };
-    case "unavailable":
-      // Replay protection is part of authentication, unlike the fail-open kill
-      // switch. An unreadable nonce store cannot admit a proof as single-use.
-      return { ok: false, response: err(503, "sender_proof_replay_check_unavailable") };
-    default:
-      return { ok: false, response: err(401, "invalid_sender_proof") };
-  }
-}
 
 /**
  * The custom endpoint for this (agent, provider), or null for the built-in host.
@@ -378,7 +216,11 @@ async function resolveEndpoint(
   provider: string
 ): Promise<EndpointResolution> {
   const policy = endpointPolicy();
-  if (policy.kind === "off") {
+  // Off means no custom endpoints — except for a provider with no host of its
+  // own (Azure), whose stored address is the only destination there is. That one
+  // is read on every deployment, and admitted only by its own Microsoft-suffix
+  // rule (`isEndpointAllowedFor`), never by this gate.
+  if (policy.kind === "off" && !(isProvider(provider) && providerRequiresEndpoint(provider))) {
     return { known: true, endpoint: null, credentialId: null, fence: null };
   }
 
@@ -398,7 +240,7 @@ async function resolveEndpoint(
 
   const admit = (value: string | null, credentialId: string | null): EndpointResolution => ({
     known: true,
-    endpoint: value && isEndpointAllowed(value, policy) ? value : null,
+    endpoint: value && isEndpointAllowedFor(provider, value, policy) ? value : null,
     credentialId,
     fence,
   });
@@ -496,253 +338,6 @@ async function resolveEndpoint(
     )
   );
   return admit(stored, credentialId);
-}
-
-function clientIp(req: Request): string {
-  // Cloudflare overwrites this header at its edge, but other hosts may pass a
-  // client-supplied value through. Trust it only in the Workers deployment,
-  // whose committed configuration explicitly opts in.
-  const cloudflareIp = process.env.PASSCONTROL_TRUST_CF_CONNECTING_IP === "true"
-    ? req.headers.get("cf-connecting-ip")?.trim()
-    : undefined;
-  return (
-    cloudflareIp ||
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip")?.trim() ||
-    "unknown"
-  );
-}
-
-/**
- * Coalesced last-seen, the direct-key half of it.
- *
- * The passport path stamps this at the challenge and again at the visa mint; a
- * direct key reaches neither, so `lastseen:<agid>` was never written for a
- * direct-key agent, the reconcile cron had nothing to flush, and
- * `agents.last_seen_at` stayed NULL however many calls the agent made — the
- * fleet table read "never" for an agent whose last call was minutes old.
- *
- * Swallows everything, in both directions. This is a presentation stamp sitting
- * on the money path: it must not add latency to the gate, and it must never be
- * able to refuse, delay or 500 a call. A rejected write is swallowed, and so is
- * a SYNCHRONOUS throw — `redis()` constructs its client on first use and can
- * throw outright on a misconfigured instance, which without the guard would
- * surface to the caller as `authentication_unavailable` on a call whose
- * credential was in fact perfectly good. A missed stamp costs one stale cell.
- */
-function stampLastSeen(agentId: string): void {
-  try {
-    waitUntil(Promise.resolve(touchLastSeen(agentId)).catch(() => undefined));
-  } catch {
-    // Deliberately empty — see above.
-  }
-}
-
-/**
- * Whether the durable record says this agent is suspended.
- *
- * Only a Direct Agent Key carries it: its lookup reads `agents.status` on every
- * call. It is OR-ed with the Redis flag at every revocation read, so either
- * record of a suspension refuses on its own — Redis is the hot-path copy and can
- * be lost; the row is the one an operator's suspend always leaves behind.
- */
-function principalSuspended(principal: GatewayPrincipal): boolean {
-  // Strictly boolean, never `undefined`: to `evaluateGate`, `suspended:
-  // undefined` means "not read yet", which marks the chain pending and skips
-  // scope, policy and budget — and a skipped chain has no `deniedBy`. A
-  // principal that somehow lacked this field must not switch enforcement off.
-  return principal.kind === "direct_key" && principal.suspended === true;
-}
-
-/**
- * The agent whose CURRENT passport key is `passportId`, or null — including on
- * any read failure, because this only decides between two 401 bodies. Current
- * keys are globally unique (0035), so more than one row is treated as none.
- */
-async function findAgentByPassportId(passportId: string): Promise<string | null> {
-  try {
-    const { data, error } = await serviceClient()
-      .from("agents")
-      .select("id")
-      .eq("passport_pubkey", passportId)
-      .limit(2);
-    if (error || !Array.isArray(data) || data.length !== 1) return null;
-    const id = (data[0] as { id?: unknown }).id;
-    return typeof id === "string" ? id : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Authenticate either door without letting one format fall through to the other. */
-async function authenticateGatewayRequest(
-  req: Request,
-  provider: string
-): Promise<GatewayAuthentication> {
-  // extractVisaToken is intentionally still the one header-precedence source:
-  // Authorization Bearer wins over x-api-key, including when they carry
-  // different credential classes.
-  const token = extractVisaToken(req.headers);
-  const credential = classifyGatewayCredential(token);
-  if (credential.kind === "missing") return { ok: false, response: err(401, "missing_visa") };
-  if (credential.kind === "invalid") {
-    return { ok: false, response: err(401, "invalid_credential") };
-  }
-
-  const db = serviceClient();
-  if (credential.kind === "direct_key") {
-    const limited = await rateLimitFailClosed(
-      `direct-key-ip:${clientIp(req)}`,
-      DIRECT_KEY_IP_LIMIT,
-      DIRECT_KEY_IP_WINDOW_S
-    );
-    if (!limited.success) {
-      const code = limited.unreadable
-        ? "authentication_rate_limit_unavailable"
-        : "rate_limited";
-      waitUntil(
-        captureSecurityEvent("proxy.direct_key_pre_auth_limited", {
-          route: "api.proxy",
-          method: req.method,
-          status: limited.unreadable ? 503 : 429,
-          provider,
-          code,
-        })
-      );
-      return {
-        ok: false,
-        response: new Response(JSON.stringify({ error: code }), {
-          status: limited.unreadable ? 503 : 429,
-          headers: {
-            "content-type": "application/json",
-            ...(limited.unreadable
-              ? {}
-              : { "retry-after": String(DIRECT_KEY_IP_WINDOW_S) }),
-          },
-        }),
-      };
-    }
-
-    try {
-      const principal = await authenticateDirectAgentKey(db, credential.token);
-      if (!principal) {
-        waitUntil(
-          captureSecurityEvent("proxy.invalid_direct_key", {
-            route: "api.proxy",
-            method: req.method,
-            status: 401,
-            provider,
-            code: "invalid_credential",
-          })
-        );
-        return { ok: false, response: err(401, "invalid_credential") };
-      }
-      // Stamped the moment the credential is accepted, which keeps the meaning
-      // the passport path already gives it: last *seen*, not last *cleared*. A
-      // suspended or over-budget agent presenting a valid key was still seen,
-      // and that is precisely when an operator wants to know it is still live.
-      stampLastSeen(principal.agentId);
-      return { ok: true, principal, db, credentialToken: credential.token };
-    } catch {
-      waitUntil(
-        captureError(new Error("direct key authentication unavailable"), {
-          route: "api.proxy",
-          method: req.method,
-          status: 503,
-          provider,
-          code: "authentication_unavailable",
-        })
-      );
-      return { ok: false, response: err(503, "authentication_unavailable") };
-    }
-  }
-
-  const claims = await verifyVisa(credential.token);
-  if (!claims) {
-    // C2. The Direct Agent Key door is limited before any work; this one only
-    // after a verification FAILS, so a valid visa is never counted or throttled
-    // here (it has its per-agent limit). What is bounded is the unauthenticated
-    // work a failure triggers: a security event, and the C1 lookup below.
-    // Fail closed, like the direct-key edge: an unreadable counter must not
-    // license unbounded database work. The answer itself does not change — an
-    // invalid visa is a 401 whether or not Redis is up.
-    const failures = await rateLimitFailClosed(
-      `visa-fail-ip:${clientIp(req)}`,
-      VISA_FAIL_IP_LIMIT,
-      VISA_FAIL_IP_WINDOW_S
-    );
-    if (!failures.success && !failures.unreadable) {
-      return {
-        ok: false,
-        response: new Response(JSON.stringify({ error: "rate_limited" }), {
-          status: 429,
-          headers: { "content-type": "application/json", "retry-after": String(VISA_FAIL_IP_WINDOW_S) },
-        }),
-      };
-    }
-    // C1. A Passport SECRET pasted into a client's API-key field arrives here.
-    // Deriving its public key and finding it on an agent is proof, not a guess,
-    // that this agent's private key was just transmitted. Never echo or log the
-    // token; name the agent. Detection only — the key is already exposed.
-    const exposedPassportId = failures.success ? passportIdIfSecret(credential.token) : null;
-    if (exposedPassportId) {
-      const exposed = await findAgentByPassportId(exposedPassportId);
-      if (exposed) {
-        waitUntil(
-          Promise.all([
-            captureSecurityEvent("proxy.passport_secret_presented", {
-              route: "api.proxy",
-              method: req.method,
-              status: 401,
-              provider,
-              agentId: exposed,
-              code: "passport_secret_presented_as_bearer",
-            }),
-            // Deferred so even a synchronous throw (redis() constructing its
-            // client) cannot turn this 401 into a 500 — same guard as stampLastSeen.
-            Promise.resolve()
-              .then(() => flagPassportSecretExposed(exposed, exposedPassportId))
-              .catch(() => undefined),
-          ])
-        );
-        return {
-          ok: false,
-          response: errMessage(
-            401,
-            "passport_secret_presented_as_bearer",
-            "This token is an agent's PRIVATE passport key, not an API key. Treat it as exposed: rotate that agent's passport now. A client that can only send a static API key needs a Direct Agent Key, or the local passport sidecar."
-          ),
-        };
-      }
-    }
-    waitUntil(
-      captureSecurityEvent("proxy.invalid_visa", {
-        route: "api.proxy",
-        method: req.method,
-        status: 401,
-        provider,
-        code: "invalid_visa",
-      })
-    );
-    return { ok: false, response: err(401, "invalid_visa") };
-  }
-  return {
-    ok: true,
-    db,
-    credentialToken: credential.token,
-    principal: {
-      kind: "passport",
-      agentId: claims.agid,
-      userId: claims.uid,
-      scopes: claims.scope,
-      budgetTokens: claims.bt ?? null,
-      budgetCents: claims.bc ?? null,
-      spentTokens: Number(claims.st ?? 0),
-      spentMicrocents: Number(claims.sc ?? 0),
-      passportId: claims.sub,
-      visaJti: claims.jti,
-    },
-  };
 }
 
 /**
@@ -1437,6 +1032,17 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   }
   if (
     prePolicyGate.deniedBy === "endpoint" &&
+    prePolicyGate.steps.some((step) => step.rule === "endpoint:unpriced_endpoint")
+  ) {
+    // A provider that can never be priced (Azure: a deployment name says nothing
+    // about the model) under a dollar limit. The same answer S3-03 gives a custom
+    // endpoint at step 5b, given here because it is known before the hold.
+    logBlocked("blocked_unpriced_endpoint", model);
+    captureBlocked("blocked_unpriced_endpoint", 402);
+    return errR(402, "unpriced_endpoint");
+  }
+  if (
+    prePolicyGate.deniedBy === "endpoint" &&
     prePolicyGate.steps.some((step) => step.rule === "endpoint:unpriced_model")
   ) {
     // A model with no price row under a dollar limit (lib/gate.ts). Logged, like
@@ -1459,6 +1065,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     captureBlocked("blocked_endpoint", 403);
     return errR(403, "blocked_endpoint");
   }
+  // Embeddings are one JSON document, never a stream, and the response path
+  // below reads them that way. A `stream: true` embeddings request is refused as
+  // a malformed request — before the policy step, so it spends no hourly quota,
+  // and before any hold, so there is nothing to release.
+  const embeddings = isEmbeddingsEndpoint(provider, req.method, path);
+  if (embeddings && wantsStream) return err(400, "stream_unsupported");
   // Hosted tools (OpenAI web search, file search, code interpreter, …) are
   // billed per call or per session, outside token usage, so no budget here could
   // hold them. Refused as a request this gateway does not carry — before policy
@@ -1516,7 +1128,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // fallback that fails one of those is not an error to report — it is simply a
   // fallback that does not qualify. That is what leaves every existing
   // early-refusal path above exactly as it was.
-  const estimatedUsage = estimateTokenUsage(bodyObj);
+  //
+  // An embeddings call generates nothing, so its hold reserves input alone (E1).
+  // A fallback is only ever an embeddings endpoint too: `canonicalEndpointPath`
+  // denies this path on a provider with no embeddings row.
+  const estimatedUsage = embeddings ? estimateEmbeddingUsage(bodyObj) : estimateTokenUsage(bodyObj);
   const estimate = estimatedUsage.totalTokens;
   // `seedSpent` USED TO BE HERE, and its deletion is the point.
   //
@@ -1668,9 +1284,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const attemptModel = target.model;
     const attemptReceiptId = target.receiptId;
     const attemptId = guard.attemptId;
-    const usageProtocol = isOpenAiResponsesEndpoint(attemptProvider, target.upstreamPath)
-      ? "responses"
-      : "provider";
+    const usageProtocol: UsageProtocol = isEmbeddingsEndpoint(attemptProvider, req.method, path)
+      ? "embeddings"
+      : isResponsesEndpoint(attemptProvider, target.upstreamPath)
+        ? "responses"
+        : "provider";
 
     // S5: ensure OpenAI-compatible streams report usage. Re-derived per attempt —
     // the flag is provider-shaped and the model in the body changes. A copy, not
@@ -1901,8 +1519,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // a 500 where a 402 belonged.
     //
     // `resolveEndpoint` returns null for every deployment that has not opted in,
-    // which is the default — so on Cloud today this is one short-circuit and no
-    // reads at all. It re-validates rather than trusting the row: a value stored
+    // which is the default — so on Cloud this is one short-circuit and no reads,
+    // for every provider except Azure, whose stored address is always read. It
+    // re-validates rather than trusting the row: a value stored
     // while the gate was wider must not be reached after an operator narrowed it.
     const resolvedEndpoint = await resolveEndpoint(db, userId, agentId, attemptProvider);
     // Null both when there is genuinely no endpoint and when the read failed —
@@ -2194,6 +1813,25 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       );
     }
 
+    // ── 5a'. A credential whose address is part of it, and missing ─────────────
+    //
+    // Azure has no host of ours. A key with no stored address — or one that its
+    // own rule no longer admits, which `resolveEndpoint` reports as none — has
+    // nowhere legitimate to go, and the one thing this must never do is pick
+    // somewhere. Refused before the key is decrypted (trust boundary 5: nothing
+    // is fetched for a call that cannot be sent), and before 5b so the operator
+    // is told the actual fix rather than "remove your dollar limit".
+    if (!custom && providerRequiresEndpoint(attemptProvider)) {
+      const settle = reconcile(NO_USAGE, "endpoint_required", "not_dispatched", 409);
+      // A fallback that cannot run is skipped, like one with no stored key.
+      if (!primary) {
+        await settle.released;
+        waitUntil(settle.done);
+        return { kind: "skipped" };
+      }
+      return terminal(errR(409, "endpoint_required"), settle);
+    }
+
     // ── 5b. A dollar cap cannot be enforced against a price nobody knows ───────
     //
     // S3-03, and a DELIBERATE BEHAVIOUR CHANGE rather than a repair — this call
@@ -2403,6 +2041,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // deliberately: a query string that cannot even be parsed refuses the call
       // with nothing dispatched, rather than travelling with a provider key.
       const forwardedSearch = forwardableUpstreamSearch(req.url, Object.keys(params));
+      // Unreachable after 5a' (a provider with no host of its own always has a
+      // `custom` here), and refused as unbuildable rather than asserted away.
+      if (upstreamBase === null) throw new Error("no upstream base");
       targetUrl = `${joinUpstream(upstreamBase, upstreamSuffix)}${forwardedSearch}`;
     } catch {
       // The upstream URL could not even be constructed. Nothing was sent.
@@ -2719,6 +2360,37 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // Both are terminal. Once the provider has started answering there is nothing
     // left to fail over from — the failover trigger is a response, before the
     // first byte of a body reaches the client.
+    // Embeddings: forwarded as they arrive, never buffered. A batch response is
+    // tens of megabytes, and the buffered path below holds the whole body, then
+    // re-serialises and redacts it as one string. Here the bytes stream through
+    // the key-echo redaction and a scanner that keeps only the top-level `usage`
+    // (lib/usage/topLevelUsage.ts). It settles on every ending exactly as the
+    // SSE branch does: complete only when the document closed and reported
+    // usage; otherwise the estimate stands (E2).
+    if (usageProtocol === "embeddings" && upstream.body) {
+      const { stream, settled } = createUsageTransform(attemptProvider, "embeddings");
+      waitUntil(
+        settled.then(({ usage, complete }) =>
+          reconcile(
+            usage,
+            complete ? "ok" : "usage_unknown",
+            complete ? "complete" : "usage_unknown"
+          ).done
+        )
+      );
+      return {
+        kind: "response",
+        response: new Response(redactBody(upstream.body).pipeThrough(stream), {
+          status: 200,
+          headers: {
+            // No content-length: redaction can change it.
+            "content-type": "application/json",
+            "x-passcontrol-receipt-id": attemptReceiptId,
+          },
+        }),
+      };
+    }
+
     if (isStream && upstream.body) {
       const { stream, settled } = createUsageTransform(attemptProvider, usageProtocol);
       // The monitored transform settles exactly once on every ending — normal
@@ -2836,6 +2508,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   const qualifies = async (
     fallback: FallbackEntry
   ): Promise<{ verdict: "ok" | "skip" | "stop"; shadowWould?: string }> => {
+    // A fallback runs with its own model. For embeddings that means vectors from
+    // a different model — a different space, usually a different size — returned
+    // with a 200, silently corrupting whatever index the agent writes them to.
+    // So an embeddings call never fails over; the primary's result stands.
+    if (embeddings) return { verdict: "stop" };
     // Trust boundary #3 — revocation is instant. Failover puts a whole extra
     // upstream round-trip between the kill read at the top of this request and
     // the next call going out, so an operator who arms the switch mid-failover

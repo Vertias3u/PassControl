@@ -81,6 +81,45 @@ describe("recording whether a call could be priced", () => {
   });
 });
 
+describe("recording a service call (0074)", () => {
+  beforeEach(() => {
+    insert.mockResolvedValue({ error: null });
+  });
+
+  const base = {
+    agentId: "agent-1",
+    userId: "user-1",
+    passportId: "passport-1",
+    jti: "visa-1",
+    provider: "svc:github",
+    status: "ok" as const,
+  };
+
+  it("writes call_kind and the matched rule template for a service call", async () => {
+    await writeLog({ ...base, callKind: "service", endpoint: "GET /repos/acme/*/issues" });
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({ call_kind: "service", endpoint: "GET /repos/acme/*/issues" })
+    );
+  });
+
+  it("omits both columns on an LLM row, so it is byte-identical to a pre-0074 write", async () => {
+    // Same conditional spread as `unpriced` above: PostgREST drops the WHOLE
+    // insert on an unknown column, so naming these unconditionally would lose
+    // every audit row on a database that has not run 0074.
+    await writeLog({ ...base, provider: "openai" });
+    const row = insert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row).not.toHaveProperty("call_kind");
+    expect(row).not.toHaveProperty("endpoint");
+  });
+
+  it("writes call_kind without an endpoint when no rule matched", async () => {
+    await writeLog({ ...base, status: "blocked_scope", callKind: "service" });
+    const row = insert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row.call_kind).toBe("service");
+    expect(row).not.toHaveProperty("endpoint");
+  });
+});
+
 describe("gateway accounting writes", () => {
   it("reports an authoritative agent_logs insert error instead of dropping it", async () => {
     insert.mockResolvedValue({ error: { message: "database unavailable" } });

@@ -29,6 +29,13 @@ export const AGENT_COLS =
 export const LOG_COLS =
   "id, agent_id, passport_id, jti, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, created_at";
 
+// LOG_COLS plus what a service call was (0074): `call_kind` ("service", or null
+// for a model call) and `endpoint` (METHOD plus the rule that admitted it). The
+// logs route asks for these first and falls back to LOG_COLS only when the
+// database answers 42703, so a deployment that has not applied 0074 still gets
+// its record rather than a 500.
+export const LOG_COLS_WITH_SERVICE = `${LOG_COLS}, call_kind, endpoint`;
+
 // A single call plus its signed receipt. Deliberately NOT folded into LOG_COLS:
 // a receipt is ~600-900 bytes of JWS, and adding it to the list endpoint would
 // bloat every page of results for the one caller in a hundred who wants a proof.

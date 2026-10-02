@@ -3,7 +3,13 @@
 import { useState } from "react";
 import { Check, Copy, FileClock, ShieldCheck } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
-import { departureDestination, type DepartureRow } from "@/lib/departures";
+import {
+  departureDestination,
+  departureProvider,
+  recordedUpstreamStatus,
+  upstreamMeaningFor,
+  type DepartureRow,
+} from "@/lib/departures";
 import {
   CALL_OUTCOME,
   OUTCOME_CATEGORY_LABEL,
@@ -14,14 +20,11 @@ import {
   usageLabel,
   wasForwarded,
 } from "@/lib/call-outcome";
-import { isHousekeeping } from "@/lib/call-class";
+import { classifyCall, isHousekeeping } from "@/lib/call-class";
+import { serviceCallExplanation } from "@/lib/services/presentation";
 import type { LogEntry } from "@/lib/log";
 import { parseShadowVerdict } from "@/lib/policy-shadow";
-import {
-  readRecordedEndpoint,
-  readRecordedUpstreamStatus,
-  describeUpstreamStatus,
-} from "@/lib/verify/receipt-view";
+import { readRecordedEndpoint } from "@/lib/verify/receipt-view";
 import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
 import { authenticationProofLabel } from "@/lib/first-call-activation";
 
@@ -43,6 +46,7 @@ const STATUS: Record<LogEntry["status"], { explanation: string }> = {
   provider_exhausted: { explanation: "PassControl allowed the attempt; the provider account, not the PassControl budget, had no credit." },
   no_provider_key: { explanation: "PassControl refused before forwarding: no key is stored for this provider, so there was nothing to inject. The provider never received this call — store a key for it and retry." },
   credential_state_unavailable: { explanation: "PassControl re-checks, immediately before sending, that the address and the secret still come from the same version of your credential. Here that check could not be completed — its own state store did not answer. This is NOT a report that anything changed: nothing was observed either way, and the call was refused rather than sent on an unverified pair. The provider never received it. Retry it; if it persists, check the gateway's Redis." },
+  endpoint_required: { explanation: "PassControl refused before forwarding: this provider key is stored, but not the address of the resource it belongs to. An Azure key has no provider host to fall back to, so PassControl never guesses one. The provider never received this call. Set the key's resource address under Settings, Provider credentials, Endpoint. Do not add a second key." },
   endpoint_unavailable: { explanation: "PassControl refused before forwarding because it could not read which endpoint this credential is meant to reach. It does not send the key to the provider's own host on a guess: a credential set up for your own server may not belong there. The provider never received this call — this is a PassControl-side read failure, so retry it." },
   blocked_unpriced_endpoint: { explanation: "This agent has a spending cap in dollars, and this call was bound for a custom endpoint whose price PassControl cannot know \u2014 a gateway you run may mark up, re-route, or answer to a familiar model name with something else entirely. Enforcing the cap against the built-in provider's retail price would be enforcing a number unrelated to the bill, so the call was refused instead. The provider never received it and nothing was charged. Either remove the dollar cap for this agent (a token cap still works, because token counts are real wherever the call goes) or route it through an endpoint PassControl prices." },
   blocked_unpriced_model: { explanation: "This agent has a spending limit in dollars, and PassControl has no price for this model. Its cost could only have been estimated from the provider\u2019s most expensive listed rate, and a limit enforced with a number that is not the model\u2019s price does not hold, so the call was refused instead. The provider never received it and nothing was charged. Use a model PassControl prices, remove the dollar limit for this agent (a token cap still works), or add the model\u2019s published price to the price table." },
@@ -72,7 +76,11 @@ function statusDetail(row: DepartureRow) {
   // scope refusal depends on which credential was presented.
   return {
     label: CALL_OUTCOME[row.status as LogEntry["status"]].label,
-    explanation: row.status === "blocked_scope" ? scopeRefusalExplanation(row.auth_method) : known.explanation,
+    // A service call (0074) has no model and its own rules, cap and token; the
+    // shared explanations are written for model calls and would misdirect.
+    explanation:
+      (classifyCall(row).klass === "service" ? serviceCallExplanation(row.status, row.provider) : null) ??
+      (row.status === "blocked_scope" ? scopeRefusalExplanation(row.auth_method) : known.explanation),
   };
 }
 
@@ -91,6 +99,27 @@ export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null)
   const agent = row.agent_id ? `/dashboard/agents/${encodeURIComponent(row.agent_id)}` : null;
   const providers = { href: "/dashboard/settings#provider-credentials", label: "Provider credentials" };
   const actions: NextAction[] = [];
+  // A service call is fixed in different places: the agent's service access,
+  // and the workspace's service tokens. The decision trace tests LLM controls,
+  // so it is not offered for one.
+  if (classifyCall(row).klass === "service") {
+    switch (row.status) {
+      case "blocked_scope":
+      case "blocked_policy":
+        if (agent) actions.push({ href: `${agent}#agent-services`, label: "Edit service access" });
+        break;
+      case "no_provider_key":
+      case "upstream_error":
+        actions.push({ href: "/dashboard/settings#services", label: "Service tokens" });
+        break;
+      case "endpoint_unavailable":
+        actions.push({ href: "/dashboard/system", label: "System health" });
+        break;
+      default:
+        break;
+    }
+    return actions;
+  }
   switch (row.status) {
     case "blocked_scope":
     case "blocked_endpoint":
@@ -109,6 +138,7 @@ export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null)
       actions.push({ href: "/dashboard#overview", label: "Current kill switch state" });
       break;
     case "no_provider_key":
+    case "endpoint_required":
     case "provider_exhausted":
       actions.push(providers);
       break;
@@ -221,8 +251,8 @@ export function CallDetailDrawer({
             ? "Not reported"
             : "Not sent — nothing to measure";
   const endpoint = readRecordedEndpoint(row?.receipt);
-  const upstreamStatus = readRecordedUpstreamStatus(row?.receipt);
-  const upstreamMeaning = upstreamStatus === null ? null : describeUpstreamStatus(upstreamStatus);
+  const upstreamStatus = row ? recordedUpstreamStatus(row) : null;
+  const upstreamMeaning = upstreamStatus === null || !row ? null : upstreamMeaningFor(row, upstreamStatus);
   const nextActions = row ? nextActionsFor(row, upstreamStatus) : [];
   const copyReceipt = async () => {
     if (!row?.receipt) return;
@@ -304,7 +334,7 @@ export function CallDetailDrawer({
               the board hid, so it has to say what the row was — a model-listing
               probe carries no model, and rendering the provider alone made it
               read as a call whose model failed to record. */}
-          <div><dt>Destination</dt><dd>{row.provider ?? "Not recorded"} / {departureDestination(row)}</dd></div>
+          <div><dt>Destination</dt><dd>{departureProvider(row) ?? "Not recorded"} / {departureDestination(row)}</dd></div>
           <div><dt>Call class</dt><dd>{isHousekeeping(row) ? "SDK housekeeping — preserved in the record, not counted as agent activity" : "Agent call"}</dd></div>
           {/* The one thing a blocked_endpoint row could never tell you: which
               endpoint. It has always been in the receipt; nothing showed it.

@@ -12,6 +12,9 @@ import { needsMfaStepUp } from "@/lib/mfa";
 import { getMfaStatus } from "@/app/dashboard/mfa-actions";
 import { MfaManager } from "@/components/MfaManager";
 import { ProviderKeysManager } from "@/components/ProviderKeysManager";
+import { ServiceTokensManager } from "@/components/ServiceTokensManager";
+import { SERVICE_CATALOG, isServiceProviderId } from "@/lib/services/catalog";
+import { toCredentialListItem } from "@/lib/provider-credential-list";
 import { ApiKeysManager } from "@/components/ApiKeysManager";
 import { OwnerBinding } from "@/components/OwnerBinding";
 import { ProfileSettings } from "@/components/ProfileSettings";
@@ -99,13 +102,12 @@ export default async function SettingsPage() {
   const activeApiKeys = (apiKeys ?? []).filter((key) => !key.revoked_at).length;
   // An error here means 0027 has not been applied (no `is_active` column). The
   // panel says so and still lets a key be stored, rather than taking the page down.
-  const credentialList = (providerCredentials.data ?? []).map((row) => ({
-    id: String(row.id),
-    provider: String(row.provider),
-    label: typeof row.label === "string" ? row.label : null,
-    created_at: String(row.created_at),
-    is_active: row.is_active === true,
-  }));
+  const allCredentials = (providerCredentials.data ?? []).map(toCredentialListItem);
+  // Service tokens (`svc:github`, 0074) are listed under Services, never among
+  // the LLM provider keys, and never counted as one.
+  const credentialList = allCredentials.filter((c) => !isServiceProviderId(c.provider));
+  const githubTokens = allCredentials.filter((c) => c.provider === SERVICE_CATALOG.github.credentialProvider);
+  const telegramTokens = allCredentials.filter((c) => c.provider === SERVICE_CATALOG.telegram.credentialProvider);
   const credentialListUnavailable = Boolean(providerCredentials.error);
   // Never infer "no credentials" from a failed read. In the exact window the
   // tolerant read exists for — deployed before 0027, so `is_active` does not
@@ -114,7 +116,10 @@ export default async function SettingsPage() {
   // the first. One extra head query, only on the degraded path.
   const providerCount = credentialListUnavailable
     ? (
-        await db.from("provider_credentials").select("id", { count: "exact", head: true })
+        await db
+          .from("provider_credentials")
+          .select("id", { count: "exact", head: true })
+          .not("provider", "like", "svc:%")
       ).count ?? 0
     : credentialList.length;
   const ownerRecord = owner.ok ? owner.data : null;
@@ -158,6 +163,7 @@ export default async function SettingsPage() {
           <a href="#profile">Your profile</a>
           <a href="#key-custody">Key custody</a>
           <a href="#provider-credentials">Provider credentials</a>
+          <a href="#services">Services</a>
           <a href="#control-api-keys">Control API keys</a>
           <a href="#account-security">Security and MFA</a>
           <a href="#ownership">Ownership</a>
@@ -218,6 +224,36 @@ export default async function SettingsPage() {
           <ProviderKeysManager
             credentials={credentialList}
             listUnavailable={credentialListUnavailable}
+          />
+          </div>
+        </section>
+
+        <section id="services" className="pc-section scroll-mt-28">
+          <SectionHeader
+            eyebrow="Credential vault"
+            title="Services"
+            description={<>
+            Tokens for APIs other than model providers. Stored in Vault like provider keys and
+            injected by the gateway, so an agent never holds one. A token grants nothing by
+            itself: each agent&apos;s access is set on its own page, by method and path. Some
+            GitHub writes, such as deleting a repository or adding a webhook, are never allowed.
+            To stop a service for every agent, or see who can reach it, open{" "}
+            <a href="/dashboard/services">Services</a>.
+            </>}
+          />
+          <div className="pc-section__body">
+          <ServiceTokensManager
+            service="github"
+            serviceLabel={SERVICE_CATALOG.github.label}
+            tokens={githubTokens}
+            listUnavailable={credentialListUnavailable}
+          />
+          <ServiceTokensManager
+            service="telegram"
+            serviceLabel={SERVICE_CATALOG.telegram.label}
+            tokens={telegramTokens}
+            listUnavailable={credentialListUnavailable}
+            hint="Use the token BotFather gave you for a bot made for your agents, not one people already rely on."
           />
           </div>
         </section>

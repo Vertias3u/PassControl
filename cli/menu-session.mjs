@@ -6,10 +6,16 @@ export async function collectMenuRemoteStatus({
   request,
   safeText = (value, fallback) => value == null ? fallback : String(value),
 }) {
-  if (!hasApiKey) {
-    return { account: null, gateway: "not authenticated", fleet: "unavailable", kill: "unavailable", current: {} };
-  }
   const options = { timeoutMs: MENU_STATUS_TIMEOUT_MS };
+  if (!hasApiKey) {
+    // The gateway probe reads the public /api/version and carries no
+    // credential, so a passport-only machine still learns whether its gateway
+    // is up. Everything else needs the key.
+    const gateway = await Promise.resolve()
+      .then(() => gatewayStatus(options))
+      .then((result) => result.label, () => "unavailable");
+    return { account: null, gateway, fleet: "unavailable", kill: "unavailable", current: {} };
+  }
   const [gatewayResult, accountResult, fleetResult, killResult] = await Promise.allSettled([
     gatewayStatus(options),
     request("/account", options),

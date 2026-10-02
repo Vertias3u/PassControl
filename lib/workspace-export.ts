@@ -33,13 +33,20 @@ export const WORKSPACE_CONFIG_TABLES = [
     // pubkey columns are PUBLIC keys — printed on /verify and carried in every
     // receipt (0021:39-48) — and the Ed25519 private half is generated on the
     // operator's machine and never reaches the server.
+    // `service_rules` (0074) is an agent's access to non-LLM APIs such as
+    // GitHub: methods and paths, no secret. The token it uses is not here.
     columns:
+      "id,name,status,budget_tokens,budget_cents,budget_period,budget_period_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at,service_rules",
+    // A database missing a migration refuses the whole select (42703), so each
+    // fallback drops one migration's columns, newest first. Without 0074 an
+    // agent HAS no service rules, and without 0073 no periodic limit, so the
+    // export is still complete — unlike one that failed outright, which leaves
+    // the operator nothing. One step at a time: a database with 0073 but not
+    // 0074 must keep its periodic limits.
+    fallbackColumns: [
       "id,name,status,budget_tokens,budget_cents,budget_period,budget_period_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at",
-    // A database without 0073 refuses the whole select (42703). Such an agent
-    // HAS no periodic limit, so the export is still complete without the pair —
-    // unlike an export that failed outright, which leaves the operator nothing.
-    fallbackColumns:
       "id,name,status,budget_tokens,budget_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at",
+    ],
   },
   {
     key: "providerMappings",
@@ -91,8 +98,9 @@ async function readWorkspaceRows(db: SupabaseClient, userId: string, spec: Works
         .order("created_at", { ascending: true })
         .range(start, start + PAGE_SIZE - 1);
     let { data, error } = await page_(spec.columns);
-    if ((error as { code?: string } | null)?.code === "42703" && "fallbackColumns" in spec) {
-      ({ data, error } = await page_(spec.fallbackColumns));
+    for (const fallback of "fallbackColumns" in spec ? spec.fallbackColumns : []) {
+      if ((error as { code?: string } | null)?.code !== "42703") break;
+      ({ data, error } = await page_(fallback));
     }
     if (error) throw new Error(`workspace_export_${spec.key}_unavailable`);
     const page = data ?? [];
@@ -139,7 +147,7 @@ export async function loadWorkspaceExport(db: SupabaseClient, userId: string) {
     // stated guarantee rather than a silent gap, and this is where that
     // guarantee meets the person relying on it.
     exclusions: [
-      "Provider API keys. They live in Supabase Vault, encrypted with a per-project root key that appears in no dump — re-enter them after a restore.",
+      "Provider API keys and service tokens (such as a GitHub token). They live in Supabase Vault, encrypted with a per-project root key that appears in no dump — re-enter them after a restore. An agent's GitHub rules are restored, but admit nothing until a GitHub token is stored again.",
       "Control API keys and Direct Agent Keys. Only their hashes are stored, so they cannot be restored; reissue them.",
       "MFA enrolment, recovery codes and active sessions.",
       "Passport private keys, which are generated on your machine and never sent to the server.",

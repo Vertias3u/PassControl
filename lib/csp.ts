@@ -119,6 +119,7 @@ export const PRERENDERED_PUBLIC_PATHS: readonly string[] = [
   "/learn/mcp-server-security",
   "/learn/ai-agent-budget-controls",
   "/learn/ai-agent-access-revocation",
+  "/learn/github-access-for-ai-agents",
 ];
 
 export function isPrerenderedPublicPath(pathname: string): boolean {

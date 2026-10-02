@@ -42,11 +42,37 @@ export const PROVIDER_UPSTREAMS = {
   // as `provider_tunnel_not_governed` — and, deliberately, what makes it
   // permanently ineligible for `--allow-connect`.
   gemini: { hostname: "generativelanguage.googleapis.com", basePath: "/v1beta/openai" },
+  xai: { hostname: "api.x.ai", basePath: "" },
 };
 
-const HOST_BY_NAME = new Map(
-  Object.entries(PROVIDER_UPSTREAMS).map(([provider, entry]) => [entry.hostname, { provider, ...entry }])
-);
+/**
+ * Non-LLM service upstreams (any-API), as host + base path.
+ *
+ * A second copy of `lib/services/catalog.ts`'s origins, for the .mjs reason
+ * above; `tests/cli-provider-hosts.test.ts` fails when they disagree. A service
+ * host is refused for CONNECT and permanently ineligible for `--allow-connect`
+ * for the same reason a provider host is: its token lives in the gateway, and a
+ * tunnel would be an ungoverned call wearing a governed badge. Its governed
+ * route is `/api/v1/svc/<service>`.
+ */
+export const SERVICE_UPSTREAMS = {
+  github: { hostname: "api.github.com", basePath: "" },
+  // Telegram's token is in its URL path, so a tunnel to it would carry the bot
+  // token past every control: refused for CONNECT, like every host here.
+  telegram: { hostname: "api.telegram.org", basePath: "" },
+};
+
+// `route` is the path segment after /api/v1/ that governs the host.
+const HOST_BY_NAME = new Map([
+  ...Object.entries(PROVIDER_UPSTREAMS).map(([provider, entry]) => [
+    entry.hostname,
+    { provider, route: provider, ...entry },
+  ]),
+  ...Object.entries(SERVICE_UPSTREAMS).map(([service, entry]) => [
+    entry.hostname,
+    { provider: service, route: `svc/${service}`, ...entry },
+  ]),
+]);
 
 // A hostname carrying any of these is not a hostname. Checked rather than
 // assumed because the value arrives on a request line from whatever the client
@@ -67,9 +93,24 @@ function normalizeHostname(value) {
   return host;
 }
 
+/**
+ * Azure OpenAI has no fixed host: every customer's resource is its own. So it is
+ * recognised by the same closed suffix rule the gateway stores its addresses
+ * under (lib/providers/endpoint.ts `AZURE_HOST`) — one DNS label, then exactly
+ * `openai.azure.com` or `services.ai.azure.com` — rather than by a table row.
+ * Being recognised is what makes a CONNECT to a resource refuse, and what routes
+ * an absolute-form request to the governed `azure` route. The gateway then sends
+ * it to the address stored with the tenant's key, not to the host named here.
+ */
+export const AZURE_HOST = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:openai\.azure\.com|services\.ai\.azure\.com)$/;
+const AZURE_UPSTREAM = { provider: "azure", route: "azure", basePath: "/openai/v1" };
+
 /** Exact match only — `evil-api.anthropic.com` is somebody else's hostname. */
 export function providerForHost(hostname) {
-  return HOST_BY_NAME.get(normalizeHostname(hostname)) ?? null;
+  const host = normalizeHostname(hostname);
+  const fixed = HOST_BY_NAME.get(host);
+  if (fixed) return fixed;
+  return AZURE_HOST.test(host) ? { ...AZURE_UPSTREAM, hostname: host } : null;
 }
 
 function parsePort(value) {
@@ -147,9 +188,9 @@ function refuse(status, code, message, help) {
   return { allow: false, status, code, message, help };
 }
 
-function governedPathHelp(provider, localBaseUrl) {
+function governedPathHelp(route, localBaseUrl) {
   const base = localBaseUrl ? String(localBaseUrl).replace(/\/+$/, "") : "";
-  return `${base}/api/v1/${provider}`;
+  return `${base}/api/v1/${route}`;
 }
 
 /**
@@ -178,7 +219,7 @@ export function classifyConnect({ target, gatewayOrigin, allowHosts = [], localB
       `PassControl will not tunnel TLS to ${parsed.hostname}. It cannot see inside that connection, so it could ` +
         "neither inject the provider key nor apply scope, budget or the kill switch — the call would leave " +
         "ungoverned while appearing to be governed.",
-      `Point the client's base URL at ${governedPathHelp(provider.provider, localBaseUrl)} instead. ` +
+      `Point the client's base URL at ${governedPathHelp(provider.route, localBaseUrl)} instead. ` +
         "PassControl does not install a TLS-intercepting CA."
     );
   }
@@ -250,7 +291,7 @@ export function classifyProxyRequest({ url, gatewayOrigin, localBaseUrl = "" } =
       rest = rest.slice(provider.basePath.length);
     }
     if (!rest.startsWith("/")) rest = `/${rest}`;
-    return { allow: true, path: `/api/v1/${provider.provider}${rest}${parsed.search}`, reason: "provider" };
+    return { allow: true, path: `/api/v1/${provider.route}${rest}${parsed.search}`, reason: "provider" };
   }
 
   const gateway = gatewayTarget(gatewayOrigin);

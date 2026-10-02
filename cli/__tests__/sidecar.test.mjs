@@ -124,3 +124,48 @@ describe("sidecar credential stripping", () => {
     }
   );
 });
+
+// The gateway builds a service call's pagination and redirect URLs from its OWN
+// origin, which is right for a client calling it directly and wrong behind the
+// sidecar: Octokit would follow page 2 straight to the gateway without the visa
+// only the sidecar adds. So the sidecar points those URLs back at itself.
+describe("service URLs in responses (any-API)", () => {
+  it("rewrites a gateway Link and Location to the sidecar, and leaves other hosts alone", async () => {
+    let gatewayOrigin = "";
+    const svcGateway = http.createServer((req, res) => {
+      if (req.url === "/api/auth/challenge") {
+        req.resume();
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ visa: "fake.visa.token", expires_in: 300 }));
+        return;
+      }
+      req.resume();
+      res.writeHead(200, {
+        "content-type": "application/json",
+        link: `<${gatewayOrigin}/api/v1/svc/github/repos/acme/web/issues?page=2>; rel="next"`,
+        location: "https://codeload.github.com/acme/web/legacy.tar.gz/refs/heads/main",
+      });
+      res.end("[]");
+    });
+    const gatewayPort = await listen(svcGateway);
+    gatewayOrigin = `http://127.0.0.1:${gatewayPort}`;
+    const secret = ed25519.utils.randomPrivateKey();
+    const svcSidecar = createSidecar({
+      gateway: gatewayOrigin,
+      passportId: b64url(ed25519.getPublicKey(secret)),
+      passportSecret: b64url(secret),
+    });
+    try {
+      const port = await listen(svcSidecar.server);
+      const res = await fetch(`http://127.0.0.1:${port}/api/v1/svc/github/repos/acme/web/issues`);
+      expect(res.headers.get("link")).toBe(
+        `<http://127.0.0.1:${port}/api/v1/svc/github/repos/acme/web/issues?page=2>; rel="next"`
+      );
+      expect(res.headers.get("location")).toBe("https://codeload.github.com/acme/web/legacy.tar.gz/refs/heads/main");
+    } finally {
+      for (const server of [svcSidecar.server, svcGateway]) {
+        if (server.listening) await new Promise((resolve) => server.close(resolve));
+      }
+    }
+  });
+});

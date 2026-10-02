@@ -72,7 +72,11 @@ const LOG_ROW = {
   authorization: "Bearer sk-ant-api03-NeverInAnArtifact",
 };
 
-function db(agents: unknown[], logs: unknown[]) {
+function db(
+  agents: unknown[],
+  logs: unknown[],
+  credentials: unknown[] = [{ provider: "anthropic" }, { provider: "openai" }]
+) {
   const selects: string[] = [];
   return {
     selects,
@@ -85,7 +89,11 @@ function db(agents: unknown[], logs: unknown[]) {
         },
         order: () => b,
         gte: () => b,
-        limit: () => Promise.resolve({ data: table === "agents" ? agents : logs, error: null }),
+        limit: () =>
+          Promise.resolve({
+            data: table === "agents" ? agents : table === "provider_credentials" ? credentials : logs,
+            error: null,
+          }),
       };
       return b;
     },
@@ -155,6 +163,16 @@ describe("buildProblemDiagnostics", () => {
     expect(artifact.bundle.agents[0]!.policy.deny_rule_count).toBe(1);
     expect(artifact.bundle.recent_failures).toHaveLength(1);
     expect(artifact.bundle.recent_failures![0]!.code).toBe("blocked_budget");
+  });
+
+  it("counts LLM provider keys only: a GitHub token alone is not a provider key (0074)", async () => {
+    const serviceOnly = db([AGENT_ROW], [LOG_ROW], [{ provider: "svc:github" }]);
+    const artifact = await buildProblemDiagnostics(serviceOnly as never, USER, NOW);
+    expect(JSON.stringify(artifact.bundle)).toContain('"provider_credentials":"missing"');
+
+    const both = db([AGENT_ROW], [LOG_ROW], [{ provider: "svc:github" }, { provider: "openai" }]);
+    const configured = await buildProblemDiagnostics(both as never, USER, NOW);
+    expect(JSON.stringify(configured.bundle)).toContain('"provider_credentials":"configured"');
   });
 
   it("selects the columns the summarizers read, and not a wildcard", async () => {

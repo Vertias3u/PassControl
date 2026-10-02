@@ -16,11 +16,12 @@ import { recordAdminAction } from "@/lib/audit";
 import { IDLE_WINDOW_MS } from "@/lib/control/auth";
 import { ensureProfileRow } from "@/lib/profile/manage";
 import { generateApiKey } from "@/lib/apikeys";
-import { endpointPolicy, normalizeEndpoint } from "@/lib/providers/endpoint";
+import { azureEndpointSuggestion, endpointPolicy, normalizeEndpointFor } from "@/lib/providers/endpoint";
 import {
   authHeaders,
   isProvider,
   modelListingUrl,
+  providerRequiresEndpoint,
   type ProviderId,
 } from "@/lib/providers";
 import {
@@ -63,7 +64,27 @@ type CreateAgentInput = {
   /** Omit for the product default; explicit null is the deliberate never-expire opt-out. */
   expiresAt?: string | null;
 };
-type ProviderKeyInput = { provider: string; label: string; key: string };
+type ProviderKeyInput = {
+  provider: string;
+  label: string;
+  key: string;
+  /** Required for a provider with no host of its own (Azure); ignored otherwise. */
+  endpoint?: string;
+};
+
+/**
+ * The refusal for an Azure address we will not store, naming what to type.
+ * Refused rather than rewritten (lib/providers/endpoint.ts): what is stored is
+ * what the operator entered.
+ */
+function azureEndpointError(raw: string): Error {
+  const suggestion = azureEndpointSuggestion(raw);
+  return new Error(
+    suggestion
+      ? `Use ${suggestion}. Azure's v1 API lives under /openai/v1 on your resource.`
+      : "An Azure key needs its resource's v1 address: https://<resource>.openai.azure.com/openai/v1 (or https://<resource>.services.ai.azure.com/openai/v1)."
+  );
+}
 
 /** Log only the DB machine code; surface a generic message to the caller so no
  *  database internals or reflected credential material can leave this action. */
@@ -670,28 +691,56 @@ export async function updateAgentFallbacks(
 }
 
 async function addProviderKeyForUser(
-  { db, user }: RequiredUser,
+  auth: RequiredUser,
   input: ProviderKeyInput,
   revalidate: boolean
 ): Promise<void> {
+  const { db, user } = auth;
   // Gated on the helper, same reasoning as createAgentForUser. completeKeyImport
   // calls both and therefore checks twice; two auth round-trips on one onboarding
   // click is the right price for not having an "already checked" parameter, which
   // is exactly the bypass-shaped API lib/mfa.ts refuses to offer.
   await requireCredentialMfa(db, user);
   const clean = validateProviderKeyInput(input);
+  // An Azure key is unusable without its resource address, so it is checked
+  // BEFORE anything is stored: an import path that has no address to give (the
+  // key-import on-ramp) is refused here rather than leaving a key that every
+  // call answers `endpoint_required`.
+  let endpoint: string | null = null;
+  if (isProvider(clean.provider) && providerRequiresEndpoint(clean.provider)) {
+    const raw = String(input?.endpoint ?? "").trim();
+    endpoint = normalizeEndpointFor(clean.provider, raw);
+    if (!endpoint) throw azureEndpointError(raw);
+  }
   // Service role, and the tenant is now an explicit argument. 0030 drops the
   // auth.uid()-derived RPCs: they were execute-able by `authenticated`, so an
   // aal1 session could reach them straight over /rest/v1/rpc and skip the gate
   // above. `user.id` comes from requireUser()/getUser() in this same request —
   // RLS is bypassed here, so this argument IS the tenant boundary.
-  const { error } = await serviceClient().rpc("store_provider_key_for_user", {
+  const { data: credentialId, error } = await serviceClient().rpc("store_provider_key_for_user", {
     p_user_id: user.id,
     p_provider: clean.provider,
     p_label: clean.label,
     p_plaintext: clean.key,
   });
   if (error) failGeneric("addProviderKey", error);
+  if (endpoint) {
+    // Written to the row the RPC just created, by its id — never "the newest
+    // Azure row", which a concurrent add could make a different credential.
+    //
+    // Two statements, not one transaction. Between them the key exists with no
+    // address, and a call landing there is refused `endpoint_required`: the gap
+    // fails CLOSED, so it is stated here rather than bought with a migration.
+    if (typeof credentialId !== "string") failGeneric("addProviderKey:id", new Error("no credential id"));
+    const { error: endpointError } = await serviceClient()
+      .from("provider_credentials")
+      .update({ endpoint_base_url: endpoint })
+      .eq("user_id", user.id) // tenant boundary — service_role bypasses RLS
+      .eq("id", credentialId as string);
+    if (endpointError) failGeneric("addProviderKey:endpoint", endpointError);
+    // A call in that gap cached "no address" for the TTL; this clears it.
+    await purgeProviderKeyForTenant(auth, clean.provider);
+  }
   // The exhaustion branch caches this tenant's provider list for 5 minutes to
   // decide what an agent could fail over to. Adding a key is the only mutation
   // that changes the answer (rotate replaces a secret behind a row that already
@@ -703,7 +752,7 @@ async function addProviderKeyForUser(
     userId: user.id,
     action: "provider_key.add",
     targetType: "provider_key",
-    metadata: { provider: clean.provider, label: clean.label },
+    metadata: { provider: clean.provider, label: clean.label, ...(endpoint ? { endpoint } : {}) },
   });
   if (revalidate) revalidatePath("/");
 }
@@ -731,7 +780,7 @@ type ProbeSuccess = {
 
 type ProbeFailure = {
   ok: false;
-  error: "invalid_key" | "rate_limited";
+  error: "invalid_key" | "rate_limited" | "endpoint_required";
   message: string;
 };
 
@@ -798,6 +847,16 @@ export async function probeProviderKey(input: {
   const clean = validateProviderKeyInput({ provider: input?.provider, label: "", key: input?.key });
   if (!isProvider(clean.provider)) throw new Error("Unknown provider.");
   const provider = clean.provider;
+  // No host to probe: an Azure key is only meaningful with its resource address,
+  // which this on-ramp does not ask for. Refused before the rate limit is spent.
+  const listingUrl = modelListingUrl(provider);
+  if (listingUrl === null) {
+    return {
+      ok: false,
+      error: "endpoint_required",
+      message: "An Azure key needs its resource address. Add it under Settings, Provider credentials.",
+    };
+  }
 
   const requestHeaders = await headers();
   const ip = clientIp(requestHeaders);
@@ -827,7 +886,7 @@ export async function probeProviderKey(input: {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetch(modelListingUrl(provider), {
+    const response = await fetch(listingUrl, {
       method: "GET",
       headers: { accept: "application/json", ...authHeaders(provider, clean.key) },
       cache: "no-store",
@@ -1155,6 +1214,15 @@ export async function setProviderEndpoint(input: {
 
   const raw = String(input?.endpoint ?? "").trim();
   const policy = endpointPolicy();
+  if (isProvider(provider) && providerRequiresEndpoint(provider)) {
+    // Azure's address is part of the credential: it has no provider host to
+    // return to, so it cannot be cleared, and the operator gate below does not
+    // apply to it (its own Microsoft-suffix rule does, in every mode).
+    const azure = normalizeEndpointFor(provider, raw, policy);
+    if (!azure) throw azureEndpointError(raw);
+    await writeProviderEndpoint(auth, credentialId, provider, azure);
+    return;
+  }
   if (raw && policy.kind === "off") {
     throw new Error(
       "Custom endpoints are not enabled on this deployment. Set PROVIDER_ENDPOINT_MODE to turn them on."
@@ -1163,7 +1231,7 @@ export async function setProviderEndpoint(input: {
   // Empty clears it and returns to the provider's own host — always allowed,
   // whatever the gate says, so a narrowed policy never traps an operator with a
   // stored endpoint they can no longer remove.
-  const endpoint = raw ? normalizeEndpoint(raw, policy) : null;
+  const endpoint = raw ? normalizeEndpointFor(provider, raw, policy) : null;
   if (raw && !endpoint) {
     throw new Error(
       policy.kind === "allowlist"
@@ -1172,6 +1240,16 @@ export async function setProviderEndpoint(input: {
     );
   }
 
+  await writeProviderEndpoint(auth, credentialId, provider, endpoint);
+}
+
+async function writeProviderEndpoint(
+  auth: RequiredUser,
+  credentialId: string,
+  provider: string,
+  endpoint: string | null
+): Promise<void> {
+  const { user } = auth;
   const { error } = await serviceClient()
     .from("provider_credentials")
     .update({ endpoint_base_url: endpoint })

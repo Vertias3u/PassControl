@@ -86,6 +86,12 @@ interface LogEntryBase {
     // reporting it as an upstream failure sends the operator to debug an account
     // that was never contacted. The fix here is the database, not the provider.
     | "endpoint_unavailable"
+    // The key is stored, and it belongs to a provider with no host of its own
+    // (Azure), but no usable address is stored with it. Not no_provider_key: the
+    // fix is the opposite one — set this key's resource address, do NOT add a
+    // second key. Not endpoint_unavailable: the read answered; the answer was
+    // "none". The gateway never guesses a host for such a key.
+    | "endpoint_required"
     | "upstream_error"
     // The call was forwarded and MAY have been billed, but no usage ever
     // arrived — a stream that broke, a stream that closed cleanly without ever
@@ -186,6 +192,17 @@ interface LogEntryBase {
   // the call was admitted whatever it says, and `authMethod` stays `passport`
   // — see db/migrations/0049.
   senderProofWould?: string;
+  /**
+   * `service` for a call to a non-LLM API through the service route (0074).
+   * Absent for an LLM call — which is what NULL in `agent_logs.call_kind` has
+   * to keep meaning, because 0006 means no historical row can ever be updated.
+   */
+  callKind?: "service";
+  /**
+   * Service calls only: METHOD plus the template of the rule that admitted the
+   * call, e.g. `GET /repos/acme/*\/issues`. Absent when no rule matched.
+   */
+  endpoint?: string;
 }
 
 export type AuthMethod = "passport" | "passport_proof_per_request" | "direct_key";
@@ -250,6 +267,10 @@ export async function writeLog(entry: LogEntry): Promise<void> {
     // row claiming the observed figure was enforced when nothing was.
     // Conditional for exactly the reason above, one migration later (0056).
     ...(entry.attemptId ? { attempt_id: entry.attemptId } : {}),
+    // Conditional for exactly the reason above, one migration later (0074).
+    // An LLM row names neither column, so it is byte-identical to before.
+    ...(entry.callKind ? { call_kind: entry.callKind } : {}),
+    ...(entry.endpoint ? { endpoint: entry.endpoint } : {}),
     ...(entry.enforcedTokens != null ? { enforced_tokens: Math.round(entry.enforcedTokens) } : {}),
     ...(entry.enforcedMicrocents != null
       ? { enforced_microcents: Math.round(entry.enforcedMicrocents) }

@@ -173,6 +173,20 @@ describe("PassControl MCP server", () => {
     expect(result.content).toEqual([{ type: "text", text: "Hello from Groq" }]);
   });
 
+  it("refuses xAI, which the gateway serves only through Responses, without a proxied call", async () => {
+    const fetchMock = vi.fn();
+    fetchMock.mockResolvedValue(jsonResponse({ visa: jwtWithScope(), expires_in: 300 }));
+    const client = await connect(fetchMock);
+    const result = await client.callTool({
+      name: "chat",
+      arguments: { provider: "xai", model: "grok-4.3", messages: [{ role: "user", content: "hi" }] },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toMatch(/xai is not supported by PassControl MCP/);
+    const proxied = fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/v1/xai"));
+    expect(proxied).toEqual([]);
+  });
+
   it.each([
     [402, { error: "budget_exceeded" }, /402.*budget/is],
     [403, { error: "scope_denied" }, /403.*scope.*kill switch/is],

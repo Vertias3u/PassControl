@@ -29,6 +29,7 @@ export function AgentOperatingHeader({
   hasPassport,
   activeDirectKeys,
   scopes,
+  serviceAccess,
   budgets,
   visaTtlSeconds,
   passportSecretExposedAt = null,
@@ -39,6 +40,11 @@ export function AgentOperatingHeader({
   hasPassport: boolean;
   activeDirectKeys: number;
   scopes: readonly { provider: string; models: readonly string[] }[];
+  /**
+   * Non-LLM services this agent has rules for (any-API), e.g. GitHub: 3 rules.
+   * Omitted when unknown; an agent with only services is not "allowed nothing".
+   */
+  serviceAccess?: readonly { label: string; rules: number }[];
   budgets: {
     tokens: { spentTokens: number; capTokens: number | null };
     cost: { spentCents: number; capCents: number | null };
@@ -96,9 +102,19 @@ export function AgentOperatingHeader({
         <div>
           <dt className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Access</dt>
           <dd className="m-0 mt-1 break-words" data-operate="access">
-            {scopes.length === 0
-              ? "Nothing — no provider or model is allowed."
-              : scopes.map((entry) => `${entry.provider}: ${entry.models.join(", ") || "no models"}`).join(" · ")}
+            {(() => {
+              const services = (serviceAccess ?? []).filter((entry) => entry.rules > 0);
+              const serviceText = services
+                .map((entry) => `${entry.label}: ${entry.rules} ${entry.rules === 1 ? "rule" : "rules"}`)
+                .join(" · ");
+              if (scopes.length === 0) {
+                return services.length === 0
+                  ? "Nothing — no provider, model or service is allowed."
+                  : `No model access · ${serviceText}`;
+              }
+              const models = scopes.map((entry) => `${entry.provider}: ${entry.models.join(", ") || "no models"}`).join(" · ");
+              return services.length === 0 ? models : `${models} · ${serviceText}`;
+            })()}
           </dd>
         </div>
         <div>

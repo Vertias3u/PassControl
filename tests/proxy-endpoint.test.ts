@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const establishBudgetStateMock = vi.fn();
 
-import { PROVIDERS, usesOpenAiUsageShape } from "@/lib/providers";
+import { PROVIDERS, providerRequiresEndpoint, usesOpenAiUsageShape } from "@/lib/providers";
 
 const {
   verifyVisaMock,
@@ -283,7 +283,9 @@ describe("proxy endpoint allowlist", () => {
   // Deepseek's own upstream has no /v1, so the invariant is NOT "both end at
   // /v1/chat/completions" — it is "both client shapes reach the SAME upstream".
   // That is what the allowlist's upstreamPath indirection exists to do.
-  it.each(PROVIDERS.filter(usesOpenAiUsageShape))(
+  // Azure is excluded only because it has no host to reach without a stored
+  // address; its two spellings are pinned in tests/azure-provider.test.ts.
+  it.each(PROVIDERS.filter((p) => usesOpenAiUsageShape(p) && !providerRequiresEndpoint(p)))(
     "accepts %s chat whichever side of the base URL /v1 lands on",
     async (provider) => {
       const bare = await callProxy(provider, ["chat", "completions"], "test-model");

@@ -69,6 +69,10 @@ const allowed = new Set([
   // imports it at load, so a missing file is a CLI that cannot start — and the
   // command it serves is the first one a new self-hoster ever runs.
   "cli/gateway-wait.mjs",
+  // The local stack's addresses per --port-offset. bin/passcontrol.mjs imports
+  // it at load, so a missing file is a CLI that cannot start.
+  "cli/local-stack.mjs",
+  "cli/gateway-probe.mjs",
   "cli/mcp/gateway.mjs",
   "cli/mcp/integration.mjs",
   "cli/mcp/README.md",

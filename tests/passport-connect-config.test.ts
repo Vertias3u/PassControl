@@ -44,3 +44,24 @@ describe("Cloud Passport setup generation", () => {
     expect(passportIntegrationForProvider("anthropic")).toBe("anthropic-js");
   });
 });
+
+// Any-API slice B: a passport agent that calls services and no model. Its
+// worker reaches GitHub through the SDK's visa-refreshing fetch (proven with
+// real Octokit through pc.fetch on the local stack, 2026-10-02), and the
+// private key appears only in the env block.
+describe("buildPassportServiceSetup", () => {
+  it("wires Octokit through pc.fetch and keeps the secret in the env block only", async () => {
+    const { buildPassportServiceSetup } = await import("@/lib/passport-connect-config");
+    const setup = buildPassportServiceSetup({ origin: "https://gw.example/", passportId: "pid", passportSecret: "s3cr3t" });
+    expect(setup.envBlock).toContain("export PASSPORT_SECRET='s3cr3t'");
+    expect(setup.envBlock).not.toContain("PASSCONTROL_MODEL");
+    expect(setup.installCommand).toMatch(/^npm install passcontrol@\^\S+ octokit$/);
+    expect(setup.clientCode).toContain("request: { fetch: passcontrol.fetch }");
+    expect(setup.clientCode).toContain("`${process.env.PASSCONTROL_GATEWAY}/api/v1/svc/github`");
+    expect(setup.clientCode).toContain("/api/v1/svc/telegram/");
+    expect(setup.clientCode).not.toContain("s3cr3t");
+    expect(setup.sidecarCommands).toContain("passcontrol sidecar");
+    expect(setup.sidecarCommands).toContain("passcontrol env github");
+    expect(setup.sidecarCommands).toContain("http://127.0.0.1:8788/api/v1/svc/telegram/");
+  });
+});
