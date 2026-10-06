@@ -20,7 +20,7 @@ type Row = [id: string, inputUsd: number, outputUsd: number];
 
 // Every provider with a price page. Azure has none to pin: its `model` is a
 // deployment name, so it is unpriced by design (see the test at the bottom).
-const TABLE: Record<Exclude<ProviderId, "azure">, { source: string; rows: Row[] }> = {
+const TABLE: Record<Exclude<ProviderId, "azure" | "local">, { source: string; rows: Row[] }> = {
   anthropic: {
     source: "platform.claude.com/docs/en/about-claude/pricing (Base input, Output)",
     rows: [
@@ -175,5 +175,16 @@ describe("azure has no price rows", () => {
   it("prices nothing, so a dollar limit refuses it rather than guessing", () => {
     expect(hasListedPrice("gpt-4o-mini", "azure")).toBe(false);
     expect(costMicrocents("gpt-4o-mini", 1, 1, "azure")).toBe(0);
+  });
+});
+
+describe("local has no price rows", () => {
+  // A model on the developer's own server. Pricing it at zero rather than at a
+  // fallback rate is also what keeps a local call's budget estimate at zero, so
+  // free calls do not accumulate a phantom "charged to cap" figure.
+  it("prices nothing, and estimates nothing", () => {
+    expect(hasListedPrice("llama3.2", "local")).toBe(false);
+    expect(costMicrocents("llama3.2", 1_000, 1_000, "local")).toBe(0);
+    expect(costMicrocents("gpt-4o-mini", 1_000, 1_000, "local")).toBe(0);
   });
 });

@@ -107,6 +107,15 @@ describe("addServiceToken", () => {
   });
 });
 
+describe("addServiceToken at the account's credential limit", () => {
+  it("says the limit was reached, built from the refusal's numbers, never its raw text", async () => {
+    h.rpc.mockResolvedValue({ data: null, error: { code: "P0001", message: "account_limit_reached:credentials:live:10" } });
+    const result = await addServiceToken({ service: "github", label: "", token: "github_pat_secret_value" });
+    expect(result.error).toMatch(/limit of 10 stored credentials/);
+    expect(h.audit).not.toHaveBeenCalled();
+  });
+});
+
 describe("setAgentServiceRules", () => {
   const rules = [
     { method: "GET", path: "/repos/acme/*/issues" },
@@ -126,7 +135,7 @@ describe("setAgentServiceRules", () => {
         action: "agent.service_rules",
         targetType: "agent",
         targetId: AGENT,
-        metadata: { service: "github", rules: 2, max_requests_per_hour: 100 },
+        metadata: { service: "github", rules: 2, ask: 0, max_requests_per_hour: 100 },
       })
     );
   });
@@ -242,6 +251,23 @@ describe("Telegram in the dashboard actions", () => {
     expect(result.error).toBeUndefined();
     expect(h.updates.at(-1)!.values).toEqual({
       service_rules: { telegram: { allow: [{ call: "sendMessage" }, { call: "getMe" }], max_requests_per_hour: 30 } },
+    });
+  });
+
+  it("keeps \"Ask me first\" on the rules that have it, in both shapes, and stores nothing for the rest", async () => {
+    await setAgentServiceRules(AGENT, "telegram", {
+      allow: [{ method: "CALL", path: "sendMessage", ask: true }, { method: "CALL", path: "getMe", ask: false }],
+      maxRequestsPerHour: null,
+    });
+    expect(h.updates.at(-1)!.values).toEqual({
+      service_rules: { telegram: { allow: [{ call: "sendMessage", ask: true }, { call: "getMe" }] } },
+    });
+    await setAgentServiceRules(AGENT, "github", {
+      allow: [{ method: "POST", path: "/repos/acme/web/issues", ask: true }],
+      maxRequestsPerHour: null,
+    });
+    expect(h.updates.at(-1)!.values).toEqual({
+      service_rules: { github: { allow: [{ method: "POST", path: "/repos/acme/web/issues", ask: true }] } },
     });
   });
 

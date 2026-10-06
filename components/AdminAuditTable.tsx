@@ -130,7 +130,7 @@ export function AdminAuditTable({
           <span>No operator actions match this filter.</span>
           <button type="button" className="ghost" onClick={() => setFilter("")}>Clear filter</button>
         </div>
-      ) : <table>
+      ) : <table className="pc-audit-table">
         <thead>
           <tr>
             <th>Time · {zoneLabel}</th>

@@ -284,6 +284,12 @@ export default async function ControlTowerPage() {
   // null = the read failed, which the connect form reports as "could not
   // confirm" rather than as "no key stored".
   const configuredProviders = providerKeys.error ? null : storedLlmProviders;
+  // Services with a stored token (`svc:<service>` credentials), for the
+  // service access "Connect an agent" offers pre-ticked.
+  const storedServices = (providerKeys.data ?? [])
+    .map((row: { provider?: unknown }) => (typeof row.provider === "string" ? row.provider : ""))
+    .filter((provider) => provider.startsWith("svc:"))
+    .map((provider) => provider.slice("svc:".length));
   const operationsSignals: CloudOperationsSignals = {
     providerCredentials: providerKeys.error
       ? "unavailable"
@@ -313,7 +319,11 @@ export default async function ControlTowerPage() {
       description="Identity, capability, spend, and every governed call in one operational view."
       actions={
         <div className="flex flex-wrap items-center gap-2">
-          <DirectAgentConnect initialProvider={firstStoredProvider} configuredProviders={configuredProviders} />
+          <DirectAgentConnect
+            initialProvider={firstStoredProvider}
+            configuredProviders={configuredProviders}
+            storedServices={storedServices}
+          />
           <PassportIssuanceModal userId={user.id} integrations={SIDECAR_PRESETS.map(String)} />
         </div>
       }
@@ -351,6 +361,7 @@ export default async function ControlTowerPage() {
           integrations={SIDECAR_PRESETS.map(String)}
           defaultProvider={firstStoredProvider}
           configuredProviders={configuredProviders}
+          storedServices={storedServices}
           logsAvailable={logsAvailable}
         />
 
@@ -384,7 +395,7 @@ export default async function ControlTowerPage() {
           <SectionHeader
             eyebrow="Recent usage"
             title="Spend and tokens"
-            description="A live window of up to 200 loaded call records. The figure charged against each agent's cap comes from its own counter, and includes a conservative estimate for any call PassControl could not price."
+            description="A live window of up to 200 loaded call records. The figure charged against each agent's cap comes from its own counter. Calls to a custom endpoint, which PassControl cannot price, add nothing to it."
           />
           <div className="pc-section__body">
           <SpendReconciliation value={spendReconciliation} />

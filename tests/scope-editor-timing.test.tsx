@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-vi.mock("@/app/dashboard/actions", () => ({ updateAgentScopes: vi.fn() }));
+vi.mock("@/app/dashboard/actions-client", () => ({ updateAgentScopes: vi.fn() }));
 
 const { ScopeEditor } = await import("@/components/ScopeEditor");
 

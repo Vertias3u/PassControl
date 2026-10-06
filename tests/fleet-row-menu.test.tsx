@@ -8,7 +8,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("@/app/dashboard/actions", () => ({
+vi.mock("@/app/dashboard/actions-client", () => ({
   setAgentSuspended: vi.fn(),
   updateAgentBudgets: vi.fn(),
   updateAgentScopes: vi.fn(),

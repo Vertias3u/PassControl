@@ -14,6 +14,8 @@ import { jsonResponse, errorResponse } from "@/lib/control/respond";
 import { rotatePassport, MAX_ROTATION_GRACE_S } from "@/lib/fleet";
 import { recordAdminAction } from "@/lib/audit";
 import { dispatchSecurityAlert } from "@/lib/alert";
+import { notifyWorkspace } from "@/lib/alerts/workspace";
+import { waitUntil } from "@vercel/functions";
 import { logSecurityEvent } from "@/lib/seclog";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -50,6 +52,10 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId, 
   // needs to hear about it immediately, not at the next audit read.
   logSecurityEvent("agent.passport_rotate", { user: userId, agentId: id });
   await dispatchSecurityAlert("agent.passport_rotate", { user: userId, agentId: id });
+  // The workspace's own channel too (plans/workspace-alerts.md); never awaited.
+  waitUntil(
+    notifyWorkspace({ userId, agentId: id, type: "passport_rotated", origin: new URL(req.url).origin })
+  );
   await recordAdminAction({
     userId,
     action: "agent.update",

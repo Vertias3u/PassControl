@@ -17,8 +17,9 @@
 //     That is a legitimate way to park an agent, so validation does not block
 //     it; the form warns instead.
 import { type FormEvent, useState } from "react";
-import { updateAgentScopes } from "@/app/dashboard/actions";
-import { PROVIDERS, SCOPE_PROVIDERS, type ProviderId } from "@/lib/providers";
+import { updateAgentScopes } from "@/app/dashboard/actions-client";
+import { PROVIDERS, SCOPE_PROVIDERS, type ProviderId, offeredProviders } from "@/lib/providers";
+import { useLocalModelsEnabled } from "@/components/dashboard/LocalModels";
 import { describeDelay, parseModels, type ScopeRow } from "@/lib/scope-rows";
 import { prospectiveAgentChange } from "@/lib/impact-preview";
 import { ImpactPreview } from "@/components/ImpactPreview";
@@ -37,6 +38,8 @@ export function ScopeEditor({
   hasPassport: boolean;
   onClose: () => void;
 }) {
+  // `local` only where this deployment can reach it (components/dashboard/LocalModels.tsx).
+  const localModels = useLocalModelsEnabled();
   const [rows, setRows] = useState<{ provider: string; models: string }[]>(
     scopes.length > 0
       ? scopes.map((s) => ({ provider: s.provider, models: s.models.join(", ") }))
@@ -87,7 +90,7 @@ export function ScopeEditor({
                     accepts does not prevent that row from existing — it only
                     stops this editor from naming it, and leaves the select
                     showing a provider the agent does not actually have. */}
-                {SCOPE_PROVIDERS.map((p) => (
+                {offeredProviders(SCOPE_PROVIDERS, localModels, [row.provider]).map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>

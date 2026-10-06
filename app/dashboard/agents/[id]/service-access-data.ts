@@ -11,7 +11,7 @@ export type AgentServiceAccess =
   | {
       state: "ok";
       /** As stored and valid; null when the agent has no rules for this service. */
-      allow: { method: string; path: string }[];
+      allow: { method: string; path: string; ask: boolean }[];
       /** Null when the rules name no cap (the gateway's default applies). */
       maxRequestsPerHour: number | null;
       configured: boolean;
@@ -47,7 +47,7 @@ export async function readAgentServiceAccess(
   const entry = (raw as Record<string, { max_requests_per_hour?: unknown }>)[service];
   return {
     state: "ok",
-    allow: parsed.rules.allow.map((rule) => ({ method: rule.method, path: rule.path })),
+    allow: parsed.rules.allow.map((rule) => ({ method: rule.method, path: rule.path, ask: rule.ask })),
     maxRequestsPerHour: typeof entry?.max_requests_per_hour === "number" ? entry.max_requests_per_hour : null,
     configured: true,
     tokenStored,

@@ -10,7 +10,7 @@ export const SITE_BRAND_LABEL = "PassControl";
 
 // The Core mark: the product's own shield, the same one the self-host landing page
 // leads with. No company mark, because a self-hosted instance belongs to whoever runs it.
-export function SiteLogo({ size = 44 }: { size?: number }) {
+export function SiteLogo({ size = 44 }: { size?: number; decorative?: boolean }) {
   return <ShieldCheck size={size} aria-hidden="true" />;
 }
 

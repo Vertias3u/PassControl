@@ -174,6 +174,9 @@ describe("explaining a service call in the call drawer", () => {
   it("sends a refused service call to the agent's service access, and a missing token to Services", () => {
     const scope = nextActionsFor(row({ status: "blocked_scope", endpoint: null }), null);
     expect(scope.map((a) => a.href)).toContain("/dashboard/agents/agent-1#agent-services");
+    // Each service's own section on the agent page, GitHub's original anchor kept.
+    const brave = nextActionsFor(row({ status: "blocked_scope", endpoint: null, provider: "svc:brave" }), null);
+    expect(brave.map((a) => a.href)).toContain("/dashboard/agents/agent-1#agent-services-brave");
     const missing = nextActionsFor(row({ status: "no_provider_key" }), null);
     expect(missing.map((a) => a.href)).toContain("/dashboard/settings#services");
     expect(missing.map((a) => a.href)).not.toContain("/dashboard/settings#provider-credentials");

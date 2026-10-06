@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Check, Copy, KeyRound, ShieldCheck } from "lucide-react";
 import { ed25519 } from "@noble/curves/ed25519";
 
-import { attachAgentPassport } from "@/app/dashboard/actions";
+import { attachAgentPassport } from "@/app/dashboard/actions-client";
 import { bytesToBase64url } from "@/lib/encoding";
 import { buttonVariants } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";

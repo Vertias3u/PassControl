@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PassControl Control-Plane API
-  version: "1.1.0"
+  version: "1.2.0"
   description: >
     Developer API for managing a PassControl agent fleet. Authenticated with a
     `pc_` API key (Authorization: Bearer). All access is tenant-isolated to the
@@ -131,7 +131,7 @@ paths:
               type: object
               required: [provider, model]
               properties:
-                provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, xai, azure, demo] }
+                provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, xai, azure, local, demo] }
                 model: { type: string, minLength: 1, maxLength: 200 }
                 timestamp:
                   type: string
@@ -363,7 +363,7 @@ components:
     Scope:
       type: object
       properties:
-        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, xai, azure, demo] }
+        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, xai, azure, local, demo] }
         models: { type: array, items: { type: string } }
     Agent:
       type: object
@@ -427,7 +427,7 @@ components:
         evaluated_at: { type: string, format: date-time }
         policy_time: { type: string, format: date-time }
         agent_id: { type: string, format: uuid }
-        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, xai, azure, demo] }
+        provider: { type: string, enum: [openai, anthropic, groq, mistral, together, deepseek, gemini, xai, azure, local, demo] }
         model: { type: string }
         method: { type: string, const: POST }
         path: { type: array, items: { type: string } }

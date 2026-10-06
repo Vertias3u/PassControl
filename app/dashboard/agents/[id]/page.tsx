@@ -18,8 +18,6 @@ import { StatusPill, type StatusType } from "@/components/StatusPill";
 import { DirectAgentKeyPanel } from "@/components/DirectAgentKeyPanel";
 import { AgentSetupPanel } from "@/components/AgentSetupPanel";
 import { AgentOperatingHeader } from "@/components/AgentOperatingHeader";
-import { AgentPublicListing } from "@/components/AgentPublicListing";
-import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { operatorEmails } from "@/lib/operator-allowlist";
@@ -34,6 +32,9 @@ import { readKeyCustodyExpectation } from "@/lib/key-custody-expectation";
 import { AgentServiceAccess } from "@/components/AgentServiceAccess";
 import { ServiceLogo } from "@/components/ServiceLogo";
 import { readAgentServiceAccess } from "./service-access-data";
+import { AgentSectionNav, type AgentNavGroup } from "@/components/dashboard/AgentSectionNav";
+import { SERVICE_CATALOG, ruleShapeFor } from "@/lib/services/catalog";
+import { DISPLAYED_SERVICES, SERVICE_DISPLAY } from "@/lib/services/display";
 
 export const dynamic = "force-dynamic";
 
@@ -188,10 +189,24 @@ export default async function AgentPassportPage({
     ? await readKeyCustodyExpectation(db, user.id)
     : null;
   const passportWithSourceSignals = { ...passport, sourceSignals };
-  const [githubAccess, telegramAccess] = await Promise.all([
-    readAgentServiceAccess(db, user.id, passport.agent.id, "github"),
-    readAgentServiceAccess(db, user.id, passport.agent.id, "telegram"),
-  ]);
+  // Where "Ask me first" questions also go, for what the access editor says.
+  // RLS scopes the read; a database without 0078 errors, which reads as unknown.
+  const alertRead = await db.from("workspace_alerts").select("destination").maybeSingle();
+  const alertKind = (alertRead.data as { destination?: unknown } | null)?.destination;
+  const alertDestination = alertRead.error
+    ? undefined
+    : alertKind === "telegram" || alertKind === "slack" || alertKind === "discord"
+      ? alertKind
+      : null;
+  // Every catalog service, in catalog order (lib/services/display.ts).
+  const serviceAccess = await Promise.all(
+    DISPLAYED_SERVICES.map(async (service) => ({
+      service,
+      label: SERVICE_CATALOG[service].label,
+      display: SERVICE_DISPLAY[service],
+      access: await readAgentServiceAccess(db, user.id, passport.agent.id, service),
+    }))
+  );
   // C1 detection: the gateway proved this agent's private passport key was sent
   // to it as an API key. Shown only while it names the CURRENT key, so rotating
   // the passport clears it. Best-effort, like the source signals above.
@@ -201,12 +216,43 @@ export default async function AgentPassportPage({
   // The exported card carries real colour values, so the accent has to reach it as
   // data — it cannot read var(--pc-brand) through an image serialisation.
   const firstVisa = passport.visas[0];
-  // The listing panel has to name whichever of the two opt-ins is still
-  // missing, so it needs the operator's own profile state. Tolerates null: a
-  // freshly signed-up operator has no row, and the panel then says the profile
-  // is not public, which is true.
-  const profile = await readProfile(serviceClient(), user.id);
-  const profileRecord = profile.ok ? profile.data : null;
+
+  // The section nav's three groups. Operate is the identity's live status, and
+  // break glass is temporary access, so neither needs a group of its own.
+  const navGroups: AgentNavGroup[] = [
+    {
+      id: "identity",
+      label: "Identity",
+      links: [
+        { href: "#agent-operate", label: "Status" },
+        { href: "#agent-overview", label: "Overview" },
+        { href: "#agent-identity", label: "Credentials" },
+        ...(passport.directKeys.length > 0 ? [{ href: "#agent-setup" as const, label: "Setup" }] : []),
+      ],
+    },
+    {
+      id: "access",
+      label: "Access",
+      links: [
+        { href: "#agent-policy", label: "Policy" },
+        ...serviceAccess.map(({ label, display }) => ({
+          href: `#${display.sectionId}` as const,
+          label,
+          ariaLabel: `${label} access`,
+        })),
+        { href: "#agent-policy-lab", label: "Lab", ariaLabel: "Policy lab" },
+        { href: "#agent-emergency", label: "Break glass", ariaLabel: "Temporary access (break glass)" },
+      ],
+    },
+    {
+      id: "record",
+      label: "Record",
+      links: [
+        { href: "#agent-activity", label: "Activity" },
+        { href: "#agent-trace", label: "Trace", ariaLabel: "Decision trace" },
+      ],
+    },
+  ];
 
   return (
     <DashboardShell
@@ -233,26 +279,16 @@ export default async function AgentPassportPage({
       }
       contentClassName="pc-agent-content"
     >
-        <nav className="pc-agent-subnav" aria-label="Agent sections">
-          <a href="#agent-operate">Operate</a>
-          <a href="#agent-overview">Overview</a>
-          <a href="#agent-identity">Identity</a>
-          {passport.directKeys.length > 0 ? <a href="#agent-setup">Setup</a> : null}
-          <a href="#agent-public">Public listing</a>
-          <a href="#agent-policy">Live policy</a>
-          <a href="#agent-services">GitHub access</a>
-          <a href="#agent-services-telegram">Telegram access</a>
-          <a href="#agent-policy-lab">Policy lab</a>
-          <a href="#agent-activity">Activity</a>
-          <a href="#agent-emergency">Temporary access (break glass)</a>
-          <a href="#agent-trace">Decision trace</a>
-        </nav>
+        {/* Three fixed groups with one sub-row (components/dashboard/AgentSectionNav).
+            Every section id is unchanged: refusal messages, the fleet table and
+            the services page deep-link to them. */}
+        <AgentSectionNav groups={navGroups} />
 
         <AgentOperatingHeader
-          serviceAccess={[
-            { label: "GitHub", rules: githubAccess.state === "ok" ? githubAccess.allow.length : 0 },
-            { label: "Telegram", rules: telegramAccess.state === "ok" ? telegramAccess.allow.length : 0 },
-          ]}
+          serviceAccess={serviceAccess.map(({ label, access }) => ({
+            label,
+            rules: access.state === "ok" ? access.allow.length : 0,
+          }))}
           agentId={passport.agent.id}
           agentName={passport.agent.name}
           status={passport.agent.status}
@@ -267,10 +303,9 @@ export default async function AgentPassportPage({
         <div id="agent-identity" className="scroll-mt-40">
         <AgentPassport
           passport={passportWithSourceSignals}
-          services={[
-            ...(githubAccess.state === "ok" && githubAccess.allow.length > 0 ? ["GitHub"] : []),
-            ...(telegramAccess.state === "ok" && telegramAccess.allow.length > 0 ? ["Telegram"] : []),
-          ]}
+          services={serviceAccess
+            .filter(({ access }) => access.state === "ok" && access.allow.length > 0)
+            .map(({ label }) => label)}
           visaTtlSeconds={visaTtlSeconds()}
         />
         </div>
@@ -322,81 +357,34 @@ export default async function AgentPassportPage({
           status={passport.agent.status}
           keys={passport.directKeys}
         />
-        {/* With identity, not with policy, and deliberately NOT a toggle in the
-            fleet table: a row-level switch in a list makes publishing something
-            you do by accident, and this is the one control on the dashboard
-            whose effect strangers can see. */}
-        <section id="agent-public" className="pc-section scroll-mt-40">
-          <SectionHeader
-            eyebrow="Public identity"
-            title="Public listing"
-            description={<>
-            Whether this agent appears on your public profile. It is the second of two
-            opt-ins — publishing your profile lists <strong>no agent</strong> by itself.
-            </>}
-          />
-          <div className="pc-section__body">
-            <AgentPublicListing
-              agentId={passport.agent.id}
-              agentName={passport.agent.name}
-              published={passport.agent.published}
-              publicLabel={passport.agent.publicLabel}
-              hasPassport={Boolean(passport.agent.passportId)}
-              profileHandle={profileRecord?.username ?? null}
-              profilePublic={profileRecord?.profile_public === true}
-            />
-          </div>
-        </section>
         <div id="agent-policy" className="scroll-mt-40">
         <AgentPolicySummary policy={passport.policy} />
         </div>
         {/* Beside the live policy, but not part of it: these rules ARE the scope
             of a service call, and nothing in the policy above applies to one. */}
-        <section id="agent-services" className="pc-section scroll-mt-40">
-          <SectionHeader
-            eyebrow="Service access"
-            title="GitHub access"
-            icon={<ServiceLogo service="github" />}
-            description={<>
-            What this agent may do on GitHub with the workspace&apos;s GitHub token, which it never
-            holds. Nothing until you allow it, checked on every call: a choice you untick stops the next one.
-            </>}
-          />
-          <div className="pc-section__body">
-            <AgentServiceAccess
-              agentId={passport.agent.id}
-              service="github"
-              serviceLabel="GitHub"
-              initialAllow={githubAccess.state === "ok" ? githubAccess.allow : []}
-              initialCap={githubAccess.state === "ok" ? githubAccess.maxRequestsPerHour : null}
-              state={githubAccess.state}
-              tokenStored={githubAccess.state === "unavailable" ? null : githubAccess.tokenStored}
+        {serviceAccess.map(({ service, label, display, access }) => (
+          <section key={service} id={display.sectionId} className="pc-section scroll-mt-40">
+            <SectionHeader
+              eyebrow="Service access"
+              title={`${label} access`}
+              icon={<ServiceLogo service={service} />}
+              description={display.accessDescription}
             />
-          </div>
-        </section>
-        <section id="agent-services-telegram" className="pc-section scroll-mt-40">
-          <SectionHeader
-            eyebrow="Service access"
-            title="Telegram access"
-            icon={<ServiceLogo service="telegram" />}
-            description={<>
-            What this agent may do with the workspace&apos;s Telegram bot, whose token it never holds.
-            Nothing until you allow it, checked on every call.
-            </>}
-          />
-          <div className="pc-section__body">
-            <AgentServiceAccess
-              agentId={passport.agent.id}
-              service="telegram"
-              serviceLabel="Telegram"
-              ruleShape="call"
-              initialAllow={telegramAccess.state === "ok" ? telegramAccess.allow : []}
-              initialCap={telegramAccess.state === "ok" ? telegramAccess.maxRequestsPerHour : null}
-              state={telegramAccess.state}
-              tokenStored={telegramAccess.state === "unavailable" ? null : telegramAccess.tokenStored}
-            />
-          </div>
-        </section>
+            <div className="pc-section__body">
+              <AgentServiceAccess
+                agentId={passport.agent.id}
+                service={service}
+                serviceLabel={label}
+                ruleShape={ruleShapeFor(service)}
+                initialAllow={access.state === "ok" ? access.allow : []}
+                initialCap={access.state === "ok" ? access.maxRequestsPerHour : null}
+                state={access.state}
+                tokenStored={access.state === "unavailable" ? null : access.tokenStored}
+                alertDestination={alertDestination}
+              />
+            </div>
+          </section>
+        ))}
         {/* Directly below the live policy, because the pair is the point: what
             decides now, and what would decide if you promoted the draft. */}
         <div id="agent-policy-lab" className="scroll-mt-40">

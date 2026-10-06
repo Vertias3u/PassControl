@@ -12,6 +12,8 @@
 // next.config.mjs keeps only the API's own policy, which shares nothing with
 // this one.
 
+import { TURNSTILE_ORIGIN } from "./auth/turnstile-config";
+
 /**
  * 128 bits of CSPRNG per request, base64 encoded. Web Crypto rather than
  * node:crypto — every route in this app runs on the edge runtime.
@@ -138,6 +140,12 @@ export interface CspOptions {
    * where the page may TALK; it never touches what may RUN.
    */
   allowExternalJwks?: boolean;
+  /**
+   * The three auth forms, when Turnstile is configured (`needsTurnstile` in
+   * lib/auth/turnstile-config.ts decides both this and whether the widget
+   * renders). Admits Cloudflare's script and iframe and nothing else.
+   */
+  allowTurnstile?: boolean;
 }
 
 export function buildContentSecurityPolicy({
@@ -146,6 +154,7 @@ export function buildContentSecurityPolicy({
   supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL,
   prerendered = false,
   allowExternalJwks = false,
+  allowTurnstile = false,
 }: CspOptions): string {
   // 'self' is retained alongside 'strict-dynamic' deliberately: CSP3 browsers
   // ignore it once 'strict-dynamic' is present, and CSP2-only browsers ignore
@@ -167,6 +176,12 @@ export function buildContentSecurityPolicy({
         "'strict-dynamic'",
         ...(isProduction ? [] : ["'unsafe-eval'"]),
       ];
+  // The widget's script is injected by our nonced bundle, which 'strict-dynamic'
+  // already trusts in CSP3 browsers; the host is listed for CSP2 browsers, which
+  // ignore 'strict-dynamic' and fall back to host allowlisting. The iframe needs
+  // its own frame-src: without one it falls back to default-src 'self' and the
+  // widget silently never appears.
+  if (allowTurnstile) scriptSrc.push(TURNSTILE_ORIGIN);
 
   return [
     "default-src 'self'",
@@ -181,6 +196,7 @@ export function buildContentSecurityPolicy({
     // execution, so this stays until the framework offers a nonced path.
     "style-src 'self' 'unsafe-inline'",
     `script-src ${scriptSrc.join(" ")}`,
+    ...(allowTurnstile ? [`frame-src ${TURNSTILE_ORIGIN}`] : []),
     `connect-src ${connectSources(supabaseUrl, isProduction, allowExternalJwks).join(" ")}`,
     ...(isProduction ? ["upgrade-insecure-requests"] : []),
   ].join("; ");

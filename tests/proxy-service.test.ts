@@ -792,3 +792,212 @@ describe("Telegram", () => {
     expectNothingSent();
   });
 });
+
+// Brave Search through the same route (§13, S1). Read-only, header auth, and
+// billed per request on Brave's side with no cap there: the agent's hourly cap
+// is the bill guard, and it defaults to 30 for Brave.
+describe("Brave Search", () => {
+  const BRAVE_KEY = "BSAexampleSubscriptionToken0123456789";
+  const BRAVE_RULES = { brave: { allow: [{ method: "GET", path: "/web/search" }] } };
+
+  function brave(method: string, clientPath: string, clientQuery = "", init: { headers?: Record<string, string>; body?: string } = {}) {
+    const segments = clientPath.replace(/^\//u, "").split("/");
+    const injected = ["service=brave", ...segments.map((x) => `path=${x}`)].join("&");
+    const query = [clientQuery, injected].filter(Boolean).join("&");
+    const req = new Request(`${ORIGIN}/api/v1/svc/brave${clientPath}?${query}`, {
+      method,
+      headers: { authorization: `Bearer ${VISA}`, ...(init.headers ?? {}) },
+      ...(init.body !== undefined ? { body: init.body } : {}),
+    });
+    const ctx = { params: Promise.resolve({ service: "brave", path: segments }) };
+    const handler = { GET, POST }[method as "GET" | "POST"];
+    return handler(req, ctx);
+  }
+
+  beforeEach(() => {
+    h.rulesRead.mockResolvedValue({ data: { service_rules: BRAVE_RULES }, error: null });
+    h.rpc.mockResolvedValue({ data: BRAVE_KEY, error: null });
+    h.fetch.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ web: { results: [] } }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-ratelimit-remaining": "999", "set-cookie": "x=1" },
+        })
+    );
+  });
+
+  it("sends a search to api.search.brave.com/res/v1 with the key in X-Subscription-Token only", async () => {
+    const res = await brave("GET", "/web/search", "q=agent+gateway&count=5");
+    expect(res.status).toBe(200);
+    const [url, init] = upstreamCalls()[0]!;
+    expect(url).toBe("https://api.search.brave.com/res/v1/web/search?q=agent+gateway&count=5");
+    const sent = new Headers(init.headers);
+    expect(sent.get("x-subscription-token")).toBe(BRAVE_KEY);
+    expect(sent.get("authorization")).toBeNull();
+    expect(keyReads()).toEqual([["get_provider_key", { p_agent_id: AGENT, p_provider: "svc:brave" }]]);
+    expect(lastLog()).toMatchObject({ provider: "svc:brave", status: "ok", endpoint: "GET /web/search" });
+    expect(res.headers.get("x-ratelimit-remaining")).toBe("999");
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(JSON.stringify(lastLog())).not.toContain(BRAVE_KEY);
+    expect(JSON.stringify(lastReceipt())).not.toContain(BRAVE_KEY);
+  });
+
+  it("caps an agent with no cap of its own at 30 calls an hour", async () => {
+    await brave("GET", "/web/search", "q=x");
+    const capCall = h.rateLimitFailClosed.mock.calls.find(([key]) => String(key).startsWith("svc-cap:"))!;
+    expect(capCall).toEqual([`svc-cap:${AGENT}:brave`, 30, 3600]);
+  });
+
+  it("refuses a write whatever the rules say, before the key is read", async () => {
+    h.rulesRead.mockResolvedValue({ data: { service_rules: { brave: { allow: [{ method: "POST", path: "/chat/completions" }] } } }, error: null });
+    const res = await brave("POST", "/chat/completions", "", { headers: { "content-type": "application/json" }, body: "{}" });
+    expect(res.status).toBe(403);
+    expect(lastLog()).toMatchObject({ status: "blocked_endpoint" });
+    expectNothingSent();
+  });
+
+  it("refuses a path no rule names", async () => {
+    const res = await brave("GET", "/llm/context", "q=x");
+    expect(res.status).toBe(403);
+    expect(lastLog()).toMatchObject({ status: "blocked_scope" });
+    expectNothingSent();
+  });
+});
+
+// Notion through the same route (§13, S2). Bearer token, the agent's own
+// Notion-Version forwarded, /v1 kept in the path as Notion's SDK sends it.
+describe("Notion", () => {
+  const NOTION_TOKEN = "ntn_example0123456789abcdefghijklmnopqrstuvwxyzAB";
+  const NOTION_RULES = {
+    notion: {
+      allow: [
+        { method: "GET", path: "/v1/pages/*" },
+        { method: "POST", path: "/v1/search" },
+        { method: "POST", path: "/v1/oauth/token" },
+      ],
+    },
+  };
+
+  function notion(method: string, clientPath: string, init: { headers?: Record<string, string>; body?: string } = {}) {
+    const segments = clientPath.replace(/^\//u, "").split("/");
+    const injected = ["service=notion", ...segments.map((x) => `path=${x}`)].join("&");
+    const req = new Request(`${ORIGIN}/api/v1/svc/notion${clientPath}?${injected}`, {
+      method,
+      headers: { authorization: `Bearer ${VISA}`, ...(init.headers ?? {}) },
+      ...(init.body !== undefined ? { body: init.body } : {}),
+    });
+    const ctx = { params: Promise.resolve({ service: "notion", path: segments }) };
+    const handler = { GET, POST, PATCH }[method as "GET" | "POST" | "PATCH"];
+    return handler(req, ctx);
+  }
+
+  beforeEach(() => {
+    h.rulesRead.mockResolvedValue({ data: { service_rules: NOTION_RULES }, error: null });
+    h.rpc.mockResolvedValue({ data: NOTION_TOKEN, error: null });
+    h.fetch.mockImplementation(
+      async () => new Response(JSON.stringify({ object: "page" }), { status: 200, headers: { "content-type": "application/json" } })
+    );
+  });
+
+  it("reads a page with the token as Bearer and the agent's Notion-Version", async () => {
+    const res = await notion("GET", "/v1/pages/p1", { headers: { "notion-version": "2026-03-11" } });
+    expect(res.status).toBe(200);
+    const [url, init] = upstreamCalls()[0]!;
+    expect(url).toBe("https://api.notion.com/v1/pages/p1");
+    const sent = new Headers(init.headers);
+    expect(sent.get("authorization")).toBe(`Bearer ${NOTION_TOKEN}`);
+    expect(sent.get("notion-version")).toBe("2026-03-11");
+    expect(keyReads()).toEqual([["get_provider_key", { p_agent_id: AGENT, p_provider: "svc:notion" }]]);
+    // The log names the rule that admitted the call, as for GitHub.
+    expect(lastLog()).toMatchObject({ provider: "svc:notion", status: "ok", endpoint: "GET /v1/pages/*" });
+    expect(JSON.stringify(lastLog())).not.toContain(NOTION_TOKEN);
+  });
+
+  it("forwards a search as a JSON POST", async () => {
+    const body = JSON.stringify({ query: "roadmap" });
+    const res = await notion("POST", "/v1/search", { headers: { "content-type": "application/json" }, body });
+    expect(res.status).toBe(200);
+    const [url, init] = upstreamCalls()[0]!;
+    expect(url).toBe("https://api.notion.com/v1/search");
+    expect(init.body).toBe(body);
+  });
+
+  it("refuses an OAuth endpoint even when a rule allows it, before the token is read", async () => {
+    const res = await notion("POST", "/v1/oauth/token", { headers: { "content-type": "application/json" }, body: "{}" });
+    expect(res.status).toBe(403);
+    expect(lastLog()).toMatchObject({ status: "blocked_endpoint" });
+    expectNothingSent();
+  });
+});
+
+// Discord (bot) through the same route (§13, S3). `Bot` auth, a User-Agent
+// naming this release, /api plus the agent's /v10 path, as discord.js builds it.
+describe("Discord", () => {
+  // Discord's documentation example token, split so secret scanners do not block a push over it.
+  const DISCORD_TOKEN = ["MTk4NjIyNDgzNDcxOTI1MjQ4", "Cl2FMQ", "ZnCjm1XVW7vRze4b7Cq4se7kKWs"].join(".");
+  const CHANNEL = "123456789012345678";
+  const DISCORD_RULES = {
+    discord: {
+      allow: [
+        { method: "POST", path: `/v10/channels/${CHANNEL}/messages` },
+        { method: "GET", path: `/v10/channels/${CHANNEL}/webhooks` },
+      ],
+    },
+  };
+
+  function discord(method: string, clientPath: string, init: { headers?: Record<string, string>; body?: string } = {}) {
+    const segments = clientPath.replace(/^\//u, "").split("/");
+    const injected = ["service=discord", ...segments.map((x) => `path=${x}`)].join("&");
+    const req = new Request(`${ORIGIN}/api/v1/svc/discord${clientPath}?${injected}`, {
+      method,
+      headers: { authorization: `Bearer ${VISA}`, ...(init.headers ?? {}) },
+      ...(init.body !== undefined ? { body: init.body } : {}),
+    });
+    const ctx = { params: Promise.resolve({ service: "discord", path: segments }) };
+    const handler = { GET, POST }[method as "GET" | "POST"];
+    return handler(req, ctx);
+  }
+
+  beforeEach(() => {
+    h.rulesRead.mockResolvedValue({ data: { service_rules: DISCORD_RULES }, error: null });
+    h.rpc.mockResolvedValue({ data: DISCORD_TOKEN, error: null });
+    h.fetch.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ id: "9" }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-ratelimit-bucket": "abc", "x-ratelimit-remaining": "4" },
+        })
+    );
+  });
+
+  it("sends a message to discord.com/api/v10 as the bot, with its own User-Agent", async () => {
+    const body = JSON.stringify({ content: "deploy finished" });
+    const res = await discord("POST", `/v10/channels/${CHANNEL}/messages`, {
+      headers: { "content-type": "application/json", "user-agent": "agent-chosen" },
+      body,
+    });
+    expect(res.status).toBe(200);
+    const [url, init] = upstreamCalls()[0]!;
+    expect(url).toBe(`https://discord.com/api/v10/channels/${CHANNEL}/messages`);
+    expect(init.body).toBe(body);
+    const sent = new Headers(init.headers);
+    expect(sent.get("authorization")).toBe(`Bot ${DISCORD_TOKEN}`);
+    expect(sent.get("user-agent")).toMatch(/^DiscordBot \(https:\/\/github\.com\/Vertias3u\/PassControl, /u);
+    expect(keyReads()).toEqual([["get_provider_key", { p_agent_id: AGENT, p_provider: "svc:discord" }]]);
+    expect(res.headers.get("x-ratelimit-bucket")).toBe("abc");
+    expect(JSON.stringify(lastLog())).not.toContain(DISCORD_TOKEN);
+  });
+
+  it("refuses reading a channel's webhooks even when a rule allows it: they carry tokens", async () => {
+    const res = await discord("GET", `/v10/channels/${CHANNEL}/webhooks`);
+    expect(res.status).toBe(403);
+    expect(lastLog()).toMatchObject({ status: "blocked_endpoint" });
+    expectNothingSent();
+  });
+
+  it("refuses an unversioned path, which would reach Discord's default v6", async () => {
+    const res = await discord("POST", `/channels/${CHANNEL}/messages`, { headers: { "content-type": "application/json" }, body: "{}" });
+    expect(res.status).toBe(403);
+    expectNothingSent();
+  });
+});

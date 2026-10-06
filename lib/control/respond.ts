@@ -21,6 +21,8 @@ const MESSAGES: Record<string, string> = {
   invalid_idempotency_key: "The Idempotency-Key header is missing or malformed.",
   request_in_progress: "A request with this Idempotency-Key is still being processed.",
   agent_exists: "That passport is already registered.",
+  account_limit_reached:
+    "This account has reached a limit on how many of these it can have. Revoke one you no longer use, or ask the operator for a higher limit.",
   agent_not_active: "Only an active passport can be rotated.",
   same_key: "That is already this agent's passport. Generate a new keypair.",
   rotation_in_progress:

@@ -68,7 +68,11 @@ export function SignupForm({
         </label>
       ) : null}
       {state?.error ? <p role="alert" className="pc-form-error">{state.error}</p> : null}
-      {state?.success ? <p role="status" className="pc-form-success">{state.success}</p> : null}
+      {state?.success ? (
+        <p role="status" className="pc-form-success">
+          {state.success}
+        </p>
+      ) : null}
       {canSubmit ? <SubmitButton /> : null}
       <p className="pc-auth-form__switch">
         Already have an account? <a href="/login">Sign in</a>

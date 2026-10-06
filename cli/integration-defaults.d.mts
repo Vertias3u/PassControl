@@ -7,7 +7,8 @@ export type IntegrationProvider =
   | "deepseek"
   | "gemini"
   | "xai"
-  | "azure";
+  | "azure"
+  | "local";
 
 export const DEFAULT_ALLOWED_MODELS: Readonly<Record<IntegrationProvider, string>>;
 export const DEFAULT_CLIENT_MODELS: Readonly<Record<IntegrationProvider, string>>;

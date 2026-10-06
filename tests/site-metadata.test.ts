@@ -58,7 +58,6 @@ describe("advertised version", () => {
     "docs/integrations/hermes.md",
     "docs/integrations/passport-sdk.md",
     "docs/demo/README.md",
-    "docs/deployment/cloudflare.md",
   ];
 
   it.each(VERSIONED_DOCS)("pins no npm version in %s", async (path) => {

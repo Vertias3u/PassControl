@@ -101,6 +101,7 @@ import {
 import { rateLimit } from "@/lib/ratelimit";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
+import { alertForGatewayStatus, notifyWorkspace } from "@/lib/alerts/workspace";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 import { err, errMessage } from "@/lib/gateway/responses";
 import {
@@ -869,7 +870,17 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     status: Parameters<typeof writeLog>[0]["status"],
     model?: string,
     httpStatus = 403
-  ) =>
+  ) => {
+    // Workspace alerts (plans/workspace-alerts.md): after the refusal is
+    // decided and answered, inside waitUntil, never awaited by the response.
+    // The status filter costs nothing; notifyWorkspace then spends one Redis
+    // SET NX before anything else and never throws.
+    const alert = alertForGatewayStatus(status);
+    if (alert) {
+      waitUntil(
+        notifyWorkspace({ userId, agentId, type: alert, status, model, origin: new URL(req.url).origin })
+      );
+    }
     waitUntil(
       (async () =>
         writeLog({
@@ -904,6 +915,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           ...(senderProofWould ? { senderProofWould } : {}),
         }))()
     );
+  };
 
   const captureBlocked = (code: string, status: number, controlScope?: string) =>
     waitUntil(
@@ -1306,12 +1318,37 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     }
     const forwardBody = JSON.stringify(attemptBody);
 
-    const estimateMicrocents = costMicrocents(
-      attemptModel,
-      estimatedUsage.inputTokens,
-      estimatedUsage.outputTokens,
-      attemptProvider
-    );
+    // Where this attempt's credential goes, resolved BEFORE the hold opens: the
+    // hold's cost estimate depends on it (a custom endpoint is unpriced, so it
+    // reserves no money — T4-02 below), and `reconcile` prices the call from it.
+    // Declaring it at the injection point instead put it in the temporal dead
+    // zone of a closure TypeScript cannot order-prove, which the failover suite
+    // caught as a 500 where a 402 belonged. Nothing it reads is a secret: the key
+    // is still fetched at step 6, after every refusal.
+    //
+    // `resolveEndpoint` returns null for every deployment that has not opted in,
+    // which is the default — so on Cloud this is one short-circuit and no reads,
+    // for every provider except Azure, whose stored address is always read. It
+    // re-validates rather than trusting the row: a value stored
+    // while the gate was wider must not be reached after an operator narrowed it.
+    const resolvedEndpoint = await resolveEndpoint(db, userId, agentId, attemptProvider);
+    // Null both when there is genuinely no endpoint and when the read failed —
+    // the failure is refused below, and pricing an unsent call is moot either way.
+    const custom = resolvedEndpoint.known ? resolvedEndpoint.endpoint : null;
+
+    // T4-02: a call to a custom endpoint reserves NO money. Its price is unknown,
+    // and since S3-03 a dollar limit (cumulative or periodic) refuses it at step
+    // 5b before it is sent, so there is no cost cap for an estimate to protect.
+    // Priced from the built-in table instead, it reserved the provider's highest
+    // rate and settled it into the agent's spend: free local calls accumulated
+    // "charged to budgets" that a cap added later would start from. Zero here
+    // makes every exit agree (complete, usage unknown and refused all settle the
+    // same zero), so the row needs no enforced figure and Postgres's definition
+    // of spend matches the counter. Tokens are real wherever the call went and
+    // are reserved as before.
+    const estimateMicrocents = isPricedEndpoint(custom)
+      ? costMicrocents(attemptModel, estimatedUsage.inputTokens, estimatedUsage.outputTokens, attemptProvider)
+      : 0;
 
     // ── 5. Open the attempt's hold (atomic) ────────────────────────────────────
     // One clock per attempt: it decides the period the hold is judged in, and
@@ -1512,21 +1549,6 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     }
 
     // From here a reservation is held; it MUST be reconciled on every exit path.
-    // Where this attempt's credential goes, resolved BEFORE `reconcile` because
-    // that closure prices the call and a custom endpoint is unpriced. Declaring
-    // it at the injection point instead put it in the temporal dead zone of a
-    // closure TypeScript cannot order-prove, which the failover suite caught as
-    // a 500 where a 402 belonged.
-    //
-    // `resolveEndpoint` returns null for every deployment that has not opted in,
-    // which is the default — so on Cloud this is one short-circuit and no reads,
-    // for every provider except Azure, whose stored address is always read. It
-    // re-validates rather than trusting the row: a value stored
-    // while the gate was wider must not be reached after an operator narrowed it.
-    const resolvedEndpoint = await resolveEndpoint(db, userId, agentId, attemptProvider);
-    // Null both when there is genuinely no endpoint and when the read failed —
-    // the failure is refused below, and pricing an unsent call is moot either way.
-    const custom = resolvedEndpoint.known ? resolvedEndpoint.endpoint : null;
 
     /**
      * Close this attempt's hold and write its audit row.
@@ -1578,12 +1600,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // WHAT THE COST DIMENSION IS CHARGED, which is not always the price.
       //
       // For an unpriced endpoint `cost` is 0 — not because the call was free but
-      // because nobody could price it. Settling the cost dimension at that zero
-      // released the whole cost reservation, so a cost cap NEVER ADVANCED on an
-      // agent using a custom endpoint: it could run forever against a limit that
-      // could not move. The reservation stands instead. The audit row still
-      // records `cost_microcents: null` + `unpriced: true`, because what was
-      // enforced and what was priced are different questions.
+      // because nobody could price it. The charge is the reservation, and for a
+      // custom endpoint the reservation is 0 (T4-02, at the hold): no dollar
+      // limit can reach one (S3-03), so there is no cap for a charge to advance.
+      // An unpriced call to a built-in host (Azure, `local`) has no price row
+      // and reserved 0 already. The audit row still records
+      // `cost_microcents: null` + `unpriced: true`: unknown, not free.
       const chargeMicrocents = priced ? cost : estimateMicrocents;
       // What the ROW will say was observed, in the terms the spend view reads it
       // in: `coalesce(enforced_microcents, coalesce(cost_microcents, 0))`. An
@@ -1835,11 +1857,13 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // ── 5b. A dollar cap cannot be enforced against a price nobody knows ───────
     //
     // S3-03, and a DELIBERATE BEHAVIOUR CHANGE rather than a repair — this call
-    // used to be allowed. `estimateMicrocents` above is computed before the
-    // endpoint is resolved, so `costMicrocents` receives no endpoint and returns
-    // the BUILT-IN PROVIDER'S RETAIL price; `reconcile` then charges that
-    // estimate, because settling an unpriced call at zero released the whole
-    // reservation and a cost cap could never advance.
+    // used to be allowed. Before it, the estimate was computed before the
+    // endpoint was resolved, so `costMicrocents` returned the BUILT-IN
+    // PROVIDER'S RETAIL price, and `reconcile` charged that estimate, because
+    // settling an unpriced call at zero released the whole reservation and a
+    // cost cap could never advance. (Since T4-02 the endpoint is resolved first
+    // and a custom endpoint reserves nothing, which is safe only BECAUSE this
+    // refusal exists: no dollar limit ever reaches an unpriced call.)
     //
     // Each half was deliberate and each is defensible alone. Together they
     // enforce a dollar limit with a number that has nothing to do with the bill:

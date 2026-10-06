@@ -236,7 +236,7 @@ export function PassportStoreAndConnect({
           </section>
           <section className="grid gap-2" aria-labelledby="passport-svc-client-heading" data-client-family="services">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div><strong id="passport-svc-client-heading">3. Connect GitHub and Telegram</strong><small className="block text-muted-foreground">Save as <code>{serviceSetup.clientFilename}</code>. This code contains no private key and no service token.</small></div>
+              <div><strong id="passport-svc-client-heading">3. Connect services</strong><small className="block text-muted-foreground">Save as <code>{serviceSetup.clientFilename}</code>. This code contains no private key and no service token.</small></div>
               {copyButton("client", "Copy application code", serviceSetup.clientCode)}
             </div>
             <pre className="pc-secret-block is-public overflow-x-auto">{serviceSetup.clientCode}</pre>
@@ -301,7 +301,7 @@ export function PassportStoreAndConnect({
               </div>
               <pre className="pc-secret-block is-public overflow-x-auto">{serviceSetup.sidecarCommands}</pre>
               <p className="pc-field-note">
-                The tool sends no GitHub or Telegram token: the sidecar adds the passport&apos;s proof and PassControl adds the
+                The tool sends no service token: the sidecar adds the passport&apos;s proof and PassControl adds the
                 stored token.
               </p>
             </section>

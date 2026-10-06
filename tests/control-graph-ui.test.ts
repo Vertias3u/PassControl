@@ -7,8 +7,6 @@ const read = (path: string) => readFileSync(resolve(process.cwd(), path), "utf8"
 const page = read("app/dashboard/graph/page.tsx");
 const component = read("components/dashboard/ControlGraph.tsx");
 const shell = read("components/dashboard/DashboardShell.tsx");
-const homepage = read("components/PassControlSiteClient.tsx");
-const homeCss = read("app/home.module.css");
 const globalCss = read("app/globals.css");
 
 describe("authenticated Control Graph composition", () => {
@@ -87,17 +85,3 @@ describe("authenticated Control Graph composition", () => {
   });
 });
 
-describe("homepage boundary graph", () => {
-  it("runs only from the existing real demo states and preserves the disclosure contract", () => {
-    expect(homepage).toContain("function DemoBoundaryGraph");
-    expect(homepage).toContain("Every signal below comes from the call you just made.");
-    expect(homepage).toContain("<DemoBoundaryGraph state={state} />");
-    expect(homepage).not.toMatch(/setInterval|synthetic|ambient/);
-  });
-
-  it("stops the blocked path at PassControl and has a reduced-motion fallback", () => {
-    expect(homepage).toContain('blocked ? "Demo call stopped at PassControl"');
-    expect(homepage).toContain('data-blocked={blocked}');
-    expect(homeCss).toContain(".demoGraphPulse { display: none; }");
-  });
-});

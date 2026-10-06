@@ -7,6 +7,7 @@ import { serviceClient } from "@/lib/supabase";
 import { userClient } from "@/lib/supabase/server";
 import {
   validateAgentInput,
+  validateAgentProfileInput,
   validateProviderKeyInput,
   validateRotateInput,
 } from "@/lib/validate";
@@ -17,6 +18,8 @@ import { IDLE_WINDOW_MS } from "@/lib/control/auth";
 import { ensureProfileRow } from "@/lib/profile/manage";
 import { generateApiKey } from "@/lib/apikeys";
 import { azureEndpointSuggestion, endpointPolicy, normalizeEndpointFor } from "@/lib/providers/endpoint";
+import { OLLAMA_ENDPOINT, listLocalModels } from "@/lib/providers/local-server";
+import { wizardServiceRules, type WizardServiceChoice } from "@/lib/services/presets";
 import {
   authHeaders,
   isProvider,
@@ -31,6 +34,12 @@ import {
   readSuspensionFlag,
 } from "@/lib/state/redis";
 import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
+import { accountLimitFrom, accountLimitMessage } from "@/lib/account-limits";
+import { agentCreationRefusal, type AgentCapacityDb } from "@/lib/agent-capacity";
+import { validateDirectKeyMetadata } from "@/lib/auth/direct-key";
+import { captureError } from "@/lib/observability";
+import { ActionError, type ActionResult } from "@/lib/action-result";
+import { runAction } from "@/lib/run-action";
 import {
   GRANT_TTL_S,
   approveDeviceAuthorization,
@@ -79,15 +88,50 @@ type ProviderKeyInput = {
  */
 function azureEndpointError(raw: string): Error {
   const suggestion = azureEndpointSuggestion(raw);
-  return new Error(
+  return new ActionError(
     suggestion
       ? `Use ${suggestion}. Azure's v1 API lives under /openai/v1 on your resource.`
       : "An Azure key needs its resource's v1 address: https://<resource>.openai.azure.com/openai/v1 (or https://<resource>.services.ai.azure.com/openai/v1)."
   );
 }
 
+/**
+ * The refusal for a credential whose address is part of it, in that provider's
+ * terms: Azure names the resource shape, `local` names the gate or the address.
+ */
+function endpointRequiredError(provider: string, raw: string): Error {
+  if (provider !== "local") return azureEndpointError(raw);
+  const policy = endpointPolicy();
+  if (policy.kind === "off") return localModelsDisabledError();
+  return new ActionError(
+    policy.kind === "allowlist"
+      ? "A local credential needs its server's address, at a host this deployment's PROVIDER_ENDPOINT_MODE lists."
+      : "A local credential needs its server's address, such as http://localhost:11434/v1 for Ollama."
+  );
+}
+
+function localModelsDisabledError(): Error {
+  return new ActionError(
+    "Local models are not enabled on this deployment. Set PROVIDER_ENDPOINT_MODE=selfhost to turn them on."
+  );
+}
+
 /** Log only the DB machine code; surface a generic message to the caller so no
  *  database internals or reflected credential material can leave this action. */
+/**
+ * Run one of lib/validate's form checks and show its message. Those messages are
+ * fixed text written for the form ("Unknown provider.", "Label too long.") and
+ * never include what was submitted, so they may cross to the browser; as plain
+ * Errors, runAction would replace them with the generic message.
+ */
+function formCheck<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    throw new ActionError(error instanceof Error ? error.message : "Invalid input.");
+  }
+}
+
 function failGeneric(
   context: string,
   error: { code?: string; message?: string } | null
@@ -99,7 +143,7 @@ function failGeneric(
     .replace(/[^a-zA-Z0-9_-]/g, "")
     .slice(0, 40) || "unknown";
   console.error(`[dashboard:${context}]`, safeCode);
-  throw new Error("Something went wrong. Please try again.");
+  throw new ActionError("Something went wrong. Please try again.");
 }
 
 /**
@@ -123,7 +167,7 @@ export interface KillObservation {
  * agent that was separately suspended or revoked (lib/fleet.ts:729-731).
  *
  * The Redis flag is the whole enforcement: the proxy reads it per call at check 2. */
-export async function setMasterKill(on: boolean): Promise<KillObservation> {
+async function setMasterKillBody(on: boolean): Promise<KillObservation> {
   const { db, user } = await requireUser();
   let applied = false;
   try {
@@ -144,7 +188,7 @@ export async function setMasterKill(on: boolean): Promise<KillObservation> {
 }
 
 /** Read-only re-check of the fleet kill switch, behind "Refresh status". */
-export async function observeMasterKill(requested: boolean): Promise<KillObservation> {
+async function observeMasterKillBody(requested: boolean): Promise<KillObservation> {
   const { user } = await requireUser();
   const observed = await observeKillState(user.id);
   return { requested: requested === true, ...observed, confirmed: observed.tenant === (requested === true) };
@@ -206,7 +250,7 @@ async function readOwnAgentStatus(
  * refuses" is the answer the operator needs, and an exception says nothing.
  *
  * Stays on requireUser(): a stop is never behind a step-up. */
-export async function setAgentSuspended(
+async function setAgentSuspendedBody(
   agentId: string,
   suspended: boolean
 ): Promise<AgentControlObservation> {
@@ -221,7 +265,10 @@ export async function setAgentSuspended(
     if (!r.ok) throw new Error("not_authorized");
     applied = true;
   } catch (error) {
-    if ((error as Error).message === "not_authorized") throw error;
+    // Not this caller's agent: refused, and said in the words the other agent
+    // actions use. The sentinel stays internal so a layer failure is not mistaken
+    // for it.
+    if ((error as Error).message === "not_authorized") throw new ActionError("This agent is unavailable.");
     // A layer failed part-way. Fall through to the readback.
   }
   if (applied) {
@@ -244,17 +291,17 @@ export async function setAgentSuspended(
 }
 
 /** Read-only: where does this agent's stop actually stand? Behind "Refresh status". */
-export async function observeAgentControl(
+async function observeAgentControlBody(
   agentId: string,
   requested: ControlIntent
 ): Promise<AgentControlObservation> {
   const auth = await requireUser();
-  if (!UUID_RE.test(String(agentId))) throw new Error("This agent is unavailable.");
+  if (!UUID_RE.test(String(agentId))) throw new ActionError("This agent is unavailable.");
   const intent: ControlIntent = requested === "suspended" ? "suspended" : "active";
   // Ownership through the caller's own read BEFORE any Redis key is touched,
   // so this cannot be used to probe other tenants' agent ids.
   const database = await readOwnAgentStatus(auth, agentId);
-  if (database === undefined) throw new Error("not_authorized");
+  if (database === undefined) throw new ActionError("This agent is unavailable.");
   if (database === null) return observation(agentId, intent, null, null);
   return observation(agentId, intent, database, await readSuspensionFlag(agentId));
 }
@@ -285,7 +332,7 @@ async function createAgentForUser(
   const r = await fleet.createAgent(serviceClient(), user.id, input);
   if (!r.ok) {
     console.error("[dashboard:createAgent]", r.code, r.message ?? "");
-    throw new Error(r.message ?? "Something went wrong. Please try again.");
+    throw new ActionError(r.message ?? "Something went wrong. Please try again.");
   }
   await recordAdminAction({
     userId: user.id,
@@ -298,7 +345,7 @@ async function createAgentForUser(
 }
 
 /** Register a new agent passport (public key generated in the browser). */
-export async function createAgent(
+async function createAgentBody(
   input: CreateAgentInput
 ): Promise<{ agentId: string; createdAt: string; expiresAt: string | null }> {
   const created = await createAgentForUser(await requireUser(), input);
@@ -329,7 +376,7 @@ async function requireCredentialMfa(
   // caller-threaded user or the unsigned session.user cookie wrapper.
   const gate = await mfaAuthorizedUser(db);
   if (!gate.ok || gate.user.id !== user?.id) {
-    throw new Error(
+    throw new ActionError(
       !gate.ok && gate.reason === "step_up_required"
         // Neutral about the verb on purpose: this gate also guards revocation, and
         // telling an operator who just pressed Revoke that they must verify "before
@@ -347,6 +394,8 @@ type DirectAgentInput = {
   budget_cents?: number | null;
   keyName: string;
   expiresAt?: string | null;
+  /** Service access ticked in "Connect an agent" (lib/services/presets.ts, WIZARD_SERVICE_DEFAULTS). */
+  services?: WizardServiceChoice[];
 };
 type IssuedDirectAgent = {
   agentId: string;
@@ -355,6 +404,10 @@ type IssuedDirectAgent = {
   name: string;
   keyName: string;
   expiresAt: string | null;
+  /** The services whose rules were saved on the new agent. */
+  servicesGranted?: string[];
+  /** False when the rules could not be saved: the agent exists, without them. */
+  servicesSaved?: boolean;
 };
 
 // How many credential rows the provider check reads. Metadata only (the
@@ -387,12 +440,12 @@ async function requireStoredProviders(
     .eq("user_id", user.id)
     .limit(STORED_PROVIDER_SCAN);
   if (error || !Array.isArray(data)) {
-    throw new Error("PassControl could not confirm which provider keys are stored. Try again.");
+    throw new ActionError("PassControl could not confirm which provider keys are stored. Try again.");
   }
   const stored = new Set(data.map((row: { provider?: unknown }) => row.provider));
   for (const provider of wanted) {
     if (!stored.has(provider)) {
-      throw new Error(
+      throw new ActionError(
         `No ${provider} provider key is stored in PassControl yet. Add one before creating this worker's credential.`
       );
     }
@@ -410,6 +463,10 @@ async function issueDirectAgentForUser(
   const { db, user } = auth;
   await requireCredentialMfa(db, user);
   await requireStoredProviders(auth, input?.scopes);
+  // Checked before anything is created: a bad choice must not leave an agent
+  // behind with a key nobody saw.
+  const services = wizardServiceRules(input?.services);
+  if (!services.ok) throw new ActionError(services.message);
   // Service role, not `db` — see createAgentForUser above and 0032.
   try {
     await ensureProfileRow(serviceClient(), user);
@@ -420,7 +477,7 @@ async function issueDirectAgentForUser(
   }
 
   const result = await fleet.createDirectAgent(serviceClient(), user.id, input);
-  if (!result.ok) throw new Error(result.message ?? "The Direct Agent Key could not be created.");
+  if (!result.ok) throw new ActionError(result.message ?? "The Direct Agent Key could not be created.");
 
   await recordAdminAction({
     userId: user.id,
@@ -435,28 +492,56 @@ async function issueDirectAgentForUser(
       expires_at: result.value.expiresAt,
     },
   });
+  // Service access, written AFTER the agent exists (create_direct_agent takes
+  // no rules) and never allowed to fail the call: the key below is shown once,
+  // so a failed write is reported beside it rather than thrown over it.
+  let servicesGranted: string[] = [];
+  let servicesSaved = true;
+  if (services.document) {
+    const { data: updated, error } = await serviceClient()
+      .from("agents")
+      .update({ service_rules: services.document })
+      .eq("id", result.value.agentId)
+      .eq("user_id", user.id)
+      .select("id");
+    if (error || !Array.isArray(updated) || updated.length !== 1) {
+      servicesSaved = false;
+    } else {
+      servicesGranted = services.granted;
+      for (const service of services.granted) {
+        const allow = services.document[service]!.allow;
+        await recordAdminAction({
+          userId: user.id,
+          action: "agent.service_rules",
+          targetType: "agent",
+          targetId: result.value.agentId,
+          metadata: { service, rules: allow.length, ask: allow.filter((rule) => rule.ask === true).length, max_requests_per_hour: null },
+        });
+      }
+    }
+  }
   // The raw key exists only in this return value. Revalidating here can
   // remount DirectAgentConnect before it commits the credential to reveal-once
   // state; the component refreshes after the operator acknowledges storage.
-  return result.value;
+  return { ...result.value, servicesGranted, servicesSaved };
 }
 
 /** Create the browser-first on-ramp: one agent plus one reveal-once bearer key.
  * The key is returned from this action once and is never logged or persisted. */
-export async function issueDirectAgent(input: DirectAgentInput): Promise<IssuedDirectAgent> {
+async function issueDirectAgentBody(input: DirectAgentInput): Promise<IssuedDirectAgent> {
   return issueDirectAgentForUser(await requireUser(), input);
 }
 
 /** Add a named installation credential to an existing owned agent. */
-export async function issueDirectAgentKey(
+async function issueDirectAgentKeyBody(
   agentId: string,
   input: { name: string; expiresAt?: string | null }
 ): Promise<{ keyId: string; key: string; name: string; expiresAt: string | null }> {
   const { db, user } = await requireUser();
   await requireCredentialMfa(db, user);
-  if (!UUID_RE.test(String(agentId))) throw new Error("This agent is unavailable.");
+  if (!UUID_RE.test(String(agentId))) throw new ActionError("This agent is unavailable.");
   const result = await fleet.createAgentAccessKey(serviceClient(), user.id, agentId, input);
-  if (!result.ok) throw new Error(result.message ?? "The Direct Agent Key could not be created.");
+  if (!result.ok) throw new ActionError(result.message ?? "The Direct Agent Key could not be created.");
   await recordAdminAction({
     userId: user.id,
     action: "agent.direct_key.create",
@@ -496,14 +581,14 @@ export async function issueDirectAgentKey(
  * fact that the control plane reads no kill state — if that ever changes, this
  * rationale has to be revisited rather than inherited.
  */
-export async function revokeDirectAgentKey(agentId: string, keyId: string): Promise<void> {
+async function revokeDirectAgentKeyBody(agentId: string, keyId: string): Promise<void> {
   const { db, user } = await requireUser();
   await requireCredentialMfa(db, user);
   if (!UUID_RE.test(String(agentId)) || !UUID_RE.test(String(keyId))) {
-    throw new Error("This credential is unavailable.");
+    throw new ActionError("This credential is unavailable.");
   }
   const result = await fleet.revokeAgentAccessKey(serviceClient(), user.id, agentId, keyId);
-  if (!result.ok) throw new Error(result.message ?? "This credential could not be revoked.");
+  if (!result.ok) throw new ActionError(result.message ?? "This credential could not be revoked.");
   await recordAdminAction({
     userId: user.id,
     action: "agent.direct_key.revoke",
@@ -517,17 +602,17 @@ export async function revokeDirectAgentKey(agentId: string, keyId: string): Prom
 
 /** Upgrade a direct-first agent to passport signing in place. The private half
  * is generated and retained by the browser; this action accepts only public key material. */
-export async function attachAgentPassport(agentId: string, passportPubkey: string): Promise<void> {
+async function attachAgentPassportBody(agentId: string, passportPubkey: string): Promise<void> {
   const { db, user } = await requireUser();
   await requireCredentialMfa(db, user);
-  if (!UUID_RE.test(String(agentId))) throw new Error("This agent is unavailable.");
+  if (!UUID_RE.test(String(agentId))) throw new ActionError("This agent is unavailable.");
   const result = await fleet.attachAgentPassport(
     serviceClient(),
     user.id,
     agentId,
     passportPubkey
   );
-  if (!result.ok) throw new Error(result.message ?? "The signing passport could not be attached.");
+  if (!result.ok) throw new ActionError(result.message ?? "The signing passport could not be attached.");
   await recordAdminAction({
     userId: user.id,
     action: "agent.update",
@@ -547,7 +632,7 @@ export async function attachAgentPassport(agentId: string, passportPubkey: strin
   // DirectAgentPassportUpgrade refreshes after the acknowledgement instead.
 }
 
-export async function updateAgentBudgets(
+async function updateAgentBudgetsBody(
   agentId: string,
   input: {
     budget_tokens: number | null;
@@ -561,7 +646,7 @@ export async function updateAgentBudgets(
   const r = await fleet.updateAgent(db, user.id, agentId, input);
   if (!r.ok) {
     console.error("[dashboard:updateAgentBudgets]", r.code, r.message ?? "");
-    throw new Error(r.message ?? "Something went wrong. Please try again.");
+    throw new ActionError(r.message ?? "Something went wrong. Please try again.");
   }
   await recordAdminAction({
     userId: user.id,
@@ -596,7 +681,7 @@ export async function updateAgentBudgets(
  * scope until that visa expires. The editor renders that delay from
  * `visaTtlSeconds()`. Use suspend or the kill switch when you need "now".
  */
-export async function updateAgentScopes(
+async function updateAgentScopesBody(
   agentId: string,
   scopes: { provider: string; models: string[] }[]
 ) {
@@ -614,7 +699,7 @@ export async function updateAgentScopes(
   const r = await fleet.updateAgent(db, user.id, agentId, { scopes });
   if (!r.ok) {
     console.error("[dashboard:updateAgentScopes]", r.code, r.message ?? "");
-    throw new Error(r.message ?? "Something went wrong. Please try again.");
+    throw new ActionError(r.message ?? "Something went wrong. Please try again.");
   }
   await recordAdminAction({
     userId: user.id,
@@ -653,7 +738,7 @@ export async function updateAgentScopes(
  * seconds of a stale list, which must never be a reason to fail the operator's
  * save and leave the database and the screen disagreeing.
  */
-export async function updateAgentFallbacks(
+async function updateAgentFallbacksBody(
   agentId: string,
   fallbacks: { provider: string; model: string }[]
 ) {
@@ -671,7 +756,7 @@ export async function updateAgentFallbacks(
   const r = await fleet.updateAgent(db, user.id, agentId, { fallbacks });
   if (!r.ok) {
     console.error("[dashboard:updateAgentFallbacks]", r.code, r.message ?? "");
-    throw new Error(r.message ?? "Something went wrong. Please try again.");
+    throw new ActionError(r.message ?? "Something went wrong. Please try again.");
   }
   await purgeAgentFallbacks(user.id, agentId).catch(() => {});
   await recordAdminAction({
@@ -690,18 +775,19 @@ export async function updateAgentFallbacks(
   revalidatePath("/");
 }
 
+/** Returns the new credential's id (null if the RPC did not report one). */
 async function addProviderKeyForUser(
   auth: RequiredUser,
   input: ProviderKeyInput,
   revalidate: boolean
-): Promise<void> {
+): Promise<string | null> {
   const { db, user } = auth;
   // Gated on the helper, same reasoning as createAgentForUser. completeKeyImport
   // calls both and therefore checks twice; two auth round-trips on one onboarding
   // click is the right price for not having an "already checked" parameter, which
   // is exactly the bypass-shaped API lib/mfa.ts refuses to offer.
   await requireCredentialMfa(db, user);
-  const clean = validateProviderKeyInput(input);
+  const clean = formCheck(() => validateProviderKeyInput(input));
   // An Azure key is unusable without its resource address, so it is checked
   // BEFORE anything is stored: an import path that has no address to give (the
   // key-import on-ramp) is refused here rather than leaving a key that every
@@ -710,7 +796,7 @@ async function addProviderKeyForUser(
   if (isProvider(clean.provider) && providerRequiresEndpoint(clean.provider)) {
     const raw = String(input?.endpoint ?? "").trim();
     endpoint = normalizeEndpointFor(clean.provider, raw);
-    if (!endpoint) throw azureEndpointError(raw);
+    if (!endpoint) throw endpointRequiredError(clean.provider, raw);
   }
   // Service role, and the tenant is now an explicit argument. 0030 drops the
   // auth.uid()-derived RPCs: they were execute-able by `authenticated`, so an
@@ -723,7 +809,13 @@ async function addProviderKeyForUser(
     p_label: clean.label,
     p_plaintext: clean.key,
   });
-  if (error) failGeneric("addProviderKey", error);
+  if (error) {
+    // 0076's refusal is safe to put into words: the sentence is built from the
+    // parsed kind and number, never from the raw message (see failGeneric).
+    const limit = accountLimitFrom(error);
+    if (limit) throw new ActionError(accountLimitMessage(limit));
+    failGeneric("addProviderKey", error);
+  }
   if (endpoint) {
     // Written to the row the RPC just created, by its id — never "the newest
     // Azure row", which a concurrent add could make a different credential.
@@ -755,10 +847,11 @@ async function addProviderKeyForUser(
     metadata: { provider: clean.provider, label: clean.label, ...(endpoint ? { endpoint } : {}) },
   });
   if (revalidate) revalidatePath("/");
+  return typeof credentialId === "string" ? credentialId : null;
 }
 
 /** Add a provider key via the SECURITY DEFINER RPC (plaintext never stored in app tables). */
-export async function addProviderKey(input: ProviderKeyInput) {
+async function addProviderKeyBody(input: ProviderKeyInput) {
   await addProviderKeyForUser(await requireUser(), input, true);
 }
 
@@ -839,13 +932,13 @@ function modelIds(payload: unknown, rawKey: string): { ids: string[]; total: num
  * provider auth header. The browser receives model ids plus an encrypted,
  * tenant-bound handoff, never the plaintext key or an upstream error body.
  */
-export async function probeProviderKey(input: {
+async function probeProviderKeyBody(input: {
   provider: string;
   key: string;
 }): Promise<ProbeSuccess | ProbeFailure> {
   const { user } = await requireUser();
-  const clean = validateProviderKeyInput({ provider: input?.provider, label: "", key: input?.key });
-  if (!isProvider(clean.provider)) throw new Error("Unknown provider.");
+  const clean = formCheck(() => validateProviderKeyInput({ provider: input?.provider, label: "", key: input?.key }));
+  if (!isProvider(clean.provider)) throw new ActionError("Unknown provider.");
   const provider = clean.provider;
   // No host to probe: an Azure key is only meaningful with its resource address,
   // which this on-ramp does not ask for. Refused before the rate limit is spent.
@@ -987,13 +1080,77 @@ async function redeemKeyImport(
     handoff.provider !== input?.provider ||
     handoff.expiresAt < Date.now()
   ) {
-    throw new Error("This key import has expired. Start again.");
+    throw new ActionError("This key import has expired. Start again.");
   }
   return handoff;
 }
 
+/**
+ * Refuse a key import that 0076 would refuse at the agent step, BEFORE the
+ * provider key is stored and before the handoff is spent: at the cap, the old
+ * order stored a real provider secret that no agent used. Gated first, like
+ * every helper here, so an unverified session learns nothing about the account.
+ * See lib/agent-capacity.ts: the trigger remains the enforcement.
+ */
+async function requireAgentCapacity(auth: RequiredUser, options: { withKey: boolean }): Promise<void> {
+  await requireCredentialMfa(auth.db, auth.user);
+  const refusal = await agentCreationRefusal(
+    serviceClient() as unknown as AgentCapacityDb,
+    auth.user.id,
+    options
+  );
+  if (refusal) throw new ActionError(accountLimitMessage(refusal));
+}
+
+/**
+ * Create the agent half of a key import; if it fails, delete the credential
+ * the import just stored, then rethrow the original error.
+ *
+ * Reached only past requireAgentCapacity, so this is a race or an unexpected
+ * refusal. The delete goes through the one sanctioned RPC, which refuses an
+ * ACTIVE credential (0027/0030: never silently reassign billing). The first key
+ * for a provider is its active one, so that case keeps the key: the user's
+ * own, usable, and listed in Settings. It is reported, never hidden.
+ */
+async function withImportedCredential<T>(
+  auth: RequiredUser,
+  credentialId: string | null,
+  provider: string,
+  create: () => Promise<T>
+): Promise<T> {
+  try {
+    return await create();
+  } catch (error) {
+    if (credentialId) {
+      const { error: deleteError } = await serviceClient().rpc("delete_provider_key_for_user", {
+        p_user_id: auth.user.id,
+        p_credential_id: credentialId,
+      });
+      if (deleteError) {
+        // A fixed message and code: the RPC's text is not a safe log input.
+        await captureError(new Error("key import left its provider key stored after the agent was refused"), {
+          route: "dashboard:keyImport",
+          code: "key_import_rollback_failed",
+          provider,
+        }).catch(() => {});
+      } else {
+        await purgeProviderKeyForTenant(auth, provider);
+        await purgeProviderKeysCache(auth.user.id).catch(() => {});
+        await recordAdminAction({
+          userId: auth.user.id,
+          action: "provider_key.delete",
+          targetType: "provider_key",
+          targetId: credentialId,
+          metadata: { provider, reason: "key_import_rolled_back" },
+        });
+      }
+    }
+    throw error;
+  }
+}
+
 /** Complete a probed import through the existing Vault and fleet actions. */
-export async function completeKeyImport(input: {
+async function completeKeyImportBody(input: {
   handoff: string;
   provider: string;
   label: string;
@@ -1007,20 +1164,21 @@ export async function completeKeyImport(input: {
   scope: { provider: ProviderId; models: string[] }[];
 }> {
   const auth = await requireUser();
+  await requireAgentCapacity(auth, { withKey: false });
   const handoff = await redeemKeyImport(auth, input);
 
-  const keyInput = validateProviderKeyInput({
+  const keyInput = formCheck(() => validateProviderKeyInput({
     provider: input.provider,
     label: input.label,
     key: handoff.key,
-  });
-  const agentInput = validateAgentInput({
+  }));
+  const agentInput = formCheck(() => validateAgentInput({
     name: input.name,
     passportPubkey: input.passportPubkey,
     scopes: [{ provider: input.provider, models: input.models }],
     budget_tokens: null,
     budget_cents: null,
-  });
+  }));
   const provider = handoff.provider;
   const scope = agentInput.scopes.map((entry) => ({
     provider: entry.provider as ProviderId,
@@ -1032,8 +1190,10 @@ export async function completeKeyImport(input: {
   // generated the private passport and cannot commit it to reveal-once React
   // state until this action returns. Revalidating here remounts the on-ramp and
   // destroys that secret. KeyImportOnramp refreshes only after acknowledgement.
-  await addProviderKeyForUser(auth, keyInput, false);
-  const created = await createAgentForUser(auth, agentInput);
+  const credentialId = await addProviderKeyForUser(auth, keyInput, false);
+  const created = await withImportedCredential(auth, credentialId, provider, () =>
+    createAgentForUser(auth, agentInput)
+  );
   return { agentId: created.id, createdAt: created.createdAt, provider, scope };
 }
 
@@ -1046,7 +1206,7 @@ export async function completeKeyImport(input: {
  * worker's key exists only in this return value until the operator
  * acknowledges storing it.
  */
-export async function completeKeyImportDirect(input: {
+async function completeKeyImportDirectBody(input: {
   handoff: string;
   provider: string;
   label: string;
@@ -1055,20 +1215,32 @@ export async function completeKeyImportDirect(input: {
   models: string[];
 }): Promise<IssuedDirectAgent & { provider: ProviderId }> {
   const auth = await requireUser();
+  await requireAgentCapacity(auth, { withKey: true });
+  // `input.provider` is safe to use before the redeem: redeemKeyImport refuses
+  // a handoff whose provider differs from it.
+  const agentInput = {
+    name: input.name,
+    keyName: input.keyName,
+    scopes: [{ provider: input.provider, models: Array.isArray(input.models) ? input.models : [] }],
+    budget_tokens: null,
+    budget_cents: null,
+  };
+  // fleet.createDirectAgent checks these again. Checking first means a bad
+  // name is refused before the provider key is stored or the handoff spent.
+  formCheck(() => {
+    validateAgentProfileInput(agentInput);
+    validateDirectKeyMetadata({ name: agentInput.keyName });
+  });
   const handoff = await redeemKeyImport(auth, input);
-  const keyInput = validateProviderKeyInput({
+  const keyInput = formCheck(() => validateProviderKeyInput({
     provider: input.provider,
     label: input.label,
     key: handoff.key,
-  });
-  await addProviderKeyForUser(auth, keyInput, false);
-  const issued = await issueDirectAgentForUser(auth, {
-    name: input.name,
-    keyName: input.keyName,
-    scopes: [{ provider: handoff.provider, models: Array.isArray(input.models) ? input.models : [] }],
-    budget_tokens: null,
-    budget_cents: null,
-  });
+  }));
+  const credentialId = await addProviderKeyForUser(auth, keyInput, false);
+  const issued = await withImportedCredential(auth, credentialId, handoff.provider, () =>
+    issueDirectAgentForUser(auth, agentInput)
+  );
   return { ...issued, provider: handoff.provider };
 }
 
@@ -1126,13 +1298,13 @@ async function ownedCredentialProvider(
 }
 
 /** Rotate a provider key behind an owned credential row. */
-export async function rotateProviderKey(input: { credentialId: string; key: string }) {
+async function rotateProviderKeyBody(input: { credentialId: string; key: string }) {
   const auth = await requireUser();
   const { db, user } = auth;
   // Replacing the secret behind a credential row is the same authority as storing
   // one: the new key is what the proxy will inject from here on.
   await requireCredentialMfa(db, user);
-  const clean = validateRotateInput(input);
+  const clean = formCheck(() => validateRotateInput(input));
   // Read the provider BEFORE the write: it is what the cache purge is keyed on,
   // and after a rotate the row still exists but we would be re-reading it for no
   // reason. After a delete it would be gone entirely — same shape, so both paths
@@ -1161,17 +1333,17 @@ export async function rotateProviderKey(input: { credentialId: string; key: stri
  * call — and the spend behind it — onto a different upstream account, which is
  * the same authority as having stored the key.
  */
-export async function setActiveProviderKey(input: { credentialId: string }) {
+async function setActiveProviderKeyBody(input: { credentialId: string }) {
   const auth = await requireUser();
   const { db, user } = auth;
   await requireCredentialMfa(db, user);
   const credentialId = String(input?.credentialId ?? "").trim();
-  if (!UUID_RE.test(credentialId)) throw new Error("Invalid credential id.");
+  if (!UUID_RE.test(credentialId)) throw new ActionError("Invalid credential id.");
   const provider = await ownedCredentialProvider(auth, credentialId);
   // Refuse here rather than letting the RPC's own 'credential not found' answer
   // it: this keeps a cross-tenant id indistinguishable from a missing one at the
   // action boundary, before any write is attempted.
-  if (!provider) throw new Error("That credential could not be found.");
+  if (!provider) throw new ActionError("That credential could not be found.");
   const { error } = await serviceClient().rpc("set_active_provider_key_for_user", {
     p_user_id: user.id,
     p_credential_id: credentialId,
@@ -1189,6 +1361,85 @@ export async function setActiveProviderKey(input: { credentialId: string }) {
 }
 
 /**
+ * Settings' "Use Ollama": store a `local` credential with no key and Ollama's
+ * address, in one click.
+ *
+ * Ollama is asked for its models FIRST, and nothing is stored unless it
+ * answers: a credential pointing at a server that is not running would make
+ * every agent call fail with a gateway error that does not say why. The same
+ * MFA gate and the same store path as adding any provider key
+ * (`addProviderKeyForUser`), so the address is validated by the gate there too.
+ * One already pointing at Ollama is reported rather than duplicated.
+ */
+async function connectOllamaBody(): Promise<{ models: string[]; alreadyConnected: boolean }> {
+  const auth = await requireUser();
+  const { db, user } = auth;
+  await requireCredentialMfa(db, user);
+  const policy = endpointPolicy();
+  if (policy.kind === "off") throw localModelsDisabledError();
+
+  const probe = await listLocalModels(OLLAMA_ENDPOINT, policy);
+  if (probe.state === "disabled") {
+    throw new ActionError(
+      "This deployment's PROVIDER_ENDPOINT_MODE does not admit http://localhost:11434. Set it to selfhost to use Ollama."
+    );
+  }
+  if (probe.state === "unreachable") {
+    throw new ActionError(
+      "Ollama is not answering at http://localhost:11434. Start the Ollama app (or run `ollama serve`) and try again."
+    );
+  }
+  if (probe.state === "refused") {
+    throw new ActionError(`Ollama answered with an error (HTTP ${probe.status}). Check that it is running normally.`);
+  }
+
+  const { data: existing, error } = await db
+    .from("provider_credentials")
+    .select("id, endpoint_base_url")
+    .eq("user_id", user.id)
+    .eq("provider", "local");
+  if (error) failGeneric("connectOllama:list", error);
+  const rows = (existing ?? []) as { endpoint_base_url?: unknown }[];
+  if (rows.some((row) => row.endpoint_base_url === OLLAMA_ENDPOINT)) {
+    return { models: probe.models, alreadyConnected: true };
+  }
+
+  await addProviderKeyForUser(auth, { provider: "local", label: "ollama", key: "", endpoint: OLLAMA_ENDPOINT }, true);
+  revalidatePath("/dashboard/settings");
+  return { models: probe.models, alreadyConnected: false };
+}
+
+/**
+ * The models on this workspace's local server, for the agent wizard to offer.
+ *
+ * Read-only and keyless, so it is not MFA-gated: it reveals what the developer's
+ * own server lists to the developer. The address is the SELECTED local
+ * credential's, by the same rule the gateway uses (`is_active` first, then
+ * oldest), so the wizard offers what an agent would actually reach.
+ */
+async function listLocalModelsForAgentsBody(): Promise<{
+  state: "ok" | "none" | "disabled" | "unreachable" | "refused";
+  models: string[];
+}> {
+  const { db, user } = await requireUser();
+  const policy = endpointPolicy();
+  if (policy.kind === "off") return { state: "disabled", models: [] };
+  const { data } = await db
+    .from("provider_credentials")
+    .select("endpoint_base_url")
+    .eq("user_id", user.id)
+    .eq("provider", "local")
+    .order("is_active", { ascending: false })
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  const endpoint = (data as { endpoint_base_url?: unknown } | null)?.endpoint_base_url;
+  if (typeof endpoint !== "string" || !endpoint) return { state: "none", models: [] };
+  const probe = await listLocalModels(endpoint, policy);
+  return probe.state === "ok" ? probe : { state: probe.state, models: [] };
+}
+
+/**
  * Point a credential at an endpoint other than the provider's own host.
  *
  * Refused outright unless the operator has set `PROVIDER_ENDPOINT_MODE` — the
@@ -1200,7 +1451,7 @@ export async function setActiveProviderKey(input: { credentialId: string }) {
  * it is. The endpoint is normalised through the same validator the proxy uses on
  * read, so a value that stores is a value that will still be honoured.
  */
-export async function setProviderEndpoint(input: {
+async function setProviderEndpointBody(input: {
   credentialId: string;
   endpoint: string;
 }) {
@@ -1208,9 +1459,9 @@ export async function setProviderEndpoint(input: {
   const { db, user } = auth;
   await requireCredentialMfa(db, user);
   const credentialId = String(input?.credentialId ?? "").trim();
-  if (!UUID_RE.test(credentialId)) throw new Error("Invalid credential id.");
+  if (!UUID_RE.test(credentialId)) throw new ActionError("Invalid credential id.");
   const provider = await ownedCredentialProvider(auth, credentialId);
-  if (!provider) throw new Error("That credential could not be found.");
+  if (!provider) throw new ActionError("That credential could not be found.");
 
   const raw = String(input?.endpoint ?? "").trim();
   const policy = endpointPolicy();
@@ -1218,13 +1469,13 @@ export async function setProviderEndpoint(input: {
     // Azure's address is part of the credential: it has no provider host to
     // return to, so it cannot be cleared, and the operator gate below does not
     // apply to it (its own Microsoft-suffix rule does, in every mode).
-    const azure = normalizeEndpointFor(provider, raw, policy);
-    if (!azure) throw azureEndpointError(raw);
-    await writeProviderEndpoint(auth, credentialId, provider, azure);
+    const required = normalizeEndpointFor(provider, raw, policy);
+    if (!required) throw endpointRequiredError(provider, raw);
+    await writeProviderEndpoint(auth, credentialId, provider, required);
     return;
   }
   if (raw && policy.kind === "off") {
-    throw new Error(
+    throw new ActionError(
       "Custom endpoints are not enabled on this deployment. Set PROVIDER_ENDPOINT_MODE to turn them on."
     );
   }
@@ -1233,7 +1484,7 @@ export async function setProviderEndpoint(input: {
   // stored endpoint they can no longer remove.
   const endpoint = raw ? normalizeEndpointFor(provider, raw, policy) : null;
   if (raw && !endpoint) {
-    throw new Error(
+    throw new ActionError(
       policy.kind === "allowlist"
         ? "That endpoint is not one this deployment allows. It must be HTTPS on the default port, at a host the operator has listed."
         : "That is not an endpoint we can use. Give a base URL with no query string, no fragment and no credentials in it."
@@ -1279,21 +1530,21 @@ async function writeProviderEndpoint(
  * billed. That refusal is surfaced as its own sentence — a generic failure here
  * would read as a bug rather than as the deliberate "switch first" rule.
  */
-export async function deleteProviderKey(input: { credentialId: string }) {
+async function deleteProviderKeyBody(input: { credentialId: string }) {
   const auth = await requireUser();
   const { db, user } = auth;
   await requireCredentialMfa(db, user);
   const credentialId = String(input?.credentialId ?? "").trim();
-  if (!UUID_RE.test(credentialId)) throw new Error("Invalid credential id.");
+  if (!UUID_RE.test(credentialId)) throw new ActionError("Invalid credential id.");
   const provider = await ownedCredentialProvider(auth, credentialId);
-  if (!provider) throw new Error("That credential could not be found.");
+  if (!provider) throw new ActionError("That credential could not be found.");
   const { error } = await serviceClient().rpc("delete_provider_key_for_user", {
     p_user_id: user.id,
     p_credential_id: credentialId,
   });
   if (error) {
     if (String(error.message ?? "").includes("active_credential")) {
-      throw new Error(
+      throw new ActionError(
         "That is the credential the gateway is using. Switch to another one first, then delete it."
       );
     }
@@ -1373,7 +1624,11 @@ async function mintApiKeyForUser(
     scope,
     expires_at: expiresAt,
   });
-  if (error) failGeneric("mintApiKeyForUser", error);
+  if (error) {
+    const limit = accountLimitFrom(error);
+    if (limit) throw new ActionError(accountLimitMessage(limit));
+    failGeneric("mintApiKeyForUser", error);
+  }
 
   await recordAdminAction({
     userId: user.id,
@@ -1389,19 +1644,19 @@ async function mintApiKeyForUser(
 /** Validate a key name. Shared so the CLI path cannot skip what the form does. */
 function validateApiKeyName(value: unknown): string {
   const name = String(value ?? "").trim();
-  if (name.length < 1 || name.length > 80) throw new Error("Name must be 1–80 characters.");
+  if (name.length < 1 || name.length > 80) throw new ActionError("Name must be 1–80 characters.");
   return name;
 }
 
 /** Mint a developer API key for the public control-plane API. The full token is
  *  returned ONCE here and never stored (only its hash + display prefix are). */
-export async function createApiKey(input: { name: string; scope: "read" | "write" }): Promise<{
+async function createApiKeyBody(input: { name: string; scope: "read" | "write" }): Promise<{
   token: string;
   prefix: string;
 }> {
   const { db, user } = await requireUser();
   const name = validateApiKeyName(input?.name);
-  if (input?.scope !== "read" && input?.scope !== "write") throw new Error("Scope must be read or write.");
+  if (input?.scope !== "read" && input?.scope !== "write") throw new ActionError("Scope must be read or write.");
   const minted = await mintApiKeyForUser(db, user, name, input.scope);
   revalidatePath("/");
   return minted;
@@ -1444,7 +1699,7 @@ async function lookupCliDevice(
     CLI_DEVICE_LOOKUP_LIMIT,
     CLI_DEVICE_LOOKUP_WINDOW_S
   );
-  if (!limit.success) throw new Error("Too many attempts. Wait a minute and try again.");
+  if (!limit.success) throw new ActionError("Too many attempts. Wait a minute and try again.");
 
   // Reject a malformed code before it costs a round trip. normalizeUserCode does
   // NOT map homoglyphs — the alphabet excludes them, so a `0` is a wrong code and
@@ -1457,7 +1712,7 @@ async function lookupCliDevice(
 }
 
 /** What the approval screen shows before the operator commits. Never a secret. */
-export async function inspectCliDevice(rawCode: string): Promise<{
+async function inspectCliDeviceBody(rawCode: string): Promise<{
   clientName: string;
   ip: string;
   requestedAt: string;
@@ -1485,14 +1740,14 @@ export async function inspectCliDevice(rawCode: string): Promise<{
  * an unverified caller whether the code is real and already spent one of that
  * code's five attempts. Both of those are the attack; the mint is just the prize.
  */
-export async function approveCliDevice(rawCode: string): Promise<{ clientName: string }> {
+async function approveCliDeviceBody(rawCode: string): Promise<{ clientName: string }> {
   const { db, user } = await requireUser();
   await requireCredentialMfa(db, user);
 
   // Does not consume an attempt: inspectCliDevice already charged for resolving
   // this code, and charging twice per approval quartered the operator's budget.
   const found = await lookupCliDevice(user.id, rawCode, { count: false });
-  if (!found) throw new Error("That code is not valid, or it has expired. Run `passcontrol login` again.");
+  if (!found) throw new ActionError("That code is not valid, or it has expired. Run `passcontrol login` again.");
 
   // Write scope is not a default we drifted into: the CLI's next two calls are
   // agent create and passport rotate, both of which lib/control/handler.ts
@@ -1554,7 +1809,7 @@ export async function approveCliDevice(rawCode: string): Promise<{ clientName: s
  * cap as every other reader — and the blast radius is a login that has to be
  * re-run, against an alternative where a phished operator cannot quickly refuse.
  */
-export async function denyCliDevice(rawCode: string): Promise<void> {
+async function denyCliDeviceBody(rawCode: string): Promise<void> {
   const { user } = await requireUser();
   const found = await lookupCliDevice(user.id, rawCode);
   if (!found) return;
@@ -1574,9 +1829,9 @@ export async function denyCliDevice(rawCode: string): Promise<void> {
 
 /** Revoke an API key (soft delete). Ownership enforced by RLS — the update
  *  returns 0 rows if the key isn't the caller's. */
-export async function revokeApiKey(id: string): Promise<void> {
+async function revokeApiKeyBody(id: string): Promise<void> {
   const { db, user } = await requireUser();
-  if (!UUID_RE.test(String(id))) throw new Error("Invalid key id.");
+  if (!UUID_RE.test(String(id))) throw new ActionError("Invalid key id.");
   const { data, error } = await db
     .from("api_keys")
     .update({ revoked_at: new Date().toISOString() })
@@ -1585,7 +1840,7 @@ export async function revokeApiKey(id: string): Promise<void> {
     .select("id, key_prefix")
     .maybeSingle();
   if (error) failGeneric("revokeApiKey", error);
-  if (!data) throw new Error("Key not found or already revoked.");
+  if (!data) throw new ActionError("Key not found or already revoked.");
 
   await recordAdminAction({
     userId: user.id,
@@ -1595,4 +1850,175 @@ export async function revokeApiKey(id: string): Promise<void> {
     metadata: { prefix: data.key_prefix },
   });
   revalidatePath("/");
+}
+
+// ── The exported actions ─────────────────────────────────────────────────────
+//
+// Each one runs its body through runAction and RETURNS the outcome. A thrown
+// message does not survive a production build (Next replaces it with "An error
+// occurred in the Server Components render…"); a returned one does. Components
+// import these through app/dashboard/actions-client.ts, which re-throws on the
+// client so their existing error handling is unchanged. Only ActionError text
+// reaches the browser; anything else becomes the generic message.
+
+export async function setMasterKill(
+  ...args: Parameters<typeof setMasterKillBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof setMasterKillBody>>>> {
+  return runAction("setMasterKill", () => setMasterKillBody(...args));
+}
+
+export async function observeMasterKill(
+  ...args: Parameters<typeof observeMasterKillBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof observeMasterKillBody>>>> {
+  return runAction("observeMasterKill", () => observeMasterKillBody(...args));
+}
+
+export async function setAgentSuspended(
+  ...args: Parameters<typeof setAgentSuspendedBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof setAgentSuspendedBody>>>> {
+  return runAction("setAgentSuspended", () => setAgentSuspendedBody(...args));
+}
+
+export async function observeAgentControl(
+  ...args: Parameters<typeof observeAgentControlBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof observeAgentControlBody>>>> {
+  return runAction("observeAgentControl", () => observeAgentControlBody(...args));
+}
+
+export async function createAgent(
+  ...args: Parameters<typeof createAgentBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof createAgentBody>>>> {
+  return runAction("createAgent", () => createAgentBody(...args));
+}
+
+export async function issueDirectAgent(
+  ...args: Parameters<typeof issueDirectAgentBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof issueDirectAgentBody>>>> {
+  return runAction("issueDirectAgent", () => issueDirectAgentBody(...args));
+}
+
+export async function issueDirectAgentKey(
+  ...args: Parameters<typeof issueDirectAgentKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof issueDirectAgentKeyBody>>>> {
+  return runAction("issueDirectAgentKey", () => issueDirectAgentKeyBody(...args));
+}
+
+export async function revokeDirectAgentKey(
+  ...args: Parameters<typeof revokeDirectAgentKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof revokeDirectAgentKeyBody>>>> {
+  return runAction("revokeDirectAgentKey", () => revokeDirectAgentKeyBody(...args));
+}
+
+export async function attachAgentPassport(
+  ...args: Parameters<typeof attachAgentPassportBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof attachAgentPassportBody>>>> {
+  return runAction("attachAgentPassport", () => attachAgentPassportBody(...args));
+}
+
+export async function updateAgentBudgets(
+  ...args: Parameters<typeof updateAgentBudgetsBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof updateAgentBudgetsBody>>>> {
+  return runAction("updateAgentBudgets", () => updateAgentBudgetsBody(...args));
+}
+
+export async function updateAgentScopes(
+  ...args: Parameters<typeof updateAgentScopesBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof updateAgentScopesBody>>>> {
+  return runAction("updateAgentScopes", () => updateAgentScopesBody(...args));
+}
+
+export async function updateAgentFallbacks(
+  ...args: Parameters<typeof updateAgentFallbacksBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof updateAgentFallbacksBody>>>> {
+  return runAction("updateAgentFallbacks", () => updateAgentFallbacksBody(...args));
+}
+
+export async function addProviderKey(
+  ...args: Parameters<typeof addProviderKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof addProviderKeyBody>>>> {
+  return runAction("addProviderKey", () => addProviderKeyBody(...args));
+}
+
+export async function probeProviderKey(
+  ...args: Parameters<typeof probeProviderKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof probeProviderKeyBody>>>> {
+  return runAction("probeProviderKey", () => probeProviderKeyBody(...args));
+}
+
+export async function completeKeyImport(
+  ...args: Parameters<typeof completeKeyImportBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof completeKeyImportBody>>>> {
+  return runAction("completeKeyImport", () => completeKeyImportBody(...args));
+}
+
+export async function completeKeyImportDirect(
+  ...args: Parameters<typeof completeKeyImportDirectBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof completeKeyImportDirectBody>>>> {
+  return runAction("completeKeyImportDirect", () => completeKeyImportDirectBody(...args));
+}
+
+export async function rotateProviderKey(
+  ...args: Parameters<typeof rotateProviderKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof rotateProviderKeyBody>>>> {
+  return runAction("rotateProviderKey", () => rotateProviderKeyBody(...args));
+}
+
+export async function setActiveProviderKey(
+  ...args: Parameters<typeof setActiveProviderKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof setActiveProviderKeyBody>>>> {
+  return runAction("setActiveProviderKey", () => setActiveProviderKeyBody(...args));
+}
+
+export async function connectOllama(
+  ...args: Parameters<typeof connectOllamaBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof connectOllamaBody>>>> {
+  return runAction("connectOllama", () => connectOllamaBody(...args));
+}
+
+export async function listLocalModelsForAgents(
+  ...args: Parameters<typeof listLocalModelsForAgentsBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof listLocalModelsForAgentsBody>>>> {
+  return runAction("listLocalModelsForAgents", () => listLocalModelsForAgentsBody(...args));
+}
+
+export async function setProviderEndpoint(
+  ...args: Parameters<typeof setProviderEndpointBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof setProviderEndpointBody>>>> {
+  return runAction("setProviderEndpoint", () => setProviderEndpointBody(...args));
+}
+
+export async function deleteProviderKey(
+  ...args: Parameters<typeof deleteProviderKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof deleteProviderKeyBody>>>> {
+  return runAction("deleteProviderKey", () => deleteProviderKeyBody(...args));
+}
+
+export async function createApiKey(
+  ...args: Parameters<typeof createApiKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof createApiKeyBody>>>> {
+  return runAction("createApiKey", () => createApiKeyBody(...args));
+}
+
+export async function inspectCliDevice(
+  ...args: Parameters<typeof inspectCliDeviceBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof inspectCliDeviceBody>>>> {
+  return runAction("inspectCliDevice", () => inspectCliDeviceBody(...args));
+}
+
+export async function approveCliDevice(
+  ...args: Parameters<typeof approveCliDeviceBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof approveCliDeviceBody>>>> {
+  return runAction("approveCliDevice", () => approveCliDeviceBody(...args));
+}
+
+export async function denyCliDevice(
+  ...args: Parameters<typeof denyCliDeviceBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof denyCliDeviceBody>>>> {
+  return runAction("denyCliDevice", () => denyCliDeviceBody(...args));
+}
+
+export async function revokeApiKey(
+  ...args: Parameters<typeof revokeApiKeyBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof revokeApiKeyBody>>>> {
+  return runAction("revokeApiKey", () => revokeApiKeyBody(...args));
 }

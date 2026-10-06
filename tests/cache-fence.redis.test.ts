@@ -319,6 +319,25 @@ describe.skipIf(!live)("the owner-claim fence", () => {
     expect(await setCachedOwner(uid, published, 300, fence)).toBe(true);
     expect(await getCachedOwner(uid)).toBe(published);
   });
+
+  it("caches 'no owner' as a hit, and drops it when a claim is published", async () => {
+    // lib/owner/current.ts caches absence as `{}` (a stored JSON `null` reads
+    // back as a miss through this client). Once that absence is actually
+    // served, a publish has to clear it, or a newly published claim would be
+    // left off receipts for the TTL.
+    const uid = tenant();
+    const before = await readOwnerFence(uid);
+    expect(await setCachedOwner(uid, "{}", 300, before)).toBe(true);
+    expect(await getCachedOwner(uid)).toBe("{}");
+
+    // The owner publishes. Row written, cache purged.
+    expect(await purgeOwnerCache(uid)).toBe(true);
+    expect(await getCachedOwner(uid)).toBeNull();
+
+    // A read that began before the publish cannot re-cache "no owner".
+    expect(await setCachedOwner(uid, "{}", 300, before)).toBe(false);
+    expect(await getCachedOwner(uid)).toBeNull();
+  });
 });
 
 describe.skipIf(!live)("the failover-list and provider-list fences", () => {

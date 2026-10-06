@@ -12,27 +12,56 @@ import { needsMfaStepUp } from "@/lib/mfa";
 import { getMfaStatus } from "@/app/dashboard/mfa-actions";
 import { MfaManager } from "@/components/MfaManager";
 import { ProviderKeysManager } from "@/components/ProviderKeysManager";
+import { LocalModelsSetup } from "@/components/LocalModelsSetup";
+import { endpointPolicy } from "@/lib/providers/endpoint";
+import { OLLAMA_ENDPOINT } from "@/lib/providers/local-server";
 import { ServiceTokensManager } from "@/components/ServiceTokensManager";
 import { SERVICE_CATALOG, isServiceProviderId } from "@/lib/services/catalog";
+import { DISPLAYED_SERVICES, SERVICE_DISPLAY } from "@/lib/services/display";
 import { toCredentialListItem } from "@/lib/provider-credential-list";
 import { ApiKeysManager } from "@/components/ApiKeysManager";
-import { OwnerBinding } from "@/components/OwnerBinding";
-import { ProfileSettings } from "@/components/ProfileSettings";
 import { AccountLifecycle } from "@/components/AccountLifecycle";
 import { RecoveryPanel } from "@/components/RecoveryPanel";
-import { readOwner } from "@/lib/owner/manage";
-import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
 import { Fingerprint, KeyRound, ShieldCheck, UserRound, Vault } from "lucide-react";
 import { operatorEmails } from "@/lib/operator-allowlist";
 import { KeyCustodyExpectation } from "@/components/KeyCustodyExpectation";
+import { WorkspaceAlerts } from "@/components/WorkspaceAlerts";
 import { readKeyCustodyExpectation } from "@/lib/key-custody-expectation";
+import { MotionPreference } from "@/components/dashboard/MotionPreference";
+import { motionTurnedOff } from "@/lib/motion-preference";
 
 export const dynamic = "force-dynamic";
 
 export const metadata = { title: "Settings" };
+
+const SETTINGS_DESCRIPTION = "Credentials, operator access, and account security.";
+
+// The animations switch is a self-host setting (owner, 2026-10-06): Cloud's
+// copy of these two helpers renders nothing, and the mirror's renders the
+// section. Statement-level on purpose: a public-only block inside JSX would be
+// read as text.
+function motionNavLink() {
+  return <a href="#motion">Animations</a>;
+}
+
+async function motionSection() {
+  const off = await motionTurnedOff();
+  return (
+    <section id="motion" className="pc-section scroll-mt-28">
+      <SectionHeader
+        eyebrow="Display"
+        title="Animations"
+        description="Turn the dashboard's motion off if you would rather it stood still. Nothing else changes."
+      />
+      <div className="pc-section__body">
+        <MotionPreference initialOff={off} />
+      </div>
+    </section>
+  );
+}
 
 export default async function SettingsPage() {
   const db = await userClient();
@@ -44,33 +73,19 @@ export default async function SettingsPage() {
   if (await needsMfaStepUp(db)) redirect("/login/verify");
 
   // Metadata only; key_hash is never selected.
-  // agent_owners is SELECT-only for `authenticated` (0017) and readOwner filters
-  // on user_id explicitly, so the service-role client here is the same tenant
-  // boundary the control route uses — enforced in code, not by RLS.
   const [
     { data: apiKeys },
     mfaStatus,
-    owner,
-    profile,
-    publishedAgents,
     providerCredentials,
     { data: lastExport },
     keyCustodyExpectation,
+    alertSettings,
   ] = await Promise.all([
     db
       .from("api_keys")
       .select("id, name, key_prefix, scope, last_used_at, revoked_at, created_at")
       .order("created_at", { ascending: false }),
     getMfaStatus(),
-    readOwner(serviceClient(), user.id),
-    // Tolerates a missing row: nothing creates one at signup, so a freshly
-    // signed-up operator legitimately has none and the panel renders empty
-    // rather than erroring. See ensureProfileRow's note.
-    readProfile(serviceClient(), user.id),
-    // How many agents this operator has published, for the panel that has to
-    // say — accurately — that publishing the profile publishes no agent.
-    // `published` is not in the client's column grant, so this is a plain read.
-    db.from("agents").select("id", { count: "exact", head: true }).eq("published", true),
     // Metadata only, and that is structural rather than careful: the secret is
     // in Vault and has no column here to select. `is_active` arrives with
     // migration 0027, so this is read tolerantly — a settings page that 500s
@@ -97,7 +112,23 @@ export default async function SettingsPage() {
     // PostgREST fails the whole request for an unknown column, which would take
     // the profile panels down alongside this one.
     readKeyCustodyExpectation(db, user.id),
+    // RLS scopes this to the operator's own row (0078). Only the service and
+    // the hint: the webhook URL is in Vault and has no column here to select.
+    // A missing table (0078 not applied) is shown as such, not as an error page.
+    db.from("workspace_alerts").select("destination, hint, events").maybeSingle(),
   ]);
+  const alertsState: "ready" | "unmigrated" | "unavailable" = !alertSettings.error
+    ? "ready"
+    : ["42P01", "PGRST205"].includes(String(alertSettings.error.code))
+      ? "unmigrated"
+      : "unavailable";
+  const alertDestination = alertSettings.data
+    ? {
+        kind: String(alertSettings.data.destination),
+        hint: String(alertSettings.data.hint),
+        events: Array.isArray(alertSettings.data.events) ? alertSettings.data.events.map(String) : [],
+      }
+    : null;
 
   const activeApiKeys = (apiKeys ?? []).filter((key) => !key.revoked_at).length;
   // An error here means 0027 has not been applied (no `is_active` column). The
@@ -106,8 +137,6 @@ export default async function SettingsPage() {
   // Service tokens (`svc:github`, 0074) are listed under Services, never among
   // the LLM provider keys, and never counted as one.
   const credentialList = allCredentials.filter((c) => !isServiceProviderId(c.provider));
-  const githubTokens = allCredentials.filter((c) => c.provider === SERVICE_CATALOG.github.credentialProvider);
-  const telegramTokens = allCredentials.filter((c) => c.provider === SERVICE_CATALOG.telegram.credentialProvider);
   const credentialListUnavailable = Boolean(providerCredentials.error);
   // Never infer "no credentials" from a failed read. In the exact window the
   // tolerant read exists for — deployed before 0027, so `is_active` does not
@@ -122,9 +151,6 @@ export default async function SettingsPage() {
           .not("provider", "like", "svc:%")
       ).count ?? 0
     : credentialList.length;
-  const ownerRecord = owner.ok ? owner.data : null;
-  const profileRecord = profile.ok ? profile.data : null;
-  const publishedAgentCount = publishedAgents.count ?? 0;
 
   return (
     <DashboardShell
@@ -133,13 +159,9 @@ export default async function SettingsPage() {
       active="settings"
       eyebrow="Administration"
       title="Settings"
-      description="Credentials, operator access, account security, and public ownership."
+      description={SETTINGS_DESCRIPTION}
     >
       <div className="pc-settings-status" aria-label="Settings status">
-        <a href="#profile" data-state={profileRecord?.profile_public ? "ready" : profileRecord?.username ? "neutral" : "attention"}>
-          <UserRound aria-hidden="true" />
-          <span><strong>Operator profile</strong><small>{profileRecord?.profile_public ? `Public at /@${profileRecord.username}` : profileRecord?.username ? `@${profileRecord.username} · private` : "No handle yet"}</small></span>
-        </a>
         <a href="#provider-credentials" data-state={providerCount ? "ready" : "attention"}>
           <Vault aria-hidden="true" />
           <span><strong>Provider credentials</strong><small>{providerCount ? `${providerCount} stored in Vault` : "Needs a provider key"}</small></span>
@@ -152,40 +174,22 @@ export default async function SettingsPage() {
           <ShieldCheck aria-hidden="true" />
           <span><strong>Account security</strong><small>{mfaStatus.enrolled ? (mfaStatus.recoveryRemaining === null ? "MFA on" : `MFA on · ${mfaStatus.recoveryRemaining} recovery codes`) : "MFA is not enabled"}</small></span>
         </a>
-        <a href="#ownership" data-state={ownerRecord?.published ? "ready" : "neutral"}>
-          <Fingerprint aria-hidden="true" />
-          <span><strong>Public ownership</strong><small>{ownerRecord?.published ? "Published with receipts" : ownerRecord ? "Declared, not published" : "No owner declared"}</small></span>
-        </a>
       </div>
 
       <div className="pc-settings-layout">
         <nav aria-label="Settings sections" className="pc-settings-nav">
-          <a href="#profile">Your profile</a>
           <a href="#key-custody">Key custody</a>
           <a href="#provider-credentials">Provider credentials</a>
           <a href="#services">Services</a>
+          <a href="#alerts">Alerts</a>
           <a href="#control-api-keys">Control API keys</a>
           <a href="#account-security">Security and MFA</a>
-          <a href="#ownership">Ownership</a>
+          {motionNavLink()}
           <a href="#account-data">Account data</a>
           <a href="#recovery">Recovery</a>
         </nav>
 
         <div className="pc-settings-sections">
-        <section id="profile" className="pc-section scroll-mt-28">
-          <SectionHeader
-            eyebrow="Operator identity"
-            title="Your profile"
-            description={<>
-            Who you are inside the product, and — only if you choose — on a page at
-            <code> /@handle</code> that anyone can read. Publishing the profile publishes
-            <strong> no agent</strong>; each one is a separate opt-in on its own page.
-            </>}
-          />
-          <div className="pc-section__body">
-            <ProfileSettings profile={profileRecord} publishedAgentCount={publishedAgentCount} />
-          </div>
-        </section>
 
 
         {/* Deliberately NOT next to the kill switch or any other control that
@@ -221,6 +225,15 @@ export default async function SettingsPage() {
             </>}
           />
           <div className="pc-section__body">
+          {/* Only where the operator gate admits a local address: on hosted
+              Cloud it is off, and a setup that can only fail is not offered. */}
+          {endpointPolicy().kind !== "off" ? (
+            <LocalModelsSetup
+              connected={credentialList.some(
+                (credential) => credential.provider === "local" && credential.endpoint_base_url === OLLAMA_ENDPOINT
+              )}
+            />
+          ) : null}
           <ProviderKeysManager
             credentials={credentialList}
             listUnavailable={credentialListUnavailable}
@@ -241,20 +254,31 @@ export default async function SettingsPage() {
             <a href="/dashboard/services">Services</a>.
             </>}
           />
+          <div className="pc-section__body pc-service-token-list">
+          {DISPLAYED_SERVICES.map((service) => (
+            <ServiceTokensManager
+              key={service}
+              service={service}
+              serviceLabel={SERVICE_CATALOG[service].label}
+              tokens={allCredentials.filter((c) => c.provider === SERVICE_CATALOG[service].credentialProvider)}
+              listUnavailable={credentialListUnavailable}
+              hint={SERVICE_DISPLAY[service].settingsHint}
+            />
+          ))}
+          </div>
+        </section>
+
+        <section id="alerts" className="pc-section scroll-mt-28">
+          <SectionHeader
+            eyebrow="Notifications"
+            title="Alerts"
+            description={<>
+            Messages in your own Slack, Discord or Telegram chat when an agent is refused, runs out of
+            budget, or has a security change.
+            </>}
+          />
           <div className="pc-section__body">
-          <ServiceTokensManager
-            service="github"
-            serviceLabel={SERVICE_CATALOG.github.label}
-            tokens={githubTokens}
-            listUnavailable={credentialListUnavailable}
-          />
-          <ServiceTokensManager
-            service="telegram"
-            serviceLabel={SERVICE_CATALOG.telegram.label}
-            tokens={telegramTokens}
-            listUnavailable={credentialListUnavailable}
-            hint="Use the token BotFather gave you for a bot made for your agents, not one people already rely on."
-          />
+            <WorkspaceAlerts state={alertsState} destination={alertDestination} />
           </div>
         </section>
 
@@ -287,20 +311,8 @@ export default async function SettingsPage() {
           </div>
         </section>
 
-        <section id="ownership" className="pc-section scroll-mt-28">
-          <SectionHeader
-            eyebrow="Public identity"
-            title="Owner binding"
-            description={<>
-            Who your passports belong to. A passport already proves it was issued here and is
-            still valid; this is what lets a stranger holding one know who stands behind it.
-            Nothing is shown to anyone until you publish it.
-            </>}
-          />
-          <div className="pc-section__body">
-          <OwnerBinding owner={ownerRecord} />
-          </div>
-        </section>
+        {await motionSection()}
+
 
         <section id="account-data" className="pc-section scroll-mt-28">
           <SectionHeader

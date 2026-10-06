@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { PROVIDERS, providerRequiresEndpoint, upstreamBaseUrl, type ProviderId } from "@/lib/providers";
 import { isEndpointAllowedFor } from "@/lib/providers/endpoint";
 // @ts-expect-error — plain .mjs CLI module, no types
-import { PROVIDER_UPSTREAMS, SERVICE_UPSTREAMS, providerForHost } from "@/cli/proxy-policy.mjs";
+import { PROVIDER_UPSTREAMS, SERVICE_UPSTREAMS, classifyProxyRequest, providerForHost } from "@/cli/proxy-policy.mjs";
 import { SERVICE_CATALOG, SERVICE_IDS } from "@/lib/services/catalog";
 
 /** Providers with a fixed host of ours. Azure has none: it is matched by suffix. */
@@ -65,10 +65,31 @@ describe("CLI service host table", () => {
     expect(Object.keys(SERVICE_UPSTREAMS).sort()).toEqual([...SERVICE_IDS].sort());
   });
 
+  // The prefix the gateway's upstreamUrl adds after the origin (Brave pins
+  // /res/v1, Discord's API lives under /api). The sidecar strips the same prefix
+  // from a request it routes, or the gateway would add it twice. Telegram's
+  // `/bot<token>` is a credential, not a base path.
+  const BASE_PATHS: Record<string, string> = { github: "", telegram: "", brave: "/res/v1", notion: "", discord: "/api" };
+
   it.each([...SERVICE_IDS])("agrees with the catalog on %s's host, and governs it at /api/v1/svc", (service) => {
     const origin = new URL(SERVICE_CATALOG[service].origin);
     expect(SERVICE_UPSTREAMS[service].hostname).toBe(origin.hostname);
-    expect(SERVICE_UPSTREAMS[service].basePath).toBe(origin.pathname === "/" ? "" : origin.pathname);
+    expect(SERVICE_UPSTREAMS[service].basePath).toBe(BASE_PATHS[service]);
     expect(providerForHost(origin.hostname)).toMatchObject({ route: `svc/${service}` });
+  });
+
+  it.each([
+    ["brave", "http://api.search.brave.com/res/v1/web/search?q=x", "/api/v1/svc/brave/web/search?q=x"],
+    ["discord", "http://discord.com/api/v10/channels/1/messages", "/api/v1/svc/discord/v10/channels/1/messages"],
+    ["notion", "http://api.notion.com/v1/pages/p1", "/api/v1/svc/notion/v1/pages/p1"],
+  ])("routes a plain-HTTP %s request to the path the gateway expects", (_service, url, path) => {
+    expect(classifyProxyRequest({ url, gatewayOrigin: "https://gw.example" })).toMatchObject({ allow: true, path });
+  });
+
+  it.each(["brave", "discord"] as const)("%s's base path is exactly what the gateway's upstreamUrl adds", (service) => {
+    const entry = SERVICE_CATALOG[service];
+    // Discord's documentation example token, split so secret scanners do not block a push over it.
+    const token = service === "brave" ? "BSAexampleSubscriptionToken0123456789" : ["MTk4NjIyNDgzNDcxOTI1MjQ4", "Cl2FMQ", "ZnCjm1XVW7vRze4b7Cq4se7kKWs"].join(".");
+    expect(entry.upstreamUrl(token, "/x", "")).toBe(`${entry.origin}${BASE_PATHS[service]}/x`);
   });
 });

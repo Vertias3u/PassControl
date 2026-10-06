@@ -102,7 +102,6 @@ const NON_RENDERING = [
   "lib/control/columns.ts",
   "lib/account-lifecycle.ts",
   "lib/cloud-operations.ts",
-  "lib/problem-diagnostics.ts",
   // A typed transport. It names the column in the statements docblock — to warn
   // a caller that `covered_count` and `cost_microcents` alone would convert "we
   // cannot say" into "zero" — and it formats nothing. Values cross it untouched,

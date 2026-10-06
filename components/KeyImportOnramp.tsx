@@ -4,7 +4,7 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ed25519 } from "@noble/curves/ed25519";
 import { ArrowRight, Check, KeyRound, Plus, ShieldCheck, Upload, X } from "lucide-react";
-import { completeKeyImport, completeKeyImportDirect, probeProviderKey } from "@/app/dashboard/actions";
+import { completeKeyImport, completeKeyImportDirect, probeProviderKey } from "@/app/dashboard/actions-client";
 import {
   clientModelIsUsable,
   DEFAULT_CLIENT_MODELS,

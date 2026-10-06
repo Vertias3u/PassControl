@@ -18,6 +18,7 @@ import { jsonResponse, errorResponse } from "@/lib/control/respond";
 import { readJsonBody } from "@/lib/control/body";
 import { recordAdminAction } from "@/lib/audit";
 import { planAgentImports, planOwnershipImport, readImportEnvelope, summarizePlan } from "@/lib/workspace-import";
+import { accountLimitFrom } from "@/lib/account-limits";
 
 // The body cap in lib/control/body.ts is 64 KiB and is shared by every
 // control-plane route, so it is not raised for this one. The CLI therefore
@@ -203,12 +204,28 @@ const handler = control("write", async ({ req, userId, db, keyId, requestId }) =
   // Row at a time rather than one batch insert: a batch fails whole, so a
   // single refused row would discard every good one, and the unique-violation
   // path below could not tell which passport caused it.
+  // Set once 0076's trigger refuses an agent for the account's limit. Every
+  // later create would be refused the same way, so they are reported as such
+  // without another round trip each: a large file must not turn one refusal
+  // into hundreds of failed inserts.
+  let limitReached = false;
   for (const item of plan) {
     if (item.action !== "create") continue;
+    if (limitReached) {
+      report.agents.rejected.push({ name: item.name, reason: "account_limit_reached" });
+      report.complete = false;
+      continue;
+    }
     // user_id comes from the authenticated caller, never from the file.
     const { error } = await db.from("agents").insert({ ...item.row, user_id: userId });
     if (!error) {
       report.agents.created.push(item.name);
+      continue;
+    }
+    if (accountLimitFrom(error)) {
+      limitReached = true;
+      report.agents.rejected.push({ name: item.name, reason: "account_limit_reached" });
+      report.complete = false;
       continue;
     }
     if (!passportKeyConflict(error)) {

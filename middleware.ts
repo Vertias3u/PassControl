@@ -13,6 +13,7 @@ import {
   isPrerenderedPublicPath,
   needsExternalJwks,
 } from "@/lib/csp";
+import { needsTurnstile } from "@/lib/auth/turnstile-config";
 
 // /verify is the public agent verification page (PAVP): a stranger with a
 // passport id and no account can ask whether we issued it. It is public but NOT
@@ -119,6 +120,8 @@ export async function middleware(request: NextRequest) {
     // therefore has to reach an issuer we cannot know in advance. Exact match —
     // see EXTERNAL_JWKS_PATHS for why this is narrow on purpose.
     allowExternalJwks: needsExternalJwks(request.nextUrl.pathname),
+    // The same switch renders the widget, so the policy and the form agree.
+    allowTurnstile: needsTurnstile(request.nextUrl.pathname),
   });
 
   // Rebuilt per call rather than captured once: Supabase's setAll mutates

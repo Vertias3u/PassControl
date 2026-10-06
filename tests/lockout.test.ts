@@ -28,6 +28,8 @@ const { store, setCalls, redisMock } = vi.hoisted(() => {
   return { store, setCalls, redisMock };
 });
 vi.mock("@/lib/state/redis", () => ({ redis: () => redisMock }));
+const { logFailOpenMock } = vi.hoisted(() => ({ logFailOpenMock: vi.fn() }));
+vi.mock("@/lib/observability", () => ({ logFailOpen: logFailOpenMock }));
 
 import {
   isLockedOut,
@@ -89,5 +91,41 @@ describe("account lockout — brute-force defense (security #4)", () => {
     expect(await isLockedOut("")).toBe(false);
     await recordLoginFailure(""); // no-op, must not throw
     expect(redisMock.incr).not.toHaveBeenCalled();
+  });
+});
+
+// Owner decision, 2026-10-04: the lockout FAILS OPEN. It used to throw, which
+// took the whole /login action down whenever Redis was unreachable (seen with
+// the local Redis stopped) — and on Cloud, Upstash running out of monthly
+// commands would have locked EVERY operator out, the owner included, at the
+// moment they need the dashboard. Failing open matches the login rate limiter
+// beside it; Supabase still checks the password.
+describe("lockout when Redis is unreachable", () => {
+  const down = () => Promise.reject(new Error("fetch failed"));
+
+  beforeEach(() => logFailOpenMock.mockClear());
+
+  it("isLockedOut reads as not locked, and says it failed open", async () => {
+    redisMock.exists.mockImplementationOnce(down);
+    await expect(isLockedOut(EMAIL)).resolves.toBe(false);
+    expect(logFailOpenMock).toHaveBeenCalledWith("lockout");
+  });
+
+  it("recordLoginFailure does not throw", async () => {
+    redisMock.incr.mockImplementationOnce(down);
+    await expect(recordLoginFailure(EMAIL)).resolves.toBeUndefined();
+    expect(logFailOpenMock).toHaveBeenCalledWith("lockout");
+  });
+
+  it("clearLoginFailures does not throw", async () => {
+    redisMock.del.mockImplementationOnce(down);
+    await expect(clearLoginFailures(EMAIL)).resolves.toBeUndefined();
+    expect(logFailOpenMock).toHaveBeenCalledWith("lockout");
+  });
+
+  it("a healthy Redis still locks: failing open is only for failures", async () => {
+    for (let i = 0; i < 5; i++) await recordLoginFailure(EMAIL);
+    expect(await isLockedOut(EMAIL)).toBe(true);
+    expect(logFailOpenMock).not.toHaveBeenCalled();
   });
 });

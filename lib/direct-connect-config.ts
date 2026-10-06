@@ -15,6 +15,11 @@ export interface DirectConnectSetup {
   envFileName: typeof ENV_FILE_NAME;
   /** POSIX shell; exports every variable in the file to the process started after it. */
   loadCommand: string;
+  /**
+   * One paste: writes `envBlock` to the env file, then runs `loadCommand`.
+   * Pasting `envBlock` itself into a terminal sets variables an SDK never sees.
+   */
+  saveAndLoadCommand: string;
   runtimeNote: string;
 }
 
@@ -27,6 +32,24 @@ export interface DirectConnectSetup {
 export const DIRECT_KEY_PLACEHOLDER = "PASTE_YOUR_DIRECT_AGENT_KEY";
 const ENV_FILE_NAME = "passcontrol.env";
 const LOAD_COMMAND = `set -a; . ./${ENV_FILE_NAME}; set +a`;
+// Quoted, so the shell writes the lines as they are and expands nothing. The
+// load step still reads the file as shell, which is safe only because every
+// value is a bare token: the origin, a pc_agent_ key or the placeholder, and a
+// model that `clientModelIsUsable` limits to [A-Za-z0-9._:/-].
+const HEREDOC_DELIMITER = "PASSCONTROL_ENV";
+
+// chmod after the write, not umask before it: a umask only shapes a NEW file,
+// and re-running the paste over a world-readable passcontrol.env must still
+// leave the bearer key readable by its owner only.
+function saveAndLoad(envBlock: string): string {
+  return [
+    `cat > ${ENV_FILE_NAME} <<'${HEREDOC_DELIMITER}'`,
+    envBlock,
+    HEREDOC_DELIMITER,
+    `chmod 600 ${ENV_FILE_NAME}`,
+    LOAD_COMMAND,
+  ].join("\n");
+}
 const RUNTIME_NOTE =
   "In this worker's runtime, replace the provider key it used before with this Direct Agent Key. PassControl governs the model calls routed through it; it does not govern the worker process or any other API the worker calls.";
 
@@ -92,6 +115,7 @@ console.log(response.content);`,
       authNote: "The Anthropic SDK sends this credential as x-api-key and uses the native Messages API. PassControl does not translate OpenAI request bodies into Anthropic request bodies.",
       keyVariable: "ANTHROPIC_API_KEY",
       installCommand: "npm install @anthropic-ai/sdk",
+      saveAndLoadCommand: saveAndLoad(envBlock),
       ...shared,
     };
   }
@@ -141,6 +165,7 @@ console.log(response.choices[0]?.message.content);`,
       (input.provider === "azure" ? AZURE_CLIENT_NOTE : ""),
     keyVariable: "OPENAI_API_KEY",
     installCommand: "npm install openai",
+    saveAndLoadCommand: saveAndLoad(envBlock),
     ...shared,
   };
 }

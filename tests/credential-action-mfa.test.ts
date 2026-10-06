@@ -19,7 +19,9 @@ const source = readFileSync(join(process.cwd(), "app/dashboard/actions.ts"), "ut
 
 /** Slice one function body out of the actions module, exported or not. */
 function functionBody(name: string): string {
-  const start = source.search(new RegExp(`^(?:export )?async function ${name}\\b`, "m"));
+  // An exported action is a thin runAction wrapper; its code lives in `<name>Body`.
+  const target = new RegExp(`^async function ${name}Body\\b`, "m").test(source) ? `${name}Body` : name;
+  const start = source.search(new RegExp(`^(?:export )?async function ${target}\\b`, "m"));
   expect(start, `${name} not found in app/dashboard/actions.ts`).toBeGreaterThan(-1);
   const rest = source.slice(start + 1);
   const next = rest.search(/^(?:export )?async function \w/m);

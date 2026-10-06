@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { ArrowLeft, KeyRound, Route, ShieldCheck } from "lucide-react";
+import { ArrowLeft, KeyRound, Route } from "lucide-react";
 import { SiteLogo, SiteWordmark } from "@/components/SiteBrand";
 import { instanceLabel } from "@/lib/instance-label";
 
@@ -57,7 +57,7 @@ export function AuthShell({
             </div>
             <span className="pc-auth__boundary-line" aria-hidden="true" />
             <div className="is-control">
-              <ShieldCheck aria-hidden="true" />
+              <SiteLogo size={16} decorative />
               <span>PassControl</span>
               <small>policy boundary</small>
             </div>

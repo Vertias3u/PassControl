@@ -25,7 +25,8 @@ export type ProviderId =
   | "deepseek"
   | "gemini"
   | "xai"
-  | "azure";
+  | "azure"
+  | "local";
 
 export interface PassControlOptions {
   /**

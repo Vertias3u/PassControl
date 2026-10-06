@@ -53,6 +53,8 @@ const RULES: Record<ProviderId, readonly ExhaustionRule[]> = {
   // Azure answers quota and rate limits with 429s whose codes are not a verified
   // out-of-credit signature, so it gets no rule rather than a guess.
   azure: [],
+  // A local server has no credit to run out of.
+  local: [],
 };
 
 function errorObject(body: string): Record<string, unknown> | null {

@@ -189,7 +189,7 @@ control key, not a Direct Agent Key. A platform kill requires the instance opera
 A Passport already inactive when minting may instead be refused at the challenge step.
 
 Stop controls do not cancel a request already dispatched upstream. Redis read failures
-have a separate configurable fail mode; see [production guidance](../TUTORIAL.md#9-going-to-production).
+have a separate configurable fail mode; see [Features to configure deliberately](../TUTORIAL.md#features-to-configure-deliberately).
 
 ## “Calls return `503 blocked_budget_state`”
 
@@ -265,8 +265,8 @@ an existing checkout. Run `passcontrol start` afterward to launch the dashboard.
 
 ## “Setup succeeded — is this production?”
 
-**No.** The generated development configuration and seeded local account are not a
-production deployment. Continue with [Tutorial §9: Going to production](../TUTORIAL.md#9-going-to-production)
-for Auth/SMTP, secrets, persistence, trusted proxying and reconciliation. For the Workers
-target, use [the Cloudflare deployment guide](./deployment/cloudflare.md). A successful
-local boot does not verify production operations or provide an independent security audit.
+**No.** Self-hosted PassControl is built for one developer on their own machine. The
+generated development configuration and seeded local account are not a production
+deployment, and this repository does not ship one. To let agents elsewhere reach
+PassControl, see [Tutorial §9: Running it for other people](../TUTORIAL.md#9-running-it-for-other-people).
+A successful local boot is not an independent security audit.

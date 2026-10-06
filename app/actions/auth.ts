@@ -19,8 +19,9 @@ import { isLockedOut, recordLoginFailure, clearLoginFailures } from "@/lib/auth/
 import { logSecurityEvent, maskEmail } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
 import { needsMfaStepUp } from "@/lib/mfa";
+import { HUMAN_CHECK_FAILED, captchaTokenFrom, isCaptchaFailure } from "@/lib/auth/turnstile-config";
 
-type FormState = { error?: string; success?: string } | undefined;
+type FormState = { error?: string; success?: string; resend?: boolean } | undefined;
 
 // Throttle thresholds. Strict enough to stop automated guessing, loose enough
 // that a real user mistyping a few times is unaffected.
@@ -75,9 +76,27 @@ export async function login(_prev: FormState, formData: FormData): Promise<FormS
     return { error: "Too many attempts. Please wait a few minutes and try again." };
   }
 
+  // Forwarded, never required here: Supabase decides whether a request without
+  // one is refused (see lib/auth/turnstile-config.ts).
+  const captchaToken = captchaTokenFrom(formData);
   const supabase = await userClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const { error } = await supabase.auth.signInWithPassword(
+    captchaToken ? { email, password, options: { captchaToken } } : { email, password }
+  );
   if (error) {
+    // Not a wrong password, so not a lockout strike: a broken or expired
+    // widget must never be able to lock an operator out of their account.
+    if (isCaptchaFailure(error)) {
+      logSecurityEvent("auth.login.captcha_failed", { email: maskEmail(email), ip });
+      return { error: HUMAN_CHECK_FAILED };
+    }
+    // Supabase says this only AFTER the password matched, so it tells nothing to
+    // someone who does not already know it. Not a strike either: the person is
+    // right, they just have not clicked the link yet.
+    if ((error as { code?: unknown }).code === "email_not_confirmed") {
+      logSecurityEvent("auth.login.unconfirmed", { email: maskEmail(email), ip });
+      return { error: "Confirm your email first: open the link we sent you.", resend: true };
+    }
     await recordLoginFailure(email);
     logSecurityEvent("auth.login.failure", { email: maskEmail(email), ip });
     return { error: "Invalid email or password." };
@@ -122,12 +141,23 @@ export async function signup(_prev: FormState, formData: FormData): Promise<Form
 
   const supabase = await userClient();
   const emailRedirectTo = authEmailRedirect();
+  const captchaToken = captchaTokenFrom(formData);
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    ...(emailRedirectTo ? { options: { emailRedirectTo } } : {}),
+    ...((emailRedirectTo || captchaToken) ? {
+      options: {
+        ...(emailRedirectTo ? { emailRedirectTo } : {}),
+        ...(captchaToken ? { captchaToken } : {}),
+      },
+    } : {}),
   });
-  if (error) return { error: "Could not create the account. Please try again." };
+  if (error) {
+    if (isCaptchaFailure(error)) {
+      return { error: HUMAN_CHECK_FAILED };
+    }
+    return { error: "Could not create the account. Please try again." };
+  }
 
 
   logSecurityEvent("auth.signup.success", { email: maskEmail(email), ip });
@@ -171,8 +201,17 @@ export async function requestPasswordReset(
     return { error: "Password recovery is not configured on this deployment." };
   }
 
+  const captchaToken = captchaTokenFrom(formData);
   const supabase = await userClient();
-  const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+  const { error } = await supabase.auth.resetPasswordForEmail(
+    email,
+    captchaToken ? { redirectTo, captchaToken } : { redirectTo }
+  );
+  // Specific, unlike every other outcome here: a captcha refusal happens before
+  // Supabase looks the account up, so it says nothing about whether one exists.
+  // The generic success would tell someone with a broken widget that a link is
+  // on its way when none is.
+  if (error && isCaptchaFailure(error)) return { error: HUMAN_CHECK_FAILED };
   logSecurityEvent(error ? "auth.password_reset.failure" : "auth.password_reset.requested", {
     email: maskEmail(email),
     ip,
@@ -182,6 +221,7 @@ export async function requestPasswordReset(
   // must not become an account-enumeration oracle.
   return { success: genericSuccess };
 }
+
 
 export async function resetPassword(
   _prev: FormState,

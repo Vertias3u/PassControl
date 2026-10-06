@@ -77,7 +77,7 @@ vi.mock("@/lib/seclog", () => ({ logSecurityEvent: vi.fn() }));
 vi.mock("@/lib/alert", () => ({ dispatchSecurityAlert: vi.fn() }));
 vi.mock("@/lib/apikeys", () => ({ generateApiKey: vi.fn() }));
 
-import { addProviderKey, probeProviderKey, setProviderEndpoint } from "@/app/dashboard/actions";
+import { addProviderKey, probeProviderKey, setProviderEndpoint } from "@/app/dashboard/actions-client";
 
 beforeEach(() => {
   mocks.rpc.mockClear();
@@ -91,6 +91,23 @@ beforeEach(() => {
 });
 
 const endpointWrites = () => mocks.updates.filter((u) => "endpoint_base_url" in u.values);
+
+describe("a form validator's message still reaches the person", () => {
+  it("an unknown provider says so, not 'Something went wrong'", async () => {
+    await expect(
+      addProviderKey({ provider: "not-a-provider", label: "x", key: "sk-material-0123456789abcdef" })
+    ).rejects.toThrow("Unknown provider.");
+  });
+});
+
+describe("adding a provider key at the account's credential limit", () => {
+  it("says the limit was reached instead of 'Something went wrong'", async () => {
+    mocks.rpc.mockResolvedValueOnce({ data: null, error: { code: "P0001", message: "account_limit_reached:credentials:live:10" } } as never);
+    await expect(
+      addProviderKey({ provider: "openai", label: "prod", key: "sk-proj-material-0123456789abcdef" })
+    ).rejects.toThrow(/limit of 10 stored credentials/);
+  });
+});
 
 describe("adding an Azure key", () => {
   it("stores the key and then its address on the row the RPC created", async () => {

@@ -15,9 +15,13 @@
 // a private key — the gateway has never held one, and the convenience of
 // generating it server-side is not worth being the first thing that does.
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
+import { waitUntil } from "@vercel/functions";
 
 import { recordAdminAction } from "@/lib/audit";
 import { dispatchSecurityAlert } from "@/lib/alert";
+import { notifyWorkspace } from "@/lib/alerts/workspace";
+import { originFromHeaders } from "@/lib/alerts/origin";
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import { logSecurityEvent } from "@/lib/seclog";
 import { serviceClient } from "@/lib/supabase";
@@ -94,6 +98,15 @@ export async function rotateAgentPassport(
   // this needs to hear about it now, not at the next audit read.
   logSecurityEvent("agent.passport_rotate", { user: acting.userId, agentId });
   await dispatchSecurityAlert("agent.passport_rotate", { user: acting.userId, agentId });
+  // The workspace's own channel too (plans/workspace-alerts.md); never awaited.
+  waitUntil(
+    notifyWorkspace({
+      userId: acting.userId,
+      agentId,
+      type: "passport_rotated",
+      origin: originFromHeaders(await headers()) ?? "",
+    })
+  );
   await recordAdminAction({
     userId: acting.userId,
     action: "agent.update",

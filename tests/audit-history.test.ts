@@ -503,9 +503,12 @@ describe("the dashboard actions now say where a change came from", () => {
   // absent and the fallback above is the only thing keeping attribution honest
   // — which works, but leaves new rows indistinguishable from old ones.
   it.each(["updateAgentScopes", "updateAgentFallbacks"])("%s records via: dashboard", (name) => {
-    const at = actions.indexOf(`export async function ${name}`);
+    // The exported action is a runAction wrapper; its code lives in `<name>Body`.
+    const at = actions.indexOf(`async function ${name}Body`);
     expect(at).toBeGreaterThan(-1);
-    const body = actions.slice(at, actions.indexOf("\nexport async function ", at + 1));
+    const rest = actions.slice(at + 1);
+    const end = rest.search(/\n(?:export )?(?:async )?function /);
+    const body = actions.slice(at, end === -1 ? undefined : at + 1 + end);
     expect(body).toMatch(/via: "dashboard"/);
   });
 });

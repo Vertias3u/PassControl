@@ -22,6 +22,8 @@ import {
 } from "@/lib/call-outcome";
 import { classifyCall, isHousekeeping } from "@/lib/call-class";
 import { serviceCallExplanation } from "@/lib/services/presentation";
+import { isServiceId } from "@/lib/services/catalog";
+import { SERVICE_DISPLAY } from "@/lib/services/display";
 import type { LogEntry } from "@/lib/log";
 import { parseShadowVerdict } from "@/lib/policy-shadow";
 import { readRecordedEndpoint } from "@/lib/verify/receipt-view";
@@ -95,6 +97,12 @@ export interface NextAction {
  * The next useful EXISTING place to go from a recorded call. Only links to
  * surfaces that already exist; never a rerun of the historical decision.
  */
+/** The agent page's section for this service call; GitHub's for an id this build does not know. */
+function serviceSectionFor(provider: string | null | undefined): string {
+  const id = provider?.startsWith("svc:") ? provider.slice(4) : "";
+  return isServiceId(id) ? SERVICE_DISPLAY[id].sectionId : "agent-services";
+}
+
 export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null): NextAction[] {
   const agent = row.agent_id ? `/dashboard/agents/${encodeURIComponent(row.agent_id)}` : null;
   const providers = { href: "/dashboard/settings#provider-credentials", label: "Provider credentials" };
@@ -106,7 +114,7 @@ export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null)
     switch (row.status) {
       case "blocked_scope":
       case "blocked_policy":
-        if (agent) actions.push({ href: `${agent}#agent-services`, label: "Edit service access" });
+        if (agent) actions.push({ href: `${agent}#${serviceSectionFor(row.provider)}`, label: "Edit service access" });
         break;
       case "no_provider_key":
       case "upstream_error":

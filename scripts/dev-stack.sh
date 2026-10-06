@@ -57,6 +57,7 @@ COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" PASSCONTROL_SRH_PORT="$SRH_PORT" do
 gen() { openssl rand -base64 32 | tr -d '\n'; }
 VISA_SECRET=""; CACHE_ENC_KEY=""; CRON_SECRET=""
 INSTANCE_SIGNING_KEY=""; INSTANCE_SIGNING_KEY_PREV=""; INSTANCE_SIGNING_KEY_HISTORY=""
+PASSCONTROL_SYSTEM_OPERATOR_EMAILS=""; PASSCONTROL_SIGNUP_MODE=""
 if [[ -f "$ENVF" ]]; then
   VISA_SECRET=$(grep '^VISA_SECRET=' "$ENVF" | cut -d= -f2- || true)
   CACHE_ENC_KEY=$(grep '^CACHE_ENC_KEY=' "$ENVF" | cut -d= -f2- || true)
@@ -67,6 +68,11 @@ if [[ -f "$ENVF" ]]; then
   # one rotation ago. Regenerating this file without it silently un-publishes
   # them, which is the same mass-invalidation described above one step removed.
   INSTANCE_SIGNING_KEY_HISTORY=$(grep '^INSTANCE_SIGNING_KEY_HISTORY=' "$ENVF" | cut -d= -f2- || true)
+  # Who may open System Health. The seed fills it with the account it creates;
+  # `passcontrol update` skips the seed, so it must be carried forward here.
+  PASSCONTROL_SYSTEM_OPERATOR_EMAILS=$(grep '^PASSCONTROL_SYSTEM_OPERATOR_EMAILS=' "$ENVF" | cut -d= -f2- || true)
+  # Sign-up is off by default (setup seeds your account); a mode you set stays.
+  PASSCONTROL_SIGNUP_MODE=$(grep '^PASSCONTROL_SIGNUP_MODE=' "$ENVF" | cut -d= -f2- || true)
 fi
 VISA_SECRET=${VISA_SECRET:-$(gen)}
 CACHE_ENC_KEY=${CACHE_ENC_KEY:-$(gen)}
@@ -94,7 +100,15 @@ INSTANCE_SIGNING_KEY_PREV=$INSTANCE_SIGNING_KEY_PREV
 INSTANCE_SIGNING_KEY_HISTORY=$INSTANCE_SIGNING_KEY_HISTORY
 PASSCONTROL_ISSUER=http://localhost:${PORT:-3000}
 INVITE_CODE=local-dev
+# One developer per install, and setup seeds your account, so sign-up is off.
+# Set to invite (uses INVITE_CODE) or open to add more local accounts.
+PASSCONTROL_SIGNUP_MODE=${PASSCONTROL_SIGNUP_MODE:-closed}
 PASSCONTROL_DEMO=${PASSCONTROL_DEMO:-0}
+# Lets a provider credential go to your own server, e.g. Ollama at
+# http://localhost:11434/v1 (Settings -> Endpoint). Set to off to refuse them.
+PROVIDER_ENDPOINT_MODE=selfhost
+# Who may open System Health (two-factor still required). The seed adds your account.
+PASSCONTROL_SYSTEM_OPERATOR_EMAILS=$PASSCONTROL_SYSTEM_OPERATOR_EMAILS
 EOF
 # An offset install's dashboard port, so `npm run dev:docker` by hand serves it
 # where the issuer above and Supabase's site URL say it is. Only for an offset:
@@ -231,7 +245,9 @@ if [[ "${PASSCONTROL_SKIP_SEED:-}" == "1" ]]; then
 else
   echo "→ Seeding dev user…"
   set -a; . "$ENVF"; set +a
-  node scripts/seed.mjs
+  # Relative on purpose: we are in "$SRC" (cd above), and Git Bash on Windows
+  # converts POSIX paths in arguments but not in environment values.
+  PASSCONTROL_ENV_FILE=.env.docker node scripts/seed.mjs
 fi
 
 # ── 7. Done ───────────────────────────────────────────────────────────────────
@@ -240,12 +256,18 @@ fi
 # Read from the env file: it is a variable here only when step 6 sourced it,
 # which PASSCONTROL_SKIP_SEED skips.
 INVITE_CODE="$(grep '^INVITE_CODE=' "$ENVF" | cut -d= -f2- || true)"
+SIGNUP_MODE="$(grep '^PASSCONTROL_SIGNUP_MODE=' "$ENVF" | cut -d= -f2- || true)"
+if [[ "$SIGNUP_MODE" == "closed" ]]; then
+  SIGNUP_LINE="off (set PASSCONTROL_SIGNUP_MODE in .env.docker to add local accounts)"
+else
+  SIGNUP_LINE="${SIGNUP_MODE:-invite} · invite code ${INVITE_CODE}"
+fi
 if [[ "${PASSCONTROL_VIA_CLI:-}" == "1" ]]; then
 cat <<DONE
 
 ✅ Local stack is up.
    Supabase API    : ${API_URL}   (Studio UI is excluded — use the PassControl dashboard)
-   Invite code     : ${INVITE_CODE}   (for signing up more local accounts)
+   Sign-up         : ${SIGNUP_LINE}
    Stop everything : passcontrol stop   (data is kept)
 DONE
 else
@@ -255,7 +277,7 @@ cat <<DONE
    Supabase API    : ${API_URL}   (Studio UI is excluded — use the PassControl dashboard)
    Start the app   : npm run dev:docker
                      → http://localhost:${PORT:-3000}  (log in with the account you just created)
-   Invite code     : ${INVITE_CODE}   (for signing up more local accounts)
+   Sign-up         : ${SIGNUP_LINE}
 
    Then: add a provider key + issue a passport in the dashboard, and run:
          node examples/chat-agent.mjs "Say hi in 3 words"

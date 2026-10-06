@@ -11,3 +11,12 @@
  * sourcing assigns unconditionally.
  */
 export declare function parseEnvFile(contents: string): Record<string, string>;
+
+/**
+ * The values the launcher applies: the file's, plus `PROVIDER_ENDPOINT_MODE=selfhost`
+ * when neither the file nor `ambientEnv` names the mode.
+ */
+export declare function localStackEnv(
+  fileValues: Record<string, string>,
+  ambientEnv: Record<string, string | undefined>
+): Record<string, string>;

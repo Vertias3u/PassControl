@@ -7,6 +7,7 @@
 // service-role client this `.eq("user_id", …)` IS the tenant boundary). Returns a
 // discriminated result — no throwing for expected outcomes — so each caller maps
 // it to its own response (HTTP status / dashboard error).
+import { accountLimitFrom, accountLimitMessage } from "@/lib/account-limits";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   SENDER_CONSTRAINT_MODES,
@@ -100,6 +101,8 @@ export async function createAgent(
     .select("id, created_at")
     .single();
   if (error) {
+    const limit = accountLimitFrom(error);
+    if (limit) return { ok: false, status: 409, code: "account_limit_reached", message: accountLimitMessage(limit) };
     // 23505 = unique_violation (passport already registered).
     if (passportKeyInUse(error)) {
       return { ok: false, status: 409, code: "agent_exists", message: "That passport is already registered." };
@@ -180,6 +183,8 @@ export async function createDirectAgent(
     if (rpcErrorCode(error) === "active_key_limit") {
       return { ok: false, status: 409, code: "active_key_limit", message: "This workspace has reached its active credential limit." };
     }
+    const limit = accountLimitFrom(error);
+    if (limit) return { ok: false, status: 409, code: "account_limit_reached", message: accountLimitMessage(limit) };
     return { ok: false, status: 500, code: "query_failed" };
   }
   const row = firstRpcRow(data);
@@ -226,6 +231,8 @@ export async function createAgentAccessKey(
     if (rpcErrorCode(error) === "active_key_limit") {
       return { ok: false, status: 409, code: "active_key_limit", message: "This workspace has reached its active credential limit." };
     }
+    const limit = accountLimitFrom(error);
+    if (limit) return { ok: false, status: 409, code: "account_limit_reached", message: accountLimitMessage(limit) };
     return { ok: false, status: 500, code: "query_failed" };
   }
   const row = firstRpcRow(data);

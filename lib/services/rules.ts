@@ -29,11 +29,16 @@
 // Some writes are refused whatever a rule says; that list lives in the catalog
 // (`refused`), because it is about the service, not the tenant.
 import { livePolicyRevision } from "@/lib/policy-shadow";
-import { ruleShapeFor } from "@/lib/services/catalog";
+import { SERVICE_CATALOG, isServiceId, ruleShapeFor } from "@/lib/services/catalog";
 import { MAX_PATH_SEGMENTS, MAX_SEGMENT_LENGTH } from "@/lib/services/path";
 
 /** Calls per hour when a rule set names no cap. A default, never "unlimited". */
 export const DEFAULT_SERVICE_HOURLY_CAP = 500;
+
+/** This service's default cap: its catalog entry's own (lower) one, or the shared default. */
+export function defaultHourlyCapFor(service: string): number {
+  return isServiceId(service) ? SERVICE_CATALOG[service].defaultHourlyCap ?? DEFAULT_SERVICE_HOURLY_CAP : DEFAULT_SERVICE_HOURLY_CAP;
+}
 export const MAX_SERVICE_HOURLY_CAP = 1_000_000;
 export const MAX_SERVICE_RULES = 200;
 
@@ -50,6 +55,12 @@ export interface ServiceRule {
   path: string;
   /** Pattern segments; for `CALL`, the lower-cased method name alone. */
   segments: readonly string[];
+  /**
+   * "Ask me first": a call this rule admits waits for the owner's approval
+   * before it is sent (lib/state/approvals.ts). Stored only when true; absent
+   * reads as false, so every rule written before the flag keeps working unasked.
+   */
+  ask: boolean;
 }
 
 export interface ServiceRules {
@@ -65,8 +76,8 @@ export type ServiceRulesRead =
   | { kind: "malformed"; reason: string };
 
 const ENTRY_KEYS = new Set(["allow", "max_requests_per_hour"]);
-const RULE_KEYS = new Set(["method", "path"]);
-const CALL_RULE_KEYS = new Set(["call"]);
+const RULE_KEYS = new Set(["method", "path", "ask"]);
+const CALL_RULE_KEYS = new Set(["call", "ask"]);
 // A Bot-API-style method name: letters, digits and _, starting with a letter.
 // No wildcard on purpose: a call rule names exactly one method.
 const CALL_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u;
@@ -111,6 +122,10 @@ export function parseServiceRules(raw: unknown, service: string): ServiceRulesRe
   const callShaped = ruleShapeFor(service) === "call";
   for (const rule of allowRaw) {
     if (!isPlainObject(rule)) return { kind: "malformed", reason: "rule_not_object" };
+    // A boolean or nothing. Anything else is a document this build does not
+    // understand, and that denies the service rather than guessing either way.
+    if (rule.ask !== undefined && typeof rule.ask !== "boolean") return { kind: "malformed", reason: "ask" };
+    const ask = rule.ask === true;
     if (callShaped) {
       for (const key of Object.keys(rule)) {
         if (!CALL_RULE_KEYS.has(key)) return { kind: "malformed", reason: `unknown_rule_key:${key}` };
@@ -118,7 +133,7 @@ export function parseServiceRules(raw: unknown, service: string): ServiceRulesRe
       if (typeof rule.call !== "string" || !CALL_NAME.test(rule.call)) {
         return { kind: "malformed", reason: "call" };
       }
-      allow.push({ method: "CALL", path: rule.call, segments: [rule.call.toLowerCase()] });
+      allow.push({ method: "CALL", path: rule.call, segments: [rule.call.toLowerCase()], ask });
       continue;
     }
     for (const key of Object.keys(rule)) {
@@ -132,10 +147,10 @@ export function parseServiceRules(raw: unknown, service: string): ServiceRulesRe
     if (rule.method !== "GET" && segments.at(-1) === "**") {
       return { kind: "malformed", reason: "write_wildcard" };
     }
-    allow.push({ method: rule.method as ServiceRuleMethod, path: rule.path as string, segments });
+    allow.push({ method: rule.method as ServiceRuleMethod, path: rule.path as string, segments, ask });
   }
 
-  let maxRequestsPerHour = DEFAULT_SERVICE_HOURLY_CAP;
+  let maxRequestsPerHour = defaultHourlyCapFor(service);
   if (entry.max_requests_per_hour !== undefined) {
     const cap = entry.max_requests_per_hour;
     if (typeof cap !== "number" || !Number.isInteger(cap) || cap < 1 || cap > MAX_SERVICE_HOURLY_CAP) {
@@ -161,26 +176,34 @@ function segmentsMatch(pattern: readonly string[], actual: readonly string[]): b
  * admits exactly one method name, in any case (the API's own rule), over GET or
  * POST and nothing else.
  */
+function ruleAdmits(rule: ServiceRule, method: string, segments: readonly string[]): boolean {
+  if (rule.method === "CALL") {
+    return (
+      (method === "GET" || method === "POST") &&
+      segments.length === 1 &&
+      segments[0]!.toLowerCase() === rule.segments[0]
+    );
+  }
+  return rule.method === (method === "HEAD" ? "GET" : method) && segmentsMatch(rule.segments, segments);
+}
+
 export function matchServiceRule(
   rules: ServiceRules,
   method: string,
   segments: readonly string[]
 ): ServiceRule | null {
-  const asRuleMethod = method === "HEAD" ? "GET" : method;
-  for (const rule of rules.allow) {
-    if (rule.method === "CALL") {
-      if (
-        (method === "GET" || method === "POST") &&
-        segments.length === 1 &&
-        segments[0]!.toLowerCase() === rule.segments[0]
-      ) {
-        return rule;
-      }
-      continue;
-    }
-    if (rule.method === asRuleMethod && segmentsMatch(rule.segments, segments)) return rule;
-  }
+  for (const rule of rules.allow) if (ruleAdmits(rule, method, segments)) return rule;
   return null;
+}
+
+/**
+ * Whether this call must wait for the owner: true when ANY rule admitting it
+ * asks, not only the first. A broad read rule listed before a narrow rule with
+ * "Ask me first" must not quietly win, because the editor shows the narrow
+ * rule as asking.
+ */
+export function serviceCallAsks(rules: ServiceRules, method: string, segments: readonly string[]): boolean {
+  return rules.allow.some((rule) => rule.ask && ruleAdmits(rule, method, segments));
 }
 
 /**
@@ -191,7 +214,8 @@ export function matchServiceRule(
 export function serviceRulesRevision(service: string, rules: ServiceRules | null): string {
   return livePolicyRevision({
     service,
-    allow: rules ? rules.allow.map((r) => ({ method: r.method, path: r.path })) : null,
+    // `ask` only when on, so a rule set without it keeps the revision it had.
+    allow: rules ? rules.allow.map((r) => ({ method: r.method, path: r.path, ...(r.ask ? { ask: true } : {}) })) : null,
     max_requests_per_hour: rules ? rules.maxRequestsPerHour : null,
   });
 }

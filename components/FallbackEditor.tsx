@@ -15,8 +15,9 @@
 //     paragraph: fallbacks are read live with a 60-second cache, and saving
 //     purges it, so the honest answer is "immediately".
 import { type FormEvent, useState } from "react";
-import { updateAgentFallbacks } from "@/app/dashboard/actions";
-import { PROVIDERS, type ProviderId } from "@/lib/providers";
+import { updateAgentFallbacks } from "@/app/dashboard/actions-client";
+import { PROVIDERS, type ProviderId, offeredProviders } from "@/lib/providers";
+import { useLocalModelsEnabled } from "@/components/dashboard/LocalModels";
 import { MAX_FALLBACKS } from "@/lib/providers/fallbacks";
 import { outOfScope, type FallbackRow } from "@/lib/fallback-rows";
 import type { ScopeRow } from "@/lib/scope-rows";
@@ -34,6 +35,8 @@ export function FallbackEditor({
   scopes: readonly ScopeRow[];
   onClose: () => void;
 }) {
+  // `local` only where this deployment can reach it (components/dashboard/LocalModels.tsx).
+  const localModels = useLocalModelsEnabled();
   const [rows, setRows] = useState<FallbackRow[]>(fallbacks.map((f) => ({ ...f })));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -84,7 +87,7 @@ export function FallbackEditor({
                   value={row.provider}
                   onChange={(e) => setRow(index, { provider: e.target.value as ProviderId })}
                 >
-                  {PROVIDERS.map((p) => (
+                  {offeredProviders(PROVIDERS, localModels, [row.provider]).map((p) => (
                     <option key={p} value={p}>
                       {p}
                     </option>

@@ -175,6 +175,7 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "agent.direct_key.revoke",
         "agent.update",
         "agent.service_rules",
+        "approval.decide",
         "agent.suspend",
         "agent.revoke",
         "killswitch.master",
@@ -191,6 +192,8 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "provider_key.activate",
         "provider_key.delete",
         "workspace.key_custody_expectation",
+        // Workspace alerts (0078): destination set, kinds changed, or removed.
+        "workspace.alerts",
         // Migration 0055. Both move money by hand. `budget.hold_resolve` decides
         // what an attempt that never finished actually cost — the only place a
         // human, rather than the gateway, says what was spent. `budget.rebuild`

@@ -137,3 +137,63 @@ describe("the Telegram access editor", () => {
     expect(html).toMatch(/setWebhook/);
   });
 });
+
+describe("\"Ask me first\" in the access editor", () => {
+  const renderWith = (
+    service: string,
+    serviceLabel: string,
+    initialAllow: { method: string; path: string; ask?: boolean }[],
+    alertDestination?: "telegram" | "slack" | "discord" | null
+  ) =>
+    renderToStaticMarkup(
+      <AgentServiceAccess
+        agentId="11111111-1111-4111-8111-111111111111"
+        service={service}
+        serviceLabel={serviceLabel}
+        initialAllow={initialAllow}
+        initialCap={null}
+        state="ok"
+        tokenStored
+        alertDestination={alertDestination}
+      />
+    );
+  const askBox = (html: string) => /<input type="checkbox"[^>]*data-field="ask-writes"[^>]*>/.exec(html)?.[0] ?? null;
+
+  it("offers the switch where a service has writes, unticked for a list with none asking", () => {
+    const html = renderWith("github", "GitHub", [{ method: "POST", path: `/repos/${REPO}/issues` }]);
+    expect(askBox(html)).not.toBeNull();
+    expect(askBox(html)).not.toMatch(/ checked=""/);
+    expect(html).not.toMatch(/data-service-ask-destination/);
+  });
+
+  it("shows it ticked when every write asks, and says where the questions go", () => {
+    const html = renderWith(
+      "github",
+      "GitHub",
+      [
+        { method: "GET", path: `/repos/${REPO}` },
+        { method: "GET", path: `/repos/${REPO}/**` },
+        { method: "POST", path: `/repos/${REPO}/issues`, ask: true },
+      ],
+      "telegram"
+    );
+    expect(askBox(html)).toMatch(/ checked=""/);
+    expect(html).toMatch(/data-service-ask-destination="telegram"/);
+    expect(html).toMatch(/Approve and Deny buttons/);
+  });
+
+  it("warns when there is no alert destination to ask on", () => {
+    const html = renderWith("github", "GitHub", [{ method: "POST", path: `/repos/${REPO}/issues`, ask: true }], null);
+    expect(html).toMatch(/data-service-ask-destination="none"/);
+    expect(html).toMatch(/only appear on the Approvals page/);
+  });
+
+  it("does not offer it for a service whose calls are all reads (Brave Search)", () => {
+    expect(askBox(renderWith("brave", "Brave Search", []))).toBeNull();
+  });
+
+  it("keeps a custom rule's own ask ticked under Advanced", () => {
+    const html = renderWith("github", "GitHub", [{ method: "GET", path: "/user", ask: true }]);
+    expect(html).toMatch(/<input type="checkbox"[^>]*checked=""[^>]*data-field="rule-ask"|data-field="rule-ask"[^>]*checked=""/);
+  });
+});

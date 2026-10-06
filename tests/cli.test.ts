@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -312,6 +313,68 @@ describe("passcontrol CLI", () => {
   // setup used, so an install made with --port-offset was reported as
   // "unavailable" (another project's ports) while status said it was online.
   // The offset is read back from supabase/config.toml, as `update` does.
+  // Found by the first real `passcontrol update` (1.0.0 → 1.1.0, 2026-10-03).
+  // Another stack (the developer's own checkout) held the Supabase ports, and
+  // the update fast-forwarded and reinstalled before Supabase refused to start,
+  // ending with "npm exited with code 1" and the dashboard stopped. Busy stack
+  // ports are now refused BEFORE anything changes, with the stack named.
+  it("refuses to update while another stack holds this install's ports, and changes nothing", async () => {
+    const offset = 7000; // ports 61321-61327 and :10000, clear of any real stack
+    const git = (cwd: string, ...args: string[]) =>
+      execFileAsync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", ...args], { cwd }).then((r) => r.stdout.trim());
+    const bare = path.join(tmp, "public.git");
+    await fs.mkdir(bare);
+    await git(bare, "init", "--bare", "-b", "main");
+    const install = await makeCheckout(path.join(tmp, "upd-install"));
+    await fs.mkdir(path.join(install, "supabase"));
+    await fs.writeFile(
+      path.join(install, "supabase", "config.toml"),
+      `project_id = "upd-install-${offset}"\n\n[api]\nenabled = true\nport = ${54321 + offset}\n`
+    );
+    await git(install, "init", "-b", "main");
+    await git(install, "add", ".");
+    await git(install, "commit", "-m", "first");
+    const before = await git(install, "rev-parse", "HEAD");
+    await git(install, "remote", "add", "origin", bare);
+    await git(install, "push", "origin", "main");
+    await fs.writeFile(path.join(install, "NEW.md"), "new\n");
+    await git(install, "add", "NEW.md");
+    await git(install, "commit", "-m", "second");
+    await git(install, "push", "origin", "main");
+    await git(install, "reset", "--hard", before);
+    // The update only touches a clone of the public repo; a URL rewrite sends
+    // its fetch to the local bare repo instead of GitHub.
+    await git(install, "remote", "set-url", "origin", "https://github.com/Vertias3u/PassControl.git");
+    const gitRewrite = {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: `url.${bare}.insteadOf`,
+      GIT_CONFIG_VALUE_0: "https://github.com/Vertias3u/PassControl.git",
+    };
+
+    const blocker = net.createServer();
+    await new Promise<void>((resolve) => blocker.listen(54322 + offset, "127.0.0.1", resolve));
+    try {
+      const failure = await runCli(["update", "--app-only", "--yes"], {
+        env: {
+          ...gitRewrite,
+          PASSCONTROL_APP_ROOT: install,
+          PASSCONTROL_GATEWAY: `http://localhost:${3000 + offset}`,
+        },
+      }).then(
+        () => null,
+        (error: { stdout?: string; stderr?: string }) => `${error.stdout ?? ""}\n${error.stderr ?? ""}`
+      );
+      expect(failure, "update succeeded with the stack's ports taken").not.toBeNull();
+      expect(failure).toContain(String(54322 + offset));
+      expect(failure).toMatch(/Nothing was changed/);
+      expect(failure).not.toMatch(/stopped part way/);
+    } finally {
+      await new Promise((resolve) => blocker.close(resolve));
+    }
+    expect(await git(install, "rev-parse", "HEAD")).toBe(before);
+    await expect(fs.access(path.join(tmp, "home", ".config", "passcontrol", "update-in-progress.json"))).rejects.toThrow();
+  }, DOCKER_BOUND_MS);
+
   it("checks the local stack at the port offset setup baked into config.toml", async () => {
     const checkout = await makeCheckout(path.join(tmp, "offset-install"));
     await fs.mkdir(path.join(checkout, "supabase"), { recursive: true });

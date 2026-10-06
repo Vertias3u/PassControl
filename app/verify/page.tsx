@@ -9,7 +9,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { SiteLogo, SITE_BRAND_LABEL } from "@/components/SiteBrand";
-import { demoPassportId } from "@/lib/demo/identity";
 import { isPassportIdShape } from "@/lib/verify/passport";
 
 function verifierCopy() {
@@ -21,6 +20,27 @@ function verifierCopy() {
 }
 
 const VERIFIER_COPY = verifierCopy();
+
+// The line under the form. Cloud points a visitor with no passport at its seeded
+// demo one. A self-hosted instance seeds that passport only with
+// PASSCONTROL_DEMO=1, so the same link 404'd on a normal install; Core says
+// instead what a verifier on localhost cannot do, and where one that can lives.
+function formFootnote() {
+  return (
+    <p className="mt-6 mb-0 text-sm text-muted-foreground">
+      This page only answers on this computer, so nobody else can check your agents here.{" "}
+      <a
+        href="https://passcontrol.vertias.eu"
+        rel="noreferrer noopener"
+        target="_blank"
+        className="font-semibold text-primary no-underline hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      >
+        PassControl Cloud
+      </a>{" "}
+      gives every passport a public verify page anyone can open.
+    </p>
+  );
+}
 
 export const dynamic = "force-dynamic";
 
@@ -105,16 +125,7 @@ export default async function VerifyIndexPage({
           </button>
         </form>
 
-        <p className="mt-6 mb-0 text-sm text-muted-foreground">
-          No passport to hand? Try the{" "}
-          <Link
-            href={`/verify/${demoPassportId()}`}
-            className="font-semibold text-primary no-underline hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-          >
-            public demo passport
-          </Link>
-          .
-        </p>
+        {formFootnote()}
       </section>
 
       <section className="rounded-xl border border-border bg-secondary/50 p-6 text-sm leading-6 text-muted-foreground sm:p-8">

@@ -18,7 +18,10 @@ async function source(path: string): Promise<string> {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
 }
 
-const SHELLS = ["components/dashboard/DashboardShell.tsx", "components/auth/AuthShell.tsx"];
+// The dashboard sidebar dropped its label line on 2026-10-04 (owner: "just ui
+// clutter"), so the login screen is the one shell that still names the
+// deployment. The sidebar must not grow a hardcoded name in its place.
+const SHELLS = ["components/auth/AuthShell.tsx"];
 
 afterEach(() => {
   delete process.env.PASSCONTROL_INSTANCE_LABEL;
@@ -44,7 +47,15 @@ describe("instance label", () => {
     expect(instanceLabel()).toBe(DEFAULT_INSTANCE_LABEL);
   });
 
-  it("is what both shells render — neither may hardcode a name", async () => {
+  it("is not rendered in the dashboard sidebar, and no name replaces it there", async () => {
+    const text = await source("components/dashboard/DashboardShell.tsx");
+    expect(text).not.toContain("instanceLabel");
+    expect(text).not.toContain("pc-sidebar__deployment");
+    expect(text).not.toContain("Local control plane");
+    expect(text).not.toContain("PASSCONTROL_INSTANCE_LABEL");
+  });
+
+  it("is what the login shell renders — it may not hardcode a name", async () => {
     for (const path of SHELLS) {
       const text = await source(path);
       expect(text).toContain("instanceLabel");

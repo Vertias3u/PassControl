@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { motionTurnedOff } from "@/lib/motion-preference";
 import {
   Activity,
   BarChart3,
   Bot,
-  ExternalLink,
   Gauge,
   LogOut,
   MessageSquareWarning,
@@ -12,16 +12,19 @@ import {
   Plug,
   Settings,
   Stethoscope,
+  UserCheck,
 } from "lucide-react";
 import { signOut } from "@/app/actions/auth";
 import { DashboardBrand } from "@/components/dashboard/DashboardBrand";
+import { SidebarAccountMenu } from "@/components/dashboard/SidebarAccountMenu";
 import { cn } from "@/lib/utils";
 import { DashboardCommandPalette } from "@/components/dashboard/DashboardCommandPalette";
 import { userClient } from "@/lib/supabase/server";
 import { DashboardTimeProvider, TimeZoneToggle } from "@/components/dashboard/DashboardTime";
+import { LocalModelsProvider } from "@/components/dashboard/LocalModels";
+import { endpointPolicy } from "@/lib/providers/endpoint";
 import { GlobalElevationBar, type ActiveElevation } from "@/components/dashboard/GlobalElevationBar";
 import { DashboardStickyOffsets } from "@/components/dashboard/DashboardStickyOffsets";
-import { instanceLabel } from "@/lib/instance-label";
 import { readProfile } from "@/lib/profile/manage";
 import { serviceClient } from "@/lib/supabase";
 import { getCachedMigrationHealth } from "@/lib/system-health/cache";
@@ -31,9 +34,10 @@ import { systemOperatorEmails } from "@/lib/system-health/operator";
 import { operatorEmails } from "@/lib/operator-allowlist";
 import { MigrationBanner } from "@/components/dashboard/MigrationBanner";
 import { mfaAuthorizedUser } from "@/lib/mfa";
+import { REPORT_PROBLEM_LINK } from "@/lib/report-problem-link";
 import type { SystemHealthSnapshot } from "@/lib/system-health";
 
-export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "statements" | "services" | "settings" | "beta" | "operator" | "system" | "report";
+export type DashboardArea = "overview" | "graph" | "fleet" | "activity" | "spend" | "statements" | "services" | "approvals" | "settings" | "beta" | "operator" | "system" | "report";
 
 const NAV: Array<{
   id: DashboardArea;
@@ -48,27 +52,37 @@ const NAV: Array<{
   { id: "spend", label: "Spend", href: "/dashboard#spend", Icon: BarChart3 },
   // Any-API: the non-LLM services agents reach, and the stop for each.
   { id: "services", label: "Services", href: "/dashboard/services", Icon: Plug },
+  // "Ask me first": the service calls waiting for the owner's yes or no.
+  { id: "approvals", label: "Approvals", href: "/dashboard/approvals", Icon: UserCheck },
   { id: "settings", label: "Settings", href: "/dashboard/settings", Icon: Settings },
 ];
 
 function Navigation({ active, mobile = false, showBetaOperator = false, showSystemHealth = false }: { active: DashboardArea; mobile?: boolean; showBetaOperator?: boolean; showSystemHealth?: boolean }) {
-  const entries = [
-    ...NAV,
+  // Operator-only links sit in their own labelled group, so an operator's
+  // sidebar reads as a tenant's sidebar plus one clearly separate section.
+  const operatorEntries = [
     ...(showSystemHealth ? [{ id: "system" as const, label: "System health", href: "/dashboard/system", Icon: Stethoscope }] : []),
   ];
+  const link = ({ id, label, href, Icon }: (typeof NAV)[number] | (typeof operatorEntries)[number]) => (
+    <Link
+      key={id}
+      href={href}
+      aria-current={active === id ? "page" : undefined}
+      className={cn("pc-nav-link", active === id && "is-active")}
+    >
+      <Icon aria-hidden="true" />
+      <span>{label}</span>
+    </Link>
+  );
   return (
     <nav aria-label="Control Tower" className={mobile ? "pc-mobile-nav__links" : "pc-sidebar__nav"}>
-      {entries.map(({ id, label, href, Icon }) => (
-        <Link
-          key={id}
-          href={href}
-          aria-current={active === id ? "page" : undefined}
-          className={cn("pc-nav-link", active === id && "is-active")}
-        >
-          <Icon aria-hidden="true" />
-          <span>{label}</span>
-        </Link>
-      ))}
+      {NAV.map(link)}
+      {operatorEntries.length ? (
+        <>
+          <p className="pc-nav-group__label">Operator</p>
+          {operatorEntries.map(link)}
+        </>
+      ) : null}
     </nav>
   );
 }
@@ -83,6 +97,25 @@ function operatorInitials(displayName: string | null, handle: string | null): st
   const words = source.split(/\s+/).filter(Boolean);
   const letters = words.length > 1 ? `${words[0]![0]}${words[1]![0]}` : source.slice(0, 2);
   return letters.toUpperCase();
+}
+
+/**
+ * What the sidebar account card shows. Cloud reads the operator's profile:
+ * display name, @handle and avatar. Core has no profile UI (localhost only,
+ * owner 2026-10-05), so it shows the signed-in email, the one name a local
+ * install always has.
+ */
+function accountCard(
+  profileRecord: { display_name?: string | null; username?: string | null; avatar_key?: string | null; avatar_path?: string | null } | null,
+  email: string | null,
+): { avatarSrc: string | null; initials: string; name: string; handle: string } {
+  void profileRecord;
+  return {
+    avatarSrc: null,
+    initials: operatorInitials(null, email),
+    name: email ?? "Your account",
+    handle: "This computer",
+  };
 }
 
 export async function DashboardShell({
@@ -194,11 +227,17 @@ export async function DashboardShell({
   // rendering, including the pages this deployment prerenders for people who are
   // not logged in. Every dashboard route is already dynamic because it requires a
   // session, so reading per-request state here costs nothing.
+  // The animations switch (lib/motion.ts) is read here for the same reason.
+  const motionOff = await motionTurnedOff();
 
   return (
     <DashboardTimeProvider>
+    {/* Whether choosers may offer the `local` provider: only where the operator
+        gate is open, so hosted Cloud never lists a provider it refuses. */}
+    <LocalModelsProvider enabled={endpointPolicy().kind !== "off"}>
     <div
       className="pc-app min-h-screen bg-background text-foreground"
+      data-motion={motionOff ? "off" : undefined}
     >
       <a href="#pc-main" className="pc-skip-link">
         Skip to content
@@ -212,10 +251,17 @@ export async function DashboardShell({
           <summary aria-label="Open navigation">Menu</summary>
           <div className="pc-mobile-nav__panel">
             <Navigation active={active} mobile showBetaOperator={showOperatorNav} showSystemHealth={showSystemHealth} />
-            <Link href="/dashboard/report" className="pc-nav-link">
-              <MessageSquareWarning aria-hidden="true" />
-              <span>Report a problem</span>
-            </Link>
+            {REPORT_PROBLEM_LINK.external ? (
+              <a href={REPORT_PROBLEM_LINK.href} target="_blank" rel="noreferrer noopener" className="pc-nav-link">
+                <MessageSquareWarning aria-hidden="true" />
+                <span>Report a problem</span>
+              </a>
+            ) : (
+              <Link href={REPORT_PROBLEM_LINK.href} className="pc-nav-link">
+                <MessageSquareWarning aria-hidden="true" />
+                <span>Report a problem</span>
+              </Link>
+            )}
             <form action={signOut}>
               <button type="submit" className="pc-nav-link w-full">
                 <LogOut aria-hidden="true" />
@@ -232,62 +278,13 @@ export async function DashboardShell({
             <DashboardBrand markSize={27} wordmarkSize={17} />
           </Link>
 
-          {/* Who is signed in, then WHICH deployment. The order is the change:
-              this block used to show the deployment label alone, so the one
-              thing it never answered was "whose session is this" — the question
-              that matters most on a screen with a kill switch on it. The
-              deployment label keeps its place on the second line, because an
-              operator with a local stack and a production tab open needs both. */}
-          <Link href="/dashboard/settings#profile" className="pc-sidebar__operator">
-            <span className="pc-sidebar__operator-avatar" aria-hidden="true">
-              {profileRecord?.avatar_key && profileRecord.avatar_path ? (
-                // eslint-disable-next-line @next/next/no-img-element -- served
-                // from our own origin by app/avatars/[key], keyed on a
-                // capability token rather than the tenant id.
-                <img src={`/avatars/${profileRecord.avatar_key}`} alt="" width={28} height={28} />
-              ) : (
-                operatorInitials(profileRecord?.display_name ?? null, profileRecord?.username ?? null)
-              )}
-            </span>
-            <span>
-              {profileRecord?.display_name ?? (profileRecord?.username ? `@${profileRecord.username}` : "Your profile")}
-              <small>{profileRecord?.username ? `@${profileRecord.username}` : "Set a handle"}</small>
-            </span>
-          </Link>
-
-          <div className="pc-sidebar__instance">
-            <span className="pc-live-dot" aria-hidden="true" />
-            <span>
-              {instanceLabel()}
-              <small>Operator session</small>
-            </span>
-          </div>
-
           <Navigation active={active} showBetaOperator={showOperatorNav} showSystemHealth={showSystemHealth} />
 
-          <div className="pc-sidebar__footer">
-            {/*
-              Reachable from every page on purpose: people report where they got
-              stuck, not from a support page they went looking for. A plain Link
-              rather than a modal, so the shell — which renders on every
-              dashboard route — pays nothing for it.
-            */}
-            <Link href="/dashboard/report" className="pc-nav-link">
-              <MessageSquareWarning aria-hidden="true" />
-              <span>Report a problem</span>
-            </Link>
-            <Link href="/verify" className="pc-nav-link">
-              <ExternalLink aria-hidden="true" />
-              <span>Verify passport</span>
-            </Link>
-            <form action={signOut}>
-              <button type="submit" className="pc-nav-link w-full">
-                <LogOut aria-hidden="true" />
-                <span>Sign out</span>
-              </button>
-            </form>
-            <p>Identity crosses the boundary. Secrets do not.</p>
-          </div>
+          {/* Pinned below a nav that scrolls, so Sign out can never be pushed
+              off a short screen again (it was, for an owner with the operator
+              links). Report a problem stays one click from every page here and
+              in the command palette. */}
+          <SidebarAccountMenu {...accountCard(profileRecord, mfa.ok ? mfa.user.email ?? null : null)} />
         </aside>
 
         <div className="pc-workspace">
@@ -320,6 +317,7 @@ export async function DashboardShell({
         </div>
       </div>
     </div>
+    </LocalModelsProvider>
     </DashboardTimeProvider>
   );
 }

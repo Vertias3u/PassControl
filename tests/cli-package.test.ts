@@ -193,9 +193,6 @@ describe("the CLI package is built from the shipped files, not the app manifest"
     expect(readme).toContain(
       "https://github.com/Vertias3u/PassControl/blob/main/docs/integrations/hermes.md",
     );
-    expect(readme).toContain(
-      "https://github.com/Vertias3u/PassControl/blob/main/docs/deployment/cloudflare.md",
-    );
     expect(readme).not.toMatch(/\]\((?:\.\/)?docs\//u);
     expect(readme).toContain("](./LICENSE)");
   });

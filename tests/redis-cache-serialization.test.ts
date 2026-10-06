@@ -48,7 +48,8 @@ const stubFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
   const body: unknown = JSON.parse(String(init?.body ?? "[]"));
   const batched = Array.isArray(body) && Array.isArray(body[0]);
   const commands = (batched ? body : [body]) as string[][];
-  const results = commands.map(([verb, key, value]) => {
+  const results = commands.map((command) => {
+    const [verb, key, value] = command;
     if (verb === "set") {
       store.set(key as string, value as string);
       return { result: "OK" };
@@ -72,13 +73,32 @@ const stubFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     // fence shipped broken behind a stub just like this one, and a comment here
     // claiming coverage that lived nowhere is part of how that happened.
     if (verb === "eval") {
-      const args = commands[0] as string[];
+      // THIS command's arguments, not the batch's first. The client auto-pipelines,
+      // so a fire-and-forget fill can share a batch with the next call's GET; reading
+      // commands[0] there stored the fill under the GET's arguments instead.
+      const args = command as string[];
       const [evalKey, evalValue] = [args[3] ?? "", args[5] ?? ""];
       store.set(evalKey, evalValue);
       return { result: 1 };
     }
     throw new Error(`unstubbed Redis command: ${verb}`);
   });
+  // The client asks for base64 results (`Upstash-Encoding: base64`, its
+  // default) and base64-DECODES every string it gets back. A stub that answers
+  // in plain text is not the real wire, and the difference is not cosmetic:
+  // a plain `null` is valid base64, so it decoded to garbage that read as a
+  // cache HIT — which hid the owner cache's every-call miss until a live
+  // MONITOR showed it (2026-10-03). Values holding `{` are not valid base64
+  // and fell through untouched, which is why the other cases never noticed.
+  const headers = new Headers(init?.headers);
+  if (headers.get("upstash-encoding")?.toLowerCase() === "base64") {
+    for (const entry of results) {
+      const { result } = entry as { result: unknown };
+      if (typeof result === "string" && result !== "OK") {
+        (entry as { result: unknown }).result = Buffer.from(result, "utf8").toString("base64");
+      }
+    }
+  }
   return new Response(JSON.stringify(batched ? results : results[0]), {
     headers: { "content-type": "application/json" },
   });
@@ -232,6 +252,35 @@ describe("the other cached readers survive their own round trip", () => {
       tier: "domain",
       vat: "2026-01-01T00:00:00Z",
     });
+  });
+
+  it("a tenant with no published owner is served from the cache, not re-read every call", async () => {
+    // The common case: no owner row. The miss branch caches that absence on
+    // purpose ("should not cost a database read on every single proxied call"),
+    // but it cached JSON `null`, which the client parses back to null — a miss.
+    // So every proxied call re-queried agent_owners and re-filled the key
+    // (measured 2026-10-03: one SELECT and four Redis commands per call).
+    //
+    // `unreachableDb` cannot catch this: readCurrentOwner turns ANY failure
+    // into null, so a throwing database and a cache hit look identical from
+    // outside. Count the reads instead.
+    let reads = 0;
+    const emptyDb = {
+      from: () => {
+        reads++;
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: async () => ({ data: null, error: null }),
+        };
+        return chain;
+      },
+    } as unknown as Parameters<typeof readCurrentOwner>[0];
+
+    expect(await readCurrentOwner(emptyDb, "u-none")).toBeNull();
+    expect(await readCurrentOwner(emptyDb, "u-none")).toBeNull();
+    expect(await readCurrentOwner(emptyDb, "u-none")).toBeNull();
+    expect(reads).toBe(1);
   });
 
   it("the provider list survives the cache", async () => {

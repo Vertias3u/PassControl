@@ -89,6 +89,9 @@ describe("the capability card on a services-only agent", () => {
   });
 
   it("is told which services the agent has rules for", () => {
-    expect(page).toMatch(/<AgentPassport[\s\S]*?services=\{\[[\s\S]*?"GitHub"[\s\S]*?"Telegram"/);
+    // Every catalog service (lib/services/display.ts), named only where the
+    // agent has at least one rule; no service is listed by hand on the page.
+    expect(page).toMatch(/<AgentPassport[\s\S]*?services=\{serviceAccess\s*\.filter\(\(\{ access \}\) => access\.state === "ok" && access\.allow\.length > 0\)\s*\.map\(\(\{ label \}\) => label\)\}/);
+    expect(page).toMatch(/DISPLAYED_SERVICES\.map\(async \(service\)/);
   });
 });

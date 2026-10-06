@@ -682,6 +682,71 @@ describe("custom provider endpoints", () => {
     expect(res.status).toBe(200);
   });
 
+  /**
+   * T4-02, fixed in the counter this time (2026-10-05).
+   *
+   * A custom-endpoint call used to reserve, and then charge to the agent's cost
+   * counter, an estimate priced from the BUILT-IN provider's table, at its
+   * highest rate for an unlisted model. That kept a cost cap advancing back when
+   * a cost-capped agent could still reach a custom endpoint. Since S3-03 it
+   * cannot: any dollar limit refuses the call before it is sent. So the estimate
+   * protected nothing and only accumulated: on 2026-10-05 eight free calls to a
+   * local Ollama showed $0.75 "charged to budgets", and an agent pointed back at
+   * the real provider would start its first cap with that phantom spend.
+   *
+   * The estimate is now zero from the moment the hold opens, so every exit
+   * (complete, usage unknown, refused) charges the same zero, the row needs no
+   * enforced figure, and Postgres's own definition of spend agrees with the
+   * counter. Tokens are real wherever the call went and are still reserved and
+   * charged in full.
+   */
+  it("reserves and charges nothing to the cost counter for a call to a custom endpoint", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      scope: [{ provider: "openai", models: ["qwen2.5:0.5b"] }],
+      bt: 10_000,
+      bc: null,
+    });
+
+    const res = await POST(
+      req({ model: "qwen2.5:0.5b", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const hold = openHoldMock.mock.calls.at(-1)?.[0] as { estimate: number; estimateMicrocents: number };
+    expect(hold.estimateMicrocents).toBe(0);
+    expect(hold.estimate).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(settleHoldMock).toHaveBeenCalled());
+    const settled = settleHoldMock.mock.calls.at(-1)?.[0] as { microcents: number; tokens: number };
+    expect(settled.microcents).toBe(0);
+    expect(settled.tokens).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+    const logged = writeLogMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(logged.costMicrocents).toBeNull();
+    expect(logged.enforcedMicrocents).toBeUndefined();
+  });
+
+  it("still reserves the priced estimate for the same call to the provider's own host", async () => {
+    // The control: only the custom endpoint changed. A built-in host is priced,
+    // and its reservation is what holds a cost cap against concurrent calls.
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      scope: [{ provider: "openai", models: ["gpt-4o-mini"] }],
+    });
+    const res = await POST(
+      req({ model: "gpt-4o-mini", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    await res.text();
+
+    const hold = openHoldMock.mock.calls.at(-1)?.[0] as { estimateMicrocents: number };
+    expect(hold.estimateMicrocents).toBeGreaterThan(0);
+  });
+
   it("still allows a cost-capped call to the provider's own host", async () => {
     // The control. A cost cap is enforceable wherever PassControl knows the
     // price, which is every built-in endpoint — this must not have become a

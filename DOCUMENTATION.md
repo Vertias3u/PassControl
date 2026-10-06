@@ -101,6 +101,7 @@ path shape real SDKs send, then forwards to the provider's canonical upstream pa
 | `gemini` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/chat/completions`; `/models`; `/models/{id}`, appended to `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `xai` | `POST /responses` or `/v1/responses`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/responses`; `/v1/models`; `/v1/models/{id}`, appended to `https://api.x.ai` |
 | `azure` | `POST /chat/completions` or `/v1/chat/completions`; `POST /responses` or `/v1/responses`; `POST /embeddings` or `/v1/embeddings`; `GET /models` or `/v1/models` | `/chat/completions`; `/responses`; `/embeddings`; `/models`, appended to the resource address stored with the key (`https://<resource>.openai.azure.com/openai/v1`) |
+| `local` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models` | `/chat/completions`; `/models`, appended to the server address stored with the credential (`http://localhost:11434/v1` for Ollama) |
 
 **OpenAI server-side tools are refused.** OpenAI bills its hosted tools per call or per
 session, outside token usage: web search, file search, code interpreter containers, and the
@@ -192,6 +193,27 @@ address**, and the key is only ever sent there.
 Not covered for Azure: Entra ID (bearer) authentication to the resource, the legacy
 `/openai/deployments/<name>/…` API, and an out-of-credit signature (a quota 429 is not
 recognised as one). An embeddings call still never fails over, including from OpenAI to Azure.
+
+`local` is a model server you run yourself and that speaks OpenAI's API: Ollama, LM Studio,
+vLLM. Like Azure it has no host of PassControl's own, so each `local` credential is stored
+**with its server address**, and a credential without one is refused with 409
+`endpoint_required` before its key is read. Unlike Azure, nothing admits that address except
+`PROVIDER_ENDPOINT_MODE`: where it is off (hosted Cloud, and the code default) every `local`
+call is refused that way, and the dashboard does not offer `local` at all.
+- **Use Ollama.** On the local stack, Settings, Provider credentials shows *Models on this
+  machine*. Its button asks Ollama at `http://localhost:11434/v1` for its models and, only if it
+  answers, stores a `local` credential with no key and that address. The agent wizard then
+  offers the server's models.
+- **A key is optional.** An empty key is stored as "send none", and the gateway forwards no
+  credential header. A key you do give is sent as `Authorization: Bearer` (vLLM's `--api-key`).
+- **Unpriced, and free of estimates.** Calls are logged with token counts and no cost, the
+  receipt says `prov: "local"` and `unp: true`, and nothing is charged to the agent's spend. An
+  agent with a dollar limit is refused with 402 `unpriced_endpoint`; use a token limit.
+- **Chat and model listing only.** The server's own admin API (Ollama's `/api/pull`, `/api/delete`)
+  is never reachable through an agent key. Embeddings are not served on `local` yet.
+- **Client.** The OpenAI client with the base URL `…/api/v1/local/v1` and the agent's key.
+- **Scope** defaults to `*`: any model on that server, since the agent can only run models, not
+  manage the server. Narrow it to exact names if that matters.
 
 The packaged SDK uses `/api/v1/<provider>` as its base. For a static OpenAI-compatible
 client, use the exact URL printed by **Connect an agent** or `passcontrol env`; the
@@ -292,10 +314,10 @@ there the client sends no credential at all, because the sidecar adds the visa.
    | Comment on issues and pull requests | `POST /repos/<owner>/<name>/issues/*/comments` |
    | Open pull requests | `POST /repos/<owner>/<name>/pulls` |
 
-**An agent that calls no model.** In **Connect an agent**, choose *Only GitHub or Telegram*.
+**An agent that calls no model.** In **Connect an agent**, choose *Only services*.
 The agent is created with no model access, so every model call it makes is refused, and no
 provider key is needed. The key reveal and the agent's Setup show the configuration for
-GitHub and Telegram instead of a model SDK. **Issue passport** has the same choice: the
+each service (GitHub, Telegram, Brave Search, Notion, Discord) instead of a model SDK. **Issue passport** has the same choice: the
 passport is issued with no model access, and its setup wires Octokit through the SDK's
 visa-refreshing `fetch` (`new Octokit({ baseUrl, request: { fetch: passcontrol.fetch } })`)
 or points a static-key tool at the local sidecar (`passcontrol env github`). Its visa
@@ -394,6 +416,12 @@ the client then calls `$TELEGRAM_API_URL/<method>` with no credential at all.
    and `getUpdates`) and *Send messages* (`sendMessage`), or add other Bot API methods under
    **Advanced: custom rules**, one per rule.
 
+   Once the token is stored, **Connect an agent** shows those two choices and *Ask me first
+   before each send* already ticked, so a new agent can use the bot straight away, with every
+   send waiting for your approval. Untick any of them before creating the agent; an agent
+   created without them has no Telegram access. A call no rule admits is refused with
+   `403 service_call_not_allowed`, and its message links to that agent's access panel.
+
 **Rules.** A Telegram rule names one method: `{ "call": "sendMessage" }`. Method names are
 matched in any case, as Telegram does, over `GET` or `POST`; the HTTP verb decides nothing,
 because Telegram accepts both for every method. There are no wildcards.
@@ -428,6 +456,204 @@ Errors: `401` as for model calls, `403 blocked_suspended`, `403 service_call_not
 `429 rate_limited`, `503 service_rules_unavailable | service_rate_limit_unavailable |
 credential_unavailable`, `502 upstream_unreachable`. A GitHub error is passed through with
 GitHub's own status and body.
+
+---
+
+## Data plane — search with Brave Search through the gateway
+
+An agent can search through Brave's Search API with the workspace's key, which the gateway
+injects as `X-Subscription-Token`, so the agent never holds it.
+
+```
+GET /api/v1/svc/brave/<path>?<Brave's query parameters>
+Authorization: Bearer <work-visa or Direct Agent Key>
+```
+
+The gateway pins Brave's `/res/v1`, so the agent's path starts after it:
+`/api/v1/svc/brave/web/search?q=…` reaches `https://api.search.brave.com/res/v1/web/search?q=…`.
+Through the local sidecar, `passcontrol env brave` prints `BRAVE_SEARCH_API_URL` for the bridge.
+
+**It costs money.** Brave bills every search to the card on the Brave account, with no spending
+limit on Brave's side. PassControl's hourly call cap is therefore the bill guard, and for Brave
+it defaults to **30 calls an hour per agent** (other services: 500) unless the agent's rules
+set their own `max_requests_per_hour`.
+
+**Setup, in the dashboard:**
+1. **Settings → Services:** add the Brave Search API key.
+2. **Each agent's page → Brave Search access:** tick *Search the web* (`GET /web/search`),
+   *Fetch search context for a model* (`GET /llm/context`) or *Look up local places*
+   (`GET /local/pois`, `GET /local/descriptions`), or add other GET paths under
+   **Advanced: custom rules**.
+
+**Refused whatever the rules say** (`403 service_endpoint_refused`): every method but `GET` and
+`HEAD` (Brave Search is read-only), and `chat/completions`, Brave's token-billed answer endpoint,
+which is an LLM call and belongs on the model gateway.
+
+Everything else is as for GitHub: rules, the per-service stop on the Services page, receipts
+with `cls: "svc"`, and the same error codes.
+
+---
+
+## Data plane — call Notion through the gateway
+
+An agent can call Notion's API with the workspace's integration token, which the gateway sends
+as `Authorization: Bearer`, so the agent never holds it.
+
+```
+GET|POST|PATCH|DELETE /api/v1/svc/notion/v1/<path>
+Authorization: Bearer <work-visa or Direct Agent Key>
+Notion-Version: <the version your code was written for>
+```
+
+Paths keep `/v1`, exactly as Notion's SDK sends them, so `@notionhq/client` works unchanged:
+`new Client({ baseUrl: process.env.NOTION_API_URL, auth: <agent key> })`. The agent's
+`Notion-Version` header is forwarded and never set by the gateway; Notion refuses a request
+without one. Through the local sidecar, `passcontrol env notion` prints `NOTION_API_URL`.
+
+**What the token reaches is decided in Notion:** only the pages and databases shared with the
+integration. Share only what your agents need.
+
+**Setup, in the dashboard:**
+1. **Settings → Services:** add the internal integration's token (`ntn_…`).
+2. **Each agent's page → Notion access:** tick *Search and read pages and databases*, *Create
+   pages*, *Edit page content and properties* or *Comment*, or add rules under **Advanced:
+   custom rules** (paths start with `/v1/`).
+
+Some Notion reads are `POST`s (`/v1/search`, `/v1/data_sources/{id}/query`,
+`/v1/databases/{id}/query`, `/v1/views/{id}/queries`, the meeting-notes, agents and sessions
+queries); the Services page counts a rule for one of these as a read.
+
+**Refused whatever the rules say** (`403 service_endpoint_refused`): any path outside `/v1`,
+the OAuth endpoints (`/v1/oauth/...`, which use the integration's client secret), file uploads
+(multipart; attach files by URL instead), and running, changing or deleting Notion's own AI
+agents (`POST /v1/sessions` spends the workspace's Notion AI credits). Moving a page or block
+to the Trash (`DELETE /v1/blocks/{id}`) is left to the rules, because Notion keeps it
+restorable.
+
+Everything else is as for GitHub: the hourly call cap (default 500), the per-service stop on
+the Services page, receipts with `cls: "svc"`, and the same error codes.
+
+---
+
+## Data plane — call Discord through the gateway
+
+An agent can act as the workspace's Discord bot. The gateway sends the bot token as
+`Authorization: Bot <token>`, with the User-Agent Discord requires, so the agent never holds it.
+
+```
+GET|POST|PUT|PATCH|DELETE /api/v1/svc/discord/v10/<path>
+Authorization: Bearer <work-visa or Direct Agent Key>
+```
+
+Paths keep the API version, as discord.js builds them, and reach `https://discord.com/api/v10/…`.
+Only `v10` is served: an unversioned path would reach Discord's default, v6. discord.js sends
+`Authorization: Bot <token>` by default, so with a Direct Agent Key set it to `Bearer`:
+
+```js
+const rest = new REST({ api: process.env.DISCORD_API_URL, version: "10", authPrefix: "Bearer" })
+  .setToken(process.env.PASSCONTROL_AGENT_KEY);
+```
+
+Through the local sidecar, `passcontrol env discord` prints `DISCORD_API_URL`; the sidecar
+replaces whatever token the client sends, so `setToken("sidecar")` with the default prefix works.
+
+**What the token reaches is decided in Discord:** the servers the bot was invited to, with the
+permissions it was given there.
+
+**Setup, in the dashboard:**
+1. **Settings → Services:** add the bot token from the Developer Portal (Bot → Reset Token).
+2. **Each agent's page → Discord access:** enter one channel (its ID, or a
+   `discord.com/channels/…` link) and tick *Read messages in the channel*, *Send messages to the
+   channel*, *Add reactions* or *Start threads*, or add rules under **Advanced: custom rules**.
+
+**Refused whatever the rules say** (`403 service_endpoint_refused`), written from Discord's route
+tables:
+- every webhook route, reads included (a webhook's details carry its own token), interactions
+  and OAuth2;
+- changing or deleting a server or a channel; roles, member roles and channel permissions;
+  kicks, bans, bulk bans and prunes; auto-moderation, onboarding, welcome screen, widget,
+  incident actions and integrations; creating or reordering a server's channels;
+- invites, channel followers, group DM members and bulk message deletion;
+- the bot's own account (renaming it, leaving a server, role connections) and the application
+  (commands, entitlements), and lobbies.
+
+Sending, editing and deleting single messages, reactions, pins, threads, opening a DM and the
+bot's own nickname are left to the rules. Uploads (`multipart/form-data`) are refused with
+`415`; send attachments by URL.
+
+Everything else is as for GitHub: the hourly call cap (default 500), the per-service stop on
+the Services page, receipts with `cls: "svc"`, and the same error codes. Discord's
+`X-RateLimit-*` and `Retry-After` headers are passed back.
+
+---
+
+## Data plane — "Ask me first": approve a service call before it is sent
+
+Any service rule can ask the owner before the call it admits is sent. On an agent's page,
+in a service's access panel, tick **Ask me first before each write** (every rule the service
+counts as a write: GitHub, Notion and Discord's non-GET methods, Telegram's methods that do
+not start with `get`), or tick **Ask me first** on one custom rule, read rules included.
+Stored as `"ask": true` on the rule:
+
+```json
+{ "discord": { "allow": [{ "method": "POST", "path": "/v10/channels/123/messages", "ask": true }] } }
+{ "telegram": { "allow": [{ "call": "sendMessage", "ask": true }] } }
+```
+
+`ask` is a boolean or absent (absent means no). Any other value makes that service's rules
+invalid, so every call to it is refused with `403 service_rules_invalid`, as for any rule
+this build does not understand. Turning it on or off changes the receipt's `pol`.
+
+**What happens to the call.** After the rules, the hourly cap and reading the body, and
+before the token is decrypted:
+1. The gateway takes a fingerprint of exactly what it would send: method, path, the
+   forwarded query, the forwarded headers and the body.
+2. The first time it sees that fingerprint, it opens a question, sends the owner a prompt,
+   and holds the call for up to 15 seconds in case the answer comes quickly.
+3. Approved in time: the call is sent. Otherwise the agent gets
+   `409 approval_pending` with `retry-after: 15`. Sending the **same** request again finds
+   the answer.
+
+An approval admits that exact request **once**, within 10 minutes of the answer. A changed
+body, query or header is a new question. If **any** rule admitting a call asks, the call is
+held, whichever rule is listed first. The owner approves what they can read: the Approvals
+page shows the whole query and body, and a call with more than 16 KB of them is refused with
+`413 approval_body_too_large` instead of being asked about. Two identical retries racing get one admission
+between them. A question nobody answers expires after 15 minutes. A denial answers every
+retry with `403 approval_denied` for 15 minutes.
+
+**Where the owner answers:**
+- **Dashboard → Approvals.** Every open question, with the method, path and the start of
+  the body. Approve or Deny there.
+- **Telegram alerts** get **Approve** and **Deny** buttons on the message. Taps are read by
+  polling the bot's `getUpdates`, so no public webhook is needed and it works on a
+  localhost self-host. A tap decides only if it comes from the message PassControl sent, in
+  the chat it sent it to, still showing the text it was sent with. If the request is too
+  long for the message (over 1,500 characters of query and body), the message says how much
+  is left out and offers only **Deny**: approve it on the Approvals page. An `@` in the
+  request shows as `＠`, so it pings nobody but stays visible.
+- **Give PassControl's alerts their own bot.** An agent whose Telegram rules use the same
+  bot could take the taps through `getUpdates`, or edit the question's text through
+  `editMessageText`. An edited question is refused, so the result is a question you
+  answer in the dashboard, but it is still interference you can avoid. A bot with a
+  webhook set cannot be polled, so its questions are answered in the dashboard.
+- **Slack and Discord alerts** get the request and a link to the Approvals page: an incoming
+  webhook cannot carry buttons that answer back.
+- **No alert destination:** the Approvals page only.
+
+Prompts are sent whatever alert kinds are ticked, and are not throttled: one per question.
+They contain the agent's name, the service, the method, the path and the start of the query
+and body (up to 1,500 characters on Telegram, 900 on Slack and Discord), so that text reaches
+your alert service.
+
+Errors: `409 approval_pending` (with `retry-after`), `403 approval_denied`,
+`413 approval_body_too_large`,
+`429 approval_queue_full` (20 open questions per workspace), and
+`503 approval_unavailable`. If the approval store cannot be read, the call is refused:
+an ask rule exists to keep a human in the way. Each held retry counts against the hourly
+call cap. Audit rows record held and denied calls as `blocked_policy`. Answers given in the
+dashboard are recorded in the admin audit as `approval.decide`. LLM calls cannot be held for
+approval yet.
 
 ---
 
@@ -572,12 +798,14 @@ one the gateway injects. The four operations, and when each is the right one:
 |---|---|---|
 | **Add a new key** | Stores another credential *alongside* the existing ones. Does **not** replace anything. The first key you store for a provider becomes the one in use; later ones do not. | You want a second account or environment available to switch between. |
 | **Replace secret** | Swaps the secret behind an existing nickname, in place. Which credential is in use does not change. | Your key expired or was rotated at the provider and you want the same slot to keep working. This is usually what you want. |
-| **Use this key** | Makes that credential the one the gateway injects, for agents using the tenant default, subject to agent-specific routing. | You added a replacement as a new key and now want to cut over to it. |
+| **Use this key** | Makes that credential the one the gateway injects for every agent that calls this provider. | You added a replacement as a new key and now want to cut over to it. |
 | **Delete** | Removes the credential row and its Vault secret. Refused for the credential currently in use — switch to another one first, so a delete can never quietly change which upstream account is billed. | You are retiring a credential you have already switched away from. |
 
 Writes attempt to purge the 60-second provider-key cache. A failed purge can leave the
-old cached credential usable until its cache expires. Agent-specific key routing can
-override the tenant default; changing that default does not override an agent selection.
+old cached credential usable until its cache expires. There is no per-agent choice of
+credential: every agent in the workspace that calls a provider gets the credential in use.
+To run agents against different accounts or servers, use different providers (for example
+`local` for a model server on your machine, alongside a real `openai` key).
 
 ### Kill switch
 | Method | Path | Scope | Description |
@@ -609,41 +837,6 @@ because writes are asynchronous and best-effort.
 
 A 404 is returned for another tenant's call id rather than a 403, so the endpoint can't be
 used to discover which ids exist.
-
-### Ownership
-Declares **who a tenant's passports belong to**, so a receipt can carry *"this agent is
-operated by X"*.
-
-**The binding is per tenant, not per agent.** There is no agent id in these paths: one owner
-applies to every passport under your account. `own` on a receipt therefore identifies the
-owner of that workspace, not necessarily the operator of the gateway deployment.
-
-| Method | Path | Scope | Description |
-|---|---|---|---|
-| GET | `/owner` | read | The current binding, its tier, and whether it is published. |
-| PUT | `/owner` | write | Declare a claim. Body: `kind` (`self_attested` \| `domain` \| `github`), `subject`, `published?`. **Always lands at tier `unverified`**, even for `kind: "domain"` — claiming a domain and proving control of it are different events. |
-| PATCH | `/owner` | write | Publish or unpublish an existing binding. Body: `published` (boolean). |
-| POST | `/owner/verify` | write | Run the declared domain or GitHub check. On success stamps that tier. |
-
-For `kind: "domain"`, `PUT` returns the instructions inline — where to publish the token and
-what to call next — rather than making you find them in docs.
-
-**A caller never sets `tier` or `verified_at`.** You say what you claim; the server records
-what it has actually proven. `kind` is the method attempted, `tier` is the result, and they
-are stored separately on purpose.
-
-| Tier | Means |
-|---|---|
-| `unverified` | Self-declared. Someone typed it. **Proves nothing** — render it as a claim, never as a fact. |
-| `domain` | Proven by publishing a token at a domain the claimant controls. |
-| `github` | A token was published under the named GitHub account. Not legal identity or an endorsement. |
-| `idv` | Reserved identity-verification tier; no issuing identity-check adapter ships yet. |
-
-Only **published** bindings appear on the public verification pages or in a receipt's `own`
-claim.
-
-Anything that renders an owner must key its wording off `tier`, not `kind` — otherwise a
-self-attested claim renders as a verified one, which defeats the entire mechanism.
 
 ---
 
@@ -878,8 +1071,6 @@ Unlike receipts, agent tokens **do** carry `exp` and are checked for expiry and 
   response body, so it cannot prove what a model replied.
 - Verifying a receipt proves the named issuer signed it. It says nothing about whether that
   issuer is honest — anyone can run PassControl, and deciding whom to trust stays with the reader.
-- Owner bindings at tier `unverified` are self-declared and prove nothing. The `domain` and
-  `github` tiers describe specific control checks; `idv` issuance is not implemented.
 
 
 ## Passport lifecycle and sender proof
@@ -943,9 +1134,14 @@ perform this lifecycle check or fetch this list.
 
 ## Custom endpoints and egress
 
-Provider credentials can carry `endpoint_base_url`. Agent-specific provider-key routing
-can select that credential; an override does not add a provider ID or new API paths.
-`PROVIDER_ENDPOINT_MODE` is unset/off by default. `selfhost` accepts HTTP/HTTPS, arbitrary
+Provider credentials can carry `endpoint_base_url`. The address belongs to the credential,
+so it applies to every agent calling that provider through the credential in use; it does
+not add a provider ID or new API paths.
+`PROVIDER_ENDPOINT_MODE` is unset/off by default in code and in `.env.example`. The local
+stack's launcher (`scripts/dev-docker.mjs`, used by `npm run dev:docker` and `passcontrol start`)
+applies `selfhost` when neither `.env.docker` nor the shell sets the mode, because a local
+stack is one developer's own gateway; set `PROVIDER_ENDPOINT_MODE=off` there to refuse custom
+endpoints. `selfhost` accepts HTTP/HTTPS, arbitrary
 ports, IP literals and private addresses. A comma-separated list such as
 `models.example.com,proxy.example.com` permits exact listed public-style hostnames,
 HTTPS and port 443. Do not set the literal string `allowlist` expecting it to load hosts.
@@ -974,8 +1170,9 @@ zero billing. An abandoned attempt can remain an open, non-expiring hold.
 
 Prices on built-in endpoints use the in-code table and provider fallback for unknown
 models. Custom endpoints are unpriced: `cost_microcents: null`, `unpriced: true`, receipt
-`unp: true` with a placeholder numeric cost. Tokens still count. Cost-cap enforcement
-uses a provider-table reservation estimate even there, not an actual custom price.
+`unp: true` with a placeholder numeric cost. Tokens still count. Nothing is reserved or
+charged to the cost budget for them, and an agent with a dollar limit (cumulative or periodic)
+is refused them with 402 `unpriced_endpoint`, so no cost cap depends on a price nobody knows.
 `enforced_*` accounting can differ from reported usage/cost. A spend figure must be read
 alongside unknown pricing, uncertain usage, and reserved headroom.
 
@@ -1028,20 +1225,6 @@ holds; it does not release them because they are old. Recovery endpoints are:
 billed; `not_spent` is refused. False permits that decision because this attempt did
 not claim dispatch permission. Rebuilds use retained logs/adjustments, not independent
 provider data. Review [the recovery runbook](./docs/budget-recovery.md) before acting.
-
-## Owner verification details
-
-For domains, publish the returned token at
-`https://<domain>/.well-known/passcontrol-owner.txt`. For GitHub, publish it in public
-repository `<login>/passcontrol-owner`, file `owner.txt` on its default branch; the
-checker fetches `https://raw.githubusercontent.com/<login>/passcontrol-owner/HEAD/owner.txt`.
-Both refuse redirects. These prove control of the publishing location at check time,
-not legal identity. Domain URL shape checks are not DNS-aware SSRF prevention.
-
-Rechecks preserve verification timestamps and can demote after three counted failures;
-GitHub network-unreachable results do not count as failed ownership evidence. Cached
-owner claims can lag changes. Registry/company lookup records separate evidence and
-never upgrades owner tier or proves the tenant represents that company.
 
 ## Signed spend statements
 

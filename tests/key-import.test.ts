@@ -111,6 +111,10 @@ vi.mock("@/lib/audit", () => ({ recordAdminAction: mocks.recordAdminAction }));
 vi.mock("@/lib/seclog", () => ({ logSecurityEvent: vi.fn() }));
 vi.mock("@/lib/alert", () => ({ dispatchSecurityAlert: vi.fn() }));
 vi.mock("@/lib/apikeys", () => ({ generateApiKey: vi.fn() }));
+// The agent-cap pre-check reads limits over the same `rpc` this file counts.
+// Its behaviour is pinned in tests/key-import-agent-cap.test.ts; here it
+// answers "no refusal" so these assertions stay about the store and the agent.
+vi.mock("@/lib/agent-capacity", () => ({ agentCreationRefusal: vi.fn(async () => null) }));
 
 import {
   PROVIDERS,
@@ -120,7 +124,7 @@ import {
   resolveProviderSelection,
   type ProviderId,
 } from "@/lib/providers";
-import { completeKeyImport, probeProviderKey } from "@/app/dashboard/actions";
+import { completeKeyImport, probeProviderKey } from "@/app/dashboard/actions-client";
 import {
   DEFAULT_CLIENT_MODELS,
   DISCOVERED_MODEL_SUGGESTION_LIMIT,

@@ -102,7 +102,14 @@ export async function readCurrentOwner(
 
     // Cache the miss too. A tenant with no owner is the common case, and it
     // should not cost a database read on every single proxied call.
-    waitUntil(setCachedOwner(userId, JSON.stringify(data ?? null), OWNER_CACHE_TTL_S, fence));
+    //
+    // As `{}`, NOT as JSON `null`. The Upstash client JSON-parses what it reads,
+    // so a stored "null" comes back as null — indistinguishable from an empty
+    // key — and the miss was never served from cache: every proxied call paid
+    // the SELECT plus four Redis commands to re-fill it (measured 2026-10-03).
+    // `{}` survives the round trip, and toClaim reads it as "no owner" exactly
+    // as it reads a null row: no subject, no claim.
+    waitUntil(setCachedOwner(userId, JSON.stringify(data ?? {}), OWNER_CACHE_TTL_S, fence));
     return toClaim((data as Record<string, unknown>) ?? null);
   } catch {
     return null;

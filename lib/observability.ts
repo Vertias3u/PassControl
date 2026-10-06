@@ -8,6 +8,7 @@ type FailOpenScope =
   | "kill_read"
   | "suspend_read"
   | "ratelimit"
+  | "lockout"
   | "policy_read"
   | "passport_source_observation"
   | "passport_key_storage_declaration";

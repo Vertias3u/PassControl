@@ -17,12 +17,13 @@
 // Optional: DEV_USER_EMAIL, DEV_USER_PASSWORD (skip the prompts — for CI).
 import { createClient } from "@supabase/supabase-js";
 import { createHash, randomBytes } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // Fixed demo credentials — seeded ONLY when PASSCONTROL_DEMO=1 (local "try it"
 // stack). The demo passport has `demo` scope only (reaches the keyless demo
 // provider — no real key, no cost); the demo control key drives the kill switch
-// in `passcontrol try`. Both are inert in any deployment without the demo
+// for the kill-switch demo. Both are inert in any deployment without the demo
 // provider enabled. These are public by design and are NOT account credentials.
 // Keep in sync with bin/passcontrol.mjs.
 // App-side source of truth: lib/demo/identity.ts (duplicated here to keep this plain-ESM seed script transpilation-free).
@@ -36,6 +37,52 @@ export const MIN_PASSWORD_LENGTH = 12;
 
 export function generatePassword() {
   return randomBytes(18).toString("base64url");
+}
+
+const SYSTEM_OPERATOR_LINE = "PASSCONTROL_SYSTEM_OPERATOR_EMAILS";
+
+/**
+ * Names the seeded account as this instance's System Health operator, in the
+ * text of a .env file. Self-host is one developer on localhost, and an empty
+ * list authorizes nobody, so the person running the stack could never open the
+ * page that diagnoses it. Only an EMPTY or missing list is filled: a value
+ * someone set is theirs. The page still requires two-factor; this only puts
+ * the account on the list. Anything that is not one plain email is refused, so
+ * a prompt answer can never write a second env line.
+ */
+export function withSystemOperator(envText, email) {
+  const value = String(email ?? "").trim().toLowerCase();
+  if (!/^[^\s@=]+@[^\s@=]+\.[^\s@=]+$/u.test(value)) return envText;
+  const line = new RegExp(`^${SYSTEM_OPERATOR_LINE}=(.*)$`, "mu");
+  const match = envText.match(line);
+  if (match) {
+    if (match[1].trim()) return envText;
+    return envText.replace(line, `${SYSTEM_OPERATOR_LINE}=${value}`);
+  }
+  const base = envText === "" || envText.endsWith("\n") ? envText : `${envText}\n`;
+  return `${base}${SYSTEM_OPERATOR_LINE}=${value}\n`;
+}
+
+/**
+ * Apply withSystemOperator to the env file at `envFile`. Never throws: setup
+ * runs under `set -e`, and failing to add a convenience must not fail the
+ * install whose account already exists. Returns "added", "unchanged" or
+ * "failed"; the caller prints what to do by hand on "failed".
+ */
+export function recordSystemOperator(
+  envFile,
+  email,
+  { read = (path) => readFileSync(path, "utf8"), write = (path, text) => writeFileSync(path, text) } = {}
+) {
+  try {
+    const before = read(envFile);
+    const after = withSystemOperator(before, email);
+    if (after === before) return "unchanged";
+    write(envFile, after);
+    return "added";
+  } catch {
+    return "failed";
+  }
 }
 
 /**
@@ -171,7 +218,19 @@ async function main() {
   if (profileErr) throw profileErr;
   console.log("• ensured public.users profile row");
 
-  // Demo passport + control key for `passcontrol try` (local demo stack only).
+  // System Health for the person who runs this stack (see withSystemOperator).
+  // dev-stack.sh passes the env file it just wrote; a standalone run has none.
+  const envFile = process.env.PASSCONTROL_ENV_FILE;
+  if (envFile) {
+    const recorded = recordSystemOperator(envFile, email);
+    if (recorded === "added") {
+      console.log(`• System Health: ${email} can open it (after turning on two-factor)`);
+    } else if (recorded === "failed") {
+      console.log(`• System Health: could not update ${envFile}; to open it, set PASSCONTROL_SYSTEM_OPERATOR_EMAILS=${email} there`);
+    }
+  }
+
+  // Demo passport + control key (local demo stack only).
   if (process.env.PASSCONTROL_DEMO === "1") {
     const { error: agentErr } = await admin.from("agents").upsert(
       {
@@ -209,10 +268,6 @@ async function main() {
     console.log("   ↑ generated because no terminal was attached — save it now, it is not stored.");
   } else {
     console.log("   password: the one you chose");
-  }
-  if (process.env.PASSCONTROL_DEMO === "1") {
-    console.log("\nTry it in one command (no key, no accounts):");
-    console.log("   passcontrol try");
   }
   console.log("\nNext (manual, one-time):");
   console.log("   1. Log in → add your provider key (Anthropic/OpenAI) — it goes into the local Vault.");

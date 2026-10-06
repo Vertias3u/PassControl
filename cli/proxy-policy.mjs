@@ -60,6 +60,15 @@ export const SERVICE_UPSTREAMS = {
   // Telegram's token is in its URL path, so a tunnel to it would carry the bot
   // token past every control: refused for CONNECT, like every host here.
   telegram: { hostname: "api.telegram.org", basePath: "" },
+  // Its key goes in a header; a tunnel would send searches billed to the
+  // workspace past the agent's rules and cap.
+  // basePath: the prefix the gateway adds itself (the catalog's upstreamUrl),
+  // stripped here so a routed request does not carry it twice.
+  brave: { hostname: "api.search.brave.com", basePath: "/res/v1" },
+  notion: { hostname: "api.notion.com", basePath: "" },
+  // discord.com is also Discord's website: an agent's browser-like traffic to it
+  // is refused through the sidecar, as every governed service host is.
+  discord: { hostname: "discord.com", basePath: "/api" },
 };
 
 // `route` is the path segment after /api/v1/ that governs the host.

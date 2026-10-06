@@ -14,7 +14,7 @@
 // that is readable from the DOM is a stage that can be checked.
 import { useState, useTransition } from "react";
 import { KeyRound, ShieldAlert } from "lucide-react";
-import { approveCliDevice, denyCliDevice, inspectCliDevice } from "@/app/dashboard/actions";
+import { approveCliDevice, denyCliDevice, inspectCliDevice } from "@/app/dashboard/actions-client";
 
 type Stage =
   | { kind: "entry" }

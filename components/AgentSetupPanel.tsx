@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import { Check, Copy, Wrench } from "lucide-react";
 
 import { setupExampleModel } from "@/lib/agent-connect";
-import { buildDirectConnectSetup } from "@/lib/direct-connect-config";
+import { buildDirectConnectSetup, DIRECT_KEY_PLACEHOLDER } from "@/lib/direct-connect-config";
 import { buildServiceConnectSetup } from "@/lib/service-connect";
+import { SERVICE_CATALOG } from "@/lib/services/catalog";
+import { DISPLAYED_SERVICES, SERVICE_DISPLAY } from "@/lib/services/display";
 import { isProvider, type ProviderId } from "@/lib/providers";
 
 export interface AgentSetupKey {
@@ -117,10 +119,15 @@ export function AgentSetupPanel({
       {state === "no-provider" ? (
         <div className="grid gap-1.5" data-setup-services-only>
           <p className="m-0 text-sm text-muted-foreground">
-            This agent has no model access, so every model call is refused. It can call GitHub or Telegram
-            through the rules under <a href="#agent-services">GitHub access</a> and{" "}
-            <a href="#agent-services-telegram">Telegram access</a>; to let it call a model, add a provider and
-            model to its access.
+            This agent has no model access, so every model call is refused. It can call a service through
+            the rules under{" "}
+            {DISPLAYED_SERVICES.map((service, index) => (
+              <span key={service}>
+                {index > 0 ? (index === DISPLAYED_SERVICES.length - 1 ? " and " : ", ") : null}
+                <a href={`#${SERVICE_DISPLAY[service].sectionId}`}>{SERVICE_CATALOG[service].label} access</a>
+              </span>
+            ))}
+            ; to let it call a model, add a provider and model to its access.
           </p>
           {usable.length > 0 && status !== "revoked" ? (
             <>
@@ -175,16 +182,18 @@ export function AgentSetupPanel({
           <span className={`${label} mt-2`}>1 · Install the SDK</span>
           <pre className={block}>{setup.installCommand}</pre>
           <CopyButton kind="install" value={setup.installCommand} text="Copy install command" />
-          <span className={`${label} mt-2`}>2 · {setup.label} — save as {setup.envFileName}</span>
-          <pre className={block}>{setup.envBlock}</pre>
-          <CopyButton kind="env" value={setup.envBlock} text="Copy configuration" />
+          <span className={`${label} mt-2`}>2 · {setup.label} — save and load {setup.envFileName}</span>
           <p className="m-0 text-xs leading-5 text-muted-foreground">
-            Replace <code>{setup.keyVariable}</code>&apos;s placeholder with the Direct Agent Key you stored.
+            Paste this into a terminal in your project folder, in the shell that starts the worker. It writes {setup.envFileName}, readable only by you, and loads it. Keep it out of git: add {setup.envFileName} to your .gitignore.
           </p>
-          <span className={`${label} mt-2`}>3 · Load it into the shell that starts the worker</span>
-          <pre className={block}>{setup.loadCommand}</pre>
-          <CopyButton kind="load" value={setup.loadCommand} text="Copy load command" />
-          <span className={`${label} mt-2`}>4 · Smoke test</span>
+          <pre className={block}>{setup.saveAndLoadCommand}</pre>
+          <CopyButton kind="env" value={setup.saveAndLoadCommand} text="Copy save-and-load command" />
+          <p className="m-0 text-xs leading-5 text-muted-foreground">
+            The key is shown only once, so this writes a placeholder. Edit {setup.envFileName}, replace{" "}
+            <code>{DIRECT_KEY_PLACEHOLDER}</code> with the Direct Agent Key you stored, then load it again with{" "}
+            <code>{setup.loadCommand}</code> — the same line a new terminal needs.
+          </p>
+          <span className={`${label} mt-2`}>3 · Smoke test</span>
           <pre className={block}>{setup.smokeCommand}</pre>
           <CopyButton kind="smoke" value={setup.smokeCommand} text="Copy smoke test" />
           <p className="m-0 text-xs leading-5 text-muted-foreground">

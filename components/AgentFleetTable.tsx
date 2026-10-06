@@ -2,7 +2,7 @@
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Search, ArrowUpRight, SlidersHorizontal } from "lucide-react";
-import { updateAgentBudgets } from "@/app/dashboard/actions";
+import { updateAgentBudgets } from "@/app/dashboard/actions-client";
 import {
   AgentControlResult,
   applyIntent,
@@ -111,22 +111,6 @@ function KeyCustody({
   );
 }
 
-function publicListingSummary(agent: Agent): string {
-  if (!agent.passport_pubkey) return "Public listing requires a passport";
-  if (!agent.published) return "Not publicly listed";
-  return agent.public_label
-    ? `Selected for public profile as ${agent.public_label}`
-    : "Selected for public profile";
-}
-
-function publicListingAction(agent: Agent): string {
-  if (!agent.passport_pubkey) return "Add passport to list";
-  return agent.published ? "Manage public listing" : "Set up public listing";
-}
-
-function publicListingHref(agent: Agent): string {
-  return `/dashboard/agents/${agent.id}#${agent.passport_pubkey ? "agent-public" : "agent-identity"}`;
-}
 
 export function AgentFleetTable({
   agents,
@@ -306,7 +290,6 @@ export function AgentFleetTable({
                   <div className="pc-passport-suffix" title={a.passport_pubkey ?? "Direct Agent Key identity"}>
                     {a.passport_pubkey ? `${a.passport_pubkey.slice(0, 16)}…` : "Direct Agent Key"}
                   </div>
-                  <div className="pc-passport-suffix">{publicListingSummary(a)}</div>
                   <AgentControlResult
                     result={controlResults[a.id] ?? null}
                     agentName={a.name}
@@ -361,7 +344,6 @@ export function AgentFleetTable({
                       <button disabled={a.status === "revoked"} onClick={() => toggle(a.id, "scopes")}>
                         Edit scopes
                       </button>
-                      <Link className="pc-open-agent" href={publicListingHref(a)}>{publicListingAction(a)}</Link>
                       <button
                         disabled={controlBusy(a.id) || a.status === "revoked"}
                         onClick={() => void runControl(a.id, intentFor(effectiveStatus(a.id, a.status)))}
@@ -389,8 +371,6 @@ export function AgentFleetTable({
                     <Link href={`/dashboard/agents/${agent.id}`}>{agent.name}</Link>
                     <span>
                       {agent.passport_pubkey ? `${agent.passport_pubkey.slice(0, 14)}…` : "Direct Agent Key"}
-                      <br />
-                      {publicListingSummary(agent)}
                     </span>
                   </div>
                   <StatusPill status={agent.status as StatusType} />
@@ -419,7 +399,6 @@ export function AgentFleetTable({
                   </Link>
                   <button className="ghost" onClick={() => toggle(agent.id, "budgets")}>Budgets</button>
                   <button className="ghost" disabled={agent.status === "revoked"} onClick={() => toggle(agent.id, "scopes")}>Scopes</button>
-                  <Link className="pc-open-agent" href={publicListingHref(agent)}>{publicListingAction(agent)}</Link>
                   <button
                     className="ghost"
                     disabled={controlBusy(agent.id) || agent.status === "revoked"}

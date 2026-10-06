@@ -60,7 +60,8 @@ describe("azure is a registered provider with no host of its own", () => {
   });
 
   it("every other provider keeps its fixed host and needs no endpoint", () => {
-    for (const provider of PROVIDERS.filter((p) => p !== "azure")) {
+    // `local` is the other provider with no host of ours (tests/local-provider.test.ts).
+    for (const provider of PROVIDERS.filter((p) => p !== "azure" && p !== "local")) {
       expect(upstreamBaseUrl(provider)).toMatch(/^https:\/\//);
       expect(providerRequiresEndpoint(provider)).toBe(false);
     }

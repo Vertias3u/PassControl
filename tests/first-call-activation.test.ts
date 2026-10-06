@@ -300,6 +300,7 @@ describe("first-call dashboard integration", () => {
     expect(component).not.toContain("document.cookie");
   });
 
+
   it("reuses the bounded dashboard log scan and listens for stored rows", () => {
     const page = read("app/dashboard/page.tsx");
     const component = read("components/dashboard/FirstCallActivation.tsx");

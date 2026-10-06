@@ -1,6 +1,6 @@
 {
   "name": "passcontrol",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Identity, scope and budget controls for AI agents while provider keys stay server-side.",
   "license": "BUSL-1.1",
   "homepage": "https://passcontrol.vertias.eu",
@@ -44,8 +44,6 @@
     "cli": "node bin/passcontrol.mjs",
     "dev": "next dev",
     "build": "next build",
-    "build:cloudflare": "node scripts/build-cloudflare.mjs",
-    "preview:cloudflare": "opennextjs-cloudflare preview",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",

@@ -98,7 +98,9 @@ describe("scope validation the editor must not be able to bypass", () => {
   // list must be generated from the same module the validator uses.
   it("offers exactly the providers the validator accepts, generated not typed", async () => {
     const source = readFileSync(resolve(process.cwd(), "components/ScopeEditor.tsx"), "utf8");
-    expect(source).toMatch(/SCOPE_PROVIDERS\.map\(/u);
+    // Generated from SCOPE_PROVIDERS, through the deployment's `local` gate
+    // (offeredProviders), which keeps a saved row's provider whatever the gate.
+    expect(source).toMatch(/offeredProviders\(SCOPE_PROVIDERS, localModels, \[row\.provider\]\)\.map\(/u);
     const { SCOPE_PROVIDERS } = await import("@/lib/providers");
     for (const provider of SCOPE_PROVIDERS) {
       expect(
@@ -166,7 +168,7 @@ describe("the editor UI", () => {
   it("derives the acting user from the session, never from an argument", () => {
     // The whole tenant boundary rests on this. An action taking a userId
     // parameter would let the caller choose whose agent to edit.
-    const fn = actions.slice(actions.indexOf("export async function updateAgentScopes"));
+    const fn = actions.slice(actions.indexOf("async function updateAgentScopesBody"));
     const signature = fn.slice(0, fn.indexOf(")"));
     expect(signature).not.toMatch(/userId/);
     expect(fn).toMatch(/await requireUser\(\)/);
@@ -176,7 +178,7 @@ describe("the editor UI", () => {
     // `fields: "allowed_scopes"` cannot answer "did someone widen this agent to
     // `*`" six weeks later. This is also the metadata capability-change history
     // needs.
-    const fn = actions.slice(actions.indexOf("export async function updateAgentScopes"));
+    const fn = actions.slice(actions.indexOf("async function updateAgentScopesBody"));
     expect(fn).toMatch(/from:/);
     expect(fn).toMatch(/to:/);
   });
@@ -184,7 +186,7 @@ describe("the editor UI", () => {
   it("revalidates the agent's own page, not just the fleet root", () => {
     // The editor lives on /dashboard/agents/[id]; revalidating "/" alone would
     // leave the scope the operator just changed still on screen.
-    const fn = actions.slice(actions.indexOf("export async function updateAgentScopes"));
+    const fn = actions.slice(actions.indexOf("async function updateAgentScopesBody"));
     expect(fn).toMatch(/revalidatePath\(`\/dashboard\/agents\/\$\{agentId\}`\)/);
   });
 

@@ -23,7 +23,8 @@
 //    feature existing, and it is required by the database, not just the form.
 import { useState, useTransition } from "react";
 
-import { PROVIDERS, type ProviderId } from "@/lib/providers";
+import { PROVIDERS, type ProviderId, offeredProviders } from "@/lib/providers";
+import { useLocalModelsEnabled } from "@/components/dashboard/LocalModels";
 import {
   MAX_BREAK_GLASS_TTL_S,
   MIN_BREAK_GLASS_TTL_S,
@@ -67,6 +68,8 @@ export function BreakGlassPanel({
   grant: BreakGlassGrant | null;
   visaTtlSeconds: number;
 }) {
+  // `local` only where this deployment can reach it (components/dashboard/LocalModels.tsx).
+  const localModels = useLocalModelsEnabled();
   const [opening, setOpening] = useState(false);
   const [provider, setProvider] = useState<ProviderId>(PROVIDERS[0]);
   const [models, setModels] = useState("");
@@ -198,7 +201,7 @@ export function BreakGlassPanel({
                 onChange={(e) => setProvider(e.target.value as ProviderId)}
                 className="h-10 rounded-lg border border-border bg-background px-3 text-sm"
               >
-                {PROVIDERS.map((p) => (
+                {offeredProviders(PROVIDERS, localModels, [provider]).map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>

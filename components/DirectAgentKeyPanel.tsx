@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Copy, KeyRound, Plus, ShieldOff } from "lucide-react";
 
-import { issueDirectAgentKey, revokeDirectAgentKey } from "@/app/dashboard/actions";
+import { issueDirectAgentKey, revokeDirectAgentKey } from "@/app/dashboard/actions-client";
 import type { AgentAccessKeyView } from "@/app/dashboard/agents/[id]/passport-data";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 import { buttonVariants } from "@/components/ui/button";

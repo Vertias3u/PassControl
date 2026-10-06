@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { coreSource } from "./support/curated-source";
 
 // What a self-hoster's Control Tower must and must not contain, asserted by running
 // the same marker transform scripts/curate-public.sh runs. The private tree is not
@@ -66,10 +67,11 @@ describe("Core dashboard boundary", () => {
       "app/not-found.tsx",
       "app/verify/page.tsx",
       "app/verify/receipt/page.tsx",
-      "app/u/[handle]/page.tsx",
     ]) {
-      expect(source(path), path).toContain('@/components/SiteBrand');
-      expect(source(path), path).not.toMatch(/Vertias(Logo|Wordmark)/);
+      // coreSource: what the mirror ships, so Cloud-only REPLACEd pages are read
+      // as their self-host sibling.
+      expect(coreSource(path), path).toContain('@/components/SiteBrand');
+      expect(coreSource(path), path).not.toMatch(/Vertias(Logo|Wordmark)/);
     }
 
     for (const path of [
@@ -103,7 +105,7 @@ describe("Core dashboard boundary", () => {
     expect(panel).not.toContain("CloudBetaQuotaSnapshot");
     expect(panel).toContain('href="https://passcontrol.vertias.eu/beta"');
     expect(panel.match(/https:\/\/passcontrol\.vertias\.eu/g)).toHaveLength(1);
-    expect(panel).toContain("invite-only");
+    expect(panel).toContain("free during the beta");
     expect(panel).toContain("operates Postgres, Redis, and migrations");
     expect(panel).toContain("permanent public issuer");
     expect(panel).toContain('return "Instance operations"');

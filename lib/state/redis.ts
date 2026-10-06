@@ -14,6 +14,7 @@ export function redis(): Redis {
 // ── Key namespaces ────────────────────────────────────────────────────────────
 const k = {
   nonce: (n: string) => `nonce:${n}`,
+  alert: (uid: string, type: string, agid: string) => `alert:${uid}:${type}:${agid}`,
   reserved: (agid: string) => `reserved:${agid}`,
   spent: (agid: string) => `spent:${agid}`,
   reservedCost: (agid: string) => `reserved_cost:${agid}`,
@@ -123,6 +124,23 @@ function asCachedString(value: unknown): string | null {
 /** Returns true if the nonce was fresh (claimed), false if already seen (replay). */
 export async function claimNonce(nonce: string, ttlSeconds = 180): Promise<boolean> {
   const res = await redis().set(k.nonce(nonce), 1, { nx: true, ex: ttlSeconds });
+  return res === "OK";
+}
+
+// ── Workspace alerts (lib/alerts/workspace.ts) ──────────────────────────────
+/**
+ * One alert of each type per agent per window. True means this caller may
+ * send; false means one was already sent. A single SET NX: this runs on every
+ * alertable refusal, so it is the whole cost for a workspace that has already
+ * been told (or has no alerts at all).
+ */
+export async function claimAlertSlot(
+  userId: string,
+  type: string,
+  agentId: string,
+  ttlSeconds = 600
+): Promise<boolean> {
+  const res = await redis().set(k.alert(userId, type, agentId), 1, { nx: true, ex: ttlSeconds });
   return res === "OK";
 }
 

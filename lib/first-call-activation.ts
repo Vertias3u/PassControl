@@ -147,6 +147,9 @@ const REFUSAL_TEST_CANDIDATES: Readonly<Record<ProviderId, readonly string[]>> =
   // the default `gpt-*` grant, so the demonstration works on the default scope;
   // a grant that covers them falls through to the synthetic id below.
   azure: ["o3", "o4-mini"],
+  // The default grant is `*`, so no real name falls outside it; the synthetic id
+  // below does only when the operator narrowed the scope.
+  local: [],
 };
 const SYNTHETIC_REFUSAL_MODEL = "passcontrol-refusal-test";
 

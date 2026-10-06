@@ -679,6 +679,21 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
   ],
+  // A local OpenAI-compatible server (Ollama, LM Studio, vLLM). Its stored base
+  // carries the version (`http://localhost:11434/v1`), so `versionlessUpstreamPath`
+  // drops ours, and both client spellings are accepted for the reason Azure's
+  // are. Chat and model discovery, which every one of those servers implements.
+  // Nothing else, so a server's own admin API (Ollama's `/api/pull`,
+  // `/api/delete`) is never reachable through an agent key. Embeddings wait
+  // until a local server's usage report is verified: Ollama 0.35.1 refused
+  // embeddings from a chat model outright (2026-10-05), so there was nothing to
+  // settle on yet.
+  local: [
+    { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+  ],
 };
 
 function pathEquals(a: readonly string[], b: readonly string[]): boolean {

@@ -54,7 +54,7 @@ vi.mock("@/lib/seclog", () => ({ logSecurityEvent: vi.fn() }));
 vi.mock("@/lib/alert", () => ({ dispatchSecurityAlert: vi.fn() }));
 vi.mock("@/lib/apikeys", () => ({ generateApiKey: vi.fn() }));
 
-import { observeAgentControl, observeMasterKill, setAgentSuspended, setMasterKill } from "@/app/dashboard/actions";
+import { observeAgentControl, observeMasterKill, setAgentSuspended, setMasterKill } from "@/app/dashboard/actions-client";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -113,7 +113,7 @@ describe("setAgentSuspended reports what it observed", () => {
 
   it("still refuses an agent the caller does not own", async () => {
     mocks.fleetSetAgentSuspended.mockResolvedValueOnce({ ok: false, status: 404, code: "not_found" } as never);
-    await expect(setAgentSuspended(AGENT, true)).rejects.toThrow("not_authorized");
+    await expect(setAgentSuspended(AGENT, true)).rejects.toThrow("This agent is unavailable.");
   });
 
   it("never needs a step-up", async () => {
@@ -133,7 +133,7 @@ describe("observeAgentControl reads without changing anything", () => {
 
   it("checks ownership through the tenant's own read before touching Redis", async () => {
     mocks.agentRow.data = null;
-    await expect(observeAgentControl(AGENT, "suspended")).rejects.toThrow("not_authorized");
+    await expect(observeAgentControl(AGENT, "suspended")).rejects.toThrow("This agent is unavailable.");
     expect(mocks.readSuspensionFlag).not.toHaveBeenCalled();
   });
 

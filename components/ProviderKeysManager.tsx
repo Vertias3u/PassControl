@@ -22,8 +22,9 @@ import {
   rotateProviderKey,
   setActiveProviderKey,
   setProviderEndpoint,
-} from "@/app/dashboard/actions";
-import { PROVIDERS, isProvider, providerRequiresEndpoint } from "@/lib/providers";
+} from "@/app/dashboard/actions-client";
+import { PROVIDERS, isProvider, providerRequiresEndpoint, offeredProviders } from "@/lib/providers";
+import { useLocalModelsEnabled } from "@/components/dashboard/LocalModels";
 import {
   AlertTriangle,
   Check,
@@ -53,6 +54,7 @@ export interface ProviderCredentialSummary {
 type Message = { ok: boolean; text: string } | null;
 
 const AZURE_ENDPOINT_PLACEHOLDER = "https://<resource>.openai.azure.com/openai/v1";
+const LOCAL_ENDPOINT_PLACEHOLDER = "http://localhost:11434/v1";
 
 /** A credential with no label is still identifiable by when it was stored. */
 function nickname(credential: ProviderCredentialSummary): string {
@@ -69,6 +71,8 @@ export function ProviderKeysManager({
   /** True when the list could not be read — see the settings page for why. */
   listUnavailable?: boolean;
 }) {
+  // `local` only where this deployment can reach it (components/dashboard/LocalModels.tsx).
+  const localModels = useLocalModelsEnabled();
   const [provider, setProvider] = useState("anthropic");
   const [label, setLabel] = useState("");
   const [key, setKey] = useState("");
@@ -82,6 +86,8 @@ export function ProviderKeysManager({
   // the credential, so it is asked for with the key rather than afterwards.
   const [newEndpoint, setNewEndpoint] = useState("");
   const needsEndpoint = isProvider(provider) && providerRequiresEndpoint(provider);
+  // A local server usually takes no key; an empty one is stored as "send none".
+  const keyOptional = provider === "local";
   const [msg, setMsg] = useState<Message>(null);
   const [pending, start] = useTransition();
 
@@ -141,7 +147,10 @@ export function ProviderKeysManager({
             setMsg(null);
           }}
         >
-          {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
+          {/* A provider with a stored credential stays listed whatever the gate
+              says, so turning local models off never hides a credential its
+              owner can no longer see to delete. */}
+          {offeredProviders(PROVIDERS, localModels, [provider, ...credentials.map((c) => c.provider)]).map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
         <small>Stored credentials are listed by nickname. The keys themselves are in Vault and are never shown.</small>
       </label>
@@ -253,14 +262,22 @@ export function ProviderKeysManager({
               {routing === credential.id ? (
                 <div className="pc-credential__rotate" data-panel="endpoint">
                   <label className="pc-field">
-                    <span>{credential.provider === "azure" ? "Resource address" : "Base URL"}</span>
+                    <span>
+                      {credential.provider === "azure"
+                        ? "Resource address"
+                        : credential.provider === "local"
+                          ? "Server address"
+                          : "Base URL"}
+                    </span>
                     <input
                       value={endpoint}
                       onChange={(e) => setEndpoint(e.target.value)}
                       placeholder={
                         credential.provider === "azure"
                           ? AZURE_ENDPOINT_PLACEHOLDER
-                          : `https://api.${credential.provider}.example/v1`
+                          : credential.provider === "local"
+                            ? LOCAL_ENDPOINT_PLACEHOLDER
+                            : `https://api.${credential.provider}.example/v1`
                       }
                       spellCheck={false}
                     />
@@ -271,6 +288,13 @@ export function ProviderKeysManager({
                       with their token counts but <strong>no calculated cost</strong>, because a
                       deployment name does not say which model, or which price, is behind it. An
                       Azure key always needs this address, so it cannot be cleared.
+                    </p>
+                  ) : credential.provider === "local" ? (
+                    <p className="m-0 text-xs leading-5 text-muted-foreground" data-endpoint-copy="local">
+                      The OpenAI-compatible server on your machine or network, with its version
+                      segment: <code>http://localhost:11434/v1</code> for Ollama,{" "}
+                      <code>http://localhost:1234/v1</code> for LM Studio. Calls are recorded with their
+                      token counts and no cost. A local credential always needs an address.
                     </p>
                   ) : (
                   <p className="m-0 text-xs leading-5 text-muted-foreground">
@@ -296,6 +320,8 @@ export function ProviderKeysManager({
                             }),
                           credential.provider === "azure"
                             ? "This key now goes to that Azure resource."
+                            : credential.provider === "local"
+                            ? "This credential now goes to that server."
                             : endpoint.trim()
                               ? "This credential now goes to your endpoint."
                               : `This credential goes to ${credential.provider} again.`
@@ -368,11 +394,11 @@ export function ProviderKeysManager({
             <small>How you will recognise this credential here. Not sent to the provider.</small>
           </label>
           <label className="pc-field">
-            <span>Provider API key</span>
+            <span>{keyOptional ? "API key (optional)" : "Provider API key"}</span>
             <span className="pc-password-field">
               <input
                 type={showKey ? "text" : "password"}
-                placeholder="Paste the provider credential"
+                placeholder={keyOptional ? "Leave empty for Ollama or LM Studio" : "Paste the provider credential"}
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
                 autoComplete="new-password"
@@ -390,7 +416,23 @@ export function ProviderKeysManager({
             </span>
             <small>The key is encrypted in Supabase Vault and is never shown again.</small>
           </label>
-          {needsEndpoint ? (
+          {needsEndpoint && keyOptional ? (
+            <label className="pc-field" data-field="local-endpoint">
+              <span>Server address</span>
+              <input
+                placeholder={LOCAL_ENDPOINT_PLACEHOLDER}
+                value={newEndpoint}
+                onChange={(e) => setNewEndpoint(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <small>
+                Your OpenAI-compatible server, ending in its version segment (usually{" "}
+                <code>/v1</code>). Calls through it have no calculated cost, so an agent with a dollar
+                limit cannot use it.
+              </small>
+            </label>
+          ) : needsEndpoint ? (
             <label className="pc-field" data-field="azure-endpoint">
               <span>Resource address</span>
               <input
@@ -412,7 +454,7 @@ export function ProviderKeysManager({
             <button type="button" className="ghost" disabled={pending} onClick={() => setAdding(false)}>
               Cancel
             </button>
-            <button disabled={!key || (needsEndpoint && !newEndpoint.trim()) || pending} onClick={submitAdd}>
+            <button disabled={(!key && !keyOptional) || (needsEndpoint && !newEndpoint.trim()) || pending} onClick={submitAdd}>
               {pending ? "Storing securely…" : "Store in Vault"}
             </button>
           </div>

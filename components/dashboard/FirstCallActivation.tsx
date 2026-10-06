@@ -31,6 +31,7 @@ import {
   type FirstCallRow,
   type RefusalTest,
 } from "@/lib/first-call-activation";
+import { serviceNames } from "@/lib/services/display";
 
 const MAX_ACTIVATION_ROWS = 40;
 const REFUSAL_POLL_INTERVAL_MS = 4_000;
@@ -90,8 +91,11 @@ export function FirstCallActivation({
   integrations,
   defaultProvider,
   configuredProviders,
+  storedServices,
   logsAvailable,
 }: {
+  /** Services with a stored token, offered pre-ticked by "Connect an agent". */
+  storedServices?: readonly string[];
   userId: string;
   providerConfigured: boolean;
   /**
@@ -325,7 +329,7 @@ export function FirstCallActivation({
           <nav className="pc-first-call__controls" aria-label="Next steps">
             <Link href={`/dashboard/agents/${state.agentId}`} data-control="agent">Operate {state.agentName || "this agent"}</Link>
             <Link href="/dashboard#activity" data-control="receipt">Inspect stored calls</Link>
-            <DirectAgentConnect triggerLabel="Connect another worker" initialProvider={defaultProvider} configuredProviders={configuredProviders} />
+            <DirectAgentConnect triggerLabel="Connect another worker" initialProvider={defaultProvider} configuredProviders={configuredProviders} storedServices={storedServices} />
           </nav>
           <button type="button" className="pc-first-call__dismiss" onClick={dismiss} aria-label="Dismiss completed first-call proof">
             <X aria-hidden="true" /> Dismiss
@@ -389,9 +393,9 @@ export function FirstCallActivation({
                 <strong>Start with the provider credential.</strong>
                 <p>PassControl stores it in Vault and uses it only after an agent call clears the gate.</p>
                 <p data-activation-services-note>
-                  This guide walks through a model call. If your agents will only call GitHub or Telegram, add the
+                  This guide walks through a model call. If your agents will only call services such as {serviceNames()}, add the
                   token under <a href="/dashboard/settings#services">Settings, Services</a>, create the agent with
-                  &ldquo;Only GitHub or Telegram&rdquo;, and dismiss this guide.
+                  &ldquo;Only services&rdquo;, and dismiss this guide.
                 </p>
               </div>
             </div>
@@ -410,7 +414,7 @@ export function FirstCallActivation({
               <p>Use a Direct Agent Key for static-key tools, or a Passport for code that can sign challenges with the PassControl SDK.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <DirectAgentConnect triggerLabel="Direct Agent Key" initialProvider={defaultProvider} configuredProviders={configuredProviders} />
+              <DirectAgentConnect triggerLabel="Direct Agent Key" initialProvider={defaultProvider} configuredProviders={configuredProviders} storedServices={storedServices} />
               <PassportIssuanceModal
                 userId={userId}
                 integrations={integrations}

@@ -58,14 +58,18 @@ export function LoginForm({
         </span>
       </label>
       {capsLock ? <p id="login-caps" className="pc-field-note is-warning">Caps Lock is on.</p> : null}
-      {state?.error ? <p id="login-error" role="alert" className="pc-form-error">{state.error}</p> : null}
+      {state?.error ? (
+        <p id="login-error" role="alert" className="pc-form-error">
+          {state.error}
+        </p>
+      ) : null}
       {!state?.error && initialError ? <p role="alert" className="pc-form-error">{initialError}</p> : null}
       {notice ? <p role="status" className="pc-form-success">{notice}</p> : null}
       <p className="pc-auth-form__assist"><a href="/login/forgot">Forgot your password?</a></p>
       <SubmitButton />
       <p className="pc-auth-form__switch">
         {signupMode === "closed" ? (
-          "Need an account? Ask this deployment's operator."
+          "Sign-up is off on this local install."
         ) : (
           <>No account? <a href="/signup">{signupMode === "invite" ? "Create one with an invite" : "Create one"}</a></>
         )}

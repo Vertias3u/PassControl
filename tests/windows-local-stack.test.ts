@@ -213,7 +213,7 @@ describe(".env.docker loading matches `set -a; . ./.env.docker`", () => {
     // exported VISA_SECRET in the operator's shell would silently outrank the
     // one the stack generated — and visas would verify nowhere.
     const src = readFileSync(path.join(ROOT, "scripts/dev-docker.mjs"), "utf8");
-    expect(src).toContain("Object.assign(process.env, parseEnvFile(");
+    expect(src).toContain("Object.assign(process.env, localStackEnv(parseEnvFile(");
   });
 
   it("keeps an empty value as empty rather than dropping the key", () => {

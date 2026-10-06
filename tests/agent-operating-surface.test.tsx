@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: () => {} }) }));
-vi.mock("@/app/dashboard/actions", () => ({
+vi.mock("@/app/dashboard/actions-client", () => ({
   setAgentSuspended: vi.fn(),
   observeAgentControl: vi.fn(),
   setMasterKill: vi.fn(),

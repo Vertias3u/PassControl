@@ -147,7 +147,7 @@ describe("composeServiceRules", () => {
 describe("splitServiceRules (reading a saved list back as choices)", () => {
   it("reads back exactly the choices that wrote a list", () => {
     const allow = composeServiceRules("github", { repo: REPO, checked: ["read", "comment"], extra: [] });
-    expect(splitServiceRules("github", allow)).toEqual({ repo: REPO, checked: ["read", "comment"], extra: [] });
+    expect(splitServiceRules("github", allow)).toEqual({ repo: REPO, checked: ["read", "comment"], extra: [], askWrites: false });
   });
 
   it("keeps every rule no choice wrote as a custom rule, so a save never drops it", () => {
@@ -175,7 +175,7 @@ describe("splitServiceRules (reading a saved list back as choices)", () => {
       { method: "POST", path: "/repos/acme/web/issues" },
     ];
     const split = splitServiceRules("github", allow);
-    expect(split).toEqual({ repo: REPO, checked: ["read"], extra: [{ method: "POST", path: "/repos/acme/web/issues" }] });
+    expect(split).toEqual({ repo: REPO, checked: ["read"], extra: [{ method: "POST", path: "/repos/acme/web/issues" }], askWrites: false });
   });
 
   it("suggests the repository of a list with no complete choice when it names only one", () => {
@@ -190,7 +190,7 @@ describe("splitServiceRules (reading a saved list back as choices)", () => {
         { method: "CALL", path: "GetMe" },
         { method: "CALL", path: "sendPhoto" },
       ])
-    ).toEqual({ repo: null, checked: ["read"], extra: [{ method: "CALL", path: "sendPhoto" }] });
+    ).toEqual({ repo: null, checked: ["read"], extra: [{ method: "CALL", path: "sendPhoto" }], askWrites: false });
   });
 });
 

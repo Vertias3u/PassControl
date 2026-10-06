@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
-import { observeMasterKill, setMasterKill, type KillObservation } from "@/app/dashboard/actions";
+import { observeMasterKill, setMasterKill } from "@/app/dashboard/actions-client";
+import type { KillObservation } from "@/app/dashboard/actions";
 import { CheckCircle2, AlertTriangle, HelpCircle, Loader2, RefreshCw, ShieldOff } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 

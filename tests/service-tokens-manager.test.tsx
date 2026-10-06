@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-vi.mock("@/app/dashboard/actions", () => ({
+vi.mock("@/app/dashboard/actions-client", () => ({
   deleteProviderKey: vi.fn(),
   rotateProviderKey: vi.fn(),
   setActiveProviderKey: vi.fn(),

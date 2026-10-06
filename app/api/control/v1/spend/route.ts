@@ -11,10 +11,11 @@
 // For every call to a provider PassControl prices, that equals the observed
 // cost. For a call it CANNOT price — a custom endpoint, where the operator's own
 // gateway may mark up, re-route, or alias a familiar model name — the audit row
-// records `cost_microcents: null` with `unpriced: true`, while the enforcement
-// figure is a conservative estimate. The budget must still advance, or an agent
-// runs forever against a limit that cannot move; so the estimate is charged, and
-// this counter contains it.
+// records `cost_microcents: null` with `unpriced: true`. Until 2026-10-05 the
+// enforcement figure for one was a conservative estimate, charged so a cost cap
+// could advance; since S3-03 refuses such calls under any dollar limit, nothing
+// is charged for them (T4-02, second fix), but rows written before then still
+// carry their estimate and this counter contains it.
 //
 // That made this endpoint say something the receipt for the same call denied:
 // the receipt said the cost was unknown, this returned a precise dollar figure

@@ -1,4 +1,4 @@
-// What an agent that calls services (GitHub, Telegram) and no model is told to
+// What an agent that calls services (every catalog service) and no model is told to
 // configure. One builder for the Direct Agent Key reveal and the agent's Setup
 // panel, so the two cannot disagree on URLs or headers (the same reason
 // lib/direct-connect-config.ts exists for model calls).
@@ -6,6 +6,7 @@
 // The agent holds only its PassControl key. The GitHub token and the bot token
 // stay in the gateway, which is why the Telegram example names a method and
 // carries no `bot<token>` segment.
+import { DISPLAYED_SERVICES, SERVICE_DISPLAY } from "@/lib/services/display";
 
 export interface ServiceConnectSetup {
   envBlock: string;
@@ -20,8 +21,7 @@ export function buildServiceConnectSetup({ origin, key }: { origin: string; key:
   return {
     envBlock: [
       `PASSCONTROL_AGENT_KEY=${key ?? KEY_PLACEHOLDER}`,
-      `GITHUB_API_URL=${base}/github`,
-      `TELEGRAM_API_URL=${base}/telegram`,
+      ...DISPLAYED_SERVICES.map((service) => `${SERVICE_DISPLAY[service].envVar}=${base}/${service}`),
     ].join("\n"),
     octokit: [
       'import { Octokit } from "octokit";',

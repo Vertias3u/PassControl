@@ -158,7 +158,7 @@ The full reference lives in [the public OpenAPI document](https://github.com/Ver
 ## Compatibility and assurance
 
 `clientOptions` accepts `openai`, `anthropic`, `groq`, `mistral`, `together`, `deepseek`,
-`gemini`, `xai` and `azure`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
+`gemini`, `xai`, `azure` and `local` (a model server you run, such as Ollama; self-host only). OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
 Chat Completions. xAI is served through its Responses API only (`client.responses.create`);
 its legacy Chat Completions endpoint is refused. Gemini uses Google's OpenAI-compatible endpoint; native
 `generateContent` is not supported. Azure OpenAI takes the plain OpenAI client (not

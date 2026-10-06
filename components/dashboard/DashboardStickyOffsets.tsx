@@ -51,10 +51,24 @@ export function DashboardStickyOffsets() {
     window.addEventListener("resize", update);
     update();
 
+    // Scroll edge (Apple: a fade where content meets floating chrome, only
+    // when it actually does). The header shows its divider and shade once the
+    // page has scrolled under it. One attribute flip per change, never per frame.
+    let scrolled = false;
+    const onScroll = () => {
+      const next = window.scrollY > 2;
+      if (next === scrolled || !(header instanceof HTMLElement)) return;
+      scrolled = next;
+      header.toggleAttribute("data-scrolled", next);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+
     return () => {
       resizeObserver.disconnect();
       mutationObserver.disconnect();
       window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", onScroll);
       workspace.style.removeProperty("--pc-sticky-header-offset");
       workspace.style.removeProperty("--pc-sticky-stack-offset");
     };

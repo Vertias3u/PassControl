@@ -7,6 +7,8 @@
 //   1 authenticate + sender proof   2 kill switch / suspend   3 per-agent rate limit
 //   4 catalog refusal (incl. the never list)   5 service rules (live, fail CLOSED)
 //   6 per-service hourly cap   6b a write's body, read only now, bounded
+//   6c "Ask me first": the owner's approval of exactly this request, when the
+//      matched rule asks for it (lib/approvals/gate.ts), before any decrypt
 //   7 resolve the tenant's token (the one decrypt path)   8 inject + forward
 //   9 redact + audit row + signed receipt
 //
@@ -46,13 +48,18 @@ import { readCurrentOwner } from "@/lib/owner/current";
 import { captureSecurityEvent } from "@/lib/observability";
 import { forwardableUpstreamSearch } from "@/lib/providers/endpoint";
 import { readBoundedBody } from "@/lib/http/bounded-body";
+import { approvalFingerprint, approvalPreview } from "@/lib/approvals/fingerprint";
+import { approvalWaitMs, awaitApproval } from "@/lib/approvals/gate";
+import { APPROVAL_PREVIEW_MAX } from "@/lib/state/approvals";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 import type { SenderProofObservation } from "@/lib/sender-constraint";
 import { SERVICE_CATALOG, isServiceId, serviceRefusal } from "@/lib/services/catalog";
+import { SERVICE_DISPLAY } from "@/lib/services/display";
 import { parseServicePath } from "@/lib/services/path";
 import {
   matchServiceRule,
   parseServiceRules,
+  serviceCallAsks,
   serviceRulesRevision,
   type ServiceRule,
 } from "@/lib/services/rules";
@@ -292,10 +299,12 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   // anything the tenant's token can reach". An answer we cannot read refuses,
   // whatever POLICY_FAIL_CLOSED says.
   let rawRules: unknown;
+  // For the owner's approval prompt (6c): the name they gave the agent.
+  let agentName = "an agent";
   try {
     const { data, error } = await db
       .from("agents")
-      .select("service_rules")
+      .select("service_rules, name")
       .eq("id", agentId)
       .eq("user_id", userId)
       .maybeSingle();
@@ -303,6 +312,8 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     // No row is an answer, not a failure: an agent that does not exist has no
     // rules, and is refused below like any agent without them.
     rawRules = (data as { service_rules?: unknown } | null)?.service_rules ?? null;
+    const name = (data as { name?: unknown } | null)?.name;
+    if (typeof name === "string" && name) agentName = name;
   } catch {
     record("blocked_scope", 503);
     captureBlocked("service_rules_unavailable", 503);
@@ -331,9 +342,14 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
       errMessage(
         403,
         "service_call_not_allowed",
-        entry.ruleShape === "call"
-          ? `This agent may not call ${segments.join("/")} on ${entry.label}. ${entry.label} access is granted per agent, one method name at a time.`
-          : `This agent may not call ${method} /${segments.join("/")} on ${entry.label}. ${entry.label} access is granted per agent, by method and path.`
+        // Ends with where the owner grants it, because a new owner who stored a
+        // token did not know each agent needs rules too (2026-10-05). The link
+        // is this deployment's own dashboard and this agent's own panel.
+        `${
+          entry.ruleShape === "call"
+            ? `This agent may not call ${segments.join("/")} on ${entry.label}. ${entry.label} access is granted per agent, one method name at a time.`
+            : `This agent may not call ${method} /${segments.join("/")} on ${entry.label}. ${entry.label} access is granted per agent, by method and path.`
+        } The owner can grant it at ${requestUrl.origin}/dashboard/agents/${encodeURIComponent(agentId)}#${SERVICE_DISPLAY[service].sectionId}`
       )
     );
   }
@@ -379,6 +395,99 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     capturedBody = bounded.text;
   }
 
+  // What will be forwarded, settled before the approval step so that an
+  // approval names exactly it: the client's query MINUS this route's own
+  // params, which Next re-appends to req.url as ordinary parameters (see
+  // forwardableUpstreamSearch), and only the headers this service is sent.
+  let search: string;
+  try {
+    search = forwardableUpstreamSearch(req.url, ["service", "path"]);
+  } catch {
+    record("blocked_endpoint", 400);
+    return governed(err(400, "invalid_query"));
+  }
+  const headers = filterRequestHeaders(entry, req.headers);
+
+  // ── 6c. "Ask me first": the owner's yes to exactly this request ────────────
+  // Before the decrypt: a call nobody approved never has the token in memory.
+  // Each pending retry has already counted against the hourly cap (step 6).
+  // Any admitting rule that asks holds the call, not only the first match.
+  if (serviceCallAsks(rules, method, segments)) {
+    const forwardedBody = isWrite ? (capturedBody ?? "") : null;
+    const preview = approvalPreview(forwardedBody, search);
+    // The owner approves what they can read, so a request too large to show
+    // in full is not asked about at all: approving the start of a body would
+    // admit whatever follows it.
+    if (preview.length > APPROVAL_PREVIEW_MAX) {
+      record("blocked_policy", 413);
+      captureBlocked("approval_body_too_large", 413);
+      return governed(
+        errMessage(
+          413,
+          "approval_body_too_large",
+          `This ${entry.label} call needs the owner's approval, and is too large for them to read in full (over ${APPROVAL_PREVIEW_MAX / 1024} KB of query and body). Send a smaller request.`
+        )
+      );
+    }
+    const fingerprint = await approvalFingerprint({
+      userId,
+      agentId,
+      service,
+      method,
+      upstreamPath,
+      search,
+      headers,
+      body: forwardedBody,
+    });
+    const approval = await awaitApproval({
+      request: { userId, agentId, service, method, path: upstreamPath, preview, fingerprint },
+      prompt: {
+        agentName,
+        serviceLabel: entry.label,
+        method,
+        path: upstreamPath,
+        preview,
+        dashboardUrl: `${requestUrl.origin}/dashboard/approvals`,
+      },
+      waitMs: approvalWaitMs(),
+    });
+    if (approval.state !== "approved") {
+      // Its own security-event codes, and never the workspace's "refused"
+      // alert: the owner was just asked, and a second ping says nothing new.
+      captureBlocked(`approval_${approval.state}`, 403);
+      if (approval.state === "unavailable") {
+        record("blocked_policy", 503);
+        return governed(
+          errMessage(503, "approval_unavailable", "This call needs the owner's approval, which could not be checked. Try again shortly.")
+        );
+      }
+      if (approval.state === "full") {
+        record("blocked_policy", 429);
+        const full = errMessage(
+          429,
+          "approval_queue_full",
+          "This workspace already has too many requests waiting for the owner's approval. Try again after they answer."
+        );
+        full.headers.set("retry-after", "60");
+        return governed(full);
+      }
+      if (approval.state === "denied") {
+        record("blocked_policy", 403);
+        return governed(
+          errMessage(403, "approval_denied", `The owner denied this ${entry.label} request. Do not send it again unchanged.`)
+        );
+      }
+      record("blocked_policy", 409);
+      const held = errMessage(
+        409,
+        "approval_pending",
+        `This ${entry.label} call needs the owner's approval, and they have been asked. Send the same request again in a little while: once they approve, it goes through once. An approval lasts 10 minutes; an unanswered request expires after 15.`
+      );
+      held.headers.set("retry-after", "15");
+      return governed(held);
+    }
+  }
+
   // ── 7. The tenant's token: get_provider_key, the only decrypt path ─────────
   let token: string | null;
   try {
@@ -408,15 +517,6 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
 
 
   // ── 8. Inject + forward ────────────────────────────────────────────────────
-  let search: string;
-  try {
-    // The client's query MINUS this route's own params, which Next re-appends to
-    // req.url as ordinary parameters (see forwardableUpstreamSearch).
-    search = forwardableUpstreamSearch(req.url, ["service", "path"]);
-  } catch {
-    record("blocked_endpoint", 400);
-    return governed(err(400, "invalid_query"));
-  }
   // Built by the catalog: for Telegram the token is IN this URL, so the URL is
   // a secret from here on — it is never logged, captured or returned. A stored
   // token that cannot be put into a URL safely refuses the call.
@@ -431,7 +531,6 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
       )
     );
   }
-  const headers = filterRequestHeaders(entry, req.headers);
   for (const [name, value] of Object.entries(entry.authHeaders(token))) headers.set(name, value);
 
   const secrets = secretsToRedact(token);

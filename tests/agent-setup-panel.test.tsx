@@ -56,6 +56,13 @@ describe("AgentSetupPanel", () => {
     expect(html).toContain("OPENAI_BASE_URL=");
     expect(html).toContain("OPENAI_API_KEY=PASTE_YOUR_DIRECT_AGENT_KEY");
     expect(html).toContain("set -a; . ./passcontrol.env; set +a");
+    // One paste writes the file and loads it (2026-10-04: a pasted env block
+    // left the key in unexported shell variables an SDK never reads).
+    expect(html).toContain("cat &gt; passcontrol.env &lt;&lt;&#x27;PASSCONTROL_ENV&#x27;");
+    expect(html).toMatch(/project folder/i);
+    expect(html).toMatch(/new terminal/i);
+    expect(html).toMatch(/edit passcontrol\.env/i);
+    expect(html).toContain(".gitignore");
     expect(html).toContain("/api/v1/openai/v1/chat/completions");
     expect(html).toMatch(/replace the provider key/i);
     expect(html).not.toMatch(/pc_agent_[A-Za-z0-9_-]{20,}/u);

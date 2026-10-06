@@ -7,13 +7,15 @@ import { ed25519 } from "@noble/curves/ed25519";
 import { bytesToBase64url } from "@/lib/encoding";
 import { parseTokenBudgetInput, parseUsdBudgetToCents } from "@/lib/budget-input";
 import { clientModelIsUsable, DEFAULT_ALLOWED_MODELS, DEFAULT_CLIENT_MODELS } from "@/lib/agent-connect";
-import { PROVIDERS, type ProviderId } from "@/lib/providers";
+import { PROVIDERS, type ProviderId, offeredProviders } from "@/lib/providers";
+import { useLocalModelsEnabled } from "@/components/dashboard/LocalModels";
 import { scopeAllows } from "@/lib/scope";
-import { createAgent } from "@/app/dashboard/actions";
+import { createAgent } from "@/app/dashboard/actions-client";
 import { buttonVariants } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { PassportStoreAndConnect } from "@/components/PassportStoreAndConnect";
 import { Plus, KeyRound, Check, ShieldCheck } from "lucide-react";
+import { serviceNames } from "@/lib/services/display";
 
 export function PassportIssuanceModal({
   userId,
@@ -26,10 +28,12 @@ export function PassportIssuanceModal({
    *  this inside a conditional branch must hold that branch open until it clears. */
   onRevealChange?: (revealing: boolean) => void;
 }) {
+  // `local` only where this deployment can reach it (components/dashboard/LocalModels.tsx).
+  const localModels = useLocalModelsEnabled();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
-  // "services": GitHub or Telegram only. The passport is issued with NO model
+  // "services": catalog services only (GitHub, Telegram, …). The passport is issued with NO model
   // access (any model call is refused), and model, budget and MCP options do
   // not apply: MCP serves model calls only.
   const [target, setTarget] = useState<"models" | "services">("models");
@@ -164,7 +168,7 @@ export function PassportIssuanceModal({
               <legend className={labelText}>What will this agent call?</legend>
               <label className="flex items-start gap-2">
                 <input type="radio" className="mt-1 w-auto" name="passport-target" checked={!servicesOnly} onChange={() => setTarget("models")} />
-                <span>AI models <span className="text-muted-foreground">(and GitHub or Telegram too, if you add rules later)</span></span>
+                <span>AI models <span className="text-muted-foreground">(and {serviceNames()} too, if you add rules later)</span></span>
               </label>
               <label className="flex items-start gap-2">
                 <input
@@ -178,7 +182,7 @@ export function PassportIssuanceModal({
                   }}
                   data-target="services"
                 />
-                <span>Only GitHub or Telegram <span className="text-muted-foreground">(no model access; every model call is refused)</span></span>
+                <span>Only services <span className="text-muted-foreground">({serviceNames()}; no model access, every model call is refused)</span></span>
               </label>
             </fieldset>
             {servicesOnly ? (
@@ -199,7 +203,7 @@ export function PassportIssuanceModal({
                   setClientModel(DEFAULT_CLIENT_MODELS[next]);
                 }}
               >
-                {PROVIDERS.map((p) => (
+                {offeredProviders(PROVIDERS, localModels, [provider]).map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>

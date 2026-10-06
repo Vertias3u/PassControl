@@ -1,6 +1,15 @@
 // Upstream provider configuration: base URLs and auth-header injection.
-export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "azure"] as const;
+export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "azure", "local"] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
+
+/**
+ * What a `local` credential stores when its server takes no key (Ollama, LM
+ * Studio). Vault holds a value for every credential, and this one means "send
+ * nothing": `authHeaders` omits the header rather than handing a local server a
+ * made-up bearer token. Only `local` reads it that way; for any other provider
+ * it would be an ordinary (wrong) key.
+ */
+export const LOCAL_NO_KEY = "passcontrol-local-no-key";
 
 export function isProvider(p: string): p is ProviderId {
   return (PROVIDERS as readonly string[]).includes(p);
@@ -50,6 +59,23 @@ export function isScopeProvider(p: string): p is ScopeProviderId {
  * its list, which is the control tower lying about what an agent may call.
  */
 export const SCOPE_PROVIDERS = [...PROVIDERS, ...SCOPE_ONLY_PROVIDERS] as const;
+
+/**
+ * The providers a chooser offers on this deployment.
+ *
+ * `local` is reachable only where the operator gate is open, so a deployment
+ * with the gate off (hosted Cloud) does not offer it: a choice the gateway will
+ * refuse on every call is clutter at best. A value already SAVED is always kept,
+ * whatever the gate says, for the reason SCOPE_PROVIDERS gives: a chooser that
+ * cannot name a row's provider shows the wrong one, which misrepresents it.
+ */
+export function offeredProviders<T extends string>(
+  list: readonly T[],
+  localEnabled: boolean,
+  keep: readonly (string | null | undefined)[] = []
+): T[] {
+  return list.filter((p) => p !== "local" || localEnabled || keep.includes(p));
+}
 
 export interface ProviderGuess {
   suggested: ProviderId | null;
@@ -139,6 +165,12 @@ export function upstreamBaseUrl(provider: ProviderId): string | null {
     // Azure OpenAI: `https://<resource>.openai.azure.com/openai/v1`, per credential.
     case "azure":
       return null;
+    // A server the developer runs (Ollama, LM Studio, vLLM), per credential. Its
+    // address is admitted only where the operator gate is open
+    // (lib/providers/endpoint.ts `isEndpointAllowedFor`), so on hosted Cloud a
+    // local credential reaches nothing.
+    case "local":
+      return null;
   }
 }
 
@@ -178,6 +210,10 @@ export function authHeaders(provider: ProviderId, key: string): Record<string, s
     // 2026-09-27). Entra ID bearer tokens are out of scope.
     case "azure":
       return { "api-key": key };
+    // OpenAI-compatible servers take Bearer when they take a key at all (vLLM's
+    // --api-key, LiteLLM). A keyless one gets no header, not a made-up one.
+    case "local":
+      return key === LOCAL_NO_KEY ? {} : { authorization: `Bearer ${key}` };
   }
 }
 
@@ -207,6 +243,9 @@ export function requestShapeFamily(provider: ProviderId): "openai" | "anthropic"
     case "xai":
     // Azure's v1 API is OpenAI's wire format; only the auth header differs.
     case "azure":
+    // OpenAI-compatible is what makes a local server reachable through an
+    // OpenAI SDK at all.
+    case "local":
       return "openai";
     case "anthropic":
       return "anthropic";
@@ -222,6 +261,9 @@ export function usesOpenAiUsageShape(provider: ProviderId): boolean {
     case "deepseek":
     case "gemini":
     case "azure":
+    // Chat-shaped usage, including on a stream with `include_usage` (Ollama,
+    // verified 2026-10-05 against qwen2.5:0.5b).
+    case "local":
       return true;
     // xAI is served on Responses only, whose usage is `input_tokens` /
     // `output_tokens` / `total_tokens` (lib/usage/parseStream.ts), never the

@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { DepartureRow } from "@/lib/departures";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: () => {} }) }));
-vi.mock("@/app/dashboard/actions", () => ({
+vi.mock("@/app/dashboard/actions-client", () => ({
   setAgentSuspended: vi.fn(),
   observeAgentControl: vi.fn(),
   updateAgentBudgets: vi.fn(),

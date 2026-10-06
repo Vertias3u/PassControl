@@ -28,8 +28,8 @@ export const PACKAGE_VERSION = (() => {
 // second numeric copy that can drift from system-health capability reporting.
 export const WORKSPACE_IMPORT_MAX_VERSION = WORKSPACE_EXPORT_PROTOCOL.maximum;
 
-export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "azure"];
-export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek", "gemini", "azure"]);
+export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "azure", "local"];
+export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek", "gemini", "azure", "local"]);
 
 const DEFAULT_GATEWAY = "http://localhost:3000";
 

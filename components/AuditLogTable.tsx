@@ -60,7 +60,7 @@ export function AuditLogTable({
             </button>
           ) : null}
         </div>
-      ) : <table>
+      ) : <table className="pc-audit-table">
         <thead>
           <tr>
             <th>Time · {zoneLabel}</th>

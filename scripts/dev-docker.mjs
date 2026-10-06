@@ -52,6 +52,28 @@ export function parseEnvFile(contents) {
   return values;
 }
 
+// Custom endpoints (a credential sent to your own server, such as Ollama on
+// localhost:11434) are ON for the local stack unless you turn them off.
+//
+// The gate exists for a gateway shared by tenants, where one of them could
+// point it at its host's network. The local stack is one developer on their own
+// machine, and the only person who can set an endpoint is that developer, so the
+// gate guarded them from themselves. The default lives HERE and in the file
+// dev-stack.sh writes, never in lib/providers/endpoint.ts: Cloud does not run
+// this launcher and relies on the code reading unset as off.
+//
+// Applied only when neither the file nor the shell names the mode, so an
+// explicit `off` (or an empty value, which reads as off) wins either way. Kept
+// here as well as in dev-stack.sh because `passcontrol start` never rewrites
+// .env.docker: a file written before this existed would otherwise stay off.
+export function localStackEnv(fileValues, ambientEnv) {
+  const values = { ...fileValues };
+  if (!("PROVIDER_ENDPOINT_MODE" in values) && ambientEnv.PROVIDER_ENDPOINT_MODE === undefined) {
+    values.PROVIDER_ENDPOINT_MODE = "selfhost";
+  }
+  return values;
+}
+
 function missingEnvMessage() {
   return [
     "✗ .env.docker not found.",
@@ -71,7 +93,7 @@ async function main() {
     process.exit(1);
   }
 
-  Object.assign(process.env, parseEnvFile(fs.readFileSync(envPath, "utf8")));
+  Object.assign(process.env, localStackEnv(parseEnvFile(fs.readFileSync(envPath, "utf8")), process.env));
 
   // Run Next in THIS process rather than spawning it. One process means the pid
   // the CLI records in its dashboard state is the server itself, so `passcontrol

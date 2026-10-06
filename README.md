@@ -10,7 +10,7 @@ stop control without copying provider secrets into every tool. Bring your own pr
 
 | Start here | Choose it when | You operate |
 |---|---|---|
-| [Cloud](#cloud) — free private beta, access by request | You want a managed gateway without running a database or Docker | Your agents and provider account |
+| [Cloud](#cloud) — free beta, open sign-up | You want a managed gateway without running a database or Docker | Your agents and provider account |
 | [Self-host](#self-host) — full working core | You want the gateway and provider credentials on infrastructure you control | Gateway, dashboard, Supabase Auth + Vault + database, and Redis |
 
 A **Passport** is an Ed25519 signing key used to obtain a short-lived visa. A **Direct
@@ -23,11 +23,11 @@ independently audited**. Start with a non-critical provider key. Source-availabl
 
 ## Cloud
 
-[Request beta access](https://passcontrol.vertias.eu/beta). To look around first, try
+[Create a free account](https://passcontrol.vertias.eu/signup). To look around first, try
 [the keyless browser demo](https://passcontrol.vertias.eu): it synthesizes output and
 does not call a billed provider.
 
-Once you have access, install the CLI with Node/npm and sign in:
+Once you have an account, install the CLI with Node/npm and sign in:
 
 ```sh
 npm install -g passcontrol
@@ -161,7 +161,7 @@ API key. Treat access to that local listener as access to the configured agent. 
 not a sandbox against other processes running as you. Its provider CONNECT requests are
 refused; use base URLs rather than TLS interception.
 
-Presets (from `cli/presets.mjs`): `generic`, `openhands`, `litellm`, `aider`, `hermes`, `cline`, `continue`, `chatbox`, `jan`, `msty`, `cherry-studio`, `open-webui`, `librechat`; service presets: `github`, `telegram`; MCP presets: `claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
+Presets (from `cli/presets.mjs`): `generic`, `openhands`, `litellm`, `aider`, `hermes`, `cline`, `continue`, `chatbox`, `jan`, `msty`, `cherry-studio`, `open-webui`, `librechat`; service presets: `github`, `telegram`, `brave`, `notion`, `discord`; MCP presets: `claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
 supported paths. [Hermes configuration](./docs/integrations/hermes.md).
 
 ## CLI configuration and key storage
@@ -258,6 +258,8 @@ are separate from signature verification.
   shadow evaluation records candidate decisions without enforcing them.
 - Token and cost admission limits through atomic reservations and settlement.
 - Platform/tenant kill switches and per-agent suspension/revocation.
+- "Ask me first" on service calls: a rule can hold the exact request until the owner
+  approves it once, from the dashboard or with Telegram buttons.
 - Provider failover within supported request families and each attempt's authorization
   and budget checks; it is not arbitrary API translation. Embeddings never fail over.
 - The injected provider key is removed from what comes back: if an upstream echoes it in
@@ -300,7 +302,8 @@ Prices are an in-code estimate table, one row per model, read from each provider
 page. Under a dollar limit, a model with no row is refused `402 unpriced_model`; without one it
 is estimated at the provider's highest listed rate. **Custom endpoints are unpriced**, even when the model name
 matches: logs mark cost unknown, receipts carry `unp`, and token accounting continues.
-The cost budget retains a proxy estimate; it does not become knowledge of actual dollars.
+They add nothing to an agent's cost budget, and an agent with a dollar limit is refused them
+(`402 unpriced_endpoint`): limit those agents by tokens.
 Known/table-priced cost, conservative enforced spend, and open holds are different figures.
 The dashboard therefore labels the all-time counter **Settled budget charges** and shows its
 durable call-attributed charges, separate operator adjustments, any visible difference, and
@@ -323,6 +326,7 @@ All paths below are relative to `/api/v1/<provider>`. SDK base URLs and aliases 
 | `gemini` | Google's **OpenAI-compatible** Chat Completions | Models list/detail |
 | `xai` | **POST Responses** only (legacy Chat Completions refused) | Models list/detail |
 | `azure` | Azure OpenAI v1: Chat Completions, **POST Responses** and **POST Embeddings**, at the resource address stored with the key | Models list |
+| `local` | A model server you run (Ollama, LM Studio, vLLM): Chat Completions at the address stored with the credential, self-host only | Models list |
 
 Gemini's native `generateContent` API is not supported. Responses is served for OpenAI,
 xAI and Azure; embeddings for OpenAI, Mistral and Azure, and an embeddings call never fails over, because
@@ -335,7 +339,9 @@ Custom provider base URLs support compatible deployments such as Ollama, vLLM, o
 LiteLLM without adding provider IDs. They require operator opt-in:
 `PROVIDER_ENDPOINT_MODE=selfhost` permits HTTP, private addresses, and custom ports;
 a comma-separated hostname list permits only listed HTTPS hosts on port 443. Unset/off
-refuses custom endpoints. Shape validation is **not full SSRF prevention**: it does not
+refuses custom endpoints. The local stack (`npm run dev:docker`, `passcontrol start`) runs
+with `selfhost` unless you set `off`: it is one developer's own gateway, so the person who
+sets an endpoint is the person who owns it. A hosted deployment's default stays off. Shape validation is **not full SSRF prevention**: it does not
 resolve or pin DNS. Operators must control egress and trust the destination receiving
 the provider credential. Upstream redirects are refused, never followed.
 
@@ -364,11 +370,6 @@ check needs the relevant earlier statements or a trusted checkpoint. The public 
 tree ships the format and verification code/page, **not statement production, scheduling,
 or statement/proof-serving routes**. See [statement format and limits](./docs/statement-format.md).
 
-Owner binding is per workspace. A typed owner is a declaration; GitHub verification
-checks publication of a token in a particular account's repository, and domain
-verification checks a well-known HTTPS token. Neither proves a person's legal identity
-or trustworthiness. Company registry evidence is also distinct from authority to represent
-that company. Only published bindings are attached to public evidence.
 
 ![Recorded kill-switch demonstration: subsequent requests are refused](./docs/demo/kill-switch.gif)
 
@@ -380,7 +381,7 @@ of an already-dispatched stream.
 ## Self-host operations reference
 
 <details>
-<summary>Source setup, lifecycle, credential switching, production and portability</summary>
+<summary>Source setup, lifecycle, credential switching and portability</summary>
 
 The CLI package declares Node ≥18, but the full stack needs Node 22+: locked Supabase
 dependencies need ≥20 and Wrangler needs ≥22. Use `passcontrol setup --no-open` to
@@ -414,14 +415,9 @@ Shell or project-file gateway overrides are refused and named before services st
 global write could not override them safely. Clean up any still-active remote identity at its
 original gateway.
 
-For production, configure [`.env.example`](./.env.example), use Supabase (plain Postgres
-is insufficient), set `DATABASE_URL` in your shell environment and apply the public migrations with
-`npm run migrate`,
-and build/run the app. Supported paths are Next.js on Vercel, `npm run build` then
-`npm start` on a Node host behind a trusted reverse proxy, and the
-[Cloudflare/OpenNext build](./docs/deployment/cloudflare.md). Configure Auth/SMTP,
-secrets, backups, Redis persistence/no-eviction, and periodic authenticated
-`GET /api/cron/reconcile`. A local successful boot does not validate production operations.
+Self-host is built for one developer on their own machine; this repository does not ship
+a production deployment path. To let agents running elsewhere reach PassControl, or to give
+passports a verify page anyone can open, use [Cloud](#cloud).
 
 | Boundary | Cloud | Public self-host tree |
 |---|---|---|

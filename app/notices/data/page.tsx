@@ -23,6 +23,12 @@ export default function InstanceDataNoticePage() {
           provider and stream the result. PassControl does not store prompts or model responses in its
           ordinary call log. The selected model provider still receives the request.
         </p>
+        <p>
+          If an alert destination is set, alerts go to that Slack, Discord or Telegram address. With
+          &ldquo;Ask me first&rdquo; on, a held service call&apos;s method, path, query and body (up to
+          16 KB) are kept in Redis for up to 15 minutes, and the start of them is sent there as the
+          question.
+        </p>
       </section>
       <section>
         <h2>Deployment-specific details</h2>

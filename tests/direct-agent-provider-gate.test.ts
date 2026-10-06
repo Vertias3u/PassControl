@@ -95,7 +95,7 @@ vi.mock("@/lib/seclog", () => ({ logSecurityEvent: vi.fn() }));
 vi.mock("@/lib/alert", () => ({ dispatchSecurityAlert: vi.fn() }));
 vi.mock("@/lib/apikeys", () => ({ generateApiKey: vi.fn() }));
 
-import { completeKeyImportDirect, issueDirectAgent } from "@/app/dashboard/actions";
+import { completeKeyImportDirect, issueDirectAgent } from "@/app/dashboard/actions-client";
 
 const openaiWorker = {
   name: "summarizer",

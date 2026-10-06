@@ -44,6 +44,16 @@ describe("Direct Agent browser on-ramp", () => {
     expect(reveal()).toMatch(/#agent-setup`\} target="_blank"/);
   });
 
+  // 2026-10-04: the env block was offered as a file to save, got pasted into a
+  // terminal instead, and an SDK started from that shell never saw the key.
+  it("offers one paste that writes passcontrol.env and loads it, not a block to save by hand", () => {
+    expect(reveal()).toMatch(/value=\{setup\.saveAndLoadCommand\}/);
+    expect(reveal()).not.toMatch(/value=\{setup\.envBlock\}/);
+    expect(reveal()).toMatch(/project folder/i);
+    expect(reveal()).toMatch(/new terminal/i);
+    expect(reveal()).toMatch(/\.gitignore/);
+  });
+
   it("does not pretend configuration proves a provider call succeeded", () => {
     expect(reveal()).toMatch(/Credential created/);
     expect(reveal()).toMatch(/not yet proof that traffic reached the gateway/i);

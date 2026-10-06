@@ -2,7 +2,7 @@
 // the server regardless of any client-side checks. Each validator throws an
 // Error with a safe, generic message (no internals) on bad input; callers let it
 // surface to the action's error boundary.
-import { isProvider, isScopeProvider } from "./providers";
+import { LOCAL_NO_KEY, isProvider, isScopeProvider } from "./providers";
 import {
   MAX_FALLBACKS,
   MAX_FALLBACK_MODEL_LEN,
@@ -278,7 +278,9 @@ export function validateProviderKeyInput(input: {
   const label = str(input.label).trim();
   if (label.length > LIMITS.label) throw new Error("Label too long.");
 
-  const key = str(input.key);
+  // A local server usually takes no key (Ollama, LM Studio). Rather than asking
+  // for a made-up one, store the marker that tells the proxy to send none.
+  const key = provider === "local" && str(input.key) === "" ? LOCAL_NO_KEY : str(input.key);
   if (key.length < 1 || key.length > LIMITS.providerKey) {
     throw new Error("Invalid provider key.");
   }

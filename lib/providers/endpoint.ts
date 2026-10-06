@@ -215,8 +215,23 @@ export function azureEndpointSuggestion(value: unknown): string | null {
  */
 export function isEndpointAllowedFor(provider: string, value: unknown, policy: EndpointPolicy): boolean {
   if (provider === "azure") return azureEndpoint(value) !== null;
+  if (provider === "local" && policy.kind === "off") return false;
   return isEndpointAllowed(value, policy);
 }
+
+// ── Local models: an address that is part of the credential, behind the gate ──
+//
+// `local` is Azure's shape (no host of ours, so a key without an address is
+// refused, never sent somewhere) and NOT Azure's admission rule. Azure is safe
+// on every deployment because its rule is a closed set of Microsoft suffixes; a
+// local server's address is whatever the developer typed, which is exactly the
+// tenant-chosen host the operator gate exists for. So it answers to the gate and
+// nothing else, and the proxy's resolveEndpoint reading the row for an
+// endpoint-required provider while the gate is off cannot widen that: off admits
+// no address here, the call is refused `endpoint_required`, before the key.
+//
+// isEndpointAllowed already refuses everything when off; this says so by name,
+// so a later change to that function cannot quietly open `local` on Cloud.
 
 /** `normalizeEndpoint`, per provider. See `isEndpointAllowedFor`. */
 export function normalizeEndpointFor(
@@ -225,6 +240,7 @@ export function normalizeEndpointFor(
   policy: EndpointPolicy = endpointPolicy()
 ): string | null {
   if (provider === "azure") return azureEndpoint(value);
+  if (provider === "local" && policy.kind === "off") return null;
   return normalizeEndpoint(value, policy);
 }
 

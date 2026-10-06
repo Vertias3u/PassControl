@@ -2,7 +2,8 @@
 
 import { useActionState } from "react";
 import { useFormStatus } from "react-dom";
-import { SCOPE_PROVIDERS, type ScopeProviderId } from "@/lib/providers";
+import { SCOPE_PROVIDERS, type ScopeProviderId, offeredProviders } from "@/lib/providers";
+import { useLocalModelsEnabled } from "@/components/dashboard/LocalModels";
 import type { GateStepResult } from "@/lib/gate";
 import {
   runDecisionTrace,
@@ -93,6 +94,8 @@ export function DecisionTracePanel({
   initialProvider?: string;
   initialModel?: string;
 }) {
+  // `local` only where this deployment can reach it (components/dashboard/LocalModels.tsx).
+  const localModels = useLocalModelsEnabled();
   const { format } = useDashboardTime();
   const action = runDecisionTrace.bind(null, agentId);
   const [state, formAction] = useActionState<DecisionTraceActionState | undefined, FormData>(
@@ -135,7 +138,7 @@ export function DecisionTracePanel({
                 through the same ordered chain, and it is the only call a
                 brand-new agent can make — so it is the first call worth
                 tracing, and the chooser has to be able to name it. */}
-            {SCOPE_PROVIDERS.map((candidate) => (
+            {offeredProviders(SCOPE_PROVIDERS, localModels, [provider]).map((candidate) => (
               <option key={candidate} value={candidate}>
                 {candidate}
               </option>

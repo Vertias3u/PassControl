@@ -68,6 +68,7 @@ import {
   isGuiPreset,
   isIntegration,
   isServicePreset,
+  SERVICE_ENV,
   supportsWrite,
 } from "../cli/presets.mjs";
 import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
@@ -85,7 +86,7 @@ import {
   writeMarker,
 } from "../cli/update.mjs";
 import { isLocalGatewayOrigin, probeGatewayVersion, probeTimeoutMs } from "../cli/gateway-probe.mjs";
-import { dashboardOriginForOffset } from "../cli/local-stack.mjs";
+import { dashboardOriginForOffset, portHolders, stackPortConflictMessage } from "../cli/local-stack.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
@@ -1214,16 +1215,24 @@ function ownSupabaseDatabaseIsRunning(offset = 0) {
   }
 }
 
-async function assertLocalStackPortsAvailable(offset = 0) {
+/** Which containers hold `ports`, so a refusal can name the stack to stop. Empty when Docker cannot say. */
+function dockerPortHolders(ports) {
+  try {
+    const listing = execFileSync("docker", ["ps", "--format", "{{.Names}}\t{{.Ports}}"], { encoding: "utf8", timeout: DOCKER_TIMEOUT_MS });
+    return portHolders(listing, ports);
+  } catch {
+    return [];
+  }
+}
+
+async function assertLocalStackPortsAvailable(offset = 0, { rerun = cliCommand("setup") } = {}) {
   if (ownSupabaseDatabaseIsRunning(offset)) return;
   const busy = [];
   for (const port of LOCAL_STACK_PORTS.map((port) => port + offset)) {
     if (await portIsListening(port)) busy.push(port);
   }
   if (busy.length) {
-    throw new Error(
-      `Local stack ports ${busy.join(", ")} are in use by another project. Stop that project first (for example, \`supabase stop --project-id <project>\`), then rerun \`passcontrol setup\`.`
-    );
+    throw new Error(stackPortConflictMessage({ busy, holders: dockerPortHolders(busy), rerun }));
   }
 }
 
@@ -1725,6 +1734,18 @@ async function applyAppUpdate(app) {
   if (!managed && await portIsListening(dashboard.port)) {
     throw new Error(
       `Port ${dashboard.port} is served by something this CLI did not start (a dashboard run by hand?). Stop it, then rerun \`${cliCommand("update")}\`. Nothing was changed.`
+    );
+  }
+  // The stack's own ports, before anything changes. Another stack on them
+  // (a second checkout at the same offset) only showed up when Supabase failed
+  // to start, after the fast-forward and \`npm ci\`, as "npm exited with code 1".
+  // A running dashboard of THIS install means its own stack holds them, which
+  // assertLocalStackPortsAvailable already allows.
+  try {
+    await assertLocalStackPortsAvailable(app.offset, { rerun: cliCommand(app.resume ? "update --app-only" : "update") });
+  } catch (error) {
+    throw new Error(
+      `${error.message} ${app.resume ? "The earlier update is still unfinished; nothing more was changed." : "Nothing was changed."}`
     );
   }
   const restart = app.resume?.wasRunning ?? Boolean(managed);
@@ -2487,22 +2508,11 @@ function printServicePreset(service, opts = {}) {
     ? cliCommand(`sidecar --port ${port}`)
     : cliCommand("sidecar");
   console.log(`# Start the bridge first: ${sidecarStart}`);
-  switch (service) {
-    case "github":
-      console.log("# GitHub REST through PassControl. What this agent may do is set on its page in the");
-      console.log("# dashboard, under GitHub access; the workspace's GitHub token stays in PassControl.");
-      printExports([["GITHUB_API_URL", `http://${host}:${port}/api/v1/svc/github`]]);
-      console.log("# Octokit: new Octokit({ baseUrl: process.env.GITHUB_API_URL }) — and no auth option.");
-      break;
-    case "telegram":
-      console.log("# Telegram Bot API through PassControl. What this agent may do is set on its page in the");
-      console.log("# dashboard, under Telegram access; the bot token stays in PassControl.");
-      printExports([["TELEGRAM_API_URL", `http://${host}:${port}/api/v1/svc/telegram`]]);
-      console.log('# Call a method by name, with no token in the URL: curl "$TELEGRAM_API_URL/getMe"');
-      break;
-    default:
-      throw new Error(`Usage: passcontrol env <${integrationChoices()}>`);
-  }
+  const entry = Object.hasOwn(SERVICE_ENV, service) ? SERVICE_ENV[service] : null;
+  if (!entry) throw new Error(`Usage: passcontrol env <${integrationChoices()}>`);
+  for (const line of entry.about) console.log(line);
+  printExports([[entry.envVar, `http://${host}:${port}/api/v1/svc/${service}`]]);
+  console.log(entry.usage);
 }
 
 function aiderConfig(opts = {}) {
@@ -3258,6 +3268,9 @@ const IMPORT_REASONS = {
   policy_malformed: "its policy could not be parsed, and creating it without one would leave it unrestricted.",
   policy_shadow_malformed: "its shadow policy could not be parsed.",
   unknown_status: "it records a status this version does not recognise.",
+  account_limit_reached:
+    "this account has reached its agent limit. Nothing was created for it. Revoke agents you no longer use, " +
+    "or ask the operator for a higher limit, then import again: agents already created are skipped.",
 };
 
 async function exportCommand(opts = {}) {

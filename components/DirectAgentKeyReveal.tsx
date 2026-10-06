@@ -8,6 +8,7 @@ import { buildDirectConnectSetup, buildHermesCloudSetup } from "@/lib/direct-con
 import { buildServiceConnectSetup } from "@/lib/service-connect";
 import type { ProviderId } from "@/lib/providers";
 import { buttonVariants } from "@/components/ui/button";
+import { serviceNames } from "@/lib/services/display";
 
 export interface RevealedDirectAgent {
   agentId: string;
@@ -127,7 +128,7 @@ export function DirectAgentKeyReveal({
       {serviceSetup ? (
         <div className="grid gap-1.5" data-client-family="services">
           <p className="m-0 text-sm leading-6" data-setup-note="services-only">
-            This agent has no model access. It can call GitHub or Telegram once you give it rules on{" "}
+            This agent has no model access. It can call {serviceNames()} once you give it rules on{" "}
             {/* A new tab: navigating THIS tab away would destroy an unacknowledged key. */}
             <Link href={`/dashboard/agents/${issued.agentId}#agent-services`} target="_blank" rel="noreferrer">
               its page
@@ -150,13 +151,16 @@ export function DirectAgentKeyReveal({
         <span className={`${label} mt-2`}>1 · Install the SDK</span>
         <pre className={block}>{setup.installCommand}</pre>
         <CopyButton kind="install" value={setup.installCommand} text="Copy install command" />
-        <span className={`${label} mt-2`}>2 · {setup.label} — save as {setup.envFileName}</span>
-        <pre className={block}>{setup.envBlock}</pre>
-        <CopyButton kind="env" value={setup.envBlock} text="Copy configuration" />
-        <span className={`${label} mt-2`}>3 · Load it into the shell that starts the worker</span>
-        <pre className={block}>{setup.loadCommand}</pre>
-        <CopyButton kind="load" value={setup.loadCommand} text="Copy load command" />
-        <span className={`${label} mt-2`}>4 · First-call smoke test</span>
+        <span className={`${label} mt-2`}>2 · {setup.label} — save and load {setup.envFileName}</span>
+        <p className="m-0 text-xs leading-5 text-muted-foreground">
+          Paste this into a terminal in your project folder, in the shell that starts the worker. It writes {setup.envFileName}, readable only by you, and loads it. Keep it out of git: add {setup.envFileName} to your .gitignore.
+        </p>
+        <pre className={block}>{setup.saveAndLoadCommand}</pre>
+        <CopyButton kind="env" value={setup.saveAndLoadCommand} text="Copy save-and-load command" />
+        <p className="m-0 text-xs leading-5 text-muted-foreground">
+          In a new terminal, load it again with <code>{setup.loadCommand}</code>
+        </p>
+        <span className={`${label} mt-2`}>3 · First-call smoke test</span>
         <pre className={block}>{setup.smokeCommand}</pre>
         <CopyButton kind="smoke" value={setup.smokeCommand} text="Copy smoke test" />
         <p className="m-0 text-xs leading-5 text-muted-foreground">

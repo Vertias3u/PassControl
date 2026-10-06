@@ -19,7 +19,9 @@
 //     absolute api.github.com URLs, and pagination uses `page`, `before`/`after`
 //     or `since` query parameters (see lib/services/wire.ts for the rewrite).
 
-export const SERVICE_IDS = ["github", "telegram"] as const;
+import { RELEASE_VERSION } from "@/lib/version";
+
+export const SERVICE_IDS = ["github", "telegram", "brave", "notion", "discord"] as const;
 export type ServiceId = (typeof SERVICE_IDS)[number];
 
 /** The `provider_credentials.provider` value a service's token is stored under. */
@@ -89,6 +91,12 @@ export interface ServiceCatalogEntry {
    * in a hurry; this list is reviewed code.
    */
   refused(method: string, segments: readonly string[]): string | null;
+  /**
+   * Calls per hour when an agent's rules name no cap, where the service's own
+   * default must be lower than DEFAULT_SERVICE_HOURLY_CAP: Brave Search bills
+   * per request with no spending cap on its side, so this is the bill guard.
+   */
+  defaultHourlyCap?: number;
 }
 
 // ── GitHub's never list (phase 2) ────────────────────────────────────────────
@@ -206,6 +214,155 @@ function telegramRefusal(_method: string, segments: readonly string[]): string |
   return null;
 }
 
+// ── Brave Search ────────────────────────────────────────────────────────────
+// Sent in a header, so a CR, LF or space would let it add a header of its own:
+// printable ASCII only. (Brave documents no key format; this refuses only what
+// a header cannot carry.)
+const BRAVE_TOKEN = /^[\x21-\x7e]{8,256}$/u;
+
+function braveRefusal(method: string, segments: readonly string[]): string | null {
+  // The AI Grounding answer endpoint is billed per token and is an LLM call:
+  // it belongs on the LLM gateway, under a budget, not under a call cap.
+  if (segments[0]?.toLowerCase() === "chat") {
+    return "Brave's chat/completions endpoint is an LLM call billed per token, so it is not served as a search call through PassControl.";
+  }
+  if (method !== "GET" && method !== "HEAD") {
+    return "Brave Search is read-only through PassControl: only GET searches are served.";
+  }
+  return null;
+}
+
+// ── Notion ──────────────────────────────────────────────────────────────────
+// Sent in a header: printable ASCII only (Notion's tokens are `ntn_…`; older
+// ones `secret_…`; this refuses only what a header cannot carry).
+const NOTION_TOKEN = /^[\x21-\x7e]{8,256}$/u;
+
+// Notion serves some reads as POST (developers.notion.com reference, read
+// 2026-10-05). A rule for exactly one of these is a read on the Services page;
+// any other POST, PATCH or DELETE is a write, and a `**` could reach a write.
+const NOTION_READ_POSTS: readonly (readonly string[])[] = [
+  ["v1", "search"],
+  ["v1", "data_sources", "{}", "query"],
+  ["v1", "databases", "{}", "query"],
+  ["v1", "views", "{}", "queries"],
+  ["v1", "blocks", "meeting_notes", "query"],
+  ["v1", "agents", "query"],
+  ["v1", "sessions", "query"],
+  ["v1", "sessions", "{}", "events", "query"],
+];
+
+function notionReadPost(segments: readonly string[]): boolean {
+  const s = segments.map((segment) => segment.toLowerCase());
+  if (s.includes("**")) return false;
+  return NOTION_READ_POSTS.some(
+    (template) => template.length === s.length && template.every((part, i) => (part === "{}" ? s[i] !== "" : s[i] === part))
+  );
+}
+
+const NOTION_REFUSAL = {
+  version: "Only Notion's /v1 API is served through PassControl: paths start with /v1/, as Notion's SDK sends them.",
+  oauth: "Notion's OAuth endpoints authenticate an integration with its client secret; they are never served through PassControl.",
+  uploads: "Notion file uploads are multipart and binary, which PassControl does not forward. Attach files by URL instead.",
+  agents:
+    "Running, changing or deleting Notion's own AI agents is refused through PassControl whatever the rules say: sessions spend the workspace's Notion AI credits, and the rest changes the agents themselves. Their query endpoints are allowed.",
+} as const;
+
+function notionRefusal(method: string, segments: readonly string[]): string | null {
+  const s = segments.map((segment) => segment.toLowerCase());
+  if (s[0] !== "v1") return NOTION_REFUSAL.version;
+  if (s[1] === "oauth") return NOTION_REFUSAL.oauth;
+  const read = method === "GET" || method === "HEAD";
+  if (s[1] === "file_uploads" && !read) return NOTION_REFUSAL.uploads;
+  if ((s[1] === "agents" || s[1] === "sessions") && !read && !notionReadPost(s)) return NOTION_REFUSAL.agents;
+  return null;
+}
+
+// ── Discord (bot) ───────────────────────────────────────────────────────────
+// A bot token is three base64url parts joined by dots; header-safe characters
+// only, so it cannot add a header of its own.
+const DISCORD_TOKEN = /^[A-Za-z0-9_.-]{30,200}$/u;
+
+// Discord: "Clients using the HTTP API must provide a valid User Agent which
+// specifies information about the client library and version", in the form
+// `DiscordBot ($url, $versionNumber)`. The version is this release's, never typed.
+const DISCORD_USER_AGENT = `DiscordBot (https://github.com/Vertias3u/PassControl, ${RELEASE_VERSION})`;
+
+const DISCORD_REFUSAL = {
+  version:
+    "Only Discord's API v10 is served through PassControl: paths start with /v10/, as discord.js sends them. An unversioned path would reach Discord's default, v6.",
+  webhooks:
+    "Discord webhooks are never served through PassControl, reads included: a webhook's details carry its own token, a credential to post as it, and creating one sends a channel's messages elsewhere.",
+  token: "Discord's interaction and OAuth2 routes carry or mint their own tokens; they are never served through PassControl.",
+  guild:
+    "Changing or deleting a server, its roles, members' roles, bans, kicks, prunes, moderation, onboarding, templates, voice states or integrations is refused through PassControl whatever the agent's rules say.",
+  channel:
+    "Changing or deleting a channel, its permissions or its followers, creating invites, bulk-deleting messages and changing group DM members are refused through PassControl whatever the agent's rules say.",
+  account:
+    "Changing the bot's own account, leaving a server, invites, lobbies and changes to the application (commands, entitlements, role connections) are refused through PassControl whatever the agent's rules say.",
+} as const;
+
+// Writes under /v10/guilds/{g}/<area> refused whatever the rules say. Areas
+// not here (emojis, stickers, soundboard, scheduled events) stay with the rules.
+const DISCORD_GUILD_NEVER = new Set([
+  "roles",
+  "bans",
+  "bulk-ban",
+  "prune",
+  "incident-actions",
+  "onboarding",
+  "welcome-screen",
+  "widget",
+  "auto-moderation",
+  "integrations",
+  "channels",
+  "mfa",
+  "vanity-url",
+  "templates",
+  "voice-states",
+]);
+const DISCORD_CHANNEL_NEVER = new Set(["permissions", "invites", "recipients", "followers"]);
+const DISCORD_ACCOUNT_ROOTS = new Set(["invites", "applications", "lobbies"]);
+
+function discordRefusal(method: string, segments: readonly string[]): string | null {
+  const s = segments.map((segment) => segment.toLowerCase());
+  if (s[0] !== "v10") return DISCORD_REFUSAL.version;
+  const [root, id, area, sub] = [s[1], s[2], s[3], s[4]];
+  // Any method.
+  if (root === "webhooks" || ((root === "channels" || root === "guilds") && area === "webhooks")) {
+    return DISCORD_REFUSAL.webhooks;
+  }
+  if (root === "interactions" || root === "oauth2") return DISCORD_REFUSAL.token;
+  if (method === "GET" || method === "HEAD") return null;
+
+  if (root === "guilds") {
+    if (s.length <= 3) return DISCORD_REFUSAL.guild; // create, change or delete a server
+    if (id === "templates") return DISCORD_REFUSAL.guild; // create a server from a template
+    if (DISCORD_GUILD_NEVER.has(area!)) return DISCORD_REFUSAL.guild;
+    // Members: roles, kicks, adding by OAuth, changing another member. Only the
+    // bot's own record and nickname, exactly `members/@me` and
+    // `members/@me/nick`, stay with the rules: never anything under them, so a
+    // bot cannot grant itself a role through `members/@me/roles/...`.
+    if (area === "members") {
+      const own = sub === "@me" && (s.length === 5 || (s.length === 6 && s[5] === "nick"));
+      return own ? null : DISCORD_REFUSAL.guild;
+    }
+    return null;
+  }
+  if (root === "channels") {
+    if (s.length <= 3) return DISCORD_REFUSAL.channel; // change or delete the channel
+    if (DISCORD_CHANNEL_NEVER.has(area!)) return DISCORD_REFUSAL.channel;
+    if (area === "messages" && sub === "bulk-delete") return DISCORD_REFUSAL.channel;
+    return null;
+  }
+  if (root === "users" && id === "@me") {
+    // Opening a DM (`POST /users/@me/channels`) stays with the rules.
+    if (s.length === 3 || area === "guilds" || area === "applications") return DISCORD_REFUSAL.account;
+    return null;
+  }
+  if (DISCORD_ACCOUNT_ROOTS.has(root!)) return DISCORD_REFUSAL.account;
+  return null;
+}
+
 const GATEWAY_USER_AGENT = "PassControl-Gateway";
 
 export const SERVICE_CATALOG: Readonly<Record<ServiceId, ServiceCatalogEntry>> = {
@@ -277,6 +434,110 @@ export const SERVICE_CATALOG: Readonly<Record<ServiceId, ServiceCatalogEntry>> =
     maxBodyBytes: 1_048_576,
     responseHeaders: ["content-type", "retry-after"],
     refused: telegramRefusal,
+  },
+  // Brave Search API facts (§13, read 2026-10-05): "All requests require your
+  // API key in the X-Subscription-Token header." Base https://api.search.brave.com,
+  // endpoints under /res/v1/ (confirmed: web/search, web/rich, local/pois,
+  // local/descriptions, llm/context; all GET). /res/v1 is pinned here, so an
+  // agent's paths and rules start after it. Billed per request with no cap on
+  // Brave's side: see defaultHourlyCap.
+  brave: {
+    id: "brave",
+    label: "Brave Search",
+    credentialProvider: "svc:brave",
+    origin: "https://api.search.brave.com",
+    upstreamUrl: (token, upstreamPath, search) =>
+      BRAVE_TOKEN.test(token) ? `https://api.search.brave.com/res/v1${upstreamPath}${search}` : null,
+    authHeaders: (token) => ({ "x-subscription-token": token }),
+    ruleShape: "http",
+    neverSummary:
+      "Brave Search is read-only: only GET searches are served, and the token-billed chat/completions endpoint is refused. Brave bills per search with no cap on its side, so each agent is held to 30 calls an hour unless you set its own cap.",
+    isWriteRule: () => false,
+    bodyTypes: [],
+    // Results link to the open web, not back to the API: nothing to rewrite.
+    rewritesUrls: false,
+    tokenShape: BRAVE_TOKEN,
+    tokenShapeHint: "A Brave Search API key is one line of letters, digits and punctuation, with no spaces.",
+    requestHeaders: ["accept", "cache-control", "api-version"],
+    maxBodyBytes: 0,
+    responseHeaders: [
+      "content-type",
+      "retry-after",
+      "x-ratelimit-limit",
+      "x-ratelimit-policy",
+      "x-ratelimit-remaining",
+      "x-ratelimit-reset",
+    ],
+    refused: braveRefusal,
+    defaultHourlyCap: 30,
+  },
+  // Notion API facts (§13, read 2026-10-05): base https://api.notion.com,
+  // `Authorization: Bearer <token>`, a `Notion-Version` header required (the
+  // agent's is forwarded, never set here), JSON bodies, cursor pagination in
+  // the body or query (no URLs to rewrite). Paths keep `/v1`, because Notion's
+  // SDK puts it there from its `baseUrl`; anything outside it is refused.
+  notion: {
+    id: "notion",
+    label: "Notion",
+    credentialProvider: "svc:notion",
+    origin: "https://api.notion.com",
+    upstreamUrl: (token, upstreamPath, search) =>
+      NOTION_TOKEN.test(token) ? `https://api.notion.com${upstreamPath}${search}` : null,
+    authHeaders: (token) => ({ authorization: `Bearer ${token}` }),
+    ruleShape: "http",
+    neverSummary:
+      "Notion's OAuth endpoints, file uploads, and running or changing Notion's own AI agents are never allowed, whatever an agent's rules say. Moving a page to the Trash is allowed by rule: Notion keeps it restorable.",
+    isWriteRule: (rule) =>
+      rule.method !== "GET" &&
+      rule.method !== "HEAD" &&
+      !(rule.method === "POST" && notionReadPost(rule.path.replace(/^\//u, "").split("/"))),
+    bodyTypes: ["application/json"],
+    rewritesUrls: false,
+    tokenShape: NOTION_TOKEN,
+    tokenShapeHint: "A Notion integration token is one line, usually starting ntn_, with no spaces.",
+    requestHeaders: ["accept", "content-type", "notion-version"],
+    maxBodyBytes: 1_048_576,
+    responseHeaders: ["content-type", "retry-after"],
+    refused: notionRefusal,
+  },
+  // Discord HTTP API facts (§13, docs.discord.com/developers, read 2026-10-05):
+  // base https://discord.com/api, `Authorization: Bot <token>`, a required
+  // User-Agent, JSON bodies (multipart uploads refused here), rate-limit
+  // headers X-RateLimit-* plus Retry-After. The agent's path keeps its version
+  // (`/v10/...`, as discord.js builds `${api}/v${version}`); any other version,
+  // or none (Discord's default is v6), is refused. Never list: Discord's own
+  // route tables, see discordRefusal.
+  discord: {
+    id: "discord",
+    label: "Discord",
+    credentialProvider: "svc:discord",
+    origin: "https://discord.com",
+    upstreamUrl: (token, upstreamPath, search) =>
+      DISCORD_TOKEN.test(token) ? `https://discord.com/api${upstreamPath}${search}` : null,
+    authHeaders: (token) => ({ authorization: `Bot ${token}`, "user-agent": DISCORD_USER_AGENT }),
+    ruleShape: "http",
+    neverSummary:
+      "Some Discord calls are never allowed, whatever an agent's rules say: every webhook route (reads too, because they carry tokens), interactions and OAuth2, changing or deleting a server or channel, roles and permissions, bans, kicks and prunes, moderation settings, invites, bulk message deletion, and changes to the bot's own account or application.",
+    isWriteRule: (rule) => rule.method !== "GET" && rule.method !== "HEAD",
+    bodyTypes: ["application/json"],
+    rewritesUrls: false,
+    tokenShape: DISCORD_TOKEN,
+    tokenShapeHint: "A Discord bot token is three parts joined by dots, as the Developer Portal shows it under Bot.",
+    // `x-audit-log-reason` is the moderation reason Discord records; harmless.
+    requestHeaders: ["accept", "content-type", "x-audit-log-reason"],
+    maxBodyBytes: 1_048_576,
+    responseHeaders: [
+      "content-type",
+      "retry-after",
+      "x-ratelimit-limit",
+      "x-ratelimit-remaining",
+      "x-ratelimit-reset",
+      "x-ratelimit-reset-after",
+      "x-ratelimit-bucket",
+      "x-ratelimit-global",
+      "x-ratelimit-scope",
+    ],
+    refused: discordRefusal,
   },
 };
 

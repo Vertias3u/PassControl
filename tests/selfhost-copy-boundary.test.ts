@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { coreSource } from "./support/curated-source";
 
 const MARK = "curate:";
 const PRIVATE_START = `${MARK}private-start`;
@@ -67,12 +68,48 @@ describe("self-hosted issuer and copy boundary", () => {
       "app/verify/receipt/page.tsx",
       "components/ReceiptVerifier.tsx",
     ]) {
-      const text = curated(path);
+      const text = coreSource(path);
       expect(text, path).not.toMatch(/Vertias/);
     }
     expect(curated("components/ReceiptVerifier.tsx")).toContain("never leaves this browser");
   });
 
+
+  // A self-hosted instance seeds the demo passport only with PASSCONTROL_DEMO=1,
+  // so Cloud's "Try the public demo passport" link 404'd on a normal install.
+  // Core says instead what a localhost verifier cannot do, and names the one
+  // hosted alternative: no sign-up mode, no price, both of which would go stale
+  // in a mirror that ships long after it was written.
+  it("replaces the demo passport link on /verify with an honest hosted alternative", () => {
+    const verify = coreSource("app/verify/page.tsx");
+    const hostedOrigin = "https://passcontrol.vertias.eu";
+
+    expect(verify).not.toContain("demoPassportId");
+    expect(verify).not.toContain("public demo passport");
+    expect(verify).toContain("PassControl Cloud");
+    expect(verify).toContain("only answers on this computer");
+    expect(verify.match(new RegExp(hostedOrigin, "g"))).toHaveLength(1);
+    expect(verify).not.toMatch(/sign[ -]?up|invite|free|beta/i);
+  });
+
+  // The report page writes into the self-hoster's own database, and the triage
+  // view that reads reports is Cloud-only, so on Core nobody could ever read one.
+  // Core's "Report a problem" goes to the public repository's issues instead.
+  it("sends Report a problem to the public issue tracker", () => {
+    const link = curated("lib/report-problem-link.ts");
+
+    expect(link).toContain('"https://github.com/Vertias3u/PassControl/issues/new/choose"');
+    expect(link).not.toContain('"/dashboard/report"');
+    expect(link).toContain("external: true");
+    for (const path of [
+      "components/dashboard/SidebarAccountMenu.tsx",
+      "components/dashboard/DashboardShell.tsx",
+    ]) {
+      const text = curated(path);
+      expect(text, path).not.toContain("/dashboard/report");
+      expect(text, path).toContain("REPORT_PROBLEM_LINK");
+    }
+  });
 
   it("publishes no hosted origin from the metadata routes", () => {
     // sitemap.xml, robots.txt and llms.txt are served from the self-hoster's own
@@ -138,11 +175,5 @@ describe("self-hosted issuer and copy boundary", () => {
   });
 
 
-  it("uses neutral profile examples", () => {
-    const profile = curated("components/ProfileSettings.tsx");
-    for (const hostedExample of ["Vertias Ops", 'placeholder="Vertias"', "vertias.eu"]) {
-      expect(profile).not.toContain(hostedExample);
-    }
-  });
 
 });

@@ -35,7 +35,61 @@ export function isGuiPreset(name) {
  * preset prints the governed base URL for that service; what the agent may call
  * there is set per agent in the dashboard.
  */
-export const SERVICE_PRESETS = ["github", "telegram"];
+export const SERVICE_PRESETS = ["github", "telegram", "brave", "notion", "discord"];
+
+/**
+ * What `passcontrol env <service>` prints for each: the variable (the same one
+ * the dashboard's Setup names, lib/services/display.ts), two lines on where the
+ * agent's access is set, and one usage hint. Pinned to the catalog by
+ * tests/cli-service-presets.test.ts.
+ */
+export const SERVICE_ENV = {
+  github: {
+    label: "GitHub",
+    envVar: "GITHUB_API_URL",
+    about: [
+      "# GitHub REST through PassControl. What this agent may do is set on its page in the",
+      "# dashboard, under GitHub access; the workspace's GitHub token stays in PassControl.",
+    ],
+    usage: "# Octokit: new Octokit({ baseUrl: process.env.GITHUB_API_URL }) — and no auth option.",
+  },
+  telegram: {
+    label: "Telegram",
+    envVar: "TELEGRAM_API_URL",
+    about: [
+      "# Telegram Bot API through PassControl. What this agent may do is set on its page in the",
+      "# dashboard, under Telegram access; the bot token stays in PassControl.",
+    ],
+    usage: '# Call a method by name, with no token in the URL: curl "$TELEGRAM_API_URL/getMe"',
+  },
+  brave: {
+    label: "Brave Search",
+    envVar: "BRAVE_SEARCH_API_URL",
+    about: [
+      "# Brave Search through PassControl. What this agent may search is set on its page in the",
+      "# dashboard, under Brave Search access; the API key stays in PassControl. Brave bills per search.",
+    ],
+    usage: '# Search with no key header: curl "$BRAVE_SEARCH_API_URL/web/search?q=passcontrol"',
+  },
+  notion: {
+    label: "Notion",
+    envVar: "NOTION_API_URL",
+    about: [
+      "# Notion through PassControl. What this agent may do is set on its page in the dashboard,",
+      "# under Notion access; the integration token stays in PassControl.",
+    ],
+    usage: "# @notionhq/client: new Client({ baseUrl: process.env.NOTION_API_URL }) — and no auth option.",
+  },
+  discord: {
+    label: "Discord",
+    envVar: "DISCORD_API_URL",
+    about: [
+      "# Discord's bot API through PassControl. What this agent may do is set on its page in the",
+      "# dashboard, under Discord access; the bot token stays in PassControl.",
+    ],
+    usage: '# discord.js: new REST({ api: process.env.DISCORD_API_URL, version: "10" }).setToken("sidecar") — any token; the sidecar replaces it.',
+  },
+};
 
 export function isServicePreset(name) {
   return SERVICE_PRESETS.includes(String(name ?? "").toLowerCase());

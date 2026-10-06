@@ -12,9 +12,13 @@
 // The tenant boundary is therefore enforced here in code: the userId comes from
 // the verified session and is passed to fleet, which filters on it.
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
+import { waitUntil } from "@vercel/functions";
 
 import { recordAdminAction } from "@/lib/audit";
 import { dispatchSecurityAlert } from "@/lib/alert";
+import { notifyWorkspace } from "@/lib/alerts/workspace";
+import { originFromHeaders } from "@/lib/alerts/origin";
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import { logSecurityEvent } from "@/lib/seclog";
 import { serviceClient } from "@/lib/supabase";
@@ -70,6 +74,15 @@ export async function takeBreakGlass(
   // break-glass at all is that nobody can take one quietly.
   logSecurityEvent("agent.break_glass", { user: acting.userId, agentId });
   await dispatchSecurityAlert("agent.break_glass", { user: acting.userId, agentId });
+  // The workspace's own channel too (plans/workspace-alerts.md); never awaited.
+  waitUntil(
+    notifyWorkspace({
+      userId: acting.userId,
+      agentId,
+      type: "break_glass",
+      origin: originFromHeaders(await headers()) ?? "",
+    })
+  );
   await recordAdminAction({
     userId: acting.userId,
     action: "agent.break_glass",

@@ -25,13 +25,4 @@ describe("homepage marketing contract", () => {
     }
   });
 
-  it("ships the scoped visual system and reduced-motion fallback", async () => {
-    const [home, css] = await Promise.all([
-      source("app/page.tsx"),
-      source("app/home.module.css"),
-    ]);
-    expect(home).toContain('import styles from "./home.module.css"');
-    expect(css).toContain("@media (prefers-reduced-motion: reduce)");
-    expect(css).not.toContain("scroll-timeline");
-  });
 });

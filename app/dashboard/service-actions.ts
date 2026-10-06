@@ -19,6 +19,7 @@
 // `get_provider_key`, the one decrypt path (invariant 5). Replacing and deleting
 // a token reuse rotateProviderKey / deleteProviderKey, which work by credential
 // id and do not care what the credential is for.
+import { accountLimitFrom, accountLimitMessage } from "@/lib/account-limits";
 import { revalidatePath } from "next/cache";
 
 import { recordAdminAction } from "@/lib/audit";
@@ -93,7 +94,11 @@ export async function addServiceToken(input: {
     p_label: label,
     p_plaintext: token,
   });
-  if (error) return failed("addServiceToken", error);
+  if (error) {
+    const limit = accountLimitFrom(error);
+    if (limit) return { error: accountLimitMessage(limit) };
+    return failed("addServiceToken", error);
+  }
 
   await recordAdminAction({
     userId: acting.userId,
@@ -115,7 +120,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export async function setAgentServiceRules(
   agentId: string,
   service: string,
-  input: { allow: { method: string; path: string }[]; maxRequestsPerHour: number | null }
+  input: { allow: { method: string; path: string; ask?: boolean }[]; maxRequestsPerHour: number | null }
 ): Promise<ServiceActionState> {
   if (!UUID_RE.test(agentId ?? "")) return { error: "That agent could not be found." };
   if (!isServiceId(service)) return { error: "Unknown service." };
@@ -125,12 +130,14 @@ export async function setAgentServiceRules(
   // it would call malformed is refused here, with the reason, instead of being
   // written and then denying every call to the service.
   // Stored in the service's own shape: `{ method, path }` for GitHub, and
-  // `{ call }` for a service whose rules name a method (Telegram).
-  const allow = (Array.isArray(input?.allow) ? input.allow : []).map((rule) =>
-    entry.ruleShape === "call"
+  // `{ call }` for a service whose rules name a method (Telegram). "Ask me
+  // first" is stored only when on, so a rule without it stays as it was.
+  const allow = (Array.isArray(input?.allow) ? input.allow : []).map((rule) => ({
+    ...(entry.ruleShape === "call"
       ? { call: String(rule?.path ?? "").trim() }
-      : { method: String(rule?.method ?? ""), path: String(rule?.path ?? "").trim() }
-  );
+      : { method: String(rule?.method ?? ""), path: String(rule?.path ?? "").trim() }),
+    ...(rule?.ask === true ? { ask: true } : {}),
+  }));
   const next: Record<string, unknown> = { allow };
   if (input?.maxRequestsPerHour !== null && input?.maxRequestsPerHour !== undefined) {
     next.max_requests_per_hour = input.maxRequestsPerHour;
@@ -202,6 +209,7 @@ export async function setAgentServiceRules(
     metadata: {
       service,
       rules: parsed.rules.allow.length,
+      ask: parsed.rules.allow.filter((rule) => rule.ask).length,
       max_requests_per_hour: (next.max_requests_per_hour as number | undefined) ?? null,
     },
   });

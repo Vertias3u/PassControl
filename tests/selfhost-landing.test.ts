@@ -26,18 +26,25 @@ async function source(): Promise<string> {
   return readFile(await resolvePage(), "utf8");
 }
 
-describe("self-host landing replacement", () => {
-  it("exists as a standalone replacement without changing the active home route", async () => {
-    await expect(resolvePage()).resolves.toBeInstanceOf(URL);
-    expect(await source()).toContain('import styles from "./home.module.css"');
+// Self-host is one developer on localhost:3000 (owner, 2026-10-05). Whoever opens
+// `/` already installed PassControl to get there, so a marketing page telling them
+// how to install it was clutter. The home route goes straight to the Control
+// Tower; middleware sends a signed-out visitor on to /login from there.
+describe("self-host home route", () => {
+  it("redirects to the Control Tower instead of rendering a landing page", async () => {
+    const page = await source();
+
+    expect(page).toContain('import { redirect } from "next/navigation"');
+    expect(page).toContain('redirect("/dashboard")');
+    expect(page).not.toContain("home.module.css");
+    expect(page).not.toContain("npm install -g passcontrol");
   });
 
-  it("is safe to statically prerender", async () => {
+  it("stays free of request-time dependencies", async () => {
     const page = await source();
 
     for (const serverOnlyDependency of [
       '"use client"',
-      "force-dynamic",
       "next/headers",
       "cookies(",
       "headers(",
@@ -47,55 +54,6 @@ describe("self-host landing replacement", () => {
       "PassControlSiteClient",
     ]) {
       expect(page).not.toContain(serverOnlyDependency);
-    }
-  });
-
-  it("points readers at the documented local stack", async () => {
-    const page = await source();
-
-    expect(page).toContain("npm install -g passcontrol");
-    expect(page).toContain("passcontrol setup");
-    expect(page).toContain("Docker Desktop");
-    expect(page).toContain("Supabase CLI");
-    expect(page).toContain("Node 18+");
-  });
-
-  it("offers the authenticated product routes without requiring route knowledge", async () => {
-    const page = await source();
-
-    expect(page).toContain('href="/dashboard"');
-    expect(page).toContain("Open Control Tower");
-    expect(page).toContain('href="/login"');
-    expect(page).toContain("Log in");
-  });
-
-  it("allows exactly one absolute hosted alternative without becoming a signup funnel", async () => {
-    const page = (await source()).toLowerCase();
-    const hostedOrigin = "https://passcontrol.vertias.eu";
-
-    expect(page.match(new RegExp(hostedOrigin, "g"))).toHaveLength(1);
-    expect(page).toContain(`href="${hostedOrigin}/beta"`);
-    expect(page).not.toMatch(/href=["']\/(?:beta|updates|legal)(?:[/?#"'])/);
-    expect(page).not.toMatch(/href=["']\/\/passcontrol\.vertias\.eu/);
-    expect(page.match(/invite-only/g)).toHaveLength(1);
-    expect(page).not.toMatch(/sign[ -]?up|request (?:an )?invite|join (?:the )?beta/);
-    expect(page).toContain("passcontrol cloud");
-    expect(page).toContain("postgres, redis, or migrations");
-    expect(page).toContain("permanent public issuer");
-  });
-
-  it("describes the core control boundary", async () => {
-    const page = await source();
-
-    for (const invariant of [
-      "provider keys stay server-side",
-      "identity",
-      "scope",
-      "budget",
-      "kill",
-      "receipt",
-    ]) {
-      expect(page.toLowerCase()).toContain(invariant);
     }
   });
 });

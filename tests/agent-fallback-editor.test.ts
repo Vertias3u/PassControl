@@ -100,7 +100,7 @@ describe("fallback updates are tenant-scoped", () => {
 
 describe("the server action", () => {
   const actions = read("app/dashboard/actions.ts");
-  const fn = actions.slice(actions.indexOf("export async function updateAgentFallbacks"));
+  const fn = actions.slice(actions.indexOf("async function updateAgentFallbacksBody"));
 
   it("exists", () => {
     expect(actions).toMatch(/export async function updateAgentFallbacks/);

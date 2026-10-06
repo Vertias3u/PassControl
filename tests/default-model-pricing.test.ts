@@ -24,8 +24,11 @@ describe("hasListedPrice", () => {
 
 describe("default client models are priced by a specific row", () => {
   // Azure's default is a deployment-name guess on a provider that is never
-  // priced (tests/azure-provider.test.ts), so it has no row to check.
-  it.each((Object.entries(DEFAULT_CLIENT_MODELS) as [ProviderId, string][]).filter(([p]) => p !== "azure"))(
+  // priced (tests/azure-provider.test.ts), so it has no row to check. Neither
+  // has `local`: a model on the developer's own server has no price at all.
+  it.each(
+    (Object.entries(DEFAULT_CLIENT_MODELS) as [ProviderId, string][]).filter(([p]) => p !== "azure" && p !== "local")
+  )(
     "%s default %s",
     (provider, model) => {
       expect(hasListedPrice(model, provider)).toBe(true);

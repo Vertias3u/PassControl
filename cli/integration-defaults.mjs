@@ -18,6 +18,10 @@ export const DEFAULT_ALLOWED_MODELS = Object.freeze({
   // `*` would widen an allowlist to whatever a resource ever deploys. An operator
   // whose deployments are named otherwise edits the scope.
   azure: "gpt-*",
+  // A model on the developer's own server: free to them, and whatever they pulled.
+  // The admin API (pull, delete) is outside the endpoint allowlist, so `*` widens
+  // which local model an agent may run, never what it may do to the server.
+  local: "*",
 });
 
 export const DEFAULT_CLIENT_MODELS = Object.freeze({
@@ -33,6 +37,9 @@ export const DEFAULT_CLIENT_MODELS = Object.freeze({
   xai: "grok-4.20-0309-non-reasoning",
   // A deployment name, so only a guess until the operator names theirs.
   azure: "gpt-4.1-mini",
+  // Ollama's most-pulled small model. Only a guess: the dashboard offers the
+  // models the server actually has.
+  local: "llama3.2",
 });
 
 export function defaultAllowedModelForProvider(provider) {

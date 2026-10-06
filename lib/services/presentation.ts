@@ -14,6 +14,12 @@ export function serviceLabelFor(provider: string | null | undefined): string {
   return isServiceId(id) ? SERVICE_CATALOG[id].label : provider;
 }
 
+/** The service's own never list, from the catalog, as a parenthetical; empty for an unknown service. */
+function neverFor(provider: string | null | undefined): string {
+  const id = provider?.startsWith("svc:") ? provider.slice(4) : provider;
+  return isServiceId(id) ? ` (${SERVICE_CATALOG[id].neverSummary})` : "";
+}
+
 /** The drawer's explanation for a service call's status, or null to use the shared one. */
 export function serviceCallExplanation(status: string | null | undefined, provider: string | null | undefined): string | null {
   const name = serviceLabelFor(provider);
@@ -27,7 +33,7 @@ export function serviceCallExplanation(status: string | null | undefined, provid
     case "blocked_policy":
       return `The agent's hourly ${name} call cap was used up, or could not be read (which refuses rather than guessing), so nothing was sent.`;
     case "blocked_endpoint":
-      return `PassControl refused this ${name} call before sending it, whatever the agent's rules say: the endpoint is never allowed (for GitHub, GraphQL and writes such as deleting a repository or adding a webhook; for Telegram, setWebhook, deleteWebhook, logOut, close and file downloads), or the request body was not a type ${name} accepts here, or was too large.`;
+      return `PassControl refused this ${name} call before sending it, whatever the agent's rules say: the endpoint is never allowed${neverFor(provider)}, or the request body was not a type ${name} accepts here, or was too large.`;
     case "no_provider_key":
       return `No ${name} token is stored for this workspace, so there was nothing to inject and ${name} never received this call. Add the token in Settings, under Services.`;
     case "endpoint_unavailable":

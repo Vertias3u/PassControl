@@ -4,12 +4,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PauseCircle, PlayCircle, RefreshCw } from "lucide-react";
 
-import {
-  observeAgentControl,
-  setAgentSuspended,
-  type AgentControlObservation,
-  type ControlIntent,
-} from "@/app/dashboard/actions";
+import { observeAgentControl, setAgentSuspended } from "@/app/dashboard/actions-client";
+import type { AgentControlObservation, ControlIntent } from "@/app/dashboard/actions";
 
 /**
  * One suspend/reactivate contract for every surface that offers it (Fleet row,

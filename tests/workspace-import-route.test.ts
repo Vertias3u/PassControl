@@ -244,6 +244,21 @@ describe("POST /workspace/import", () => {
     );
   });
 
+  it("stops at the account's agent limit and names it, instead of hammering the database", async () => {
+    // 0076's trigger refuses the first insert. Every later one would be refused
+    // too, so the route stops trying and reports each as the limit, not as
+    // "write_failed", which would read as a fault worth retrying.
+    insertError.value = { code: "P0001", message: "account_limit_reached:agents:live:10" };
+    const res = await post({ agents: [agent(), agent({ passport_pubkey: PUBKEY_B, name: "ci-runner" })] });
+    const body = await res.json();
+    expect(inserts).toHaveLength(1);
+    expect(body.data.agents.rejected).toEqual([
+      { name: "billing-bot", reason: "account_limit_reached" },
+      { name: "ci-runner", reason: "account_limit_reached" },
+    ]);
+    expect(body.data.complete).toBe(false);
+  });
+
   it("writes a restrictive policy and a suspended status in the one agent insert", async () => {
     const policy = { max_requests_per_hour: 3, deny: [{ provider: "anthropic", models: ["claude-secret-*"] }] };
     const res = await post({ agents: [agent({ policy, status: "suspended" })] });

@@ -2,7 +2,7 @@
 // Developer API keys for the public control-plane API. The full token is shown
 // exactly ONCE on creation (we store only its hash). Owners can revoke anytime.
 import { useState, useTransition } from "react";
-import { createApiKey, revokeApiKey } from "@/app/dashboard/actions";
+import { createApiKey, revokeApiKey } from "@/app/dashboard/actions-client";
 import { Check, Copy, KeyRound, Plus, ShieldAlert } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";

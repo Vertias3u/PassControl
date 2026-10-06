@@ -6,6 +6,16 @@
 // not reset or bypass the counter. The lockout window escalates with repeated
 // lockouts and is cleared on the next successful login. We deliberately do not
 // expose the remaining-attempt count to the client.
+//
+// FAILS OPEN (owner decision, 2026-10-04). When Redis is unreachable, nobody is
+// locked and nothing is recorded. It used to throw, which took the whole /login
+// action down with it: on Cloud, Upstash running out of monthly commands would
+// have locked every operator out, the owner included, at exactly the moment the
+// dashboard (and its kill switch) is needed. That matches the login rate limiter
+// beside it, and Supabase still checks the password. Unlike the Direct Agent Key
+// pre-auth limiter, nothing here protects the database from unauthenticated
+// work, so there is no reason for this one to fail closed.
+import { logFailOpen } from "@/lib/observability";
 import { redis } from "@/lib/state/redis";
 
 const FAILS_BEFORE_LOCK = 5; // consecutive failures that trigger a lockout
@@ -22,12 +32,25 @@ const levelKey = (email: string) => `locklevel:${email}`;
 /** True if the account is currently in a cooling-off lockout window. */
 export async function isLockedOut(email: string): Promise<boolean> {
   if (!email) return false;
-  return (await redis().exists(lockKey(email))) === 1;
+  try {
+    return (await redis().exists(lockKey(email))) === 1;
+  } catch {
+    logFailOpen("lockout");
+    return false;
+  }
 }
 
 /** Record a failed login. Locks the account once the threshold is reached. */
 export async function recordLoginFailure(email: string): Promise<void> {
   if (!email) return;
+  try {
+    await recordFailure(email);
+  } catch {
+    logFailOpen("lockout");
+  }
+}
+
+async function recordFailure(email: string): Promise<void> {
   const r = redis();
   const fails = await r.incr(failKey(email));
   if (fails === 1) await r.expire(failKey(email), FAIL_WINDOW_S);
@@ -47,5 +70,9 @@ export async function recordLoginFailure(email: string): Promise<void> {
 /** Clear all lockout state for an account after a successful authentication. */
 export async function clearLoginFailures(email: string): Promise<void> {
   if (!email) return;
-  await redis().del(failKey(email), lockKey(email), levelKey(email));
+  try {
+    await redis().del(failKey(email), lockKey(email), levelKey(email));
+  } catch {
+    logFailOpen("lockout");
+  }
 }

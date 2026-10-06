@@ -2,7 +2,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 
-vi.mock("@/app/dashboard/actions", () => ({ updateAgentScopes: vi.fn() }));
+vi.mock("@/app/dashboard/actions-client", () => ({ updateAgentScopes: vi.fn() }));
 vi.mock("@/components/ImpactPreview", () => ({ ImpactPreview: () => null }));
 import { ScopeEditor } from "@/components/ScopeEditor";
 

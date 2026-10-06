@@ -1,5 +1,5 @@
 "use client";
-// One agent's access to a non-LLM API (any-API: GitHub, Telegram).
+// One agent's access to a non-LLM API (any-API: every catalog service).
 //
 // Deny by default: an agent with no rules here cannot make a single call to the
 // service through PassControl, whatever the workspace's token can do.
@@ -17,15 +17,16 @@ import { setAgentServiceRules } from "@/app/dashboard/service-actions";
 import { SERVICE_CATALOG, isServiceId } from "@/lib/services/catalog";
 import {
   composeServiceRules,
-  parseRepoInput,
+  presetScopeFor,
   presetsFor,
-  presetsNeedRepo,
+  serviceHasWrites,
   splitServiceRules,
 } from "@/lib/services/presets";
-import { DEFAULT_SERVICE_HOURLY_CAP, SERVICE_RULE_METHODS } from "@/lib/services/rules";
+import { SERVICE_RULE_METHODS, defaultHourlyCapFor } from "@/lib/services/rules";
+import { SERVICE_DISPLAY } from "@/lib/services/display";
 
 type Message = { ok: boolean; text: string } | null;
-type Rule = { method: string; path: string };
+type Rule = { method: string; path: string; ask?: boolean };
 
 export function AgentServiceAccess({
   agentId,
@@ -36,7 +37,13 @@ export function AgentServiceAccess({
   state,
   tokenStored,
   ruleShape = "http",
+  alertDestination,
 }: {
+  /**
+   * Where "Ask me first" questions are also sent (Settings, Alerts): null when
+   * nowhere, undefined when it could not be read. Only changes what is said.
+   */
+  alertDestination?: "telegram" | "slack" | "discord" | null;
   /** `call`: rules name one API method (Telegram); `http`: a method and a path (GitHub). */
   ruleShape?: "http" | "call";
   agentId: string;
@@ -49,10 +56,16 @@ export function AgentServiceAccess({
 }) {
   const [initial] = useState(() => splitServiceRules(service, initialAllow));
   const presets = presetsFor(service);
-  const needsRepo = presetsNeedRepo(service);
+  // What the choices apply to (one GitHub repository), or null when nothing.
+  const scope = presetScopeFor(service);
+  const needsRepo = scope !== null;
   const [repoText, setRepoText] = useState(initial.repo ?? "");
   const [checked, setChecked] = useState<string[]>(initial.checked);
-  const [rules, setRules] = useState<Rule[]>(initial.extra.map((rule) => ({ method: rule.method, path: rule.path })));
+  const [rules, setRules] = useState<Rule[]>(
+    initial.extra.map((rule) => ({ method: rule.method, path: rule.path, ...(rule.ask ? { ask: true } : {}) }))
+  );
+  const [askWrites, setAskWrites] = useState(initial.askWrites);
+  const hasWrites = serviceHasWrites(service);
   const [advancedOpen, setAdvancedOpen] = useState(initial.extra.length > 0);
   const edit = (index: number, change: Partial<Rule>) =>
     setRules((current) => current.map((rule, i) => (i === index ? { ...rule, ...change } : rule)));
@@ -75,18 +88,16 @@ export function AgentServiceAccess({
     );
   }
 
-  const repo = needsRepo ? parseRepoInput(repoText) : null;
-  const composed = composeServiceRules(service, { repo, checked, extra: rules });
+  const repo = scope ? scope.parse(repoText) : null;
+  const composed = composeServiceRules(service, { repo, checked, extra: rules, askWrites });
+  const asks = composed.some((rule) => rule.ask);
   const never = isServiceId(service) ? SERVICE_CATALOG[service].neverSummary : null;
 
   const save = () =>
     start(async () => {
       setMsg(null);
       if (needsRepo && checked.length > 0 && repo === null) {
-        setMsg({
-          ok: false,
-          text: `Enter the repository as owner/name, or paste its github.com link: the choices above apply to one repository.`,
-        });
+        setMsg({ ok: false, text: scope!.invalid });
         return;
       }
       const trimmedCap = cap.trim();
@@ -113,24 +124,22 @@ export function AgentServiceAccess({
         </p>
       ) : null}
 
-      {needsRepo ? (
+      {scope ? (
         <label className="pc-field">
-          <span>Repository</span>
+          <span>{scope.label}</span>
           <input
             value={repoText}
-            placeholder="owner/repo, or paste its github.com link"
+            placeholder={scope.placeholder}
             onChange={(e) => setRepoText(e.target.value)}
             onBlur={() => {
-              const parsed = parseRepoInput(repoText);
+              const parsed = scope.parse(repoText);
               if (parsed) setRepoText(parsed);
             }}
             autoComplete="off"
             spellCheck={false}
             data-field="repo"
           />
-          <small>
-            The choices below apply to this one repository. It is matched exactly as your agent's code writes it, capital letters included.
-          </small>
+          <small>{scope.help}</small>
         </label>
       ) : null}
 
@@ -156,13 +165,43 @@ export function AgentServiceAccess({
 
       {needsRepo && checked.length > 0 && repo === null ? (
         <p className="pc-inline-notice" role="status" data-service-summary="needs-repo">
-          {repoText.trim() === ""
-            ? "Name the repository these choices are for."
-            : "That is not a repository: use owner/name, or paste its github.com link."}
+          {repoText.trim() === "" ? `Name the ${scope!.noun} these choices are for.` : scope!.notOne}
         </p>
       ) : composed.length === 0 ? (
         <p className="text-sm text-muted-foreground" data-service-summary="none">
           No {serviceLabel} access: every {serviceLabel} call from this agent is refused. Tick what it may do.
+        </p>
+      ) : null}
+
+      {hasWrites ? (
+        <label className="flex items-start gap-2 text-sm" data-service-ask>
+          <input
+            type="checkbox"
+            className="pc-check mt-0.5 size-4 shrink-0 accent-primary"
+            checked={askWrites}
+            onChange={(e) => setAskWrites(e.target.checked)}
+            disabled={pending}
+            data-field="ask-writes"
+          />
+          <span>
+            Ask me first before each write
+            <small className="block text-muted-foreground">
+              Every {serviceLabel} call that changes something waits for your Approve or Deny,
+              on the Approvals page and at your alert destination. Reads go straight through.
+            </small>
+          </span>
+        </label>
+      ) : null}
+
+      {asks ? (
+        <p className="pc-inline-notice" role="status" data-service-ask-destination={alertDestination ?? "none"}>
+          {alertDestination === "telegram"
+            ? "Questions go to your Telegram with Approve and Deny buttons, and to the Approvals page."
+            : alertDestination === "slack" || alertDestination === "discord"
+              ? `Questions go to your ${alertDestination === "slack" ? "Slack" : "Discord"} with a link to the Approvals page. Telegram alerts answer with a tap instead.`
+              : alertDestination === null
+                ? "No alert destination is set, so questions only appear on the Approvals page. Add Telegram under Settings, Alerts to answer with a tap."
+                : "Questions appear on the Approvals page, and at your alert destination if one is set."}
         </p>
       ) : null}
 
@@ -232,6 +271,17 @@ export function AgentServiceAccess({
                   </div>
                 )}
                 <div className="pc-credential__actions">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="pc-check size-4 accent-primary"
+                      checked={rule.ask === true}
+                      onChange={(e) => edit(index, { ask: e.target.checked })}
+                      disabled={pending}
+                      data-field="rule-ask"
+                    />
+                    Ask me first
+                  </label>
                   <button
                     type="button"
                     className="ghost"
@@ -285,12 +335,14 @@ export function AgentServiceAccess({
         <input
           inputMode="numeric"
           value={cap}
-          placeholder={String(DEFAULT_SERVICE_HOURLY_CAP)}
+          placeholder={String(defaultHourlyCapFor(service))}
           onChange={(e) => setCap(e.target.value)}
         />
         <small>
-          Empty uses {DEFAULT_SERVICE_HOURLY_CAP}. Separate from the agent&apos;s dollar limit: a{" "}
-          {serviceLabel} call has no price, so its limit is a call count.
+          Empty uses {defaultHourlyCapFor(service)}.{" "}
+          {isServiceId(service) && SERVICE_DISPLAY[service].billedPerCall
+            ? `${serviceLabel} bills each call to your ${serviceLabel} account, which PassControl cannot see, so this call count is the limit on that bill. It is separate from the agent's dollar limit.`
+            : `Separate from the agent's dollar limit: a ${serviceLabel} call has no price, so its limit is a call count.`}
         </small>
       </label>
 

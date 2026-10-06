@@ -8,7 +8,7 @@
 // LLM keys would suggest otherwise.
 import { useState, useTransition } from "react";
 import { CheckCircle2, Eye, EyeOff, KeyRound, LockKeyhole, Plus, RefreshCw, Trash2, Check } from "lucide-react";
-import { deleteProviderKey, rotateProviderKey, setActiveProviderKey } from "@/app/dashboard/actions";
+import { deleteProviderKey, rotateProviderKey, setActiveProviderKey } from "@/app/dashboard/actions-client";
 import { addServiceToken } from "@/app/dashboard/service-actions";
 import type { ProviderCredentialSummary } from "@/components/ProviderKeysManager";
 import { ServiceLogo } from "@/components/ServiceLogo";

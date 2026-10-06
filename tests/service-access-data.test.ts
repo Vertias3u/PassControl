@@ -33,7 +33,7 @@ describe("readAgentServiceAccess", () => {
     );
     expect(read).toEqual({
       state: "ok",
-      allow: [{ method: "GET", path: "/user" }],
+      allow: [{ method: "GET", path: "/user", ask: false }],
       maxRequestsPerHour: 9,
       configured: true,
       tokenStored: true,

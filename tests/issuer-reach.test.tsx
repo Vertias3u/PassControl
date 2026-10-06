@@ -63,8 +63,19 @@ describe("the verify pages carry the notice", () => {
   it.each(["app/verify/page.tsx", "app/verify/[passportId]/page.tsx", "app/verify/receipt/page.tsx"])(
     "%s renders IssuerReachNotice",
     async (file) => {
-      const src = (await import("node:fs")).readFileSync(file, "utf8");
+      const { readFileSync } = await import("node:fs");
+      const src = readFileSync(file, "utf8");
       expect(src).toContain("<IssuerReachNotice");
+    }
+  );
+
+  // What a self-hoster's /verify pages render (the REPLACE siblings privately,
+  // the files themselves in the mirror).
+  it.each(["app/verify/page.tsx", "app/verify/[passportId]/page.tsx", "app/verify/receipt/page.tsx"])(
+    "Core's %s renders IssuerReachNotice",
+    async (file) => {
+      const { coreSource } = await import("./support/curated-source");
+      expect(coreSource(file)).toContain("<IssuerReachNotice");
     }
   );
 });

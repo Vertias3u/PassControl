@@ -19,6 +19,7 @@ const {
   rateLimitFailClosedMock,
   captureSecurityEventMock,
   signReceiptMock,
+  notifyWorkspaceMock,
   touchLastSeenMock,
   fetchMock,
 } = vi.hoisted(() => ({
@@ -39,6 +40,7 @@ const {
   rateLimitFailClosedMock: vi.fn(),
   captureSecurityEventMock: vi.fn(),
   signReceiptMock: vi.fn(),
+  notifyWorkspaceMock: vi.fn(async (..._args: unknown[]) => undefined),
   touchLastSeenMock: vi.fn(),
   fetchMock: vi.fn(),
 }));
@@ -128,6 +130,11 @@ vi.mock("@/lib/observability", () => ({
   captureError: vi.fn(async () => undefined),
   captureSecurityEvent: (...args: unknown[]) => captureSecurityEventMock(...args),
   logFailOpen: vi.fn(),
+}));
+// Workspace alerts: the real status filter, a spy for the send.
+vi.mock("@/lib/alerts/workspace", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/alerts/workspace")>()),
+  notifyWorkspace: (...args: unknown[]) => notifyWorkspaceMock(...args),
 }));
 vi.mock("@/lib/receipt", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/receipt")>()),
@@ -401,6 +408,43 @@ describe("Direct Agent Key gateway authentication", () => {
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "blocked_scope" });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("tells the workspace about a scope refusal, after answering, with the model it asked for", async () => {
+    notifyWorkspaceMock.mockClear();
+    const res = await POST(
+      new Request("https://gateway.test/api/v1/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": DIRECT_KEY },
+        body: JSON.stringify({ model: "gpt-4o", messages: [] }),
+      }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(403);
+    expect(notifyWorkspaceMock).toHaveBeenCalledOnce();
+    expect(notifyWorkspaceMock).toHaveBeenCalledWith({
+      userId: directPrincipal.userId,
+      agentId: directPrincipal.agentId,
+      type: "refused",
+      status: "blocked_scope",
+      model: "gpt-4o",
+      origin: "https://gateway.test",
+    });
+  });
+
+  it("does not alert when the owner's own suspension refuses the call", async () => {
+    notifyWorkspaceMock.mockClear();
+    authenticateDirectAgentKeyMock.mockResolvedValue({ ...directPrincipal, suspended: true });
+    const res = await POST(
+      new Request("https://gateway.test/api/v1/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": DIRECT_KEY },
+        body: JSON.stringify({ model: "gpt-5-mini", messages: [] }),
+      }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+    expect(res.status).toBe(403);
+    expect(notifyWorkspaceMock).not.toHaveBeenCalled();
   });
 
   it("still refuses on the Redis flag alone for a principal the database reports active", async () => {

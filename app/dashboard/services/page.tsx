@@ -6,7 +6,9 @@ import { ServiceLogo } from "@/components/ServiceLogo";
 import { ServiceStopControl } from "@/components/ServiceStopControl";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { SERVICE_CATALOG } from "@/lib/services/catalog";
-import { DEFAULT_SERVICE_HOURLY_CAP } from "@/lib/services/rules";
+import { defaultHourlyCapFor } from "@/lib/services/rules";
+import { SERVICE_DISPLAY } from "@/lib/services/display";
+import { isServiceId } from "@/lib/services/catalog";
 import { observeServiceKill } from "@/lib/state/killswitch";
 import { userClient } from "@/lib/supabase/server";
 import { readServicesOverview, type ServiceOverview } from "./services-data";
@@ -96,14 +98,14 @@ function ServiceCard({ service, failClosed }: { service: ServiceOverview; failCl
             <ul className="pc-credential-list" aria-label={`Agents with ${service.label} access`}>
               {agents.withAccess.map((agent) => (
                 <li key={agent.id} className="pc-credential" data-service-agent={agent.id} data-access={agent.state}>
-                  <Link href={`/dashboard/agents/${agent.id}#agent-services`}>{agent.name}</Link>
+                  <Link href={`/dashboard/agents/${agent.id}#${isServiceId(service.id) ? SERVICE_DISPLAY[service.id].sectionId : "agent-services"}`}>{agent.name}</Link>
                   {agent.state === "malformed" ? (
                     <span className="pc-inline-notice is-danger">Rules not valid: every {service.label} call is refused</span>
                   ) : (
                     <span className="text-sm text-muted-foreground">
                       {agent.rules} {agent.rules === 1 ? "rule" : "rules"}
                       {agent.writes > 0 ? `, ${agent.writes} ${agent.writes === 1 ? "write" : "writes"}` : ", read-only"} ·{" "}
-                      {agent.cap ?? DEFAULT_SERVICE_HOURLY_CAP} calls/hour
+                      {agent.cap ?? defaultHourlyCapFor(service.id)} calls/hour
                     </span>
                   )}
                 </li>

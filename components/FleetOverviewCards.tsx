@@ -72,9 +72,10 @@ export function FleetOverviewCards(props: {
         // (T4-02). This figure is what PassControl charged against budgets —
         // Postgres defines it once, in 0055, as
         // `coalesce(enforced_microcents, coalesce(cost_microcents, 0))`. It
-        // equals observed cost for every provider PassControl prices, and for a
-        // call it cannot price it contains a conservative estimate while the
-        // receipt for that same call says the cost is unknown. Labelling it
+        // equals observed cost for every provider PassControl prices. A call it
+        // cannot price used to add a conservative estimate while its receipt said
+        // the cost was unknown; since the second T4-02 fix (2026-10-05) it adds
+        // nothing, but rows charged before then still count. Labelling it
         // "Tracked spend" made this card contradict a signed receipt.
         label="Settled budget charges"
         value={agents ? `$${(props.spentMicrocents / 1e8).toFixed(2)}` : "—"}

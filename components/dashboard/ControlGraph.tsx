@@ -27,6 +27,18 @@ import {
   type SimulationNodeDatum,
 } from "d3-force";
 import { browserClient } from "@/lib/supabase/client";
+import { motionAllowed } from "@/lib/motion";
+import {
+  DECELERATION_RATE,
+  SPRING_RESPONSE,
+  clampToBounds,
+  criticalSpring,
+  decayStep,
+  panBounds,
+  releaseVelocity,
+  resistBeyond,
+  type PointerSample,
+} from "@/lib/graph-physics";
 import type { DepartureRow } from "@/lib/departures";
 import { authenticationProofLabel } from "@/lib/first-call-activation";
 // The shared label retains "Passport visa" for bearer rows and names the
@@ -165,6 +177,13 @@ export function ControlGraph({
   const [reducedMotion, setReducedMotion] = useState(false);
   const [clock, setClock] = useState(0);
   const [view, setView] = useState<ControlGraphView>({ x: 0, y: 0, k: 1 });
+  // The view as it is on screen right now. Every animation starts from this,
+  // never from where the last one was heading, so the graph can be grabbed and
+  // redirected mid-flight (apple-design: interruptibility).
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const samplesRef = useRef<PointerSample[]>([]);
+  const animationRef = useRef<number | null>(null);
 
   const shown = useMemo(
     () => (presentation ? presentationSnapshot(snapshot, presentationIdentity) : snapshot),
@@ -194,11 +213,20 @@ export function ControlGraph({
   }, [paused]);
 
   useEffect(() => {
+    // The system setting and the self-host Animations switch (lib/motion.ts),
+    // which flips data-motion on the dashboard root without a reload.
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const sync = () => setReducedMotion(media.matches);
+    const sync = () => setReducedMotion(!motionAllowed(rootRef.current));
     sync();
     media.addEventListener("change", sync);
-    return () => media.removeEventListener("change", sync);
+    const app = rootRef.current?.closest(".pc-app");
+    const observer = app ? new MutationObserver(sync) : null;
+    if (app) observer?.observe(app, { attributes: true, attributeFilter: ["data-motion"] });
+    return () => {
+      media.removeEventListener("change", sync);
+      observer?.disconnect();
+      if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -365,7 +393,7 @@ export function ControlGraph({
       node.fx = null;
       node.fy = null;
     });
-    setView({ x: 0, y: 0, k: 1 });
+    springViewTo({ x: 0, y: 0, k: 1 });
     simulationRef.current?.alpha(0.8).restart();
   };
 
@@ -408,14 +436,89 @@ export function ControlGraph({
     };
   };
 
+  const cancelViewMotion = () => {
+    if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
+    animationRef.current = null;
+  };
+
+  /** Settle the view on a critically damped spring: no overshoot, no fixed duration. */
+  const springViewTo = (target: ControlGraphView, velocity = { x: 0, y: 0, k: 0 }) => {
+    cancelViewMotion();
+    if (reducedMotion) {
+      setView(target);
+      return;
+    }
+    const from = viewRef.current;
+    const omega = (2 * Math.PI) / SPRING_RESPONSE;
+    const start = performance.now();
+    const frame = (now: number) => {
+      const t = (now - start) / 1000;
+      const x = criticalSpring(from.x, velocity.x, target.x, omega, t);
+      const y = criticalSpring(from.y, velocity.y, target.y, omega, t);
+      const k = criticalSpring(from.k, velocity.k, target.k, omega, t);
+      const settled =
+        Math.abs(x.x - target.x) < 0.05 && Math.abs(y.x - target.y) < 0.05 && Math.abs(k.x - target.k) < 0.0005 &&
+        Math.abs(x.v) < 1 && Math.abs(y.v) < 1;
+      setView(settled ? target : { x: x.x, y: y.x, k: k.x });
+      animationRef.current = settled ? null : requestAnimationFrame(frame);
+    };
+    animationRef.current = requestAnimationFrame(frame);
+  };
+
+  /**
+   * After a pan is released: keep the finger's velocity and let it decay like
+   * a scroll. Past an edge, momentum bleeds off fast and the view springs back
+   * inside, carrying whatever speed it still has.
+   */
+  const settlePan = (vx: number, vy: number) => {
+    cancelViewMotion();
+    const boundsNow = () => panBounds(WIDTH, HEIGHT, viewRef.current.k);
+    if (reducedMotion) {
+      setView((current) => clampToBounds(current, boundsNow()));
+      return;
+    }
+    let x = viewRef.current.x;
+    let y = viewRef.current.y;
+    let velocityX = vx;
+    let velocityY = vy;
+    let last = performance.now();
+    const frame = (now: number) => {
+      const dt = Math.min(32, now - last);
+      last = now;
+      const bounds = boundsNow();
+      const outsideX = x < bounds.minX || x > bounds.maxX;
+      const outsideY = y < bounds.minY || y > bounds.maxY;
+      ({ x, v: velocityX } = decayStep(x, velocityX, dt, outsideX ? 0.97 : DECELERATION_RATE));
+      ({ x: y, v: velocityY } = decayStep(y, velocityY, dt, outsideY ? 0.97 : DECELERATION_RATE));
+      const current = { ...viewRef.current, x, y };
+      if (Math.abs(velocityX) < 0.02 && Math.abs(velocityY) < 0.02) {
+        viewRef.current = current;
+        setView(current);
+        const inside = clampToBounds(current, bounds);
+        if (inside.x !== x || inside.y !== y) springViewTo(inside, { x: velocityX * 1000, y: velocityY * 1000, k: 0 });
+        else animationRef.current = null;
+        return;
+      }
+      setView(current);
+      animationRef.current = requestAnimationFrame(frame);
+    };
+    animationRef.current = requestAnimationFrame(frame);
+  };
+
   const zoomAtCenter = (delta: number) => {
-    setView((current) => zoomViewAtPoint(current, { x: WIDTH / 2, y: HEIGHT / 2 }, current.k + delta));
+    const current = viewRef.current;
+    springViewTo(zoomViewAtPoint(current, { x: WIDTH / 2, y: HEIGHT / 2 }, current.k + delta));
   };
 
   const finishPointerInteraction = () => {
+    const wasPanning = panRef.current !== null;
     dragRef.current = null;
     panRef.current = null;
     simulationRef.current?.alphaTarget(0);
+    if (!wasPanning) return;
+    const { vx, vy } = releaseVelocity(samplesRef.current, performance.now());
+    samplesRef.current = [];
+    settlePan(vx, vy);
   };
 
   return (
@@ -498,6 +601,7 @@ export function ControlGraph({
             data-view-scale={view.k.toFixed(3)}
             onWheel={(event) => {
               event.preventDefault();
+              cancelViewMotion();
               const anchor = viewportPoint(event.clientX, event.clientY);
               if (!anchor) return;
               setView((current) => zoomViewAtPoint(
@@ -512,7 +616,10 @@ export function ControlGraph({
               if (!point) return;
               event.preventDefault();
               event.currentTarget.setPointerCapture(event.pointerId);
-              panRef.current = { x: point.x, y: point.y, originX: view.x, originY: view.y };
+              // Grab from the on-screen value, even mid-glide.
+              cancelViewMotion();
+              samplesRef.current = [{ x: point.x, y: point.y, t: performance.now() }];
+              panRef.current = { x: point.x, y: point.y, originX: viewRef.current.x, originY: viewRef.current.y };
             }}
             onPointerMove={(event) => {
               if (dragRef.current) {
@@ -527,10 +634,16 @@ export function ControlGraph({
               } else if (panRef.current) {
                 const point = viewportPoint(event.clientX, event.clientY);
                 if (!point) return;
+                samplesRef.current = [...samplesRef.current.slice(-7), { x: point.x, y: point.y, t: performance.now() }];
+                // 1:1 with the pointer inside the bounds; past them, resistance
+                // that grows the further it is pulled (rubber-band).
+                const bounds = panBounds(WIDTH, HEIGHT, viewRef.current.k);
+                const rawX = panRef.current.originX + point.x - panRef.current.x;
+                const rawY = panRef.current.originY + point.y - panRef.current.y;
                 setView((current) => ({
                   ...current,
-                  x: panRef.current!.originX + point.x - panRef.current!.x,
-                  y: panRef.current!.originY + point.y - panRef.current!.y,
+                  x: resistBeyond(rawX, bounds.minX, bounds.maxX, WIDTH),
+                  y: resistBeyond(rawY, bounds.minY, bounds.maxY, HEIGHT),
                 }));
               }
             }}

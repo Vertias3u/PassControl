@@ -43,7 +43,7 @@ function noQuotaCard() {
         <h3>Prefer not to operate the control plane?</h3>
         <p>
           PassControl Cloud operates Postgres, Redis, and migrations, and signs receipts
-          under a permanent public issuer. Access is invite-only.
+          under a permanent public issuer. It is free during the beta.
         </p>
         <a
           className="pc-operations-cloud-link"

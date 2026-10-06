@@ -253,8 +253,8 @@ again:
 The gateway blocked it before spending a cent. Raise the budget back up and it works again.
 Cost budgets use whole cents; whether an estimate exceeds a cap depends on the model,
 input, output limit, and remaining spend. Do not assume 2,000 tokens always costs 1¢.
-Custom endpoints are unpriced: token accounting continues, and the cost-cap estimate is
-not a claim about actual dollars. Built-in unknown models use provider fallback pricing.
+Custom endpoints are unpriced: token accounting continues, nothing is charged to the cost
+budget, and an agent with a dollar limit is refused them. Built-in unknown models use provider fallback pricing.
 
 The dashboard's **Settled budget charges** is the all-time admission counter, not the sum of
 the first 40 visible rows. Its Spend equation shows durable charge-contributing calls plus
@@ -520,13 +520,16 @@ passcontrol env open-webui
 passcontrol env librechat
 ```
 
-Two presets point a client at a service other than a model provider, through the same sidecar.
+These presets point a client at a service other than a model provider, through the same sidecar.
 The service's token stays in PassControl, and what the agent may call is set on its page in the
 dashboard:
 
 ```bash
 passcontrol env github         # prints GITHUB_API_URL for Octokit and other GitHub clients
 passcontrol env telegram       # prints TELEGRAM_API_URL; call $TELEGRAM_API_URL/<method>
+passcontrol env brave          # prints BRAVE_SEARCH_API_URL; Brave bills per search (30/hour per agent by default)
+passcontrol env notion         # prints NOTION_API_URL for @notionhq/client (baseUrl) and other Notion clients
+passcontrol env discord        # prints DISCORD_API_URL for discord.js REST (api, version 10)
 ```
 
 For other clients that use the supported provider endpoints, `passcontrol env generic` prints connection settings.
@@ -580,35 +583,19 @@ another restores it. (Note: blocking already-issued visas relies on Redis; see �
 
 ---
 
-## 9. Going to production
+## 9. Running it for other people
 
-The Docker stack is for local dev. To self-host for real:
+Self-hosted PassControl is built for **one developer on their own machine**. The Docker
+stack, the seeded local account and the generated `.env.docker` are local-development
+setup, and this repository does not ship or support a production deployment path.
 
-Copy `.env.example` to `.env.local` and fill in Supabase, Redis and secrets. Set
-`DATABASE_URL` in your shell environment, then apply migrations and build:
+If agents running somewhere else (a server, CI, a teammate's laptop) need to reach
+PassControl, or you want a passport verify page that anyone can open, use
+[PassControl Cloud](https://passcontrol.vertias.eu). It runs the database, Redis,
+migrations and signing key for you.
 
-```sh
-npm run migrate
-npm run build
-npm run start
-```
-
-Production checklist:
-
-- **Supabase specifically** (not vanilla Postgres) — the vault uses the `supabase_vault`
-  extension. Use a Supabase project (hosted or self-hosted).
-- **Strong secrets:** `VISA_SECRET` and `CACHE_ENC_KEY` must be ≥32 bytes of real randomness
-  (`openssl rand -base64 32`). Visa mint/verification refuses an unusable `VISA_SECRET`; app startup alone is not a secret validation test.
-- **Redis with eviction disabled** (`maxmemory-policy noeviction`) — instant revocation
-  relies on suspend/kill keys not being evicted under memory pressure.
-- **Behind a trusted proxy** — per-IP rate limits trust `X-Forwarded-For`; only real behind
-  Vercel or a proxy that sets it.
-- **Reconcile cron** — schedule `GET /api/cron/reconcile` (Bearer `$CRON_SECRET`) every few
-  minutes to correct budget drift. The committed Vercel schedule is nightly (`vercel.json`), while the Cloudflare trigger runs every five minutes; elsewhere use
-  system `cron` or a GitHub Action.
-- **Never deploy the seeded dev user** — configure production Auth/SMTP and `PASSCONTROL_SIGNUP_MODE` (`open`, `invite`, `closed`); invite mode uses `INVITE_CODE`.
-- **Kill switch fail mode** — reads fail *open* by default; set `KILL_SWITCH_FAIL_CLOSED=true`
-  to make a Redis read failure block instead.
+The settings that still matter on your own machine are under
+[Features to configure deliberately](#features-to-configure-deliberately).
 
 ---
 
@@ -627,6 +614,15 @@ Found a rough edge or a security issue? See `SECURITY.md` — we'd rather you te
 
 ## Features to configure deliberately
 
+**Kill switch fail mode:** kill-switch reads fail *open* by default (a Redis suspend is
+the backstop); set `KILL_SWITCH_FAIL_CLOSED=true` to make a Redis read failure block calls
+instead. Redis must not evict keys (`maxmemory-policy noeviction`): instant revocation
+relies on suspend and kill keys surviving memory pressure. That is Redis's own default,
+which the local stack (`docker/compose.yml`) leaves unchanged.
+
+**Budget drift:** `GET /api/cron/reconcile` (Bearer `$CRON_SECRET`) corrects budget drift.
+Locally nothing schedules it; run it from system `cron` if you leave the stack up for days.
+
 **Sender proof:** enable `observe` first to inspect compatibility, then `required` when
 using the sidecar or another proof-capable implementation. The direct CLI call,
 MCP chat, and TypeScript SDK do not attach proofs and are refused in required mode.
@@ -640,13 +636,11 @@ information, excluding expiry/suspend/kill. Offline copies need a freshness poli
 receipt signature validity is not current Passport lifecycle validity.
 
 **Custom endpoints:** set a credential's base URL only on an operator-enabled deployment.
+The local stack is enabled by default (set `PROVIDER_ENDPOINT_MODE=off` to refuse them). To run
+agents on Ollama, use *Models on this machine* in Settings and give the agent the `local` provider.
 `PROVIDER_ENDPOINT_MODE=selfhost` permits private HTTP services and custom ports;
 a hostname list restricts HTTPS/443 destinations. Validation is not DNS-aware SSRF
 prevention. Upstream redirects are refused. See [endpoint policy](./DOCUMENTATION.md#custom-endpoints-and-egress).
-
-**Owner binding:** a workspace can declare an owner, prove a domain token or GitHub
-repository token, and choose publication. These check control of identifiers, not legal
-identity. Company registry evidence does not establish representative authority.
 
 **Spend statements:** `passcontrol statements` reads Cloud's signed chain;
 `passcontrol verify statement "<jws>" --issuer <origin>` verifies an artifact. Public

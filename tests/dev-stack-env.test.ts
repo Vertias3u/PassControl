@@ -168,10 +168,15 @@ describe("the stack's closing text", () => {
   const script = readFileSync("scripts/dev-stack.sh", "utf8");
   const done = script.slice(script.indexOf("# ── 7. Done"));
 
-  it("names the invite code for additional local accounts, read from the env file", () => {
-    expect(done).toMatch(/Invite code[^\n]*\$\{INVITE_CODE\}/);
-    // Not left to step 6's `source`: PASSCONTROL_SKIP_SEED skips that step.
+  it("says whether sign-up is on, and names the invite code only when it is", () => {
+    // Sign-up is off by default on a local install (setup seeds the account).
+    expect(done.match(/Sign-up {9}: \$\{SIGNUP_LINE\}/g)).toHaveLength(2);
+    expect(done).toContain('if [[ "$SIGNUP_MODE" == "closed" ]]; then');
+    expect(done).toMatch(/SIGNUP_LINE="\$\{SIGNUP_MODE:-invite\} · invite code \$\{INVITE_CODE\}"/);
+    // Both read from the env file, not left to step 6's `source`:
+    // PASSCONTROL_SKIP_SEED skips that step.
     expect(done).toMatch(/INVITE_CODE="\$\(grep '\^INVITE_CODE=' "\$ENVF"/);
+    expect(done).toMatch(/SIGNUP_MODE="\$\(grep '\^PASSCONTROL_SIGNUP_MODE=' "\$ENVF"/);
   });
 
   it("never suggests a stop that deletes data volumes", () => {

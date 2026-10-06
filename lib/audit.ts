@@ -60,12 +60,20 @@ export const AUDIT_ACTIONS = [
   // Which non-LLM API calls an agent may make with the tenant's token (0074).
   // It widens or narrows what a credential can reach, like a scope edit.
   "agent.service_rules",
+  // The owner's yes or no to one service call under an "Ask me first" rule,
+  // given in the dashboard. (A Telegram tap leaves the call's own audit row.)
+  "approval.decide",
   "apikey.create",
   "apikey.revoke",
   // The workspace's stated key-custody expectation. In the trail because it is
   // a policy statement other people are held to — and NOT because it enforces
   // anything: it gates no call and appears on no receipt. See migration 0051.
   "workspace.key_custody_expectation",
+  // Where the workspace's own alerts go, which kinds, or that they were removed
+  // (0078). In the trail because silencing alerts is what an intruder does
+  // first. The metadata holds the service and a hint, NEVER the webhook URL:
+  // the URL is a credential and lives only in Vault.
+  "workspace.alerts",
   "mfa.enroll",
   "mfa.disable",
   // Taking a portable copy of the workspace configuration, and restoring one.
