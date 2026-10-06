@@ -156,9 +156,11 @@ describe("passcontrol CLI", () => {
 
   it("shows status without network access", async () => {
     const { stdout } = await runCli(["status", "--no-network"]);
-    expect(stdout).toContain("Gateway:   not checked  http://localhost:3000");
-    expect(stdout).toContain("Dashboard: local server not checked");
-    expect(stdout).toContain("Passport:  missing");
+    expect(stdout).toContain("Gateway:       not checked  http://localhost:3000");
+    // Every label gets a space before its value; "Key storage:tier 1" did not (2026-10-06).
+    expect(stdout).not.toMatch(/^[A-Za-z ]+:\S/m);
+    expect(stdout).toContain("Dashboard:     local server not checked");
+    expect(stdout).toContain("Passport:      missing");
     expect(stdout).toContain("passcontrol init");
     expect(stdout).toContain("passcontrol agent create <name>");
     expect(stdout.match(/^\s+passcontrol /gm) ?? []).toHaveLength(3);
@@ -466,7 +468,7 @@ describe("passcontrol CLI", () => {
     const { stdout } = await runCli(["status", "--no-network"], {
       env: { PASSCONTROL_APP_ROOT: process.cwd() },
     });
-    expect(stdout).toContain(`App:       ${process.cwd()}`);
+    expect(stdout).toContain(`App:           ${process.cwd()}`);
   }, 10000);
 
   // Regression: a saved ~/.config/passcontrol/app.json used to short-circuit
@@ -573,7 +575,7 @@ describe("passcontrol CLI", () => {
     await saveAppRoot(saved);
 
     const { stdout } = await runCli(["status", "--no-network"], { env: { NO_COLOR: "1" } });
-    expect(stdout).toContain(`App:       ${saved}`);
+    expect(stdout).toContain(`App:           ${saved}`);
     expect(stdout).toMatch(/saved/i);
     expect(stdout).toContain("passcontrol unlink");
   }, 10000);
@@ -582,7 +584,7 @@ describe("passcontrol CLI", () => {
     const { stdout } = await runCli(["status", "--no-network"], {
       env: { PASSCONTROL_APP_ROOT: process.cwd(), NO_COLOR: "1" },
     });
-    expect(stdout).toContain(`App:       ${process.cwd()}`);
+    expect(stdout).toContain(`App:           ${process.cwd()}`);
     expect(stdout).toContain("PASSCONTROL_APP_ROOT");
   }, 10000);
 
@@ -809,10 +811,10 @@ describe("passcontrol CLI", () => {
       },
     });
 
-    expect(stdout).toContain("Gateway:   not checked  http://from-env.test");
-    expect(stdout).toContain("Provider:  openai");
-    expect(stdout).toContain("Model:     env-model");
-    expect(stdout).toContain("Passport:  configured");
+    expect(stdout).toContain("Gateway:       not checked  http://from-env.test");
+    expect(stdout).toContain("Provider:      openai");
+    expect(stdout).toContain("Model:         env-model");
+    expect(stdout).toContain("Passport:      configured");
     expect(stdout).toContain(path.join(tmp, "project", ".passcontrol"));
   }, 10000);
 

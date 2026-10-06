@@ -13,6 +13,8 @@ const {
   expectedProjectId,
   planUpdate,
   formatPlan,
+  migrationBase,
+  finishLines,
 } = update;
 
 const PUBLIC = "https://github.com/Vertias3u/PassControl.git";
@@ -183,5 +185,64 @@ describe("planUpdate", () => {
     const plan = planUpdate({ ...base, latest: null });
     expect(plan.cli.needed).toBe(false);
     expect(formatPlan(plan).join("\n")).toMatch(/could not reach/i);
+  });
+});
+
+// Found by the 1.1.0 → 1.2.0 update on the owner's Mac (2026-10-06): the
+// install still carried a marker from a 1.0.0 → 1.1.0 update that had stopped
+// before its migrations. The plan named three migrations and applied eight, never
+// said it was finishing the earlier update, offered a rollback to the commit from
+// before THAT update, and ended without saying the dashboard was not running.
+describe("resuming an interrupted update", () => {
+  const install = { method: "npm-global", command: ["npm", "install", "-g", "passcontrol@1.2.0"], manual: "" };
+  const resume = { from: "473ebf52c626273fb7bdc04298e43feba8c756b5", to: "3733115c25d826db15d8dcebae150b394794859e", wasRunning: false };
+
+  it("counts migrations from where the interrupted update started, when that commit is an ancestor", () => {
+    const isAncestor = (rev: string) => rev === resume.from;
+    expect(migrationBase({ head: "3733115", resumeFrom: resume.from, isAncestor })).toBe(resume.from);
+  });
+
+  it("falls back to HEAD with no marker, or a marker naming a commit this checkout does not contain", () => {
+    expect(migrationBase({ head: "3733115", resumeFrom: undefined, isAncestor: () => true })).toBe("3733115");
+    expect(migrationBase({ head: "3733115", resumeFrom: resume.from, isAncestor: () => false })).toBe("3733115");
+  });
+
+  it("says a behind app is also finishing the earlier update", () => {
+    const plan = planUpdate({
+      current: "1.2.0",
+      latest: "1.2.0",
+      install,
+      app: { status: "behind", behind: 2, from: "3733115", to: "c6dc457", migrations: ["db/migrations/0071_a.sql"], resume },
+    });
+    const text = formatPlan(plan).join("\n");
+    expect(text).toMatch(/earlier update .*did not finish/i);
+    expect(text).toMatch(/473ebf5/);
+    expect(text).toMatch(/0071_a\.sql/);
+  });
+});
+
+describe("finishLines", () => {
+  const base = { target: "c6dc457abc", root: "/u/pc", startCommand: "passcontrol start" };
+
+  it("tells you to start the dashboard when the update did not restart it", () => {
+    const text = finishLines({ ...base, restarted: false, rollbackTo: "3733115abc" }).map(([, t]: [string, string]) => t).join("\n");
+    expect(text).toMatch(/not running/i);
+    expect(text).toContain("passcontrol start");
+  });
+
+  it("says nothing about starting when it restarted the dashboard itself", () => {
+    const text = finishLines({ ...base, restarted: true, rollbackTo: "3733115abc" }).map(([, t]: [string, string]) => t).join("\n");
+    expect(text).not.toMatch(/passcontrol start/);
+  });
+
+  it("offers a rollback to the commit this run started from, not an older marker's", () => {
+    const text = finishLines({ ...base, restarted: true, rollbackTo: "3733115abc" }).map(([, t]: [string, string]) => t).join("\n");
+    expect(text).toContain("git -C /u/pc checkout 3733115abc");
+    expect(text).toMatch(/migrations only go forward/i);
+  });
+
+  it("offers no rollback when this run did not move the code (it only finished an earlier update)", () => {
+    const text = finishLines({ ...base, restarted: true, rollbackTo: null }).map(([, t]: [string, string]) => t).join("\n");
+    expect(text).not.toMatch(/roll back/i);
   });
 });

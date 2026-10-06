@@ -72,14 +72,16 @@ import {
   supportsWrite,
 } from "../cli/presets.mjs";
 import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
-import { checkForUpdate, fetchLatest, REGISTRY_URL } from "../cli/update-check.mjs";
+import { announcesAfter, checkForUpdate, fetchLatest, REGISTRY_URL } from "../cli/update-check.mjs";
 import {
   clearMarker,
   detectInstall,
   dirtyBlockers,
   expectedProjectId,
+  finishLines,
   formatPlan,
   isPublicRepoUrl,
+  migrationBase,
   planUpdate,
   readMarker,
   stackFromConfig,
@@ -331,6 +333,9 @@ async function gatewayStatus(noNetwork = false, gateway = config.gateway) {
   return probeGatewayVersion(origin);
 }
 
+// Wide enough for "System health:", the longest label status prints.
+const STATUS_LABEL_WIDTH = 15;
+
 async function printCockpit({ noNetwork = false, json = false } = {}) {
   const gateway = await gatewayStatus(noNetwork);
   const local = managedDashboardTarget();
@@ -369,17 +374,17 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
   }
 
   console.log(`${heading("PassControl")}\n`);
-  console.log(formatLabel("Gateway", `${gateway.label}  ${config.gateway}`));
-  console.log(formatLabel("Dashboard", `${dashboard}  ${local.url}`));
-  console.log(formatLabel("App", app));
-  console.log(formatLabel("Config", configFile));
-  console.log(formatLabel("Provider", config.provider));
-  console.log(formatLabel("Model", config.model));
-  console.log(formatLabel("Passport", passportConfigured ? redact(config.passportId) : "missing"));
-  console.log(formatLabel("Key storage", passportStorage.message));
-  console.log(formatLabel("Admin key", adminConfigured ? redact(config.apiKey, 6) : "missing"));
-  console.log(formatLabel("System health", systemHealthLabel(systemHealth)));
-  console.log(`${formatLabel("Sidecar", `foreground command (\`${cliCommand("sidecar")}\`)`)}\n`);
+  console.log(formatLabel("Gateway", `${gateway.label}  ${config.gateway}`, STATUS_LABEL_WIDTH));
+  console.log(formatLabel("Dashboard", `${dashboard}  ${local.url}`, STATUS_LABEL_WIDTH));
+  console.log(formatLabel("App", app, STATUS_LABEL_WIDTH));
+  console.log(formatLabel("Config", configFile, STATUS_LABEL_WIDTH));
+  console.log(formatLabel("Provider", config.provider, STATUS_LABEL_WIDTH));
+  console.log(formatLabel("Model", config.model, STATUS_LABEL_WIDTH));
+  console.log(formatLabel("Passport", passportConfigured ? redact(config.passportId) : "missing", STATUS_LABEL_WIDTH));
+  console.log(formatLabel("Key storage", passportStorage.message, STATUS_LABEL_WIDTH));
+  console.log(formatLabel("Admin key", adminConfigured ? redact(config.apiKey, 6) : "missing", STATUS_LABEL_WIDTH));
+  console.log(formatLabel("System health", systemHealthLabel(systemHealth), STATUS_LABEL_WIDTH));
+  console.log(`${formatLabel("Sidecar", `foreground command (\`${cliCommand("sidecar")}\`)`, STATUS_LABEL_WIDTH)}\n`);
   const next = [];
   if (config.sources.length === 0) {
     next.push(["init", "configure this project"]);
@@ -1719,7 +1724,19 @@ function analyzeAppForUpdate({ fetchRemote = true } = {}) {
   const behind = Number(gitIn(root, ["rev-list", "--count", "HEAD..origin/main"]));
   const base = { root, offset: stack.offset, head, target, resume, lockfileDirty: gitIn(root, ["status", "--porcelain", "--untracked-files=no", "--", "package-lock.json"]) !== "" };
   if (behind === 0) return { status: "current", ...base };
-  const migrations = gitIn(root, ["diff", "--name-only", "--diff-filter=A", head, target, "--", "db/migrations"]).split("\n").filter(Boolean);
+  const since = migrationBase({
+    head,
+    resumeFrom: resume?.from,
+    isAncestor: (rev) => {
+      try {
+        gitIn(root, ["merge-base", "--is-ancestor", rev, head]);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+  const migrations = gitIn(root, ["diff", "--name-only", "--diff-filter=A", since, target, "--", "db/migrations"]).split("\n").filter(Boolean);
   return { status: "behind", behind, from: head.slice(0, 7), to: target.slice(0, 7), migrations, ...base };
 }
 
@@ -1760,15 +1777,26 @@ async function applyAppUpdate(app) {
       // npm's own rewrite of the lockfile (see dirtyBlockers); \`npm ci\` below
       // installs exactly what the new lockfile says.
       if (app.lockfileDirty) gitIn(app.root, ["checkout", "--", "package-lock.json"]);
-      step(`Fast-forwarding ${app.from} → ${app.to}…`);
-      await runCommand("git", ["merge", "--ff-only", "origin/main"], { cwd: app.root });
+      // One summary line, not git's per-file list (277 lines for 1.2.0).
+      const changed = gitIn(app.root, ["diff", "--shortstat", "HEAD", "origin/main"]);
+      step(`Fast-forwarding ${app.from} → ${app.to}${changed ? ` (${changed})` : ""}…`);
+      await runCommand("git", ["merge", "--ff-only", "--quiet", "origin/main"], { cwd: app.root });
     }
     step("Installing dependencies (npm ci)…");
-    await runCommand(npm, ["ci"], { cwd: app.root });
+    // Errors still print; deprecation warnings, funding and audit chatter do not.
+    await runCommand(npm, ["ci", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: app.root });
     step("Applying migrations and refreshing the local stack…");
-    await runCommand(npm, ["run", "dev:stack"], {
+    await runCommand(npm, ["run", "--silent", "dev:stack"], {
       cwd: app.root,
-      env: { ...process.env, PASSCONTROL_PORT_OFFSET: String(app.offset), PASSCONTROL_SKIP_SEED: "1", PASSCONTROL_VIA_CLI: "1" },
+      env: {
+        ...process.env,
+        PASSCONTROL_PORT_OFFSET: String(app.offset),
+        PASSCONTROL_SKIP_SEED: "1",
+        PASSCONTROL_VIA_CLI: "1",
+        // dev-stack.sh keeps Supabase's banner (with its local keys) to a log it
+        // prints only on failure, and lists only migrations it applies.
+        PASSCONTROL_QUIET: "1",
+      },
     });
     if (restart) await startDashboard({ dashboardOnly: true });
   } catch (error) {
@@ -1779,8 +1807,16 @@ async function applyAppUpdate(app) {
     );
   }
   clearMarker();
-  ok(`App updated to ${String(app.target).slice(0, 7)}.`);
-  step(`To roll back the code: git -C ${app.root} checkout ${from}. Database migrations only go forward.`);
+  const closing = finishLines({
+    target: app.target,
+    root: app.root,
+    restarted: restart,
+    // The commit THIS run moved from. The marker's `from` can predate an
+    // earlier, interrupted update; rolling back there skips a release.
+    rollbackTo: app.status === "behind" ? app.head : null,
+    startCommand: cliCommand("start"),
+  });
+  for (const [kind, text] of closing) (kind === "ok" ? ok : step)(text);
 }
 
 async function updateCommand(opts = {}) {
@@ -3795,7 +3831,7 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
   // it can never turn a registry outage into a slow `passcontrol call`.
   // .catch() rather than try/catch: an unhandled rejection from a background
   // nicety must not take down a command that already did its job.
-  const updateNotice = runtime.skipUpdate ? Promise.resolve(null) : checkForUpdate({
+  const updateNotice = runtime.skipUpdate || !announcesAfter(command) ? Promise.resolve(null) : checkForUpdate({
     current: CLI_VERSION,
     json: Boolean(opts.json),
   }).catch(() => null);

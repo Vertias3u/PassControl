@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
 import {
+  announcesAfter,
   CACHE_TTL_MS,
   checkForUpdate,
   fetchLatest,
@@ -293,5 +294,18 @@ describe("the registry request", () => {
       return new Response(JSON.stringify({ version: "1.0.1" }), { status: 200 });
     });
     expect(accept).toBe("application/json");
+  });
+});
+
+// `passcontrol update` printed "Update available 1.1.0 → 1.2.0" as its last line
+// after updating to 1.2.0 (2026-10-06): the notice started before the update ran.
+describe("announcesAfter", () => {
+  it("never announces after `update`, which reports versions itself", () => {
+    expect(announcesAfter("update")).toBe(false);
+  });
+
+  it("announces after everything else", () => {
+    expect(announcesAfter("status")).toBe(true);
+    expect(announcesAfter(undefined)).toBe(true);
   });
 });

@@ -32,6 +32,8 @@ describe("CLI presentation helpers", () => {
     expect(formatLabel("Gateway", "online")).toBe(
       "\x1b[36mGateway:   \x1b[0monline"
     );
+    // A label longer than the column still gets a space before its value.
+    expect(formatLabel("System health", "ok")).toBe("\x1b[36mSystem health: \x1b[0mok");
     step("checking gateway");
     ok("ready");
 

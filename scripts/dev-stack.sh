@@ -12,6 +12,11 @@ set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SRC"
 ENVF="$SRC/.env.docker"
+# `passcontrol update` sets this: it prints its own progress, so the script keeps
+# Supabase's banner (local keys included) and per-migration "already applied"
+# lines to itself, and shows Supabase's full output only if starting it fails.
+QUIET="${PASSCONTROL_QUIET:-}"
+say() { [[ "$QUIET" == "1" ]] || echo "$@"; }
 OFFSET="${PASSCONTROL_PORT_OFFSET:-0}"
 if ! [[ "$OFFSET" =~ ^[0-9]+$ ]] || (( OFFSET > 10000 )); then
   echo "✗ PASSCONTROL_PORT_OFFSET must be an integer from 0 to 10000." >&2; exit 1
@@ -38,13 +43,31 @@ command -v node >/dev/null || { echo "✗ node not found." >&2; exit 1; }
 # Studio is a leaf (nothing depends on it), so this is safe; other services are
 # left as-is to avoid dependency-health surprises (e.g. analytics ← vector).
 echo "→ Starting Supabase local stack (first run pulls images — be patient)…"
-supabase start -x studio
-# Pull connection details (sets API_URL, ANON_KEY, SERVICE_ROLE_KEY, DB_URL, …)
-eval "$(supabase status -o env)"
+if [[ "$QUIET" == "1" ]]; then
+  START_LOG="$(mktemp)"
+  if ! supabase start -x studio >"$START_LOG" 2>&1; then
+    cat "$START_LOG" >&2; rm -f "$START_LOG"; exit 1
+  fi
+  rm -f "$START_LOG"
+  # Pull connection details (sets API_URL, ANON_KEY, SERVICE_ROLE_KEY, DB_URL, …)
+  eval "$(supabase status -o env 2>/dev/null)"
+else
+  supabase start -x studio
+  # Pull connection details (sets API_URL, ANON_KEY, SERVICE_ROLE_KEY, DB_URL, …)
+  eval "$(supabase status -o env)"
+fi
 
 # ── 3. Redis + SRH (the Upstash-REST piece the CLI doesn't provide) ───────────
-echo "→ Starting redis + serverless-redis-http…"
-COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" PASSCONTROL_SRH_PORT="$SRH_PORT" docker compose -f docker/compose.yml up -d >/dev/null
+say "→ Starting redis + serverless-redis-http…"
+if [[ "$QUIET" == "1" ]]; then
+  COMPOSE_LOG="$(mktemp)"
+  if ! COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" PASSCONTROL_SRH_PORT="$SRH_PORT" docker compose -f docker/compose.yml up -d >"$COMPOSE_LOG" 2>&1; then
+    cat "$COMPOSE_LOG" >&2; rm -f "$COMPOSE_LOG"; exit 1
+  fi
+  rm -f "$COMPOSE_LOG"
+else
+  COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" PASSCONTROL_SRH_PORT="$SRH_PORT" docker compose -f docker/compose.yml up -d >/dev/null
+fi
 
 # ── 4. Generate .env.docker (preserve previously generated secrets) ───────────
 # This file is rewritten from scratch every run, so anything not read back here
@@ -115,7 +138,7 @@ EOF
 # scripts/dev-docker.mjs lets the file win over the environment, and a default
 # install must keep honouring a PORT someone sets on purpose.
 [[ "$OFFSET" == "0" ]] || echo "PORT=${PORT:-3000}" >> "$ENVF"
-echo "→ Wrote .env.docker"
+say "→ Wrote .env.docker"
 
 # ── 5. Migrations — run INSIDE the Supabase DB container (no host psql needed) ─
 # Mirrors scripts/migrate.sh's ledger, but via docker exec. Each file + its
@@ -123,8 +146,10 @@ echo "→ Wrote .env.docker"
 # (e.g. 0005) can never be half-applied.
 DBC=$(docker ps --filter "label=com.supabase.cli.project=$PROJECT_ID" --filter name=supabase_db --format '{{.Names}}' | head -1)
 [[ -n "$DBC" ]] || { echo "✗ Could not find the Supabase DB container." >&2; exit 1; }
-PSQL=(docker exec -i "$DBC" psql -U postgres -d postgres -v ON_ERROR_STOP=1)
-echo "→ Applying migrations (in $DBC)…"
+# Warnings and errors only: idempotent migrations print a NOTICE for every
+# "already exists, skipping", which buried the lines that mattered.
+PSQL=(docker exec -i -e PGOPTIONS=--client-min-messages=warning "$DBC" psql -U postgres -d postgres -v ON_ERROR_STOP=1)
+say "→ Applying migrations (in $DBC)…"
 REBASELINE="${PASSCONTROL_LEDGER_REBASELINE:-}"
 checksum() { openssl dgst -sha256 "$1" | awk '{ print $NF }'; }
 
@@ -212,6 +237,7 @@ if [[ "$vetted" != "t" ]]; then
 fi
 
 applied="$("${PSQL[@]}" -At -c "select version || '|' || coalesce(checksum, '') from public.schema_migrations;")"
+already=0
 for f in db/migrations/*.sql; do
   v="$(basename "$f")"
   sum="$(checksum "$f")"
@@ -221,27 +247,29 @@ for f in db/migrations/*.sql; do
     have="${row#*|}"
     if [[ -z "$have" || ( "$have" != "$sum" && "$REBASELINE" == "keep" ) ]]; then
       "${PSQL[@]}" -q -c "update public.schema_migrations set checksum = '$sum' where version = '$v';"
-      echo "  = $v (already applied, checksum recorded)"
+      say "  = $v (already applied, checksum recorded)"
     elif [[ "$have" != "$sum" ]]; then
       echo "✗ $v has changed since it was applied to this stack (recorded $have, on disk $sum)." >&2
       echo "  Applied migrations are immutable. Restore the file, or re-stamp with" >&2
       echo "  PASSCONTROL_LEDGER_REBASELINE=keep if the schema already reflects it." >&2
       exit 1
     else
-      echo "  = $v (already applied)"
+      say "  = $v (already applied)"
     fi
+    already=$((already + 1))
     continue
   fi
   echo "  + $v"
   { cat "$f"; printf "\ninsert into public.schema_migrations (version, checksum) values ('%s', '%s');\n" "$v" "$sum"; } | "${PSQL[@]}" -1 -q
 done
+if [[ "$QUIET" == "1" ]]; then echo "  $already already applied"; fi
 
 # ── 6. Seed a confirmed dev user ──────────────────────────────────────────────
 # `passcontrol update` re-runs this script for its migrations on an install that
 # already has its account, and sets PASSCONTROL_SKIP_SEED=1 so an update never
 # opens an account-setup conversation. Everything above still runs.
 if [[ "${PASSCONTROL_SKIP_SEED:-}" == "1" ]]; then
-  echo "→ Skipping the dev-user seed (PASSCONTROL_SKIP_SEED=1)."
+  say "→ Skipping the dev-user seed (PASSCONTROL_SKIP_SEED=1)."
 else
   echo "→ Seeding dev user…"
   set -a; . "$ENVF"; set +a
@@ -262,7 +290,9 @@ if [[ "$SIGNUP_MODE" == "closed" ]]; then
 else
   SIGNUP_LINE="${SIGNUP_MODE:-invite} · invite code ${INVITE_CODE}"
 fi
-if [[ "${PASSCONTROL_VIA_CLI:-}" == "1" ]]; then
+if [[ "$QUIET" == "1" ]]; then
+  : # The CLI prints its own conclusion.
+elif [[ "${PASSCONTROL_VIA_CLI:-}" == "1" ]]; then
 cat <<DONE
 
 ✅ Local stack is up.

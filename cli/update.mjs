@@ -164,10 +164,13 @@ export function formatPlan(plan) {
       break;
     case "behind": {
       lines.push(`App: ${app.behind} new commit(s), ${app.from} → ${app.to}`);
+      if (app.resume?.from) {
+        lines.push(`  an earlier update (from ${String(app.resume.from).slice(0, 7)}) did not finish; this one completes it`);
+      }
       const migrations = app.migrations ?? [];
       lines.push(
         migrations.length
-          ? `  new database migrations (they only go forward): ${migrations.map((m) => path.basename(m)).join(", ")}`
+          ? `  database migrations to apply (they only go forward): ${migrations.map((m) => path.basename(m)).join(", ")}`
           : "  no new database migrations"
       );
       lines.push("  steps: stop the dashboard, fast-forward, npm ci, apply migrations, start the dashboard again if it was running");
@@ -175,6 +178,32 @@ export function formatPlan(plan) {
     }
     default:
       break;
+  }
+  return lines;
+}
+
+/**
+ * Where to count new migrations from. After an interrupted update the checkout
+ * is already at (or past) that update's target while its migrations never ran,
+ * so counting from HEAD names too few (found 2026-10-06: three named, eight
+ * applied). Count from where the interrupted update started, if this checkout
+ * still contains that commit.
+ */
+export function migrationBase({ head, resumeFrom, isAncestor }) {
+  if (resumeFrom && isAncestor(resumeFrom)) return resumeFrom;
+  return head;
+}
+
+/**
+ * The closing lines of a finished app update, as [kind, text] pairs ("ok" or
+ * "step"). `rollbackTo` is the commit this run fast-forwarded from, or null when
+ * it only finished an earlier update and did not move the code.
+ */
+export function finishLines({ target, root, restarted, rollbackTo, startCommand }) {
+  const lines = [["ok", `App updated to ${String(target).slice(0, 7)}.`]];
+  if (!restarted) lines.push(["step", `The dashboard is not running. Start it with \`${startCommand}\`.`]);
+  if (rollbackTo) {
+    lines.push(["step", `To roll back the code: git -C ${root} checkout ${rollbackTo}. Database migrations only go forward.`]);
   }
   return lines;
 }

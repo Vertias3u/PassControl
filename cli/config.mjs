@@ -404,7 +404,8 @@ export const amber = (value) => paint(ANSI.yellow, value);
 export const alarm = (value) => paint(ANSI.red, value);
 
 export function formatLabel(label, value, width = 11) {
-  return `${paint(ANSI.cyan, `${label}:`.padEnd(width))}${value}`;
+  // A label longer than the column still gets one space before its value.
+  return `${paint(ANSI.cyan, `${label}:`.padEnd(Math.max(width, label.length + 2)))}${value}`;
 }
 
 export function step(message = "") {

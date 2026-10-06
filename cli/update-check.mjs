@@ -71,6 +71,14 @@ export function mayAnnounce({ isTty, json = false, env = process.env } = {}) {
   return true;
 }
 
+/**
+ * Whether a command ends with the notice. Not `update`: it reports versions
+ * itself, and its notice was looked up before the update ran.
+ */
+export function announcesAfter(command) {
+  return command !== "update";
+}
+
 /** May we ask the registry again, or is the cached answer still fresh? */
 export function shouldFetch({ now = Date.now(), cache = null, ttlMs = CACHE_TTL_MS } = {}) {
   if (cache && typeof cache.checkedAt === "number" && now - cache.checkedAt < ttlMs) return false;
