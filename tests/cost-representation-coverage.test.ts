@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { fare } from "@/lib/departures";
 import { formatCost } from "@/lib/verify/receipt-view";
-import { costMicrocents } from "@/lib/pricing";
+import { costMicrocents, isLivePricedProvider } from "@/lib/pricing";
 import { PROVIDERS, providerRequiresEndpoint } from "@/lib/providers";
 import { evaluateGate } from "@/lib/gate";
 
@@ -193,7 +193,17 @@ describe("an unknown cost is never presented as a zero cost", () => {
  * shipped green. Adding a provider now fails here instead.
  */
 describe("every provider can be priced", () => {
-  it.each([...PROVIDERS].filter((p) => !providerRequiresEndpoint(p)))("%s has a usable fallback price", (provider) => {
+  // The other exception: OpenRouter has no rows BY DESIGN, because one model there
+  // runs on endpoints priced up to ~7x apart. Its hold is priced per call from its
+  // own listing, and under a dollar limit a model that listing cannot price is
+  // refused 402 before anything is sent (tests/proxy-openrouter.test.ts, "refuses
+  // 402 unpriced_model"). Only it may take this path.
+  it("only openrouter is priced live, and the table gives it nothing to fall back on", () => {
+    expect([...PROVIDERS].filter((p) => isLivePricedProvider(p))).toEqual(["openrouter"]);
+    expect(costMicrocents("a-model-nobody-has-a-row-for", 1_000, 1_000, "openrouter")).toBe(0);
+  });
+
+  it.each([...PROVIDERS].filter((p) => !providerRequiresEndpoint(p) && !isLivePricedProvider(p)))("%s has a usable fallback price", (provider) => {
     const cost = costMicrocents("a-model-nobody-has-a-row-for", 1_000, 1_000, provider);
 
     expect(

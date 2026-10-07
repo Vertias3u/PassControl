@@ -85,12 +85,15 @@ jobs:
       - name: Verify release metadata and public claims
         run: npm run check:release
 
-      # Fail only on high/critical advisories. The 2 remaining moderates are
-      # build-time tooling bundled inside Next with no in-range fix (documented
-      # in the security pass); blocking on them would just flap the gate. A new
-      # high/critical — the kind that actually ships risk — turns this red.
+      
+      # High/critical advisories only. Red only when THIS push changed what gets
+      # installed; an advisory published after the dependencies were locked is a
+      # warning here, and audit.yml reports it daily as an issue instead.
+      # Strict if the commit before the push can't be read. scripts/audit-gate.mjs.
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        run: node scripts/audit-gate.mjs
+        env:
+          AUDIT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
 
       - name: Verify npm package allowlist
         run: npm run check:npm-pack

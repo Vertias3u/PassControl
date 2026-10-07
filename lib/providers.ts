@@ -1,5 +1,5 @@
 // Upstream provider configuration: base URLs and auth-header injection.
-export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "azure", "local"] as const;
+export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "openrouter", "azure", "local"] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
 /**
@@ -96,6 +96,11 @@ export function detectProviderFromKey(key: string): ProviderGuess {
   if (value.startsWith("gsk_")) {
     return { suggested: "groq", candidates: ["groq"], ambiguous: false };
   }
+  // OpenRouter's keys are `sk-or-v1-…`: checked before the bare `sk-` family,
+  // which would otherwise offer OpenAI or DeepSeek for one.
+  if (value.startsWith("sk-or-")) {
+    return { suggested: "openrouter", candidates: ["openrouter"], ambiguous: false };
+  }
   if (value.startsWith("sk-proj-") || value.startsWith("sk-svcacct-")) {
     return { suggested: "openai", candidates: ["openai"], ambiguous: false };
   }
@@ -162,6 +167,11 @@ export function upstreamBaseUrl(provider: ProviderId): string | null {
     // endpoint is the legacy API and is not allowlisted.
     case "xai":
       return "https://api.x.ai";
+    // OpenRouter, Chat Completions only (plans/openrouter.md). Its documented base is
+    // `https://openrouter.ai/api/v1`; the `/v1` is a client path segment here, as for
+    // OpenAI, so an SDK pointed at `/api/v1/openrouter/v1` reaches the same paths.
+    case "openrouter":
+      return "https://openrouter.ai/api";
     // Azure OpenAI: `https://<resource>.openai.azure.com/openai/v1`, per credential.
     case "azure":
       return null;
@@ -193,6 +203,22 @@ export function modelListingUrl(provider: ProviderId): string | null {
   return VERSIONED_BASE.includes(provider) ? `${base}/models` : `${base}/v1/models`;
 }
 
+/**
+ * Headers that name the app to the provider, sent with every forwarded call.
+ *
+ * OpenRouter credits traffic to the app named by `HTTP-Referer` and `X-Title` on its
+ * public rankings. PassControl sends its own name (owner decision 2026-10-07) and never
+ * the client's: those headers are client data, and the proxy builds upstream headers
+ * from scratch for exactly that reason. The referer is the public repository, as in
+ * the Discord User-Agent (lib/services/catalog.ts): the same on Cloud and on a
+ * self-hosted gateway, which carries no Cloud address. Every other provider gets none.
+ */
+export function providerAttributionHeaders(provider: ProviderId): Record<string, string> {
+  return provider === "openrouter"
+    ? { "http-referer": "https://github.com/Vertias3u/PassControl", "x-title": "PassControl" }
+    : {};
+}
+
 /** Headers carrying the real provider credential, injected in-flight. */
 export function authHeaders(provider: ProviderId, key: string): Record<string, string> {
   switch (provider) {
@@ -203,6 +229,7 @@ export function authHeaders(provider: ProviderId, key: string): Record<string, s
     case "deepseek":
     case "gemini":
     case "xai":
+    case "openrouter":
       return { authorization: `Bearer ${key}` };
     case "anthropic":
       return { "x-api-key": key, "anthropic-version": "2023-06-01" };
@@ -241,6 +268,8 @@ export function requestShapeFamily(provider: ProviderId): "openai" | "anthropic"
     case "gemini":
     // OpenAI-style bodies and Bearer auth, on the Responses endpoint.
     case "xai":
+    // OpenRouter's Chat Completions normalises every model it routes to this shape.
+    case "openrouter":
     // Azure's v1 API is OpenAI's wire format; only the auth header differs.
     case "azure":
     // OpenAI-compatible is what makes a local server reachable through an
@@ -261,6 +290,8 @@ export function usesOpenAiUsageShape(provider: ProviderId): boolean {
     case "deepseek":
     case "gemini":
     case "azure":
+    // Chat usage plus OpenRouter's own `cost` (lib/providers/openrouter.ts).
+    case "openrouter":
     // Chat-shaped usage, including on a stream with `include_usage` (Ollama,
     // verified 2026-10-05 against qwen2.5:0.5b).
     case "local":

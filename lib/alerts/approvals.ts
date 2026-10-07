@@ -256,8 +256,10 @@ export type PollResult =
 /**
  * Read the owner's taps from Telegram and decide each one. `waitSeconds` is
  * the long-poll: Telegram answers as soon as a tap arrives, or after it.
+ * `maxMs` caps the whole request, for a caller with a deadline of its own: a
+ * Telegram that hangs is otherwise cut off only 5 s after the long-poll ends.
  */
-export async function pollTelegramDecisions(userId: string, waitSeconds: number): Promise<PollResult> {
+export async function pollTelegramDecisions(userId: string, waitSeconds: number, maxMs?: number): Promise<PollResult> {
   const read = await readDestination(userId).catch(() => null);
   if (!read || read.destination.kind !== "telegram") return { state: "not_telegram" };
   const base = telegramBotBase(read.destination);
@@ -275,7 +277,7 @@ export async function pollTelegramDecisions(userId: string, waitSeconds: number)
     const res = await fetch(`${base}/getUpdates?${query}`, {
       method: "GET",
       redirect: "manual",
-      signal: AbortSignal.timeout((wait + 5) * 1000),
+      signal: AbortSignal.timeout(maxMs === undefined ? (wait + 5) * 1000 : Math.min((wait + 5) * 1000, Math.max(0, maxMs))),
     });
     if (res.status === 409) return { state: "conflict" };
     if (!res.ok) return { state: "error" };

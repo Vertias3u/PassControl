@@ -98,6 +98,8 @@ export function isServicePreset(name) {
 /** Presets that print settings pointing an agent at the local sidecar bridge. */
 export const SIDECAR_PRESETS = [
   "generic",
+  // Apps that only take OLLAMA_HOST: the sidecar's Ollama listener (`--ollama-port`).
+  "ollama",
   "openhands",
   "litellm",
   "aider",
@@ -106,19 +108,27 @@ export const SIDECAR_PRESETS = [
   ...SERVICE_PRESETS,
 ];
 
+/**
+ * Coding agents configured by a file of their own rather than by a base URL and
+ * a model: Codex reads a profile (cli/codex.mjs). Kept apart from SIDECAR_PRESETS,
+ * whose members take any provider; Codex speaks only OpenAI's Responses API.
+ */
+export const AGENT_CLI_PRESETS = ["codex"];
+
 /** MCP client targets. Shares the set the MCP config writer dispatches on. */
 export const MCP_PRESETS = [...MCP_INTEGRATIONS];
 
 /** Everything both commands accept. */
-export const INTEGRATIONS = [...SIDECAR_PRESETS, ...MCP_PRESETS];
+export const INTEGRATIONS = [...SIDECAR_PRESETS, ...AGENT_CLI_PRESETS, ...MCP_PRESETS];
 
 /**
  * Integrations where `configure --write` actually writes a file. Everything else
- * is UI- or project-schema-specific (or, for claude-code, owned by that client's
- * own CLI), so `--write` is refused with the real instruction instead of being
- * accepted and silently doing nothing.
+ * is UI- or project-schema-specific, so `--write` is refused with the real
+ * instruction instead of being accepted and silently doing nothing. claude-code
+ * writes Claude Code's settings (cli/claude-code.mjs); its MCP registry stays
+ * owned by Claude Code's own CLI. codex writes a Codex profile (cli/codex.mjs).
  */
-export const WRITABLE_INTEGRATIONS = ["aider", "claude-desktop", "cursor"];
+export const WRITABLE_INTEGRATIONS = ["aider", "claude-desktop", "cursor", "claude-code", "codex"];
 
 export function isIntegration(name) {
   return INTEGRATIONS.includes(String(name ?? "").toLowerCase());

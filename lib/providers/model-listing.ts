@@ -31,6 +31,7 @@
  * The caller still cannot *call* an out-of-scope model — the gate sees to that.
  */
 import { scopeAllows } from "../scope";
+import { isOpenRouterModelRouter } from "./openrouter";
 import type { ScopeEntry } from "../auth/visa";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -67,6 +68,9 @@ export function filterModelListingToScope(
     // An entry a client cannot name cannot be selected, and must not survive a
     // filter whose whole job is identification.
     if (id === null) return false;
+    // OpenRouter's routers are refused at the gate whatever the scope says
+    // (lib/providers/openrouter.ts), so listing them offers a model that 403s.
+    if (provider === "openrouter" && isOpenRouterModelRouter(id)) return false;
     return scopeAllows(scopes as ScopeEntry[], provider, id);
   });
 

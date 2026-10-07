@@ -28,8 +28,8 @@ export const PACKAGE_VERSION = (() => {
 // second numeric copy that can drift from system-health capability reporting.
 export const WORKSPACE_IMPORT_MAX_VERSION = WORKSPACE_EXPORT_PROTOCOL.maximum;
 
-export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "azure", "local"];
-export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek", "gemini", "azure", "local"]);
+export const PROVIDERS = ["openai", "anthropic", "groq", "mistral", "together", "deepseek", "gemini", "xai", "openrouter", "azure", "local"];
+export const OPENAI_SHAPE_PROVIDERS = new Set(["openai", "groq", "mistral", "together", "deepseek", "gemini", "openrouter", "azure", "local"]);
 
 const DEFAULT_GATEWAY = "http://localhost:3000";
 
@@ -671,7 +671,7 @@ export function formatProxyError(status, body) {
     return `${blocked}\n→ The workspace has no provider key stored for this provider.\n→ Fix: add one under Settings → Provider credentials in the dashboard.`;
   }
   if (status === 400 && error === "server_side_tools_unsupported") {
-    return `${blocked}\n→ The request uses a hosted tool (such as web search) that the provider bills outside tokens, which no budget here can hold.\n→ Fix: remove the hosted tool, or call that feature outside PassControl.`;
+    return `${blocked}\n→ The request uses a hosted tool PassControl does not price, such as image generation or an MCP server.\n→ Fix: remove that tool, or call it outside PassControl. Priced tools such as web search pass.`;
   }
   // 402 is also how the gateway refuses a call it cannot price under a dollar
   // limit; a bigger budget fixes none of those, so each gets its own advice.

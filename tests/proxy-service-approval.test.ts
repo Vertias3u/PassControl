@@ -318,7 +318,7 @@ describe("a call under an ask rule", () => {
     h.fetch.mockResolvedValue(new Response("{}", { status: 201 }));
     const res = await post();
     expect(res.status).toBe(201);
-    expect(h.pollTelegramDecisions).toHaveBeenCalledWith(TENANT, expect.any(Number));
+    expect(h.pollTelegramDecisions).toHaveBeenCalledWith(TENANT, expect.any(Number), expect.any(Number));
     expect(h.checkApproval.mock.calls[1]![1]).toEqual({ create: false });
   });
 });

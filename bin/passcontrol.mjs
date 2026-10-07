@@ -90,6 +90,8 @@ import {
 import { isLocalGatewayOrigin, probeGatewayVersion, probeTimeoutMs } from "../cli/gateway-probe.mjs";
 import { dashboardOriginForOffset, portHolders, stackPortConflictMessage } from "../cli/local-stack.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
+import { claudeCodeEnv, claudeCodeSettingsPath, removeClaudeCodeSettings, writeClaudeCodeSettings } from "../cli/claude-code.mjs";
+import { CODEX_PROFILE, codexProfilePath, codexProfileToml, codexStoresApiKey, removeCodexProfile, writeCodexProfile } from "../cli/codex.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
 import { logoutCommand } from "../cli/logout.mjs";
@@ -198,7 +200,7 @@ ${heading("Quick start")}
   ${cmd} login [--project]        sign in through your browser and set this machine up
   ${cmd} call "hi"                mint a visa and make a governed model call
   ${cmd} mcp                      passport identity for Claude Desktop, Cursor, Claude Code
-  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]]
+  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]] [--ollama-port 11435]
                                  passport identity for any tool that takes an api_key
 
 ${heading("Operate")}
@@ -2362,6 +2364,7 @@ async function sidecarCommand(rest, opts) {
     passportSecret,
     keyStorage,
     port: sidecarPort(opts),
+    ollamaPort: opts.ollamaPort != null ? ollamaPort(opts) : null,
     host: String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1"),
     // Named on the command line, never inferred. A sidecar reachable off-host
     // mints visas for whoever connects, so widening the bind is a decision the
@@ -2442,11 +2445,14 @@ function passControlMcpEntry() {
   return mcpServerEntry({ cliPath: CLI_ENTRY });
 }
 
-function printMcpPreset(integration) {
+function printMcpPreset(integration, opts = {}) {
   requireGlobalMcpPassport();
   if (integration === "claude-code") {
-    console.log("# Add PassControl to Claude Code:");
-    console.log(CLAUDE_CODE_ADD_COMMAND);
+    const { baseUrl } = sidecarBaseUrl({ ...opts, provider: "anthropic" });
+    console.log("# Route Claude Code's model calls through the sidecar (start it first):");
+    printExports(Object.entries(claudeCodeEnv(baseUrl)));
+    console.log("# Optional: also add PassControl's chat tool to Claude Code:");
+    console.log(`# ${CLAUDE_CODE_ADD_COMMAND}`);
     return;
   }
 
@@ -2455,10 +2461,40 @@ function printMcpPreset(integration) {
   console.log(JSON.stringify(mcpServersDocument(passControlMcpEntry()), null, 2));
 }
 
+/** The Ollama listener's port: `--ollama-port N`, or 11435 when the flag has no number. */
+const DEFAULT_OLLAMA_PORT = 11435;
+function ollamaPort(opts = {}) {
+  const raw = opts.ollamaPort;
+  if (raw == null || raw === true) return DEFAULT_OLLAMA_PORT;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`--ollama-port must be a port number (1-65535), not "${raw}".`);
+  }
+  return port;
+}
+
+function printOllamaPreset(opts = {}) {
+  const port = ollamaPort(opts);
+  const host = String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1");
+  console.log("# Apps that only take OLLAMA_HOST: point them at PassControl's Ollama listener.");
+  printExports([["OLLAMA_HOST", `${host}:${port}`]]);
+  console.log(`# Start it with: ${cliCommand(`sidecar --ollama-port${port === DEFAULT_OLLAMA_PORT ? "" : ` ${port}`}`)}`);
+  console.log("# Calls go to the workspace's `local` model server (Settings → Models on this machine).");
+  console.log("# Local models have no price: give the agent a token budget, not a dollar limit.");
+}
+
 function printAgentPreset(name = "generic", opts = {}) {
   const preset = name.toLowerCase();
   if (isMcpIntegration(preset)) {
-    printMcpPreset(preset);
+    printMcpPreset(preset, opts);
+    return;
+  }
+  if (preset === "ollama") {
+    printOllamaPreset(opts);
+    return;
+  }
+  if (preset === "codex") {
+    printCodexPreset(opts);
     return;
   }
 
@@ -2563,19 +2599,100 @@ function aiderConfig(opts = {}) {
   ].join("\n");
 }
 
+/**
+ * Claude Code's own model calls, through the sidecar (cli/claude-code.mjs). The
+ * project's settings by default; `--global` for every session; `--remove` takes
+ * PassControl's two keys back out. The MCP chat tool stays a separate command
+ * Claude Code owns.
+ */
+function configureClaudeCode(opts = {}) {
+  const scope = opts.global ? "user" : "project";
+  const target = claudeCodeSettingsPath({ scope });
+  if (opts.remove) {
+    const result = removeClaudeCodeSettings({ target });
+    if (result.changed) ok(`removed PassControl from ${target}`);
+    else step(`${target} has no PassControl entry; nothing to remove.`);
+    return;
+  }
+  const { baseUrl, port } = sidecarBaseUrl({ ...opts, provider: "anthropic" });
+  console.log(`Preview: ${target}\n\n${JSON.stringify({ env: claudeCodeEnv(baseUrl) }, null, 2)}`);
+  if (!opts.write) {
+    step(`Dry run only. Re-run with \`--write\` to merge these two keys${scope === "project" ? " (or --write --global for every session)" : ""}.`);
+  } else {
+    const result = writeClaudeCodeSettings({ target, baseUrl, force: Boolean(opts.force) });
+    if (!result.changed) ok(`${target} already routes Claude Code through PassControl`);
+    else {
+      if (result.backupPath) step(`backed up ${result.backupPath}`);
+      ok(`wrote ${target}`);
+    }
+    if (result.rawKeyFound) {
+      warn(`${target} also holds a raw ANTHROPIC_API_KEY. PassControl does not need it there; remove it so no key sits on disk.`);
+    }
+  }
+  step(`Start the sidecar before Claude Code: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
+  step("The agent's Anthropic scope must allow the models Claude Code uses (its main model, and Haiku for small tasks).");
+  step(`Optional, the chat tool as well: ${CLAUDE_CODE_ADD_COMMAND}`);
+  step(`To undo: ${cliCommand(`configure claude-code --remove${scope === "user" ? " --global" : ""}`)}`);
+}
+
+/**
+ * Codex speaks only OpenAI's Responses API, so its profile always points at the
+ * sidecar's OpenAI route. A model is written only when one is named with
+ * --model; otherwise Codex keeps the model its own config chose.
+ */
+function codexSettings(opts = {}) {
+  if (opts.provider != null && String(opts.provider).toLowerCase() !== "openai") {
+    throw new Error(`Codex goes through PassControl's OpenAI route only, not "${opts.provider}". Drop --provider.`);
+  }
+  const { baseUrl, port } = sidecarBaseUrl({ ...opts, provider: "openai" });
+  const model = typeof opts.model === "string" && opts.model ? opts.model : undefined;
+  return { baseUrl, port, model };
+}
+
+function printCodexPreset(opts = {}) {
+  const { baseUrl, model } = codexSettings(opts);
+  console.log(`# Save as ${codexProfilePath()} (or run: ${cliCommand("configure codex --write")}):`);
+  console.log(codexProfileToml({ baseUrl, model }).trimEnd());
+}
+
+/**
+ * Codex's own model calls, through the sidecar (cli/codex.mjs): a profile file
+ * Codex layers over its config when started with `--profile passcontrol`.
+ * `--remove` deletes that file, and only when PassControl wrote it.
+ */
+function configureCodex(opts = {}) {
+  const target = codexProfilePath();
+  if (opts.remove) {
+    const result = removeCodexProfile({ target });
+    if (result.changed) ok(`removed ${target}`);
+    else step(`${target} is not a profile PassControl wrote; nothing to remove.`);
+    return;
+  }
+  const { baseUrl, port, model } = codexSettings(opts);
+  console.log(`Preview: ${target}\n\n${codexProfileToml({ baseUrl, model })}`);
+  if (!opts.write) {
+    step("Dry run only. Re-run with `--write` to create this profile. Codex's config.toml is not touched.");
+  } else {
+    const result = writeCodexProfile({ target, baseUrl, model, force: Boolean(opts.force) });
+    if (!result.changed) ok(`${target} already routes Codex through PassControl`);
+    else {
+      if (result.backupPath) step(`backed up ${result.backupPath}`);
+      ok(`wrote ${target}`);
+    }
+    if (codexStoresApiKey()) {
+      warn("Codex also keeps an OpenAI API key of its own (auth.json). The PassControl profile never sends it, but plain `codex` does; `codex logout` removes it.");
+    }
+  }
+  step(`Start the sidecar first: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
+  step(`Then run Codex with the profile: codex --profile ${CODEX_PROFILE}  (plain \`codex\` still goes straight to OpenAI)`);
+  step("The agent's OpenAI scope must allow the model Codex uses (set with -m, or `model` in Codex's config).");
+  step(`To undo: ${cliCommand("configure codex --remove")}`);
+}
+
 function configureMcpClient(integration, opts = {}) {
   requireGlobalMcpPassport();
   if (integration === "claude-code") {
-    // Claude Code owns its MCP registry through its own CLI, so there is no
-    // config file for us to merge into. `--write` used to be accepted here and
-    // silently do nothing — refuse it and hand back the command that works.
-    if (opts.write) {
-      throw new Error(
-        `Claude Code manages MCP servers through its own CLI, so there is no file to write. Run:\n  ${CLAUDE_CODE_ADD_COMMAND}`
-      );
-    }
-    console.log("Claude Code manages MCP servers through its CLI. Run:");
-    console.log(CLAUDE_CODE_ADD_COMMAND);
+    configureClaudeCode(opts);
     return;
   }
 
@@ -2608,6 +2725,10 @@ async function configureCommand(rest, opts = {}) {
     throw new Error(
       `Unknown integration "${integration}". Use one of: ${integrationChoices()}.`
     );
+  }
+  if (integration === "codex") {
+    configureCodex(opts);
+    return;
   }
   if (isMcpIntegration(integration)) {
     configureMcpClient(integration, opts);

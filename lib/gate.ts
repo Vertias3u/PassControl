@@ -14,7 +14,8 @@ import {
 } from "./scope";
 import type { RequestedOutput } from "./output-limit";
 import { isServerSideSearchModel } from "./providers/server-side-tools";
-import { hasListedPrice } from "./pricing";
+import { hasListedPrice, isLivePricedProvider } from "./pricing";
+import { isOpenRouterModelRouter } from "./providers/openrouter";
 
 export const POLICY_UNREADABLE = "POLICY_UNREADABLE" as const;
 
@@ -277,6 +278,16 @@ export function evaluateGate(input: GateInput): GateEvaluation {
       "endpoint:no_match",
       403
     );
+  } else if (input.provider === "openrouter" && isOpenRouterModelRouter(input.model)) {
+    // A router or a preset names no one model, so scope cannot judge the one that
+    // answers (plans/openrouter.md). Refused whatever the scope says, for the reason
+    // a search model is: the gate is what the decision trace and failover share.
+    fail(
+      "endpoint",
+      `${input.model} lets OpenRouter choose the model, so the scope cannot judge which one answers.`,
+      "endpoint:model_router",
+      403
+    );
   } else if (isServerSideSearchModel(input.provider, input.model)) {
     // Refused here rather than in the proxy so the decision trace and failover,
     // which share this evaluator, give the same answer (lib/providers/server-side-tools.ts).
@@ -308,6 +319,9 @@ export function evaluateGate(input: GateInput): GateEvaluation {
     input.dollarLimited === true &&
     isProvider(input.provider) &&
     !isModelListing(input.path) &&
+    // OpenRouter is priced per call from its own listing; the proxy refuses it as
+    // unpriced there when that listing cannot price the model.
+    !isLivePricedProvider(input.provider) &&
     !hasListedPrice(input.model, input.provider)
   ) {
     // Here, not at the budget step, so it is refused before policy: the hourly
@@ -325,7 +339,13 @@ export function evaluateGate(input: GateInput): GateEvaluation {
     steps.push({
       name: "endpoint",
       status: "pass",
-      reason: `${input.method.toUpperCase()} /${input.path.join("/")} is allowlisted.`,
+      reason:
+        `${input.method.toUpperCase()} /${input.path.join("/")} is allowlisted.` +
+        // The trace cannot read OpenRouter's listing; the proxy prices the call when
+        // it is made, and refuses there a model the listing cannot price.
+        (input.dollarLimited === true && input.provider === "openrouter" && !isModelListing(input.path)
+          ? " OpenRouter is priced per call from its own listing, and a model it cannot price is refused then."
+          : ""),
       rule: `endpoint:${input.method.toUpperCase()}:/${input.path.join("/")}`,
       presentation: "normal",
     });

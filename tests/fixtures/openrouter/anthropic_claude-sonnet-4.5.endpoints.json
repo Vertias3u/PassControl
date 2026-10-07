@@ -1,0 +1,156 @@
+{
+ "id": "anthropic/claude-sonnet-4.5",
+ "endpoints": [
+  {
+   "provider_name": "Claude Platform on AWS",
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375",
+    "input_cache_write_1h": "0.000006",
+    "discount": 0,
+    "overrides": [
+     {
+      "min_prompt_tokens": 200000,
+      "prompt": "0.000006",
+      "completion": "0.0000225",
+      "input_cache_read": "0.0000006",
+      "input_cache_write": "0.0000075",
+      "input_cache_write_1h": "0.000012"
+     }
+    ]
+   },
+   "max_completion_tokens": 64000
+  },
+  {
+   "provider_name": "Azure",
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375",
+    "input_cache_write_1h": "0.000006",
+    "discount": 0
+   },
+   "max_completion_tokens": 64000
+  },
+  {
+   "provider_name": "Amazon Bedrock",
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375",
+    "input_cache_write_1h": "0.000006",
+    "discount": 0,
+    "overrides": [
+     {
+      "min_prompt_tokens": 200000,
+      "prompt": "0.000006",
+      "completion": "0.0000225",
+      "input_cache_read": "0.0000006",
+      "input_cache_write": "0.0000075",
+      "input_cache_write_1h": "0.000012"
+     }
+    ]
+   },
+   "max_completion_tokens": 64000
+  },
+  {
+   "provider_name": "Anthropic",
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375",
+    "input_cache_write_1h": "0.000006",
+    "discount": 0,
+    "overrides": [
+     {
+      "min_prompt_tokens": 200000,
+      "prompt": "0.000006",
+      "completion": "0.0000225",
+      "input_cache_read": "0.0000006",
+      "input_cache_write": "0.0000075",
+      "input_cache_write_1h": "0.000012"
+     }
+    ]
+   },
+   "max_completion_tokens": 64000
+  },
+  {
+   "provider_name": "Google",
+   "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375",
+    "input_cache_write_1h": "0.000006",
+    "discount": 0,
+    "overrides": [
+     {
+      "min_prompt_tokens": 200000,
+      "prompt": "0.000006",
+      "completion": "0.0000225",
+      "input_cache_read": "0.0000006",
+      "input_cache_write": "0.0000075",
+      "input_cache_write_1h": "0.000012"
+     }
+    ]
+   },
+   "max_completion_tokens": 64000
+  },
+  {
+   "provider_name": "Amazon Bedrock",
+   "pricing": {
+    "prompt": "0.0000033",
+    "completion": "0.0000165",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000033",
+    "input_cache_write": "0.000004125",
+    "input_cache_write_1h": "0.0000066",
+    "discount": 0,
+    "overrides": [
+     {
+      "min_prompt_tokens": 200000,
+      "prompt": "0.0000066",
+      "completion": "0.00002475",
+      "input_cache_read": "0.00000066",
+      "input_cache_write": "0.00000825",
+      "input_cache_write_1h": "0.0000132"
+     }
+    ]
+   },
+   "max_completion_tokens": 64000
+  },
+  {
+   "provider_name": "Google",
+   "pricing": {
+    "prompt": "0.0000033",
+    "completion": "0.0000165",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000033",
+    "input_cache_write": "0.000004125",
+    "input_cache_write_1h": "0.0000066",
+    "discount": 0,
+    "overrides": [
+     {
+      "min_prompt_tokens": 200000,
+      "prompt": "0.0000066",
+      "completion": "0.00002475",
+      "input_cache_read": "0.00000066",
+      "input_cache_write": "0.00000825",
+      "input_cache_write_1h": "0.0000132"
+     }
+    ]
+   },
+   "max_completion_tokens": 64000
+  }
+ ]
+}

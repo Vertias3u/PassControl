@@ -25,6 +25,7 @@ export type ProviderId =
   | "deepseek"
   | "gemini"
   | "xai"
+  | "openrouter"
   | "azure"
   | "local";
 

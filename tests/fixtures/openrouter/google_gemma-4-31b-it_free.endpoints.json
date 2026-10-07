@@ -1,0 +1,14 @@
+{
+ "id": "google/gemma-4-31b-it:free",
+ "endpoints": [
+  {
+   "provider_name": "Google AI Studio",
+   "pricing": {
+    "prompt": "0",
+    "completion": "0",
+    "discount": 0
+   },
+   "max_completion_tokens": 32768
+  }
+ ]
+}

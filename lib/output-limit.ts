@@ -59,13 +59,23 @@ export function largestStatedOutputLimit(body: unknown): number | null {
     const count = tokenCount(body[field]);
     if (count !== null && (largest === null || count > largest)) largest = count;
   }
+  // Ollama's own API states it inside `options` (a positive `num_predict`).
+  const predict = ollamaNumPredict(body);
+  if (typeof predict === "number" && predict > 0 && (largest === null || predict > largest)) largest = predict;
   return largest;
+}
+
+/** `options.num_predict` as sent, or undefined when the request states none. */
+function ollamaNumPredict(body: Record<string, unknown>): unknown {
+  return isRecord(body.options) && "num_predict" in body.options && body.options.num_predict !== null
+    ? body.options.num_predict
+    : undefined;
 }
 
 // ── K2: the ceiling's reader ────────────────────────────────────────────────
 
 /** The request shapes the gateway routes for inference, by output-limit semantics. */
-export type OutputLimitShape = "anthropic_messages" | "openai_responses" | "chat_completions";
+export type OutputLimitShape = "anthropic_messages" | "openai_responses" | "chat_completions" | "ollama_native";
 
 const SHAPE_FIELDS: Record<OutputLimitShape, readonly OutputLimitField[]> = {
   // Anthropic requires max_tokens; extended thinking is budgeted inside it.
@@ -76,6 +86,8 @@ const SHAPE_FIELDS: Record<OutputLimitShape, readonly OutputLimitField[]> = {
   // the deprecated spelling; some providers honour only one of the two, so a
   // request is judged by the larger of whichever it states.
   chat_completions: ["max_completion_tokens", "max_tokens"],
+  // Ollama's own API: its limit is `options.num_predict`, read separately below.
+  ollama_native: [],
 };
 
 /** Only chat completions accept `n`; the other shapes have one output. */
@@ -83,6 +95,7 @@ const SHAPE_HAS_CHOICES: Record<OutputLimitShape, boolean> = {
   anthropic_messages: false,
   openai_responses: false,
   chat_completions: true,
+  ollama_native: false,
 };
 
 /**
@@ -95,6 +108,9 @@ export function outputLimitShape(
 ): OutputLimitShape {
   const last = upstreamPath[upstreamPath.length - 1];
   if (provider === "anthropic" && last === "messages") return "anthropic_messages";
+  if (provider === "local" && upstreamPath[0] === "api" && (last === "chat" || last === "generate")) {
+    return "ollama_native";
+  }
   // xAI's Responses documents `max_output_tokens` as covering reasoning, and
   // ignores the chat aliases, so it is judged by that field alone.
   if ((provider === "openai" || provider === "xai" || provider === "azure") && last === "responses") {
@@ -120,6 +136,15 @@ export type RequestedOutput =
  */
 export function requestedOutputTokens(shape: OutputLimitShape, body: unknown): RequestedOutput {
   const source = isRecord(body) ? body : {};
+  if (shape === "ollama_native") {
+    // -1 (generate until done) and -2 (fill the context) state no limit.
+    const predict = ollamaNumPredict(source);
+    if (predict === undefined || predict === -1 || predict === -2) return { kind: "absent" };
+    if (typeof predict !== "number" || !Number.isSafeInteger(predict) || predict < 1) {
+      return { kind: "invalid", field: "options.num_predict" };
+    }
+    return { kind: "stated", tokens: predict };
+  }
   let perChoice: number | null = null;
   for (const field of SHAPE_FIELDS[shape]) {
     if (!(field in source) || source[field] === null) continue;

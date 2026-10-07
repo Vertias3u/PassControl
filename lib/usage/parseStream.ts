@@ -11,6 +11,8 @@
 // message_start/message_delta.
 import { usesOpenAiUsageShape, type ProviderId } from "../providers";
 import { TopLevelUsageScanner } from "./topLevelUsage";
+import { xaiTicksToMicrocents, type HostedToolUse } from "@/lib/providers/hosted-tools";
+import { openrouterReportedMicrocents } from "@/lib/providers/openrouter";
 
 /**
  * Which usage report a response carries. `embeddings` is the OpenAI-shaped
@@ -18,7 +20,8 @@ import { TopLevelUsageScanner } from "./topLevelUsage";
  * `completion_tokens`, because nothing is generated. Under the chat rule that
  * is an incomplete report and the call would be charged its whole estimate.
  */
-export type UsageProtocol = "provider" | "responses" | "embeddings";
+/** `ollama`: Ollama's own API, NDJSON with `prompt_eval_count`/`eval_count` on the `done` line. */
+export type UsageProtocol = "provider" | "responses" | "embeddings" | "ollama";
 
 /**
  * What one call consumed.
@@ -38,8 +41,116 @@ export type UsageProtocol = "provider" | "responses" | "embeddings";
  * They are always 0 for the OpenAI-shaped providers, and that is correct, not an
  * omission: `prompt_tokens` there ALREADY includes cached tokens
  * (`prompt_tokens_details.cached_tokens` is a subset of it), so reporting a cache
- * figure as well would charge the same tokens twice.
+ * figure as well would charge the same tokens twice. That subset is carried
+ * separately, as `cachedInputTokens`, for the price alone (owner, 2026-10-07).
  */
+/**
+ * Anthropic's `usage.server_tool_use`, or null when absent. Missing counts are
+ * zero; a malformed one is ignored rather than guessed at.
+ */
+function anthropicServerToolUse(u: unknown): HostedToolUse | null {
+  if (!u || typeof u !== "object") return null;
+  const s = (u as Record<string, unknown>).server_tool_use;
+  if (!s || typeof s !== "object") return null;
+  const n = (k: string) => {
+    const v = (s as Record<string, unknown>)[k];
+    return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  };
+  return { webSearch: n("web_search_requests"), webFetch: n("web_fetch_requests"), codeExecution: n("code_execution_requests") };
+}
+
+/**
+ * Hosted-tool use in a Responses object. OpenAI reports no counts, so they are its
+ * output items; xAI reports counts and its exact charge in `usage`. Null when the
+ * response shows none, so a call without tools is unchanged.
+ */
+function responsesHostedTools(provider: ProviderId, response: unknown): HostedToolUse | null {
+  if (!response || typeof response !== "object") return null;
+  const r = response as Record<string, unknown>;
+  if (provider === "openai") {
+    if (!Array.isArray(r.output)) return null;
+    let webSearch = 0;
+    let fileSearch = 0;
+    const containers: string[] = [];
+    for (const item of r.output as Array<Record<string, unknown>>) {
+      if (!item || typeof item !== "object") continue;
+      if (item.type === "web_search_call") webSearch += 1;
+      else if (item.type === "file_search_call") fileSearch += 1;
+      else if (item.type === "code_interpreter_call" && typeof item.container_id === "string") containers.push(item.container_id);
+      else if (item.type === "shell_call") {
+        const env = item.environment as Record<string, unknown> | null | undefined;
+        if (env && typeof env === "object" && typeof env.container_id === "string") containers.push(env.container_id);
+      }
+    }
+    // OpenAI's own count (live 2026-10-07), when present: items also include
+    // `open_page` and `find_in_page` actions the pricing page does not bill.
+    const toolUsage = r.tool_usage as Record<string, unknown> | undefined;
+    const reported = (toolUsage?.web_search as Record<string, unknown> | undefined)?.num_requests;
+    if (typeof reported === "number" && Number.isFinite(reported) && reported >= 0) webSearch = Math.floor(reported);
+    if (webSearch + fileSearch + containers.length === 0) return null;
+    return { webSearch, webFetch: 0, codeExecution: 0, fileSearch, containers };
+  }
+  if (provider === "xai") {
+    const u = r.usage as Record<string, unknown> | undefined;
+    if (!u || typeof u !== "object") return null;
+    const d = (u.server_side_tool_usage_details ?? {}) as Record<string, unknown>;
+    const n = (k: string) => {
+      const v = d && typeof d === "object" ? d[k] : undefined;
+      return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+    };
+    const reported = xaiTicksToMicrocents(u.cost_in_usd_ticks);
+    const use: HostedToolUse = {
+      webSearch: n("web_search_calls"),
+      webFetch: 0,
+      codeExecution: n("code_interpreter_calls"),
+      fileSearch: n("file_search_calls") + n("document_search_calls"),
+      xSearch: n("x_search_calls"),
+      xPosts: n("x_posts_fetched"),
+      xUsers: n("x_users_fetched"),
+      ...(reported !== null ? { reportedMicrocents: reported } : {}),
+    };
+    const any = use.webSearch + use.codeExecution + (use.fileSearch ?? 0) + (use.xSearch ?? 0) + (use.xPosts ?? 0) + (use.xUsers ?? 0);
+    return any > 0 ? use : null;
+  }
+  return null;
+}
+
+/** Anthropic `server_tool_use` block names that are a code execution. */
+const ANTHROPIC_CODE_EXECUTION_BLOCKS = new Set(["code_execution", "bash_code_execution", "text_editor_code_execution"]);
+
+function isCodeExecutionBlock(block: unknown): boolean {
+  return (
+    !!block &&
+    typeof block === "object" &&
+    (block as Record<string, unknown>).type === "server_tool_use" &&
+    ANTHROPIC_CODE_EXECUTION_BLOCKS.has(String((block as Record<string, unknown>).name))
+  );
+}
+
+/**
+ * Anthropic's usage omits code executions (live 2026-10-07: `server_tool_use`
+ * carried web counts only), so they are counted from the content blocks and the
+ * larger of the two figures is kept.
+ */
+function withCodeExecutions(tools: HostedToolUse | null, blocks: number): HostedToolUse | null {
+  if (blocks === 0) return tools;
+  const base = tools ?? { webSearch: 0, webFetch: 0, codeExecution: 0 };
+  return { ...base, codeExecution: Math.max(base.codeExecution, blocks) };
+}
+
+/**
+ * Ollama's own usage, from a `done: true` object: `prompt_eval_count` input and
+ * `eval_count` output. Ollama 0.40 reports the full prompt count even when it
+ * reused its prompt cache (beside `prompt_eval_cached_count`, live 2026-10-07),
+ * so complete means done with both counts. `done_reason: "load"` carries none.
+ */
+function ollamaUsage(obj: any): { input: number | null; output: number | null; saw: boolean; complete: boolean } {
+  if (!obj || typeof obj !== "object" || obj.done !== true) return { input: null, output: null, saw: false, complete: false };
+  const input = token(obj.prompt_eval_count);
+  const output = token(obj.eval_count);
+  return { input, output, saw: input !== null || output !== null, complete: input !== null && output !== null };
+}
+
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
@@ -47,6 +158,42 @@ export interface Usage {
   cacheReadTokens: number;
   /** Prompt tokens written INTO the provider's cache. Billed at a premium. */
   cacheWriteTokens: number;
+  /**
+   * Hosted tools the provider ran inside the call, as it reported them. Present
+   * only when a response reported some, so every call without one is unchanged.
+   * Priced by lib/providers/hosted-tools.ts on top of the tokens above.
+   */
+  hostedTools?: HostedToolUse;
+  /**
+   * What the provider says the call cost, in µ¢, where it is the charge itself:
+   * OpenRouter's `usage.cost` (plus the upstream bill on BYOK), the only figure that
+   * knows which endpoint served the call. Present only for OpenRouter, and only when
+   * readable; an OpenRouter report without it is not complete.
+   */
+  reportedMicrocents?: number;
+  /**
+   * Of `inputTokens`, how many the provider served from its prompt cache, where its
+   * input count already includes them (`cached_tokens` on OpenAI's Chat Completions
+   * and Responses). A SUBSET, read for the price alone (lib/pricing.ts, which
+   * discounts it only where a row publishes a cached rate); never added to a token
+   * count, so the token budget, the audit row and the receipt are unchanged by it.
+   * Present only when above 0.
+   */
+  cachedInputTokens?: number;
+  /**
+   * Of `inputTokens`, how many OpenAI wrote to its prompt cache, from a Responses
+   * report (`input_tokens_details.cache_write_tokens`), only when it fits inside the
+   * uncached input. Present when stated, 0 included: 0 means "no writes", absent
+   * means "unknown". Price only. Chat Completions' figure, which OpenAI calls
+   * "unadjusted", is not read.
+   */
+  cacheWriteInputTokens?: number;
+  /**
+   * The service tier the RESPONSE reports the call ran on, from the same report as
+   * the usage (a stream's earlier events echo the requested tier instead). Price
+   * only: lib/pricing.ts settles GPT-6/5.6 at their context tier only on a standard one.
+   */
+  serviceTier?: string;
 }
 
 /**
@@ -76,6 +223,42 @@ const token = (v: unknown): number | null =>
 function optionalToken(obj: Record<string, unknown>, key: string): number | null {
   return obj[key] === undefined ? 0 : token(obj[key]);
 }
+
+/**
+ * The cached part of a reported input: `details.cached_tokens`, from the SAME usage
+ * report as `input`. 0 for anything absent, malformed, or larger than the input it
+ * is a part of, so a doubtful count is charged at the full rate.
+ */
+function cachedSubset(details: unknown, input: number | null): number {
+  if (input === null || typeof details !== "object" || details === null) return 0;
+  const n = token((details as Record<string, unknown>).cached_tokens);
+  return n !== null && n > 0 && n <= input ? n : 0;
+}
+
+const withCachedInput = (n: number): { cachedInputTokens?: number } => (n > 0 ? { cachedInputTokens: n } : {});
+
+/**
+ * A Responses report's cache writes, or null when absent, malformed, or more than
+ * the input left after its cached part (`cached` from the same report).
+ */
+function cacheWriteSubset(details: unknown, input: number | null, cached: number): number | null {
+  if (input === null || typeof details !== "object" || details === null) return null;
+  const n = token((details as Record<string, unknown>).cache_write_tokens);
+  return n !== null && n <= input - cached ? n : null;
+}
+
+/** A reported service tier: a short string, or null. */
+function serviceTierOf(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= 32 ? value : null;
+}
+
+const withTierAndWrites = (
+  write: number | null,
+  tier: string | null
+): { cacheWriteInputTokens?: number; serviceTier?: string } => ({
+  ...(write !== null ? { cacheWriteInputTokens: write } : {}),
+  ...(tier !== null ? { serviceTier: tier } : {}),
+});
 
 /**
  * Input and output from a Responses usage object.
@@ -136,6 +319,17 @@ class Tally {
   output = 0;
   cacheRead = 0;
   cacheWrite = 0;
+  /** Anthropic's hosted-tool counts, cumulative; the latest report wins. */
+  hostedTools: HostedToolUse | null = null;
+  /** Anthropic code-execution `server_tool_use` blocks seen in the stream. */
+  codeExecutionBlocks = 0;
+  /** OpenRouter's reported cost, µ¢, from the latest usage report that carried one. */
+  reportedMicrocents: number | null = null;
+  /** The cached part of `input`, re-read from every usage report (cachedSubset). */
+  cachedInput = 0;
+  /** Cache writes and service tier, re-read from every usage report like cachedInput. */
+  cacheWriteInput: number | null = null;
+  serviceTier: string | null = null;
   /**
    * Did a usage event actually ARRIVE — as opposed to the tally simply still
    * holding the zeros it was constructed with?
@@ -162,6 +356,23 @@ class Tally {
 
   feedLine(provider: ProviderId, line: string, protocol: UsageProtocol) {
     const trimmed = line.trim();
+    if (protocol === "ollama") {
+      // NDJSON: every line is one JSON object, no `data:` prefix. Counts arrive
+      // on the `done: true` line only; an `{"error": …}` line ends the stream
+      // without one, so the call stays incomplete.
+      let obj: any;
+      try {
+        obj = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      const u = ollamaUsage(obj);
+      if (u.saw) this.sawUsage = true;
+      if (u.input !== null) this.input = u.input;
+      if (u.output !== null) this.output = u.output;
+      if (u.complete) this.complete = true;
+      return;
+    }
     if (!trimmed.startsWith("data:")) return;
     const data = trimmed.slice(5).trim();
     if (!data) return;
@@ -192,6 +403,15 @@ class Tally {
       if (u) this.sawUsage = true;
       if (input !== null) this.input = input;
       if (reportedOutput !== null) this.output = reportedOutput;
+      // From this report, or 0: never an earlier event's count against a later input.
+      if (u) {
+        this.cachedInput = cachedSubset(u?.input_tokens_details, input);
+        this.cacheWriteInput = cacheWriteSubset(u?.input_tokens_details, input, this.cachedInput);
+        this.serviceTier = serviceTierOf(obj?.response?.service_tier);
+      }
+      // Terminal events carry the whole response, tool-call items included.
+      const tools = responsesHostedTools(provider, obj?.response);
+      if (tools) this.hostedTools = tools;
       if (input !== null && output !== null) {
         // Only response.completed with a completed response is authoritative.
         // Failed/incomplete events can carry a partial tally.
@@ -201,14 +421,40 @@ class Tally {
       }
     } else if (usesOpenAiUsageShape(provider)) {
       // Usage arrives on the final chunk (choices: []) when include_usage is set.
-      // No cache fields read here on purpose — prompt_tokens already includes
-      // them, so anything added would be the same tokens counted twice.
+      // No cache TOKENS are read here — prompt_tokens already includes them, so
+      // adding any would count the same tokens twice. The cached subset is read
+      // for the price only (cachedInputTokens).
       const u = obj?.usage;
       const { input, output, reportedOutput } = chatTokens(provider, u);
       if (u) this.sawUsage = true;
       if (input !== null) this.input = input;
       if (reportedOutput !== null) this.output = reportedOutput;
-      if (provider === "gemini") {
+      if (u) {
+        this.cachedInput = cachedSubset(u?.prompt_tokens_details, input);
+        this.serviceTier = serviceTierOf(obj?.service_tier);
+      }
+      if (provider === "openrouter") {
+        // OpenRouter sends usage, `cost` included, on the last data chunk before
+        // [DONE] (openrouter.ai/docs/cookbook/administration/usage-accounting). Live
+        // (2026-10-07) that chunk still carries its finished choice, `finish_reason:
+        // "stop"`, rather than `choices: []`, so either is accepted, as for Gemini, and
+        // every later chunk re-decides. A mid-stream failure is a chunk with a
+        // top-level `error` and `finish_reason: "error"`, which is never final. A report
+        // without a readable cost is not final either: the cost is the charge.
+        const reported = u ? openrouterReportedMicrocents(u) : null;
+        if (reported !== null) this.reportedMicrocents = reported;
+        const choices = obj?.choices;
+        this.openAiFinalUsage =
+          obj?.error === undefined &&
+          input !== null &&
+          output !== null &&
+          reported !== null &&
+          Array.isArray(choices) &&
+          (choices.length === 0 ||
+            choices.every(
+              (c: any) => typeof c?.finish_reason === "string" && c.finish_reason !== "" && c.finish_reason !== "error"
+            ));
+      } else if (provider === "gemini") {
         // Gemini does not send a `choices: []` usage chunk. Usage rides on the
         // content chunks, the last of which carries `finish_reason`, then [DONE]
         // (owner capture, 2026-09-27). So a report is final only on a chunk whose
@@ -246,6 +492,8 @@ class Tally {
         if (output !== null) this.output = output;
         if (cacheRead !== null) this.cacheRead = cacheRead;
         if (cacheWrite !== null) this.cacheWrite = cacheWrite;
+        const tools = anthropicServerToolUse(u);
+        if (tools) this.hostedTools = tools;
         // message_start only, NOT message_delta. message_start is where the
         // input tokens arrive, and Anthropic has already processed the whole
         // prompt by the time it sends one — so a break before it means real
@@ -258,10 +506,27 @@ class Tally {
         const u = obj?.usage;
         const output = token(u?.output_tokens);
         if (u) this.sawUsage = true;
+        // With a hosted tool the input grows while the call runs (search and
+        // fetch results become input), so the final delta carries totals
+        // message_start could not know. Its counts are cumulative: keep the
+        // larger, never lower one a delta reports smaller.
+        if (u && typeof u === "object") {
+          const record = u as Record<string, unknown>;
+          const input = token(u?.input_tokens);
+          const cacheRead = optionalToken(record, "cache_read_input_tokens");
+          const cacheWrite = optionalToken(record, "cache_creation_input_tokens");
+          if (input !== null && input > this.input) this.input = input;
+          if (cacheRead !== null && cacheRead > this.cacheRead) this.cacheRead = cacheRead;
+          if (cacheWrite !== null && cacheWrite > this.cacheWrite) this.cacheWrite = cacheWrite;
+          const tools = anthropicServerToolUse(u);
+          if (tools) this.hostedTools = tools;
+        }
         if (output !== null) {
           this.output = output;
           this.anthropicDelta = true;
         }
+      } else if (obj?.type === "content_block_start") {
+        if (isCodeExecutionBlock(obj?.content_block)) this.codeExecutionBlocks += 1;
       } else if (obj?.type === "message_stop") {
         // message_stop is the terminal evidence that the preceding cumulative
         // delta is final. EOF alone is not an authoritative provider result.
@@ -346,6 +611,13 @@ export function createUsageTransform(
           outputTokens: tally.output,
           cacheReadTokens: tally.cacheRead,
           cacheWriteTokens: tally.cacheWrite,
+          ...((): { hostedTools?: HostedToolUse } => {
+            const tools = withCodeExecutions(tally.hostedTools, tally.codeExecutionBlocks);
+            return tools ? { hostedTools: tools } : {};
+          })(),
+          ...(tally.reportedMicrocents !== null ? { reportedMicrocents: tally.reportedMicrocents } : {}),
+          ...withCachedInput(tally.cachedInput),
+          ...withTierAndWrites(tally.cacheWriteInput, tally.serviceTier),
         },
         end,
         sawUsage: tally.sawUsage,
@@ -491,13 +763,33 @@ export function usageFromJson(
   if (protocol === "responses") {
     const { input, output } = responsesTokens(provider, body?.usage);
     const sawUsage = body?.usage != null;
+    const hostedTools = responsesHostedTools(provider, body);
     return {
       inputTokens: input ?? 0,
       outputTokens: output ?? token(body?.usage?.output_tokens) ?? 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      ...(hostedTools ? { hostedTools } : {}),
+      ...withCachedInput(cachedSubset(body?.usage?.input_tokens_details, input)),
+      ...(body?.usage != null
+        ? withTierAndWrites(
+            cacheWriteSubset(body.usage.input_tokens_details, input, cachedSubset(body.usage.input_tokens_details, input)),
+            serviceTierOf(body?.service_tier)
+          )
+        : {}),
       sawUsage,
       complete: input !== null && output !== null && body?.status === "completed",
+    };
+  }
+  if (protocol === "ollama") {
+    const u = ollamaUsage(body);
+    return {
+      inputTokens: u.input ?? 0,
+      outputTokens: u.output ?? 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      sawUsage: u.saw,
+      complete: u.complete,
     };
   }
   if (protocol === "embeddings") {
@@ -521,11 +813,27 @@ export function usageFromJson(
     // dimensions stay 0 here. See the Usage doc comment.
     const { input, output, reportedOutput } = chatTokens(provider, body?.usage);
     const sawUsage = body?.usage != null;
+    if (provider === "openrouter") {
+      // The cost is the charge, so a report without one is not complete; nor is a
+      // 200 whose body is an `error` (OpenRouter's non-streaming failure shape).
+      const reported = body?.usage != null ? openrouterReportedMicrocents(body.usage) : null;
+      return {
+        inputTokens: input ?? 0,
+        outputTokens: reportedOutput ?? 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        ...(reported !== null ? { reportedMicrocents: reported } : {}),
+        sawUsage,
+        complete: input !== null && output !== null && reported !== null && body?.error === undefined,
+      };
+    }
     return {
       inputTokens: input ?? 0,
       outputTokens: reportedOutput ?? 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      ...withCachedInput(cachedSubset(body?.usage?.prompt_tokens_details, input)),
+      ...(body?.usage != null ? withTierAndWrites(null, serviceTierOf(body?.service_tier)) : {}),
       sawUsage,
       complete: input !== null && output !== null,
     };
@@ -539,11 +847,16 @@ export function usageFromJson(
     ? optionalToken(body.usage as Record<string, unknown>, "cache_creation_input_tokens")
     : null;
   const sawUsage = body?.usage != null;
+  const hostedTools = withCodeExecutions(
+    anthropicServerToolUse(body?.usage),
+    Array.isArray(body?.content) ? body.content.filter(isCodeExecutionBlock).length : 0
+  );
   return {
     inputTokens: input ?? 0,
     outputTokens: output ?? 0,
     cacheReadTokens: cacheRead ?? 0,
     cacheWriteTokens: cacheWrite ?? 0,
+    ...(hostedTools ? { hostedTools } : {}),
     sawUsage,
     complete: input !== null && output !== null && cacheRead !== null && cacheWrite !== null,
   };

@@ -246,11 +246,33 @@ function jsonResponse(body: string, status = 200) {
 
 const CHAT_OK = JSON.stringify({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 2 } });
 
-describe("OpenAI server-side tools are refused", () => {
+describe("OpenAI hosted tools: priced ones pass, the rest are refused", () => {
+  it("forwards a Responses web search and charges each web_search_call it reports", async () => {
+    fetchMock.mockImplementationOnce(async () =>
+      jsonResponse(
+        JSON.stringify({
+          status: "completed",
+          usage: { input_tokens: 37, output_tokens: 11, total_tokens: 48 },
+          output: [{ type: "web_search_call", action: { type: "search" }, status: "completed" }, { type: "message" }],
+        })
+      )
+    );
+    const body = { model: "gpt-4.1", input: "hi", max_output_tokens: 64, tools: [{ type: "web_search" }] };
+    const res = await call(["v1", "responses"], body);
+    await res.text();
+    await flushPending();
+    expect(res.status).toBe(200);
+    // No dollar limit here, so no cap is added.
+    // The tools go out as sent; `service_tier: "auto"` is added so OpenAI reports the
+    // tier it used (tests/openai-service-tier.test.ts).
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({ ...body, service_tier: "auto" });
+    const settled = settleHoldMock.mock.calls.at(-1)?.[0];
+    expect(settled.microcents).toBeGreaterThanOrEqual(1_000_000);
+  });
+
   it.each([
-    ["Responses web_search", ["v1", "responses"], { model: "gpt-4.1", input: "hi", tools: [{ type: "web_search" }] }],
-    ["Responses file_search", ["v1", "responses"], { model: "gpt-4.1", input: "hi", tools: [{ type: "file_search", vector_store_ids: ["vs"] }] }],
-    ["Responses code_interpreter", ["responses"], { model: "gpt-4.1", input: "hi", tools: [{ type: "code_interpreter", container: { type: "auto" } }] }],
+    ["Responses image_generation", ["v1", "responses"], { model: "gpt-4.1", input: "hi", tools: [{ type: "image_generation" }] }],
+    ["Responses remote MCP", ["v1", "responses"], { model: "gpt-4.1", input: "hi", tools: [{ type: "mcp", server_label: "s", server_url: "https://x" }] }],
     ["a stored prompt", ["v1", "responses"], { model: "gpt-4.1", prompt: { id: "pmpt_1" } }],
     ["chat web_search_options", ["v1", "chat", "completions"], { model: "gpt-4.1", messages: [], web_search_options: {} }],
   ])("refuses %s with 400 before any reservation or provider contact", async (_name, path, body) => {
@@ -269,7 +291,9 @@ describe("OpenAI server-side tools are refused", () => {
     const res = await call(["v1", "responses"], body);
     await res.text();
     expect(res.status).toBe(200);
-    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual(body);
+    // The tools go out as sent; `service_tier: "auto"` is added so OpenAI reports the
+    // tier it used (tests/openai-service-tier.test.ts).
+    expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({ ...body, service_tier: "auto" });
   });
 
   it("refuses a search model as blocked_endpoint, and records it", async () => {

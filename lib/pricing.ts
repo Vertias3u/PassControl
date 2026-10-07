@@ -6,12 +6,33 @@
 // Patterns reuse the same wildcard semantics as scope matching. Versioned in code.
 import type { ProviderId } from "./providers";
 import { choiceCountForEstimate, largestStatedOutputLimit } from "./output-limit";
+import { openaiUnknownContainer } from "./providers/openai-containers";
 
 interface Price {
   provider: ProviderId;
   pattern: string;
   inputMicrocentsPerToken: number;
   outputMicrocentsPerToken: number;
+  /**
+   * The rate for input the provider served from its prompt cache, where its page
+   * publishes one and its input count includes those tokens (OpenAI). Absent: a
+   * cached token costs the full input rate.
+   */
+  cachedInputMicrocentsPerToken?: number;
+  /**
+   * The rates a call SETTLES at, by context tier, where the model's page bills a
+   * prompt above 272K input tokens at the long rates "for the full request" (GPT-6,
+   * GPT-5.6). The fields above stay the long rates and remain what is HELD.
+   */
+  settle?: { short: TierRates; long: TierRates };
+}
+
+/** µ¢ per token for one context tier. */
+interface TierRates {
+  input: number;
+  cachedInput: number;
+  cacheWrite: number;
+  output: number;
 }
 
 export const MICROCENTS_PER_CENT = 1_000_000;
@@ -46,8 +67,39 @@ const mc = (usdPerMillion: number) => Math.ceil(usdPerMillion * 100 - 1e-9);
  * (lib/gate.ts refuses a model with no row of its own). A new model gets a row
  * when someone reads its price.
  */
-function model(provider: ProviderId, id: string, inputUsd: number, outputUsd: number): Price[] {
-  const rates = { inputMicrocentsPerToken: mc(inputUsd), outputMicrocentsPerToken: mc(outputUsd) };
+function model(provider: ProviderId, id: string, inputUsd: number, outputUsd: number, cachedInputUsd?: number): Price[] {
+  const rates = {
+    inputMicrocentsPerToken: mc(inputUsd),
+    outputMicrocentsPerToken: mc(outputUsd),
+    ...(cachedInputUsd === undefined ? {} : { cachedInputMicrocentsPerToken: mc(cachedInputUsd) }),
+  };
+  return [
+    { provider, pattern: id, ...rates },
+    { provider, pattern: `${id}-20*`, ...rates },
+  ];
+}
+
+type TierUsd = [input: number, cached: number, write: number, output: number];
+const tierRates = ([input, cached, write, output]: TierUsd): TierRates => ({
+  input: mc(input),
+  cachedInput: mc(cached),
+  cacheWrite: mc(write),
+  output: mc(output),
+});
+
+/**
+ * A model whose page prices prompts above 272K input tokens at long-context rates
+ * for the full request, with cache writes above the input rate. It is HELD at the
+ * long tier (input at the dearer of input and cache write), as every row is, and
+ * settled at the tier the call was billed at (`costMicrocentsForUsage`).
+ */
+function tiered(provider: ProviderId, id: string, short: TierUsd, long: TierUsd): Price[] {
+  const rates = {
+    inputMicrocentsPerToken: mc(Math.max(long[0], long[2])),
+    outputMicrocentsPerToken: mc(long[3]),
+    cachedInputMicrocentsPerToken: mc(long[1]),
+    settle: { short: tierRates(short), long: tierRates(long) },
+  };
   return [
     { provider, pattern: id, ...rates },
     { provider, pattern: `${id}-20*`, ...rates },
@@ -58,8 +110,10 @@ function model(provider: ProviderId, id: string, inputUsd: number, outputUsd: nu
 // (tests/pricing-table.test.ts pins each one with its source). Two rules apply
 // wherever a page offers more than one number, in the spirit of `mc()`'s rounding:
 // charge the HIGHER, because a budget that under-reserves does not hold.
-//   * Long-context rates (OpenAI above 272K, Gemini 3.1 Pro above 200K) are used
-//     for every call: the table has no context dimension.
+//   * Long-context rates (OpenAI above 272K, Gemini 3.1 Pro above 200K) are what
+//     every row HOLDS: a hold cannot know the prompt's length. GPT-6 and GPT-5.6
+//     SETTLE at the tier the call was billed at (`tiered`); everything else settles
+//     at the row too.
 //   * Input is the higher of the input and cache-WRITE rates where a cache write
 //     costs more than input (OpenAI GPT-6 and GPT-5.6), since `prompt_tokens`
 //     does not say which of its tokens were written to cache.
@@ -88,42 +142,50 @@ const PRICES: Price[] = [
   ...model("anthropic", "claude-haiku-4-5", 1, 5),
   ...model("anthropic", "claude-3-5-haiku", 0.8, 4),
   ...model("anthropic", "claude-3-5-haiku-latest", 0.8, 4),
-  // OpenAI — developers.openai.com/api/docs/pricing, Standard tier.
-  ...model("openai", "gpt-6-astra", 25, 75),
-  ...model("openai", "gpt-6-sol", 5, 15),
-  ...model("openai", "gpt-6-luna", 0.25, 0.75),
+  // OpenAI — developers.openai.com/api/docs/pricing, Standard tier. The fifth figure
+  // is the cached-input rate (read 2026-10-07, long context where the page gives
+  // one, like the input rate); a row without one lists "-" there.
+  // GPT-6 and GPT-5.6: [input, cached input, cache write, output], short then long
+  // context, read 2026-10-07; their model pages bill >272K "for the full request".
+  ...tiered("openai", "gpt-6-astra", [10, 1, 12.5, 50], [20, 2, 25, 75]),
+  ...tiered("openai", "gpt-6-sol", [2, 0.2, 2.5, 10], [4, 0.4, 5, 15]),
+  // GPT-6.1 Sol: cached reads at 5% of input (its model page), not 10%.
+  ...tiered("openai", "gpt-6.1-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]),
+  ...tiered("openai", "gpt-6-luna", [0.1, 0.01, 0.125, 0.5], [0.2, 0.02, 0.25, 0.75]),
   // GPT-5.6 Sol is promotional "at least through November 21, 2026".
-  ...model("openai", "gpt-5.6-sol", 10, 30),
-  ...model("openai", "gpt-5.6-terra", 5, 18),
-  ...model("openai", "gpt-5.6-luna", 0.5, 1.8),
-  ...model("openai", "gpt-5.6-cyber", 15.625, 75),
-  ...model("openai", "gpt-5.5-cyber", 12.5, 75),
+  ...tiered("openai", "gpt-5.6-sol", [4, 0.4, 5, 20], [8, 0.8, 10, 30]),
+  ...tiered("openai", "gpt-5.6-terra", [2, 0.2, 2.5, 12], [4, 0.4, 5, 18]),
+  ...tiered("openai", "gpt-5.6-luna", [0.2, 0.02, 0.25, 1.2], [0.4, 0.04, 0.5, 1.8]),
+  // The pricing page gives Cyber no long-context column; its model page prices >272K
+  // at 2x input and 1.5x output for the full request, with writes at 1.25x input.
+  ...tiered("openai", "gpt-5.6-cyber", [12.5, 1.25, 15.625, 75], [25, 2.5, 31.25, 112.5]),
+  ...model("openai", "gpt-5.5-cyber", 12.5, 75, 1.25),
   ...model("openai", "gpt-5.5-pro", 60, 270),
-  ...model("openai", "gpt-5.5", 10, 45),
+  ...model("openai", "gpt-5.5", 10, 45, 1),
   ...model("openai", "gpt-5.4-pro", 60, 270),
-  ...model("openai", "gpt-5.4-mini", 0.75, 4.5),
-  ...model("openai", "gpt-5.4-nano", 0.2, 1.25),
-  ...model("openai", "gpt-5.4", 5, 22.5),
+  ...model("openai", "gpt-5.4-mini", 0.75, 4.5, 0.075),
+  ...model("openai", "gpt-5.4-nano", 0.2, 1.25, 0.02),
+  ...model("openai", "gpt-5.4", 5, 22.5, 0.5),
   ...model("openai", "gpt-5.2-pro", 21, 168),
-  ...model("openai", "gpt-5.2", 1.75, 14),
-  ...model("openai", "gpt-5.1", 1.25, 10),
+  ...model("openai", "gpt-5.2", 1.75, 14, 0.175),
+  ...model("openai", "gpt-5.1", 1.25, 10, 0.125),
   ...model("openai", "gpt-5-pro", 15, 120),
-  ...model("openai", "gpt-5-mini", 0.25, 2),
-  ...model("openai", "gpt-5-nano", 0.05, 0.4),
-  ...model("openai", "gpt-5", 1.25, 10),
-  ...model("openai", "gpt-4.1-mini", 0.4, 1.6),
-  ...model("openai", "gpt-4.1-nano", 0.1, 0.4),
-  ...model("openai", "gpt-4.1", 2, 8),
+  ...model("openai", "gpt-5-mini", 0.25, 2, 0.025),
+  ...model("openai", "gpt-5-nano", 0.05, 0.4, 0.005),
+  ...model("openai", "gpt-5", 1.25, 10, 0.125),
+  ...model("openai", "gpt-4.1-mini", 0.4, 1.6, 0.1),
+  ...model("openai", "gpt-4.1-nano", 0.1, 0.4, 0.025),
+  ...model("openai", "gpt-4.1", 2, 8, 0.5),
   // A dated gpt-4o snapshot priced above the alias: listed before `gpt-4o-20*`.
   { provider: "openai", pattern: "gpt-4o-2024-05-13", inputMicrocentsPerToken: mc(5), outputMicrocentsPerToken: mc(15) },
-  ...model("openai", "gpt-4o-mini", 0.15, 0.6),
-  ...model("openai", "gpt-4o", 2.5, 10),
+  ...model("openai", "gpt-4o-mini", 0.15, 0.6, 0.075),
+  ...model("openai", "gpt-4o", 2.5, 10, 1.25),
   ...model("openai", "o1-pro", 150, 600),
-  ...model("openai", "o1", 15, 60),
+  ...model("openai", "o1", 15, 60, 7.5),
   ...model("openai", "o3-pro", 20, 80),
-  ...model("openai", "o3-mini", 1.1, 4.4),
-  ...model("openai", "o3", 2, 8),
-  ...model("openai", "o4-mini", 1.1, 4.4),
+  ...model("openai", "o3-mini", 1.1, 4.4, 0.55),
+  ...model("openai", "o3", 2, 8, 0.5),
+  ...model("openai", "o4-mini", 1.1, 4.4, 0.275),
   { provider: "openai", pattern: "gpt-4-turbo-2024-04-09", inputMicrocentsPerToken: mc(10), outputMicrocentsPerToken: mc(30) },
   { provider: "openai", pattern: "gpt-4-0613", inputMicrocentsPerToken: mc(30), outputMicrocentsPerToken: mc(60) },
   { provider: "openai", pattern: "gpt-3.5-turbo-1106", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(2) },
@@ -223,7 +285,13 @@ const FALLBACK_PRICES = PRICES.reduce<Partial<Record<ProviderId, Price>>>((acc, 
         inputMicrocentsPerToken: Math.max(current.inputMicrocentsPerToken, price.inputMicrocentsPerToken),
         outputMicrocentsPerToken: Math.max(current.outputMicrocentsPerToken, price.outputMicrocentsPerToken),
       }
-    : { ...price, pattern: "*" };
+    : // No cached rate: an unlisted model gets no cache discount.
+      {
+        provider: price.provider,
+        pattern: "*",
+        inputMicrocentsPerToken: price.inputMicrocentsPerToken,
+        outputMicrocentsPerToken: price.outputMicrocentsPerToken,
+      };
   return acc;
 }, {});
 
@@ -290,6 +358,17 @@ export function demoCostMicrocents(totalTokens: number): number {
 }
 
 /**
+ * A provider priced per call rather than from this table: OpenRouter, whose model
+ * runs on whichever of several endpoints routing picks, at prices up to ~7x apart.
+ * Its hold is priced from its own endpoint listing and its settlement is the cost
+ * it reports (lib/providers/openrouter.ts; DECISIONS 2026-10-07). It has no rows
+ * and no fallback here, so nothing in this file can put a number on one of its calls.
+ */
+export function isLivePricedProvider(provider: ProviderId): boolean {
+  return provider === "openrouter";
+}
+
+/**
  * Whether a model has a row of its own, rather than billing at its provider's
  * fallback (the highest listed rate, which exists only so that an unlisted model
  * never bills 0). Under a dollar limit, a model without one is refused.
@@ -322,6 +401,11 @@ export function unpricedRequestOption(provider: ProviderId, body: unknown): stri
   const set = (v: unknown) => v !== undefined && v !== null;
   if (set(b.service_tier) && !(typeof b.service_tier === "string" && TABLE_SERVICE_TIERS.has(b.service_tier))) {
     return "service_tier";
+  }
+  if (provider === "openai" && Array.isArray(b.tools)) {
+    // A reused code interpreter or shell container: its memory tier, which sets
+    // its price, is not in the request (lib/providers/openai-containers.ts).
+    if (openaiUnknownContainer(b)) return "container";
   }
   if (provider === "anthropic") {
     // platform.claude.com pricing: fast mode on Opus 5.5 / 5 / 4.8 at 2x;
@@ -364,6 +448,45 @@ export function costMicrocents(
 const CACHE_READ_RATE = (inputRate: number) => Math.ceil(inputRate * 0.1);
 const CACHE_WRITE_RATE = (inputRate: number) => Math.ceil(inputRate * 1.25);
 
+/** OpenAI's line between short- and long-context pricing: "more than 272K input tokens". */
+const LONG_CONTEXT_ABOVE = 272_000;
+
+/**
+ * Service tiers, as a RESPONSE reports them, that bill a tiered model at its
+ * Standard rates or below. Anything else, or none, settles at the row's long
+ * rates: a project whose default tier is Fast is billed 2x with nothing in the
+ * request to say so, and the long rates are the closest the table comes to it.
+ */
+const STANDARD_RESPONSE_TIERS: ReadonlySet<string> = new Set(["default", "flex"]);
+
+/**
+ * A tiered model's settlement (`tiered`), or null to settle at the row. The tier is
+ * chosen by the reported input, cached tokens included. The cache-write count is
+ * used only when it fits inside the uncached input; otherwise every uncached token
+ * is charged at the write rate, the dearer of the two.
+ */
+function tieredCost(
+  p: Price,
+  usage: { inputTokens: number; outputTokens: number; cacheWriteInputTokens?: number; serviceTier?: string },
+  cached: number
+): number | null {
+  if (!p.settle || typeof usage.serviceTier !== "string" || !STANDARD_RESPONSE_TIERS.has(usage.serviceTier)) return null;
+  const r = usage.inputTokens > LONG_CONTEXT_ABOVE ? p.settle.long : p.settle.short;
+  const uncached = usage.inputTokens - cached;
+  const w = usage.cacheWriteInputTokens;
+  const written = typeof w === "number" && Number.isSafeInteger(w) && w >= 0 && w <= uncached ? w : null;
+  const input = written === null ? uncached * r.cacheWrite : (uncached - written) * r.input + written * r.cacheWrite;
+  return input + cached * r.cachedInput + usage.outputTokens * r.output;
+}
+
+/**
+ * The rate for one cached input token. Never above the input rate, and the input
+ * rate itself where the row publishes no cached rate (or for the fallback row).
+ */
+function cachedInputRate(p: Price): number {
+  return Math.min(p.cachedInputMicrocentsPerToken ?? p.inputMicrocentsPerToken, p.inputMicrocentsPerToken);
+}
+
 /**
  * Cost in integer micro-cents for a call INCLUDING its prompt-cache traffic.
  *
@@ -386,6 +509,16 @@ export function costMicrocentsForUsage(
     outputTokens: number;
     cacheReadTokens: number;
     cacheWriteTokens: number;
+    /**
+     * Of `inputTokens`, how many OpenAI served from its prompt cache (a SUBSET,
+     * unlike the two Anthropic fields above, which are additional). Charged at the
+     * row's cached rate; a count above `inputTokens` is inconsistent and ignored.
+     */
+    cachedInputTokens?: number;
+    /** Of `inputTokens`, how many were written to OpenAI's cache, where reported (Responses). */
+    cacheWriteInputTokens?: number;
+    /** The service tier the RESPONSE says the call ran on. */
+    serviceTier?: string;
   },
   model: string,
   provider?: ProviderId,
@@ -396,8 +529,21 @@ export function costMicrocentsForUsage(
   if (!isPricedEndpoint(endpointBaseUrl)) return 0;
   const p = priceFor(model, provider);
   if (!p) return 0;
+  const reported = usage.cachedInputTokens ?? 0;
+  const cached = reported > 0 && reported <= usage.inputTokens ? reported : 0;
+  const tier = tieredCost(p, usage, cached);
+  // The Anthropic cache fields are 0 for every tiered (OpenAI) row; kept in the sum
+  // so the two paths cannot disagree if that ever changes.
+  if (tier !== null) {
+    return (
+      tier +
+      usage.cacheReadTokens * CACHE_READ_RATE(p.inputMicrocentsPerToken) +
+      usage.cacheWriteTokens * CACHE_WRITE_RATE(p.inputMicrocentsPerToken)
+    );
+  }
   return (
-    usage.inputTokens * p.inputMicrocentsPerToken +
+    (usage.inputTokens - cached) * p.inputMicrocentsPerToken +
+    cached * cachedInputRate(p) +
     usage.outputTokens * p.outputMicrocentsPerToken +
     usage.cacheReadTokens * CACHE_READ_RATE(p.inputMicrocentsPerToken) +
     usage.cacheWriteTokens * CACHE_WRITE_RATE(p.inputMicrocentsPerToken)

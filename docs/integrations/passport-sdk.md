@@ -127,7 +127,7 @@ about the agent's passport, and the two must not be read as the same claim.
 ## Compatibility and assurance
 
 `clientOptions` accepts `openai`, `anthropic`, `groq`, `mistral`, `together`, `deepseek`,
-`gemini`, `xai` and `azure`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
+`gemini`, `xai`, `openrouter` and `azure`. OpenAI POST Responses works through `pc.fetch`/the OpenAI SDK as well as
 Chat Completions. xAI is served through its Responses API only (`client.responses.create`);
 its legacy Chat Completions endpoint is refused. Gemini uses Google's OpenAI-compatible endpoint; native
 `generateContent` is not supported. Azure OpenAI takes the plain OpenAI client (not

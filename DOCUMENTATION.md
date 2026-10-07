@@ -100,20 +100,35 @@ path shape real SDKs send, then forwards to the provider's canonical upstream pa
 | `deepseek` | `POST /chat/completions` or `/v1/chat/completions` | `/chat/completions` |
 | `gemini` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/chat/completions`; `/models`; `/models/{id}`, appended to `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `xai` | `POST /responses` or `/v1/responses`; `GET /models` or `/v1/models`; `GET /models/{id}` or `/v1/models/{id}` | `/v1/responses`; `/v1/models`; `/v1/models/{id}`, appended to `https://api.x.ai` |
+| `openrouter` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models` | `/v1/chat/completions`; `/v1/models`, appended to `https://openrouter.ai/api` |
 | `azure` | `POST /chat/completions` or `/v1/chat/completions`; `POST /responses` or `/v1/responses`; `POST /embeddings` or `/v1/embeddings`; `GET /models` or `/v1/models` | `/chat/completions`; `/responses`; `/embeddings`; `/models`, appended to the resource address stored with the key (`https://<resource>.openai.azure.com/openai/v1`) |
 | `local` | `POST /chat/completions` or `/v1/chat/completions`; `GET /models` or `/v1/models` | `/chat/completions`; `/models`, appended to the server address stored with the credential (`http://localhost:11434/v1` for Ollama) |
 
-**OpenAI server-side tools are refused.** OpenAI bills its hosted tools per call or per
-session, outside token usage: web search, file search, code interpreter containers, and the
-others. A budget that counts tokens cannot hold those charges, and a receipt would understate the
-call. So an `openai` request is refused with 400 `server_side_tools_unsupported` before anything
-is reserved or sent when it carries any of these:
-- a `tools` entry that is not one the agent runs itself. Allowed: `function`, `custom`,
-  `namespace` (of functions and custom tools), `computer`, `computer_use_preview`, `local_shell`,
-  `apply_patch`, `shell` with `environment: {"type": "local"}`, and `tool_search` with
-  `execution: "client"`. Anything else is refused, including a tool type OpenAI adds later;
-- Chat Completions' `web_search_options`;
-- a stored Responses `prompt`, which carries its own tools that PassControl cannot see.
+**Hosted tools are priced, not refused (Anthropic, OpenAI, xAI).** A tool the provider runs on
+its own servers and bills per use is accepted when it has a published price, and charged as the
+provider bills it on top of the call's tokens:
+- **Anthropic:** web search 1¢ per search; web fetch at the tokens it brings in; code execution at
+  $0.05 an hour with a 5-minute minimum (free alongside `web_search_20260209`/`web_fetch_20260209`
+  or later). Exact tool versions only.
+- **OpenAI:** web search $10 per 1,000 calls (the preview tools $25); file search $2.50 per 1,000;
+  code interpreter and hosted shell per minute by container memory size, 5-minute minimum.
+- **xAI:** web search and code execution $5 per 1,000; collections search $2.50 per 1,000; X search
+  $5 per 1,000 posts and $10 per 1,000 profiles. xAI reports the exact charge for every call, and
+  PassControl uses it when it is higher than its own figure.
+
+Before the call is sent, the hold covers what the tools may use: the cap times (the per-call price
+plus room for the results, which come back as input tokens). For an agent with a dollar limit, a
+tool with no cap gets one: Anthropic `max_uses: 5` (and web fetch `max_content_tokens: 20000`),
+OpenAI `max_tool_calls: 5`. A cap the agent set is never changed. xAI has no per-call cap field, so
+its hold assumes five calls per tool. Under a dollar limit, reusing an existing OpenAI container is
+refused with 409 `unpriced_option` (`container`), because the request does not show its size.
+
+Still refused with 400 `server_side_tools_unsupported`, before anything is reserved or sent: tools
+with no published per-use price or that reach servers the agent names (Anthropic's advisor, tool
+search, MCP toolsets and `mcp_servers`; OpenAI's image generation, MCP and server-side tool search;
+xAI's remote MCP and image generation), any tool type or version PassControl has not priced, Chat
+Completions' `web_search_options`, and a stored Responses `prompt`. Azure's hosted tools are refused
+as before.
 
 The search models, `gpt-4o-search-preview` and `gpt-4o-mini-search-preview`, search on every call
 and are refused as `blocked_endpoint`, including in the decision trace. A failover into OpenAI is
@@ -148,11 +163,10 @@ refused as `blocked_endpoint`. Three things differ from OpenAI:
   reasoning tokens outside `output_tokens`, so reading `output_tokens` alone would miss most of a
   reasoning call. A usage report without `total_tokens` is treated as unknown and charged its
   estimate.
-- **Server-side tools are refused** with 400 `server_side_tools_unsupported`, before anything is
-  reserved or sent. That covers any `tools` entry whose `type` is not `function`, and any
-  `search_parameters`. xAI bills web search, X search and code execution per call or per item
-  fetched, outside tokens, so no budget here could hold them. Function tools, which the agent
-  runs itself, pass. A failover into xAI is skipped for such a request.
+- **Hosted tools are priced** as described above, and a call is charged at the larger of
+  PassControl's figure and xAI's own `cost_in_usd_ticks`. Remote MCP, image generation and
+  `search_parameters` are refused with 400 `server_side_tools_unsupported`. A failover into xAI
+  is skipped for a request xAI's rule refuses.
 - **Set `max_output_tokens`.** xAI defaults it to 128,000, and its reasoning models cannot turn
   reasoning off. Without a stated limit, the pre-call reservation (1024 output tokens) is far
   below what a call can generate, so a spend cap is only a reliable bound together with a policy
@@ -165,6 +179,37 @@ long-context (≥ 200k prompt) rates, without the cached-input discount.
 `grok-4.20-multi-agent` bills every agent's tokens in its `usage` (xAI's docs), but xAI does not
 say whether `max_output_tokens` bounds its sub-agents, so an output ceiling may not bound that
 model. Leave it out of an agent's scope if that matters (the default `grok-*` includes it).
+
+OpenRouter is served through its **Chat Completions API** and its model list. One OpenRouter key
+reaches every model in its catalog, and each model can run on several upstream providers at
+different prices, so four things differ from the other providers:
+- **The charge is the cost OpenRouter reports** on the call (`usage.cost`, in US dollars). When
+  the call ran on your own provider key stored at OpenRouter (BYOK), that figure is only
+  OpenRouter's fee, so the upstream bill it reports (`cost_details.upstream_inference_cost`) is
+  charged as well. A call that reports no cost is treated as unknown and charged its reservation.
+- **Under a dollar limit, the reservation uses the model's most expensive provider**, read from
+  OpenRouter's public model listing and cached for an hour. The same rates are sent as
+  `provider.max_price`, so OpenRouter cannot route the call to a more expensive provider than the
+  one reserved for. A lower `max_price` you set yourself is kept. A model the listing cannot price
+  (an alias, a router, a variable price) is refused with 402 `unpriced_model`. If your own
+  `max_price` is below every provider, OpenRouter answers 404 "No endpoints found that satisfy
+  the max price". Prices are cached for an hour, so if OpenRouter raises a price inside that hour
+  the dearer providers are briefly excluded and you can see that same 404. With only a token
+  budget, the price still sizes the reservation, but nothing is added to the request and a model
+  that cannot be priced is not refused.
+- **The model is the one in `model`.** Fields that let OpenRouter pick another (`models`,
+  `route`, `preset`) and `debug` are refused with 400 `model_selection_unsupported`, naming the
+  field. Routers (`openrouter/auto` and the rest) and presets (`@preset/…`) are refused as
+  `blocked_endpoint` whatever the scope says. `openrouter/free` is allowed: it only picks free
+  models. It is the default model for a new OpenRouter agent.
+- **OpenRouter's own tools are refused**: `openrouter:*` server tools, `plugins`,
+  `web_search_options` and the `:online` suffix (web search). Function tools pass.
+
+PassControl sends `HTTP-Referer: https://github.com/Vertias3u/PassControl` and `X-Title: PassControl` with
+each call, so OpenRouter's rankings count it as PassControl traffic. Your app's own attribution
+headers are not forwarded. A 402 from OpenRouter is recognised as out of credits. Keys, credits,
+BYOK settings and the other account endpoints are not reachable through the gateway. The model
+list (`GET /v1/models`) is narrowed to the agent's scope, without the routers it would refuse.
 
 Azure OpenAI is served through its **v1 API** (`/openai/v1`, no `api-version` needed). It is the
 one provider with no host of PassControl's own: each Azure key is stored **with its resource
@@ -209,9 +254,19 @@ call is refused that way, and the dashboard does not offer `local` at all.
 - **Unpriced, and free of estimates.** Calls are logged with token counts and no cost, the
   receipt says `prov: "local"` and `unp: true`, and nothing is charged to the agent's spend. An
   agent with a dollar limit is refused with 402 `unpriced_endpoint`; use a token limit.
-- **Chat and model listing only.** The server's own admin API (Ollama's `/api/pull`, `/api/delete`)
-  is never reachable through an agent key. Embeddings are not served on `local` yet.
+- **Chat and model listing only.** The server's own admin API (Ollama's `/api/pull`, `/api/push`,
+  `/api/create`, `/api/copy`, `/api/delete`) is never reachable through an agent key. Embeddings
+  are not served on `local` yet.
 - **Client.** The OpenAI client with the base URL `…/api/v1/local/v1` and the agent's key.
+- **Apps that only take `OLLAMA_HOST`** (Ollama's own API): run `passcontrol sidecar
+  --ollama-port` (11435 by default) and set `OLLAMA_HOST=127.0.0.1:11435`; `passcontrol env
+  ollama` prints it. Everything on that port goes to `local`: `/api/chat` and `/api/generate`
+  are governed calls, with tokens read from Ollama's own `prompt_eval_count` and `eval_count`;
+  `/api/show`, `/api/tags` and `/api/version` are metadata, admitted like a model listing and
+  charged nothing. The OpenAI-compatible `/v1/...` paths work on the same port. The health probe
+  goes to the gateway, so an app sees the real answer, including a refusal where `local` is off.
+  A positive `options.num_predict` is the output limit an operator's `max_output_tokens` policy
+  reads; `-1` and `-2` state none.
 - **Scope** defaults to `*`: any model on that server, since the agent can only run models, not
   manage the server. Narrow it to exact names if that matters.
 
@@ -713,17 +768,77 @@ passcontrol env librechat
 
 These print configuration fields for the client; check the emitted provider-native URL. The placeholder API key is replaced by the sidecar.
 
+### Claude Code
+
+`passcontrol configure claude-code --write` routes Claude Code's own model calls through the
+sidecar. It merges two keys into this project's `.claude/settings.local.json` (the file Claude
+Code keeps out of git), or with `--global` into your user settings for every session:
+
+```json
+{ "env": { "ANTHROPIC_BASE_URL": "http://127.0.0.1:8788/api/v1/anthropic", "ANTHROPIC_AUTH_TOKEN": "passcontrol-sidecar" } }
+```
+
+The token is a placeholder the sidecar discards; the gateway injects the real key, so Claude
+Code never holds one. The previous file is backed up to `.bak`, nothing else in it changes, and
+a different gateway already set there is not replaced without `--force`. Start
+`passcontrol sidecar` first, and give the agent's Anthropic scope the models Claude Code uses
+(its main model, and Haiku for small tasks). `passcontrol configure claude-code --remove` takes
+the two keys back out (add `--global` for the user settings). `passcontrol env claude-code`
+prints the same two variables as `export` lines. Claude Code's beta features, prompt caching and
+thinking are passed through and billed; Anthropic's hosted tools are priced (see above).
+
+The MCP chat tool is separate and optional: `claude mcp add --scope user passcontrol --
+passcontrol mcp`.
+
+### Codex
+
+`passcontrol configure codex --write` routes Codex's model calls through the sidecar. Codex
+takes a custom model provider only from your user-level config, so this writes a profile file
+of its own, `~/.codex/passcontrol.config.toml` (under `CODEX_HOME` when that is set), and
+Codex uses it when started as `codex --profile passcontrol`. Plain `codex` is unchanged and
+still goes straight to OpenAI. Codex's `config.toml`, which the Codex app shares, is never
+opened.
+
+```toml
+model_provider = "passcontrol"
+
+[model_providers.passcontrol]
+name = "PassControl"
+base_url = "http://127.0.0.1:8788/api/v1/openai"
+wire_api = "responses"
+```
+
+There is no key in it: Codex then sends no `Authorization` header at all, even with
+`OPENAI_API_KEY` exported or a key stored by `codex login --api-key`. The sidecar adds the
+agent's credential, and the gateway injects the real OpenAI key. If Codex has a key stored,
+`--write` says so (it checks only that one is there), because plain `codex` still uses it. `--model gpt-5-mini`
+also writes the model; otherwise Codex keeps the model its own config names, and the agent's
+OpenAI scope must allow it. A file at that path that PassControl did not write is not
+replaced without `--force` (a backup is kept), and `passcontrol configure codex --remove`
+deletes only a profile PassControl wrote. `passcontrol env codex` prints the profile instead
+of writing it.
+
+Codex's tools are its own functions plus OpenAI's web search, which is priced; it compacts
+long sessions through the same Responses endpoint, so nothing else needs allowing. A refused
+call shows in Codex as `403 … blocked_scope` after its own retries (five by default; none
+reaches OpenAI). Codex resends the whole conversation on every turn, which OpenAI serves
+mostly from its prompt cache; those tokens are charged at OpenAI's cached-input rate (see
+"Models PassControl cannot price"). The reservation before each turn still assumes no cache,
+so near a dollar limit a turn can be refused for headroom it would not have used. Codex may print
+"Model metadata … not found" for a model it does not know under a custom provider; it then
+uses fallback defaults and the call goes ahead.
+
 ### `configure` vs `env`
 
 Both accept the same integrations — the coding agents and desktop apps above, the catch-all
-`generic`, plus the MCP clients `claude-desktop`, `cursor` and `claude-code` — and differ
+`generic`, Codex (`codex`), plus the MCP clients `claude-desktop`, `cursor` and `claude-code` — and differ
 only in what they do
 with the result. Run `passcontrol env` with an unknown name to print the authoritative list;
 it is generated from the CLI's own preset table, so it cannot drift from what is accepted:
 
 - **`passcontrol configure <integration>`** is the one to reach for. It previews the config,
-  and `--write` creates it for the three integrations that own a config file
-  (`aider`, `claude-desktop`, `cursor`). For the others `--write` is refused with the reason,
+  and `--write` creates or merges it for the five integrations that own a config file
+  (`aider`, `claude-desktop`, `cursor`, `claude-code`, `codex`). For the others `--write` is refused with the reason,
   rather than accepted and silently ignored.
 - **`passcontrol env <integration>`** only ever prints. It never writes and takes no
   `--write`.
@@ -748,7 +863,8 @@ absolute Node executable and CLI path:
 ```bash
 passcontrol login                              # or `passcontrol init --global` to do it by hand
 passcontrol configure claude-desktop --write   # or: cursor
-# Claude Code: passcontrol configure claude-code prints the CLI-managed add command
+# Claude Code's chat tool: claude mcp add --scope user passcontrol -- passcontrol mcp
+# (to route Claude Code's own model calls instead, see "Claude Code" above)
 ```
 
 Restart the client after configuration. Every `chat` invocation uses the normal challenge
@@ -1160,7 +1276,8 @@ Admission uses atomic holds for each attempt. The estimate uses serialized promp
 and an output limit (`max_tokens`, `max_completion_tokens`, or `max_output_tokens`),
 with a default output estimate of 1024. It is not a tokenizer or a provider-enforced
 maximum. Actual settlement can exceed the estimate/cap; subsequent admission sees that
-spend. Anthropic cache read/write tokens are included in token accounting.
+spend. Anthropic cache read/write tokens are included in token accounting. OpenAI's cached
+input tokens are already part of its input count, so they are counted once.
 
 Complete usage settles observed figures. Failed/broken streams, missing terminal usage,
 unreadable bodies, or ambiguous network failure settle as `usage_unknown`, charging at
@@ -1189,7 +1306,24 @@ limit on a custom endpoint is refused `402 unpriced_endpoint`, like a cost cap.
 **Models PassControl cannot price.** Prices come from an in-code table, one row per model id
 (plus its dated snapshots), each read from the provider's own pricing page; the read date is
 pinned in `tests/pricing-table.test.ts`. Where a page gives two rates, the higher is used:
-long-context rates, cache writes above input, audio input, DeepSeek's peak hours. Under a dollar
+long-context rates, cache writes above input, audio input, DeepSeek's peak hours. That is
+always what is reserved before a call. GPT-6 and GPT-5.6, whose pages bill a prompt above 272K
+input tokens at the long rates for that request, are then charged at the tier the call was
+actually billed at: the short-context rates when the reported input (cached tokens included)
+is at most 272,000, with cached reads, cache writes (as the Responses API reports them; on
+Chat Completions all uncached input is charged at the write rate) and other input each at
+its own rate. That applies only when the response reports the standard tier (`default`, or
+`flex`); otherwise, as for every other model, the call is charged at the higher rates. So that
+OpenAI always reports it, a chat or Responses call to OpenAI's own host that names no tier is
+sent with `service_tier: "auto"`, OpenAI's default; a tier the client names is sent as is. OpenAI input
+served from its prompt cache (`cached_tokens` in the usage report) is charged at the model's
+published cached-input rate, rounded up to a whole micro-cent per token like every rate here
+(so a rate below one micro-cent, such as gpt-5-nano's, is charged up to twice its price); a
+model whose page lists no cached rate is charged the full input rate. GPT-5.5 and GPT-5.4,
+whose pages apply long-context pricing "for the full session", are charged their long-context
+rates on every call, so a short call to them reads higher than OpenAI bills it. The cached count is used for the price only: token budgets, logs and
+receipts count every input token. The reservation before a call cannot know what will be
+cached, so it is sized at the full rate. Under a dollar
 limit (a cost cap or a periodic limit), a call to a model with **no row of its own** is refused
 `402 unpriced_model` before anything is reserved or sent, and logged `blocked_unpriced_model`:
 its cost could only be a fallback, and a limit enforced with a number that is not the model's

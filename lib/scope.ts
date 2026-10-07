@@ -537,6 +537,14 @@ interface EndpointRule {
    * comment above this allowlist promises exact-segment matching.
    */
   readonly param?: true;
+  /**
+   * Served from the server's ROOT rather than under the stored base: Ollama's own
+   * API is `http://host:11434/api/chat` while the stored `local` base carries
+   * `/v1`. The route joins these to `serverRootOf(base)`.
+   */
+  readonly root?: true;
+  /** The request and usage format is Ollama's own (NDJSON, `prompt_eval_count`). */
+  readonly protocol?: "ollama";
 }
 
 /**
@@ -655,6 +663,18 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
   // reasoning is undocumented, so neither the output ceiling nor the hold could
   // be relied on. Responses documents `max_output_tokens` as covering reasoning.
   // Retrieval, deletion and compaction of stored responses are not allowlisted.
+  // OpenRouter: Chat Completions and the model list (plans/openrouter.md). Not
+  // allowlisted, on purpose: its Responses and Anthropic-shape Messages endpoints
+  // (later), embeddings, batches, the legacy completions endpoint, per-model
+  // endpoint listings, and every management endpoint (keys, credits, BYOK
+  // credentials, workspaces, generations), any of which would let an agent act on
+  // the account whose key the gateway holds.
+  openrouter: [
+    { method: "POST", path: ["chat", "completions"], upstreamPath: OPENAI_CHAT_PATH },
+    { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
+    { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
+    { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+  ],
   xai: [
     { method: "POST", path: ["responses"], upstreamPath: OPENAI_RESPONSES_PATH },
     { method: "POST", path: OPENAI_RESPONSES_PATH, upstreamPath: OPENAI_RESPONSES_PATH },
@@ -693,6 +713,16 @@ const ENDPOINT_ALLOWLIST: Record<ProviderId, readonly EndpointRule[]> = {
     { method: "POST", path: OPENAI_CHAT_PATH, upstreamPath: OPENAI_CHAT_PATH },
     { method: "GET", path: ["models"], upstreamPath: OPENAI_MODELS_PATH },
     { method: "GET", path: OPENAI_MODELS_PATH, upstreamPath: OPENAI_MODELS_PATH },
+    // Ollama's own API, for apps that only take OLLAMA_HOST (1.3.0 #3; captured
+    // from the ollama CLI against Ollama 0.40.0, 2026-10-07). Chat and generate
+    // are governed calls in Ollama's NDJSON format; show, tags and version are
+    // metadata, treated like a model listing (OLLAMA_METADATA_PATHS). Pull, push,
+    // create, copy, delete and embeddings are not here, so they are refused.
+    { method: "POST", path: ["api", "chat"], upstreamPath: ["api", "chat"], root: true, protocol: "ollama" },
+    { method: "POST", path: ["api", "generate"], upstreamPath: ["api", "generate"], root: true, protocol: "ollama" },
+    { method: "POST", path: ["api", "show"], upstreamPath: ["api", "show"], root: true },
+    { method: "GET", path: ["api", "tags"], upstreamPath: ["api", "tags"], root: true },
+    { method: "GET", path: ["api", "version"], upstreamPath: ["api", "version"], root: true },
   ],
 };
 
@@ -802,6 +832,23 @@ export function isResponsesEndpoint(
  * are). This one asks "is this the agent discovering what it may use", which is
  * the index alone — and it is the only response the gateway narrows to scope.
  */
+/** Ollama's metadata calls: they read about models and generate nothing. */
+const OLLAMA_METADATA_PATHS: readonly (readonly string[])[] = [
+  ["api", "tags"],
+  ["api", "version"],
+  ["api", "show"],
+];
+
+/** Whether this call speaks Ollama's own format (NDJSON, `prompt_eval_count`). */
+export function isOllamaNativeEndpoint(provider: ProviderId, method: string, path: readonly string[]): boolean {
+  return endpointRuleFor(provider, method, path)?.protocol === "ollama";
+}
+
+/** Whether the upstream path joins the server's root rather than the stored base. */
+export function isRootRelativeEndpoint(provider: ProviderId, method: string, path: readonly string[]): boolean {
+  return endpointRuleFor(provider, method, path)?.root === true;
+}
+
 export function isModelListingIndex(path: readonly string[]): boolean {
   return (path.length === 1 && path[0] === "models") || pathEquals(path, OPENAI_MODELS_PATH);
 }
@@ -809,6 +856,10 @@ export function isModelListingIndex(path: readonly string[]): boolean {
 export function isModelListing(path: readonly string[]): boolean {
   const listing = isModelListingIndex;
   if (listing(path)) return true;
+  // Ollama's metadata calls generate nothing either, and /api/tags names no
+  // model to match a scope against. The endpoint allowlist is what admits them
+  // (only `local` lists these paths).
+  if (OLLAMA_METADATA_PATHS.some((p) => pathEquals(p, path))) return true;
   // Retrieving ONE model is exempt for the same reason, and it must be exempt
   // for consistency: `GET /v1/models` returns every model and is already exempt,
   // so gating the strictly narrower call more tightly would mean an agent may

@@ -560,7 +560,9 @@ the client config itself stays secret-free:
 ```bash
 passcontrol init --global
 passcontrol configure claude-desktop --write   # use `cursor` for Cursor
-# `passcontrol configure claude-code` prints the Claude-managed add command
+# Claude Code: `passcontrol configure claude-code --write` routes its model calls
+# through the sidecar; its chat tool is `claude mcp add --scope user passcontrol -- passcontrol mcp`
+# Codex: `passcontrol configure codex --write`, then run `codex --profile passcontrol`
 ```
 
 Restart the client after writing its config. The generated entry contains only absolute

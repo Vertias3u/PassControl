@@ -314,9 +314,30 @@ describe("governed xAI Responses", () => {
     }
   );
 
+  it("accepts web search and settles at xAI's own reported charge when it is larger", async () => {
+    fetchMock.mockImplementationOnce(async () =>
+      jsonResponse(
+        JSON.stringify({
+          status: "completed",
+          usage: {
+            input_tokens: 32, output_tokens: 9, total_tokens: 151,
+            cost_in_usd_ticks: 90_000_000_000, // $9: far above anything computed here
+            server_side_tool_usage_details: { web_search_calls: 2 },
+          },
+        })
+      )
+    );
+    const res = await call(["v1", "responses"], { ...ASK, tools: [{ type: "web_search" }] });
+    await res.text();
+    await flushPending();
+    expect(res.status).toBe(200);
+    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string).tools).toEqual([{ type: "web_search" }]);
+    expect(settleHoldMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "complete", microcents: 900_000_000 }));
+  });
+
   it.each([
-    ["web search", { tools: [{ type: "web_search" }] }],
-    ["X search", { tools: [{ type: "x_search" }] }],
+    ["remote MCP", { tools: [{ type: "mcp", server_url: "https://x" }] }],
+    ["image generation", { tools: [{ type: "image_generation" }] }],
     ["search_parameters", { search_parameters: { mode: "auto" } }],
   ])("refuses %s before any reservation or provider contact", async (_name, extra) => {
     const res = await call(["v1", "responses"], { ...ASK, ...extra });

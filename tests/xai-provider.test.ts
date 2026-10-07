@@ -155,19 +155,20 @@ describe("xai usage: output is everything generated, total − input", () => {
   });
 });
 
-describe("server-side tools are refused (they bill outside tokens)", () => {
+describe("unpriced server-side tools are refused", () => {
   it.each([
     ["no tools", {}],
     ["an empty tools list", { tools: [] }],
     ["function tools only", { tools: [{ type: "function", name: "f", parameters: {} }] }],
+    // Priced since DECISIONS 2026-10-07 (tests/hosted-tools-openai-xai.test.ts).
+    ["web_search (priced)", { tools: [{ type: "web_search" }] }],
+    ["x_search (priced)", { tools: [{ type: "function", name: "f" }, { type: "x_search" }] }],
+    ["code_interpreter (priced)", { tools: [{ type: "code_interpreter" }] }],
   ])("allows %s", (_name, body) => {
     expect(serverSideToolUse("xai", body)).toBeNull();
   });
 
   it.each([
-    ["web_search", { tools: [{ type: "web_search" }] }],
-    ["x_search", { tools: [{ type: "function", name: "f" }, { type: "x_search" }] }],
-    ["code_interpreter", { tools: [{ type: "code_interpreter" }] }],
     ["mcp", { tools: [{ type: "mcp", server_url: "https://x" }] }],
     ["a tool with no type", { tools: [{ name: "f" }] }],
     ["a non-object tool", { tools: ["web_search"] }],

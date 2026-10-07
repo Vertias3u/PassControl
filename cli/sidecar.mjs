@@ -192,6 +192,52 @@ export function createSidecar({
     }
   });
 
+  // ── The Ollama listener (1.3.0 #3) ────────────────────────────────────────
+  //
+  // For apps that only take OLLAMA_HOST, which is host:port with no path. Every
+  // request on this port is the gateway's `local` provider: `/api/chat` becomes
+  // `/api/v1/local/api/chat`, and the OpenAI-compatible `/v1/...` paths map the
+  // same way. Its own port, so the main listener's forward-proxy handling is
+  // untouched; an absolute-form request (a proxy request for another host) is
+  // refused here rather than becoming a governed local call.
+  //
+  // The path is normalised by the URL parser BEFORE the prefix is added, so a
+  // `..` segment (encoded or not) resolves inside it and cannot carry the visa
+  // to another gateway route. The health probe (`/`, which the ollama CLI HEADs)
+  // is not answered here: it goes to the gateway as `/api/version`, so an app
+  // sees the gateway's real answer, including a refusal where `local` is off.
+  const ollamaServer = http.createServer(async (req, res) => {
+    if (!String(req.url ?? "").startsWith("/")) {
+      req.resume();
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "ollama_listener_absolute_form", message: "This port serves Ollama's API for the local provider only; it is not a proxy." }));
+      return;
+    }
+    const url = new URL(req.url, "http://ollama.invalid");
+    const probe = url.pathname === "/";
+    const mapped = `/api/v1/local${probe ? "/api/version" : url.pathname}${probe ? "" : url.search}`;
+    const method = probe ? "GET" : req.method;
+    try {
+      const body = probe ? null : await readBody(req);
+      if (probe) req.resume();
+      const upstream = await visas.fetchWithVisa((visa) => fetchUpstream({ method, headers: req.headers }, mapped, body, visa));
+      if (req.method === "HEAD") {
+        res.writeHead(upstream.status);
+        res.end();
+        await upstream.body?.cancel().catch(() => {});
+        return;
+      }
+      writeResponse(res, upstream);
+    } catch (e) {
+      if (!res.headersSent) {
+        res.writeHead(502, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "sidecar_upstream_error", message: e.message }));
+      } else {
+        res.end();
+      }
+    }
+  });
+
   // `CONNECT host:port` — what every client with HTTPS_PROXY set sends first.
   // PassControl cannot govern what it cannot read, and it deliberately does not
   // terminate TLS to make it readable, so a provider target is refused here
@@ -234,7 +280,7 @@ export function createSidecar({
     clientSocket.on("close", () => upstream.destroy());
   });
 
-  return { server, getVisa: visas.getVisa };
+  return { server, ollamaServer, getVisa: visas.getVisa };
 }
 
 /**
@@ -255,9 +301,14 @@ export function assertBindHost(host, allowNonLoopback = false) {
 }
 
 export function startSidecar(opts) {
-  const { gateway, port = 8788, host = "127.0.0.1", allowNonLoopback = false, allowConnectHosts = [] } = opts;
+  const { gateway, port = 8788, host = "127.0.0.1", allowNonLoopback = false, allowConnectHosts = [], ollamaPort = null } = opts;
   assertBindHost(host, allowNonLoopback);
-  const { server, getVisa } = createSidecar(opts);
+  const { server, ollamaServer, getVisa } = createSidecar(opts);
+  if (ollamaPort != null) {
+    ollamaServer.listen(ollamaPort, host, () => {
+      step(`Ollama API (local models) on http://${host}:${ollamaPort}: set OLLAMA_HOST=${host}:${ollamaPort}`);
+    });
+  }
   server.listen(port, host, () => {
     step(`PassControl visa sidecar forwarding to ${gateway}`);
     step(`Listening on http://${host}:${port}`);

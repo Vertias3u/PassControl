@@ -50,6 +50,10 @@ const RULES: Record<ProviderId, readonly ExhaustionRule[]> = {
   // xAI documents no distinct out-of-credit error (docs.x.ai/developers/debugging.md
   // lists 429 only as a rate limit), so it gets no rule rather than a guess.
   xai: [],
+  // 402 is OpenRouter's one documented meaning: "Your account or API key has
+  // insufficient credits" (openrouter.ai/docs/api_reference/errors-and-debugging, read
+  // 2026-10-07). Its `error.code` is the number 402, so the message is matched.
+  openrouter: [{ status: 402, message: /credit/i }],
   // Azure answers quota and rate limits with 429s whose codes are not a verified
   // out-of-credit signature, so it gets no rule rather than a guess.
   azure: [],

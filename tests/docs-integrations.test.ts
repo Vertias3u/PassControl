@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 
 // The shipped plain-ESM CLI is intentionally transpilation-free.
 // @ts-expect-error JavaScript preset module has no TypeScript declaration file.
-import { MCP_PRESETS, SIDECAR_PRESETS } from "@/cli/presets.mjs";
+import { AGENT_CLI_PRESETS, MCP_PRESETS, SIDECAR_PRESETS } from "@/cli/presets.mjs";
 
-const sidecarPresets: string[] = SIDECAR_PRESETS;
+const sidecarPresets: string[] = [...SIDECAR_PRESETS, ...AGENT_CLI_PRESETS];
 const mcpPresets: string[] = MCP_PRESETS;
 
 // The CLI's own usage strings are generated from cli/presets.mjs, so they can no

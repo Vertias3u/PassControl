@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  AGENT_CLI_PRESETS,
   GUI_PRESET_LABELS,
   INTEGRATIONS,
   MCP_PRESETS,
@@ -145,9 +146,10 @@ describe("integration presets", () => {
     }
   );
 
-  it("splits sidecar and MCP presets without overlap", () => {
-    expect(INTEGRATIONS).toEqual([...SIDECAR_PRESETS, ...MCP_PRESETS]);
+  it("splits sidecar, coding-agent and MCP presets without overlap", () => {
+    expect(INTEGRATIONS).toEqual([...SIDECAR_PRESETS, ...AGENT_CLI_PRESETS, ...MCP_PRESETS]);
     expect(SIDECAR_PRESETS.filter((p) => MCP_PRESETS.includes(p))).toEqual([]);
+    expect(AGENT_CLI_PRESETS.filter((p) => SIDECAR_PRESETS.includes(p) || MCP_PRESETS.includes(p))).toEqual([]);
     expect(new Set(INTEGRATIONS).size).toBe(INTEGRATIONS.length);
   });
 
@@ -198,12 +200,71 @@ describe("configure --write", () => {
     expect(out).toMatch(/wrote /);
   });
 
-  // Claude Code owns its own MCP registry, so there is no file for us to merge
-  // into. `--write` used to be accepted here and silently do nothing useful.
-  it("`configure claude-code --write` refuses instead of silently doing nothing", async () => {
-    const { out } = await runCli(["configure", "claude-code", "--write"], { expectFailure: true });
+  // Since 2026-10-07 `configure claude-code` routes Claude Code's own model
+  // calls through the sidecar by writing its settings (cli/claude-code.mjs).
+  // The MCP chat tool stays a separate, optional command Claude Code owns.
+  it("`configure claude-code` previews the settings and still names the MCP command", async () => {
+    const { out } = await runCli(["configure", "claude-code"]);
+    expect(out).toContain(".claude/settings.local.json");
+    expect(out).toContain("ANTHROPIC_BASE_URL");
+    expect(out).toContain("http://127.0.0.1:8788/api/v1/anthropic");
     expect(out).toContain("claude mcp add");
     expect(out).not.toMatch(/wrote /);
+  });
+
+  it("`configure claude-code --write` writes this project's settings, and --remove undoes it", async () => {
+    const { out } = await runCli(["configure", "claude-code", "--write"]);
+    expect(out).toMatch(/wrote .*\.claude\/settings\.local\.json/);
+    const written = JSON.parse(await fs.readFile(path.join(tmp, ".claude", "settings.local.json"), "utf8"));
+    expect(written.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8788/api/v1/anthropic");
+    const removed = await runCli(["configure", "claude-code", "--remove"]);
+    expect(removed.out).toMatch(/removed/i);
+    expect(JSON.parse(await fs.readFile(path.join(tmp, ".claude", "settings.local.json"), "utf8"))).toEqual({});
+  });
+
+  it("`configure claude-code --write --global` writes the user settings", async () => {
+    const { out } = await runCli(["configure", "claude-code", "--write", "--global"]);
+    expect(out).toMatch(/wrote .*home\/\.claude\/settings\.json/);
+  });
+
+  it("`env claude-code` prints the two variables", async () => {
+    const { out } = await runCli(["env", "claude-code"]);
+    expect(out).toContain("export ANTHROPIC_BASE_URL='http://127.0.0.1:8788/api/v1/anthropic'");
+    expect(out).toContain("export ANTHROPIC_AUTH_TOKEN=");
+  });
+
+  // `configure codex` writes a Codex profile file (cli/codex.mjs), used with
+  // `codex --profile passcontrol`; Codex's own config.toml is never touched.
+  it("`configure codex` previews the profile and writes nothing", async () => {
+    const { out } = await runCli(["configure", "codex"]);
+    expect(out).toContain(".codex/passcontrol.config.toml");
+    expect(out).toContain('base_url = "http://127.0.0.1:8788/api/v1/openai"');
+    expect(out).toContain("codex --profile passcontrol");
+    expect(out).not.toMatch(/wrote /);
+  });
+
+  it("`configure codex --write` writes the profile under ~/.codex, and --remove undoes it", async () => {
+    const target = path.join(tmp, "home", ".codex", "passcontrol.config.toml");
+    const { out } = await runCli(["configure", "codex", "--write", "--model", "gpt-5-mini"]);
+    expect(out).toMatch(/wrote .*\.codex\/passcontrol\.config\.toml/);
+    const written = await fs.readFile(target, "utf8");
+    expect(written).toContain('wire_api = "responses"');
+    expect(written).toContain('model = "gpt-5-mini"');
+    const removed = await runCli(["configure", "codex", "--remove"]);
+    expect(removed.out).toMatch(/removed/i);
+    await expect(fs.access(target)).rejects.toThrow();
+  });
+
+  it("`configure codex` refuses a provider Codex cannot reach through PassControl", async () => {
+    const { out } = await runCli(["configure", "codex", "--provider", "anthropic"], { expectFailure: true });
+    expect(out).toMatch(/openai/i);
+    expect(out).not.toMatch(/wrote /);
+  });
+
+  it("`env codex` prints the profile to save by hand", async () => {
+    const { out } = await runCli(["env", "codex"]);
+    expect(out).toContain("[model_providers.passcontrol]");
+    expect(out).toContain("codex --profile passcontrol");
   });
 
   it.each(SIDECAR_PRESETS.filter((p) => !WRITABLE_INTEGRATIONS.includes(p)))(
@@ -213,4 +274,21 @@ describe("configure --write", () => {
       expect(out).not.toMatch(/wrote /);
     }
   );
+});
+
+// Apps that only take OLLAMA_HOST point at the sidecar's Ollama listener
+// (`passcontrol sidecar --ollama-port`, 11435 by default). `local` has no price,
+// so the preset says to give the agent a token budget, not a dollar limit.
+describe("the ollama preset", () => {
+  it("`env ollama` prints OLLAMA_HOST and how to start the listener", async () => {
+    const { out } = await runCli(["env", "ollama"]);
+    expect(out).toContain("export OLLAMA_HOST='127.0.0.1:11435'");
+    expect(out).toContain("sidecar --ollama-port");
+    expect(out).toMatch(/token budget/);
+  });
+
+  it("follows --ollama-port", async () => {
+    const { out } = await runCli(["env", "ollama", "--ollama-port", "11500"]);
+    expect(out).toContain("export OLLAMA_HOST='127.0.0.1:11500'");
+  });
 });

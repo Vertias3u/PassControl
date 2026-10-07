@@ -7,6 +7,7 @@ export type IntegrationProvider =
   | "deepseek"
   | "gemini"
   | "xai"
+  | "openrouter"
   | "azure"
   | "local";
 

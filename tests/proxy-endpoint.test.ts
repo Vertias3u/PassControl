@@ -1476,3 +1476,115 @@ describe("a price-raising request option under a dollar limit", () => {
     expect((await send({ service_tier: "flex" })).status).toBe(200);
   });
 });
+
+// Claude Code through the gateway (2026-10-07). Built on the URL shape the route
+// really receives: Next carries the route params in the query, and Claude Code
+// adds its own `?beta=true`.
+describe("Anthropic beta header", () => {
+  function anthropicReq(headers: Record<string, string>) {
+    return new Request(
+      "https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages&beta=true",
+      {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", ...headers },
+        body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      }
+    );
+  }
+  async function send(provider: string, headers: Record<string, string>) {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider, models: ["*"] }] });
+    const res = await POST(anthropicReq(headers), { params: Promise.resolve({ provider, path: ["v1", "messages"] }) });
+    const [url, init] = fetchMock.mock.calls.at(-1) ?? [];
+    return { res, url: String(url ?? ""), headers: new Headers((init as RequestInit | undefined)?.headers) };
+  }
+
+  it("forwards the betas Claude Code needs, and drops the rest", async () => {
+    const { res, headers } = await send("anthropic", {
+      "anthropic-beta": "claude-code-20250219,context-management-2025-06-27,advisor-tool-2026-03-01,mcp-client-2025-11-20",
+    });
+    expect(res.status).toBe(200);
+    expect(headers.get("anthropic-beta")).toBe("claude-code-20250219,context-management-2025-06-27");
+    expect(headers.get("x-api-key")).toBe("provider-key");
+  });
+
+  it("keeps Claude Code's own ?beta=true and none of the router's parameters", async () => {
+    const { url } = await send("anthropic", { "anthropic-beta": "claude-code-20250219" });
+    expect(url).toBe("https://api.anthropic.com/v1/messages?beta=true");
+  });
+
+  it("sends no beta header when every beta was dropped", async () => {
+    const { headers } = await send("anthropic", { "anthropic-beta": "mcp-client-2025-11-20" });
+    expect(headers.has("anthropic-beta")).toBe(false);
+  });
+
+  it("never forwards an anthropic-beta header to another provider", async () => {
+    const { headers } = await send("openai", { "anthropic-beta": "claude-code-20250219" });
+    expect(headers.has("anthropic-beta")).toBe(false);
+  });
+});
+
+// Claude Code probes `HEAD <base>/api/hello` on every start. Routed to GET, it
+// failed scope and wrote a refusal row each session. A HEAD can carry no model
+// call, so it is answered here, with nothing read, logged or sent.
+describe("HEAD on the proxy", () => {
+  it("answers 204 without verifying, logging or forwarding", async () => {
+    const { HEAD } = await import("@/app/api/v1/[provider]/[...path]/route");
+    const res = await HEAD();
+    expect(res.status).toBe(204);
+    expect(verifyVisaMock).not.toHaveBeenCalled();
+    expect(writeLogMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Anthropic hosted tools at the route", () => {
+  function hostedReq(body: Record<string, unknown>) {
+    return new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages", {
+      method: "POST",
+      headers: { authorization: "Bearer visa", "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages: [{ role: "user", content: "search" }], ...body }),
+    });
+  }
+  const params = { params: Promise.resolve({ provider: "anthropic", path: ["v1", "messages"] }) };
+
+  it("caps an uncapped web search at 5 under a dollar limit, holds for it, and charges what was used", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }], bc: 500 });
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          usage: { input_tokens: 4000, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, server_tool_use: { web_search_requests: 2 } },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    const res = await POST(hostedReq({ tools: [{ type: "web_search_20250305", name: "web_search" }] }), params);
+    expect(res.status).toBe(200);
+
+    const sent = JSON.parse(String((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body));
+    expect(sent.tools).toEqual([{ type: "web_search_20250305", name: "web_search", max_uses: 5 }]);
+
+    // Five searches at 1¢, before anything is sent.
+    expect(openHoldMock.mock.calls[0]![0].estimateMicrocents).toBeGreaterThanOrEqual(5 * 1_000_000);
+
+    await vi.waitFor(() => expect(settleHoldMock).toHaveBeenCalled());
+    const settled = settleHoldMock.mock.calls.at(-1)![0];
+    // 4,000 input and 50 output on Haiku ($1/$5 per MTok) plus two searches at 1¢.
+    expect(settled.microcents).toBe(4000 * 100 + 50 * 500 + 2 * 1_000_000);
+  });
+
+  it("forwards the agent's own max_uses untouched", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }], bc: 500 });
+    await POST(hostedReq({ tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }] }), params);
+    const sent = JSON.parse(String((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body));
+    expect(sent.tools[0].max_uses).toBe(2);
+  });
+
+  it("refuses an unpriced hosted tool before any hold or upstream call", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+    const res = await POST(hostedReq({ tools: [{ type: "advisor_20260301", name: "advisor" }] }), params);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "server_side_tools_unsupported" });
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

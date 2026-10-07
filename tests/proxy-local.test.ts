@@ -378,3 +378,70 @@ describe("local under a dollar limit", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+// Ollama's own API through the gateway (1.3.0 #3). Built on the injected request
+// shape (`?provider=local&path=api&path=chat`) the route really receives.
+describe("local: Ollama's own API", () => {
+  const NDJSON_FINAL = { model: "qwen2.5:0.5b", done: true, done_reason: "stop", prompt_eval_count: 35, eval_count: 7 };
+  async function native(path: string[], body: Record<string, unknown> | null, method = "POST") {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    getCachedEndpointMock.mockResolvedValue(`${CRED}|${OLLAMA}`);
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "local", models: ["qwen2.5:*"] }] });
+    const query = ["provider=local", ...path.map((p) => `path=${p}`)].join("&");
+    const request = new Request(`https://gateway.test/api/v1/local/${path.join("/")}?${query}`, {
+      method,
+      headers: { authorization: "Bearer visa", "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const handler = method === "GET" ? GET : POST;
+    return handler(request, { params: Promise.resolve({ provider: "local", path }) });
+  }
+  afterEach(() => {
+    delete process.env.PROVIDER_ENDPOINT_MODE;
+  });
+
+  it("sends /api/chat to the server root, untouched, and settles the final NDJSON line", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(`{"message":{"content":"Hi"},"done":false}\n${JSON.stringify(NDJSON_FINAL)}\n`, {
+        status: 200,
+        headers: { "content-type": "application/x-ndjson" },
+      })
+    );
+    const body = { model: "qwen2.5:0.5b", messages: [{ role: "user", content: "hi" }] };
+    const res = await native(["api", "chat"], body);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/x-ndjson");
+    expect(await res.text()).toContain('"done":true');
+    expect(target()).toBe("http://localhost:11434/api/chat");
+    // No stream_options: that is the OpenAI-shape contract, not Ollama's.
+    expect(JSON.parse(String((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body))).toEqual(body);
+    await vi.waitFor(() => expect(settleHoldMock).toHaveBeenCalled());
+    expect(settleHoldMock.mock.calls.at(-1)![0]).toMatchObject({ outcome: "complete", tokens: 42 });
+  });
+
+  it("answers /api/show as metadata: settled at nothing", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ capabilities: ["completion"] }), { status: 200, headers: { "content-type": "application/json" } }));
+    const res = await native(["api", "show"], { model: "qwen2.5:0.5b" });
+    expect(res.status).toBe(200);
+    expect(target()).toBe("http://localhost:11434/api/show");
+    await vi.waitFor(() => expect(settleHoldMock).toHaveBeenCalled());
+    expect(settleHoldMock.mock.calls.at(-1)![0]).toMatchObject({ outcome: "complete", tokens: 0 });
+  });
+
+  it("lists models with GET /api/tags, needing no model in scope", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ models: [{ name: "qwen2.5:0.5b" }] }), { status: 200, headers: { "content-type": "application/json" } }));
+    const res = await native(["api", "tags"], null, "GET");
+    expect(res.status).toBe(200);
+    expect(target()).toBe("http://localhost:11434/api/tags");
+  });
+
+  it.each([["api", "pull"], ["api", "delete"], ["api", "create"], ["api", "embed"]])(
+    "refuses /%s/%s at the gateway, with nothing sent",
+    async (...path) => {
+      const res = await native(path, { model: "qwen2.5:0.5b", name: "x" });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "blocked_endpoint" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  );
+});

@@ -1,0 +1,92 @@
+name: Dependency audit
+
+# New advisories land against dependencies nobody changed. Push CI no longer
+# fails for those (scripts/audit-gate.mjs), so this is where they surface: a
+# daily audit of main and of a fresh install of the published npm package.
+#
+# It reports through ONE issue, labelled `dependency-audit`, opened when an
+# advisory appears and closed when the audit is clean again, and the job itself
+# stays green. A failing scheduled run would put a red X on whatever commit is
+# newest on main, which is the problem this replaced.
+#
+# GitHub disables scheduled workflows in a public repository after 60 days
+# without activity; "Run workflow" on the Actions tab re-enables it.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Audit this repository and the published package
+        id: audit
+        run: |
+          set -uo pipefail
+          report="$RUNNER_TEMP/report.md"
+          failed=0
+          {
+            echo "## This repository (package-lock.json on main)"
+            echo '```'
+          } > "$report"
+          npm audit --audit-level=high >> "$report" 2>&1 || failed=1
+          echo '```' >> "$report"
+
+          mkdir -p "$RUNNER_TEMP/published" && cd "$RUNNER_TEMP/published"
+          npm init -y > /dev/null
+          {
+            echo "## A fresh install of passcontrol@latest from npm"
+            echo '```'
+          } >> "$report"
+          if npm install passcontrol@latest --no-audit --no-fund > /dev/null 2>&1; then
+            npm audit --audit-level=high >> "$report" 2>&1 || failed=1
+          else
+            echo "npm install passcontrol@latest failed" >> "$report"; failed=1
+          fi
+          echo '```' >> "$report"
+
+          cat "$report"
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+          echo "report=$report" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the advisory issue
+        if: steps.audit.outputs.failed == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ steps.audit.outputs.report }}
+        run: |
+          set -euo pipefail
+          gh label create dependency-audit --color B60205 --description "Opened and closed by the daily dependency audit" 2>/dev/null || true
+          {
+            echo "The daily audit found a high or critical advisory. Update the dependency in its own commit; this issue closes on the first clean run."
+            echo
+            cat "$REPORT"
+          } > "$RUNNER_TEMP/body.md"
+          existing="$(gh issue list --label dependency-audit --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue edit "$existing" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "Dependency advisory found by the daily audit" --label dependency-audit --body-file "$RUNNER_TEMP/body.md"
+          fi
+
+      - name: Close the advisory issue once clean
+        if: steps.audit.outputs.failed == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for n in $(gh issue list --label dependency-audit --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "The daily audit is clean again."
+          done

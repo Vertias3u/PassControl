@@ -36,6 +36,11 @@ import { serviceClient } from "@/lib/supabase";
 import {
   canonicalEndpointPath,
   isModelListingIndex,
+  // Shared since Ollama's metadata calls settle through it (it also feeds the
+  // workspace-allowance exemption in the private block).
+  isModelListing,
+  isOllamaNativeEndpoint,
+  isRootRelativeEndpoint,
   isEmbeddingsEndpoint,
   isResponsesEndpoint,
 } from "@/lib/scope";
@@ -75,6 +80,7 @@ import {
   isProvider,
   upstreamBaseUrl,
   authHeaders,
+  providerAttributionHeaders,
   usesOpenAiUsageShape,
   providerRequiresEndpoint,
   type ProviderId,
@@ -97,12 +103,18 @@ import {
   isEndpointAllowedFor,
   joinUpstream,
   versionlessUpstreamPath,
+  serverRootOf,
 } from "@/lib/providers/endpoint";
 import { rateLimit } from "@/lib/ratelimit";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 import { alertForGatewayStatus, notifyWorkspace } from "@/lib/alerts/workspace";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
+import { forwardableAnthropicBeta } from "@/lib/providers/anthropic-beta";
+import { openrouterHoldMicrocents, openrouterModelSelectionField, withMaxPrice } from "@/lib/providers/openrouter";
+import { openrouterCeilingFor } from "@/lib/providers/openrouter-price";
+import { withReportedServiceTier } from "@/lib/providers/service-tier";
+import { hostedToolPlan, hostedToolReserve, totalWithHostedTools, withDefaultToolCaps } from "@/lib/providers/hosted-tools";
 import { err, errMessage } from "@/lib/gateway/responses";
 import {
   authenticateGatewayRequest,
@@ -642,6 +654,15 @@ function outputLimitRefusal(
   );
 }
 
+// Claude Code probes `HEAD <base>/api/hello` on every start. Left to Next, a HEAD
+// runs the GET handler, fails scope and writes a refusal row each session. A HEAD
+// carries no body and is never forwarded, so it cannot be a model call: answered
+// here with nothing verified, read, logged or sent. It says only that the gateway
+// is up, which any request already says.
+export async function HEAD() {
+  return new Response(null, { status: 204 });
+}
+
 export async function POST(req: Request, ctx: Ctx) {
   return observedHandle(req, ctx);
 }
@@ -1090,6 +1111,16 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   if (serverSideToolUse(provider, bodyObj) !== null) {
     return err(400, "server_side_tools_unsupported");
   }
+  // OpenRouter fields that pick the model behind `model`'s back (`models`
+  // fallbacks, `route`, a preset): scope judges the model it can read, so they are
+  // refused, unlogged, and named (lib/providers/openrouter.ts).
+  const openrouterField = provider === "openrouter" ? openrouterModelSelectionField(bodyObj) : null;
+  if (openrouterField !== null) {
+    return new Response(JSON.stringify({ error: "model_selection_unsupported", field: openrouterField }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
   // A request option that bills above the model's table row (a paid service
   // tier, Anthropic fast mode or US-only inference) cannot be held to a dollar
   // limit either (lib/pricing.ts unpricedRequestOption). Refused before policy
@@ -1300,7 +1331,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       ? "embeddings"
       : isResponsesEndpoint(attemptProvider, target.upstreamPath)
         ? "responses"
-        : "provider";
+        : isOllamaNativeEndpoint(attemptProvider, req.method, path)
+          ? "ollama"
+          : "provider";
 
     // S5: ensure OpenAI-compatible streams report usage. Re-derived per attempt —
     // the flag is provider-shaped and the model in the body changes. A copy, not
@@ -1310,13 +1343,28 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const attemptBody: Record<string, unknown> = model
       ? { ...bodyObj, model: attemptModel }
       : { ...bodyObj };
-    if (usesOpenAiUsageShape(attemptProvider) && wantsStream && usageProtocol !== "responses") {
+    if (usesOpenAiUsageShape(attemptProvider) && wantsStream && usageProtocol === "provider") {
       attemptBody.stream_options = {
         ...((bodyObj.stream_options as Record<string, unknown> | undefined) ?? {}),
         include_usage: true,
       };
     }
-    const forwardBody = JSON.stringify(attemptBody);
+    // Hosted tools (DECISIONS 2026-10-07): under a dollar limit an uncapped one is
+    // capped on this copy, and the hold below covers what the cap allows. Per
+    // attempt, because a fallback's provider prices its tools differently.
+    const cappedBody = withDefaultToolCaps(attemptProvider, attemptBody, dollarLimited);
+    const toolPlan = hostedToolPlan(attemptProvider, cappedBody);
+    // OpenRouter is priced per call (DECISIONS 2026-10-07, OpenRouter): its dearest
+    // endpoint for this model prices the hold, on every call, so a call that ends
+    // without a cost report keeps a priced estimate as every other provider's does,
+    // rather than a confident $0. Under a dollar limit the same rates also go out as
+    // `provider.max_price`, so routing cannot pick an endpoint dearer than what was
+    // held, and a model that cannot be priced is refused after the hold opens
+    // (below), like a custom endpoint at 5b. Without one, an unreadable price only
+    // leaves the hold at zero. A model listing carries no model.
+    const openrouterChat = attemptProvider === "openrouter" && !isModelListing(path);
+    const openrouterPriced = openrouterChat && dollarLimited;
+    const openrouterPrice = openrouterChat ? await openrouterCeilingFor(attemptModel) : null;
 
     // Where this attempt's credential goes, resolved BEFORE the hold opens: the
     // hold's cost estimate depends on it (a custom endpoint is unpriced, so it
@@ -1335,6 +1383,16 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // Null both when there is genuinely no endpoint and when the read failed —
     // the failure is refused below, and pricing an unsent call is moot either way.
     const custom = resolvedEndpoint.known ? resolvedEndpoint.endpoint : null;
+    // Built once the endpoint is known: OpenAI's own host is asked to report the
+    // tier it used (lib/providers/service-tier.ts), a custom endpoint is not.
+    const forwardBody = JSON.stringify(
+      withReportedServiceTier(
+        attemptProvider,
+        openrouterPriced && openrouterPrice ? withMaxPrice(cappedBody, openrouterPrice) : cappedBody,
+        usageProtocol,
+        custom
+      )
+    );
 
     // T4-02: a call to a custom endpoint reserves NO money. Its price is unknown,
     // and since S3-03 a dollar limit (cumulative or periodic) refuses it at step
@@ -1346,9 +1404,18 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // same zero), so the row needs no enforced figure and Postgres's definition
     // of spend matches the counter. Tokens are real wherever the call went and
     // are reserved as before.
-    const estimateMicrocents = isPricedEndpoint(custom)
-      ? costMicrocents(attemptModel, estimatedUsage.inputTokens, estimatedUsage.outputTokens, attemptProvider)
-      : 0;
+    const toolReserve =
+      toolPlan && isProvider(attemptProvider)
+        ? hostedToolReserve(toolPlan, attemptModel, attemptProvider)
+        : { tokens: 0, microcents: 0 };
+    const estimateMicrocents = !isPricedEndpoint(custom)
+      ? 0
+      : attemptProvider === "openrouter"
+        ? openrouterPrice
+          ? openrouterHoldMicrocents(openrouterPrice, estimatedUsage, bodyObj)
+          : 0
+        : costMicrocents(attemptModel, estimatedUsage.inputTokens, estimatedUsage.outputTokens, attemptProvider) +
+          toolReserve.microcents;
 
     // ── 5. Open the attempt's hold (atomic) ────────────────────────────────────
     // One clock per attempt: it decides the period the hold is judged in, and
@@ -1357,7 +1424,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const holdArgs: Parameters<typeof openHold>[0] = {
       agentId,
       attemptId,
-      estimate,
+      // Hosted-tool results arrive as input tokens inside the call: a token cap
+      // has to hold room for them as well.
+      estimate: estimate + toolReserve.tokens,
       estimateMicrocents,
       capTokens,
       capMicrocents,
@@ -1584,8 +1653,18 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // spend mirror takes the 0 because unknown money cannot be added to a
       // total. Every one of those three used to receive a bare zero and present
       // it as "this call was free".
-      const cost = costMicrocentsForUsage(usage, attemptModel, attemptProvider, custom);
       const priced = isPricedEndpoint(custom);
+      // Hosted tools the provider reported, on top of their tokens (already in
+      // `usage`). The call's wall time bounds any code execution inside it.
+      const tokenCost = costMicrocentsForUsage(usage, attemptModel, attemptProvider, custom);
+      // OpenRouter's charge is the cost it reports (lib/providers/openrouter.ts):
+      // only it knows which endpoint served the call. A call that reported none is
+      // `usage_unknown`, which keeps whatever was held.
+      const cost = !priced
+        ? tokenCost
+        : attemptProvider === "openrouter"
+          ? (usage.reportedMicrocents ?? 0)
+          : totalWithHostedTools(attemptProvider, tokenCost, usage.hostedTools, toolPlan, Date.now() - attemptNowMs);
 
       // Every token the provider processed for this call, which is what a token
       // budget is a limit on. Anthropic reports a cached prompt across three
@@ -1891,6 +1970,23 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       );
     }
 
+    // ── 5c. An OpenRouter model its own listing cannot price ───────────────────
+    //
+    // The gate lets OpenRouter past the price-row check because it is priced here,
+    // per call. A model with no endpoints (an alias, a router), a variable price,
+    // or a listing that could not be read has no price a dollar limit could hold,
+    // so it gets the same answer an unlisted model gets at the gate. Nothing was
+    // sent; the reservation is released in full. A fallback is skipped instead.
+    if (openrouterPriced && !openrouterPrice && !custom) {
+      const settle = reconcile(NO_USAGE, "blocked_unpriced_model", "not_dispatched", 402);
+      if (!primary) {
+        await settle.released;
+        waitUntil(settle.done);
+        return { kind: "skipped" };
+      }
+      return terminal(errR(402, "unpriced_model"), settle);
+    }
+
     // ── 6. Resolve provider key (encrypted cache, else Vault RPC) ──────────────
     //
     // The endpoint was resolved just above, AFTER the budget reserve of step 5
@@ -2053,7 +2149,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // contributes everything after it. Without this the documented
       // `http://vllm.internal:8000/v1` composed to `/v1/v1/chat/completions`
       // and the upstream 404'd — the feature's own example could not work.
-      const upstreamSuffix = custom
+      // Ollama's own API lives at the server ROOT, not under the stored `/v1`
+      // base (`root` rules in lib/scope.ts): same host and port the operator
+      // gate admitted, without its version segment.
+      const rootRelative = custom !== null && isRootRelativeEndpoint(attemptProvider, req.method, path);
+      const upstreamSuffix = custom && !rootRelative
         ? versionlessUpstreamPath(target.upstreamPath)
         : target.upstreamPath;
       // The client's query string, MINUS this route's own routing parameters.
@@ -2068,7 +2168,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // Unreachable after 5a' (a provider with no host of its own always has a
       // `custom` here), and refused as unbuildable rather than asserted away.
       if (upstreamBase === null) throw new Error("no upstream base");
-      targetUrl = `${joinUpstream(upstreamBase, upstreamSuffix)}${forwardedSearch}`;
+      targetUrl = `${joinUpstream(rootRelative ? serverRootOf(upstreamBase) : upstreamBase, upstreamSuffix)}${forwardedSearch}`;
     } catch {
       // The upstream URL could not even be constructed. Nothing was sent.
       const settle = reconcile(NO_USAGE, "blocked_endpoint", "not_dispatched", 400);
@@ -2087,6 +2187,18 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     if (accept) {
       const safeAccept = accept.replace(/[\r\n\x00-\x1f]/g, "").slice(0, 256);
       if (safeAccept) fwdHeaders.set("accept", safeAccept);
+    }
+    // The one header taken from the client on purpose (lib/providers/anthropic-beta.ts):
+    // Claude Code's body needs its betas, and only betas that change neither reach
+    // nor cost are passed. Set before the credential, which nothing can override.
+    if (attemptProvider === "anthropic") {
+      const beta = forwardableAnthropicBeta(req.headers.get("anthropic-beta")).header;
+      if (beta) fwdHeaders.set("anthropic-beta", beta);
+    }
+    // OpenRouter credits traffic to the app these name; PassControl names itself,
+    // never the client's app (DECISIONS 2026-10-07, OpenRouter).
+    for (const [h, v] of Object.entries(providerAttributionHeaders(attemptProvider))) {
+      fwdHeaders.set(h, v);
     }
     for (const [h, v] of Object.entries(authHeaders(attemptProvider, providerKey))) {
       fwdHeaders.set(h, v);
@@ -2267,7 +2379,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     }
 
     const contentType = upstream.headers.get("content-type") ?? "";
-    const isStream = contentType.includes("text/event-stream");
+    // Ollama's own API streams NDJSON, and does so by default.
+    const isStream =
+      contentType.includes("text/event-stream") ||
+      (usageProtocol === "ollama" && contentType.includes("application/x-ndjson"));
 
     // Surface upstream errors verbatim (never leak the key); reconcile by releasing.
     //
@@ -2462,7 +2577,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         response: new Response(redactBody(upstream.body).pipeThrough(stream), {
           status: 200,
           headers: {
-            "content-type": "text/event-stream; charset=utf-8",
+            "content-type": usageProtocol === "ollama" ? "application/x-ndjson" : "text/event-stream; charset=utf-8",
             "cache-control": "no-cache, no-transform",
             connection: "keep-alive",
             // The id, not the receipt: on a stream the response headers are already
@@ -2495,7 +2610,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       return {};
     });
     const usage = usageFromJson(attemptProvider, json, usageProtocol);
-    const discovery = req.method === "GET" && isModelListingIndex(path);
+    // Ollama's metadata calls (show, tags, version) generate nothing either: a
+    // body with no usage is a complete call that cost nothing.
+    const discovery =
+      (req.method === "GET" && isModelListingIndex(path)) || (attemptProvider === "local" && isModelListing(path));
     // Discovery is bounded by the visa. `GET /v1/models` otherwise answers with
     // every model the PROVIDER KEY can reach — the tenant's whole account —
     // rather than the models THIS agent may call, so an SDK's model picker
@@ -2597,6 +2715,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // The tool rule is per provider, so a request the primary may carry can be
     // one a fallback must not.
     if (serverSideToolUse(fallback.provider, bodyObj) !== null) return { verdict: "skip" };
+    if (fallback.provider === "openrouter" && openrouterModelSelectionField(bodyObj) !== null) return { verdict: "skip" };
 
     // Same threaded observation, for the same reason: measuring must not charge
     // the counter. shadowVerdict declines to answer rather than reusing a

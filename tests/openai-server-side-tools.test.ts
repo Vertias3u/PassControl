@@ -29,29 +29,30 @@ describe("OpenAI: client-executed tools pass", () => {
     ["apply_patch", { tools: [{ type: "apply_patch" }] }],
     ["shell on the local environment", { tools: [{ type: "shell", environment: { type: "local" } }] }],
     ["tool_search executed by the client", { tools: [{ type: "tool_search", execution: "client" }] }],
+    // Priced since DECISIONS 2026-10-07 (tests/hosted-tools-openai-xai.test.ts).
+    ["web_search (priced)", { tools: [{ type: "web_search" }] }],
+    ["web_search_preview (priced)", { tools: [{ type: "web_search_preview" }] }],
+    ["a dated web_search_preview (priced)", { tools: [{ type: "web_search_preview_2025_03_11" }] }],
+    ["file_search (priced)", { tools: [{ type: "file_search", vector_store_ids: ["vs_1"] }] }],
+    ["code_interpreter (priced)", { tools: [{ type: "code_interpreter", container: { type: "auto" } }] }],
+    ["shell in a hosted container (priced)", { tools: [{ type: "shell", environment: { type: "container_auto" } }] }],
   ])("allows %s", (_name, body) => {
     expect(serverSideToolUse("openai", body)).toBeNull();
   });
 });
 
-describe("OpenAI: hosted tools and anything ambiguous are refused", () => {
+describe("OpenAI: unpriced hosted tools and anything ambiguous are refused", () => {
   it.each([
-    ["web_search", { tools: [{ type: "web_search" }] }],
-    ["web_search_preview", { tools: [{ type: "web_search_preview" }] }],
-    ["a dated web_search_preview", { tools: [{ type: "web_search_preview_2025_03_11" }] }],
-    ["file_search", { tools: [{ type: "file_search", vector_store_ids: ["vs_1"] }] }],
-    ["code_interpreter", { tools: [{ type: "code_interpreter", container: { type: "auto" } }] }],
     ["image_generation", { tools: [{ type: "image_generation" }] }],
     ["mcp", { tools: [{ type: "mcp", server_label: "s", server_url: "https://x" }] }],
     ["programmatic_tool_calling", { tools: [{ type: "programmatic_tool_calling" }] }],
-    ["shell in a hosted container", { tools: [{ type: "shell", environment: { type: "container_auto" } }] }],
     ["shell with no environment", { tools: [{ type: "shell" }] }],
     ["shell with a null environment", { tools: [{ type: "shell", environment: null }] }],
     ["tool_search executed by the server", { tools: [{ type: "tool_search", execution: "server" }] }],
     ["tool_search with no execution stated", { tools: [{ type: "tool_search" }] }],
     ["a namespace wrapping web_search", { tools: [{ type: "namespace", name: "ns", description: "d", tools: [fn, { type: "web_search" }] }] }],
     ["a namespace with no tools list", { tools: [{ type: "namespace", name: "ns", description: "d" }] }],
-    ["a hosted tool after a function", { tools: [fn, { type: "web_search" }] }],
+    ["an unpriced hosted tool after a function", { tools: [fn, { type: "image_generation" }] }],
     ["an unknown type", { tools: [{ type: "something_new" }] }],
     ["a tool with no type", { tools: [{ name: "f" }] }],
     ["a non-object tool", { tools: ["web_search"] }],
@@ -63,8 +64,9 @@ describe("OpenAI: hosted tools and anything ambiguous are refused", () => {
   });
 });
 
+// Anthropic gained a rule on 2026-10-07: tests/anthropic-server-side-tools.test.ts.
 describe("providers without a rule", () => {
-  it.each(["anthropic", "groq", "mistral", "together", "deepseek", "gemini"])(
+  it.each(["groq", "mistral", "together", "deepseek", "gemini"])(
     "leaves %s requests alone",
     (provider) => {
       expect(serverSideToolUse(provider, { tools: [{ type: "web_search" }], web_search_options: {} })).toBeNull();

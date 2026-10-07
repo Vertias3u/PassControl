@@ -20,6 +20,8 @@
 
 type ToolCheck = (tool: Record<string, unknown>) => boolean;
 
+import { ANTHROPIC_PRICED_TOOLS, OPENAI_PRICED_TOOLS, XAI_PRICED_TOOLS } from "@/lib/providers/hosted-tools";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -47,10 +49,32 @@ const OPENAI_CLIENT_TOOLS: Record<string, ToolCheck> = {
     tool.tools.every((inner) => isRecord(inner) && (inner.type === "function" || inner.type === "custom")),
 };
 
+/**
+ * Anthropic tools the client executes, from the installed SDK's `BetaToolUnion`
+ * (@anthropic-ai/sdk 0.112.4, resources/beta/messages/messages.d.ts): bash,
+ * computer, text editor and memory, each versioned by a date suffix. Matched by
+ * family so a newer version of a client tool passes; everything else in that
+ * union (web search, web fetch, code execution, the advisor, tool search, an MCP
+ * toolset) runs on Anthropic's side and is refused, as is any type added later.
+ */
+const ANTHROPIC_CLIENT_TOOL = /^(?:bash|computer|text_editor|memory)_\d{8}$/u;
+
 interface ProviderRule {
   clientTools: Record<string, ToolCheck>;
   /** Request fields that switch on a hosted capability whenever present. */
   refusedFields: readonly string[];
+  /**
+   * A tool with no `type`, or `type: "custom"`/null, is the agent's own. True only
+   * where the provider documents it so (Anthropic: `BetaTool.type?: 'custom' | null`).
+   */
+  untypedIsClient?: boolean;
+  /** Client-executed type families, versioned by date. */
+  clientTypePattern?: RegExp;
+  /**
+   * Hosted tools accepted because they are PRICED (lib/providers/hosted-tools.ts):
+   * held for before the call and charged at settlement. Exact versions only.
+   */
+  pricedTools?: Readonly<Record<string, unknown>>;
 }
 
 /** xAI documents only functions as client tools ("only functions and web search"). */
@@ -59,8 +83,12 @@ const XAI_CLIENT_TOOLS: Record<string, ToolCheck> = {
 };
 
 const RULES: Readonly<Record<string, ProviderRule>> = {
+  // Web search, file search, code interpreter and hosted shell are accepted and
+  // priced (DECISIONS 2026-10-07); MCP, image generation and server tool search
+  // stay refused. Azure below keeps the old rule: nobody has priced its tools.
   openai: {
     clientTools: OPENAI_CLIENT_TOOLS,
+    pricedTools: OPENAI_PRICED_TOOLS,
     refusedFields: [
       // Chat Completions' web search switch.
       "web_search_options",
@@ -76,12 +104,45 @@ const RULES: Readonly<Record<string, ProviderRule>> = {
     clientTools: OPENAI_CLIENT_TOOLS,
     refusedFields: ["web_search_options", "prompt"],
   },
+  // Claude Code's own tools are all untyped custom tools (captured 2026-10-07).
+  // Web search, web fetch and code execution are accepted and priced (owner,
+  // DECISIONS 2026-10-07). The advisor, tool search and MCP toolsets have no
+  // published per-use price, or reach servers the agent names, and stay refused.
+  anthropic: {
+    clientTools: {},
+    untypedIsClient: true,
+    clientTypePattern: ANTHROPIC_CLIENT_TOOL,
+    pricedTools: ANTHROPIC_PRICED_TOOLS,
+    // Remote MCP servers Anthropic connects to. (`container` reuses a priced
+    // code execution container across turns, so it passes.)
+    refusedFields: ["mcp_servers"],
+  },
+  // Web search, X search, code execution and collections search are accepted and
+  // priced (DECISIONS 2026-10-07); remote MCP and image generation stay refused.
   xai: {
     clientTools: XAI_CLIENT_TOOLS,
+    pricedTools: XAI_PRICED_TOOLS,
     // xAI's older live-search switch. Refused whenever present, even
     // `mode: "off"`: telling a harmless value from a costly one is the judgement
     // this rule avoids making.
     refusedFields: ["search_parameters"],
+  },
+  // OpenRouter runs its own server tools (`openrouter:web_search`, `:shell`,
+  // `:advisor`, `:subagent`, `:fusion`, …), some of which call other models. Its web
+  // search is priced by an engine OpenRouter picks, and one engine bills a third-party
+  // account, so none is priced yet: functions only (plans/openrouter.md).
+  openrouter: {
+    clientTools: { function: () => true },
+    refusedFields: [
+      // The web plugin, and the other plugins (PDF parsing, response healing).
+      "plugins",
+      // Chat Completions' web search switch, which OpenRouter also accepts.
+      "web_search_options",
+      // Server-tool loop control: meaningless without server tools.
+      "stop_server_tools_when",
+      // The legacy switch for xAI's X search through OpenRouter.
+      "x_search_filter",
+    ],
   },
 };
 
@@ -96,7 +157,16 @@ export function serverSideToolUse(provider: string, body: unknown): string | nul
   const tools = body.tools;
   if (!Array.isArray(tools)) return "tools";
   for (const [index, tool] of tools.entries()) {
-    if (!isRecord(tool) || typeof tool.type !== "string") return `tools[${index}]`;
+    if (!isRecord(tool)) return `tools[${index}]`;
+    if (rule.untypedIsClient && (tool.type === undefined || tool.type === null || tool.type === "custom")) continue;
+    if (typeof tool.type !== "string") return `tools[${index}]`;
+    if (rule.clientTypePattern?.test(tool.type)) continue;
+    if (rule.pricedTools && Object.prototype.hasOwnProperty.call(rule.pricedTools, tool.type)) {
+      // A value that is a function is a shape check (an OpenAI container tool
+      // must name its container); anything else means the type alone suffices.
+      const priced = rule.pricedTools[tool.type];
+      if (typeof priced !== "function" || (priced as ToolCheck)(tool)) continue;
+    }
     const check = Object.prototype.hasOwnProperty.call(rule.clientTools, tool.type)
       ? rule.clientTools[tool.type]
       : undefined;
@@ -111,5 +181,8 @@ export function serverSideToolUse(provider: string, body: unknown): string | nul
  * and their dated ids, per the installed SDK's `ChatModel` union).
  */
 export function isServerSideSearchModel(provider: string, model: string): boolean {
+  // OpenRouter's `:online` suffix is "exactly equivalent" to its web plugin
+  // (openrouter.ai/docs/guides/features/plugins/web-search, read 2026-10-07).
+  if (provider === "openrouter") return /:online$/iu.test(model);
   return provider === "openai" && /(^|-)search(-|$)/iu.test(model);
 }

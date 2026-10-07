@@ -13,6 +13,9 @@ export const DEFAULT_ALLOWED_MODELS = Object.freeze({
   deepseek: "deepseek-*",
   gemini: "gemini-*",
   xai: "grok-*",
+  // OpenRouter's free router: it only ever picks a $0 model, so the default grant
+  // spends nothing. A paid model is a scope the operator widens on purpose.
+  openrouter: "openrouter/free",
   // An Azure `model` is a DEPLOYMENT name the customer chose, not a model id.
   // `gpt-*` covers deployments named after their model and nothing wider: a bare
   // `*` would widen an allowlist to whatever a resource ever deploys. An operator
@@ -35,6 +38,8 @@ export const DEFAULT_CLIENT_MODELS = Object.freeze({
   // The cheapest listed model that does not reason (docs.x.ai/developers/models.md,
   // 2026-09-27): xAI's reasoning models cannot turn reasoning off.
   xai: "grok-4.20-0309-non-reasoning",
+  // Stable, where individual `:free` model ids come and go.
+  openrouter: "openrouter/free",
   // A deployment name, so only a guess until the operator names theirs.
   azure: "gpt-4.1-mini",
   // Ollama's most-pulled small model. Only a guess: the dashboard offers the

@@ -124,7 +124,9 @@ describe("reading prompt-cache tokens off a provider response", () => {
 
   // The asymmetry. `prompt_tokens` already contains the cached tokens, so the
   // gateway must add NOTHING here — reporting a cache figure would double-count
-  // the same tokens against the agent's budget.
+  // the same tokens against the agent's budget. The cached part is carried as
+  // `cachedInputTokens`, a subset read for the price alone (owner, 2026-10-07;
+  // tests/openai-cached-input.test.ts), and the token counts are unchanged.
   it("adds nothing on an OpenAI-shaped response, where prompt_tokens already includes the cache", () => {
     const usage = usageFromJson("openai", {
       usage: {
@@ -138,6 +140,7 @@ describe("reading prompt-cache tokens off a provider response", () => {
       outputTokens: 200,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      cachedInputTokens: 18_000,
       sawUsage: true,
       complete: true,
     });
@@ -152,6 +155,7 @@ describe("reading prompt-cache tokens off a provider response", () => {
       outputTokens: 200,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      cachedInputTokens: 18_000,
     });
   });
 

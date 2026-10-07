@@ -51,7 +51,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  for (const server of [sidecar?.server, gateway]) {
+  for (const server of [sidecar?.server, sidecar?.ollamaServer, gateway]) {
     if (server?.listening) await new Promise((resolve) => server.close(resolve));
   }
 });
@@ -167,5 +167,59 @@ describe("service URLs in responses (any-API)", () => {
         if (server.listening) await new Promise((resolve) => server.close(resolve));
       }
     }
+  });
+});
+
+// A second listener for apps that only take OLLAMA_HOST (host:port, no path).
+// Everything on it maps under the gateway's `local` provider. It is its own
+// port, so the main sidecar's forward-proxy handling is untouched, and an
+// absolute-form request (a forward-proxy request for some other host) is refused
+// rather than turned into a governed local call.
+describe("the Ollama listener", () => {
+  async function ollamaCall(method, path, { absolute = false } = {}) {
+    const port = sidecar.ollamaServer.listening ? sidecar.ollamaServer.address().port : await listen(sidecar.ollamaServer);
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: "127.0.0.1", port, method, path: absolute ? `http://elsewhere.example${path}` : path, headers: { "content-type": "application/json", "x-api-key": LEAK } },
+        (res) => {
+          let body = "";
+          res.on("data", (c) => (body += c));
+          res.on("end", () => resolve({ status: res.statusCode, body }));
+        }
+      );
+      req.on("error", reject);
+      req.end(method === "POST" ? '{"model":"qwen2.5:0.5b"}' : undefined);
+    });
+  }
+
+  it("maps /api/chat under /api/v1/local with a visa, and drops the client's key", async () => {
+    const res = await ollamaCall("POST", "/api/chat");
+    expect(res.status).toBe(200);
+    expect(received.at(-1).url).toBe("/api/v1/local/api/chat");
+    expect(received.at(-1).headers.authorization).toBe("Bearer fake.visa.token");
+    expect(JSON.stringify(received.at(-1).headers)).not.toContain(LEAK);
+  });
+
+  it("maps the OpenAI-compatible /v1 paths too", async () => {
+    await ollamaCall("POST", "/v1/chat/completions");
+    expect(received.at(-1).url).toBe("/api/v1/local/v1/chat/completions");
+  });
+
+  it("forwards the health probe instead of answering it", async () => {
+    await ollamaCall("GET", "/");
+    expect(received.at(-1).url).toBe("/api/v1/local/api/version");
+  });
+
+  it("keeps a dot-segment path inside the local prefix", async () => {
+    await ollamaCall("POST", "/api/../../../control/v1/agents");
+    expect(received.at(-1).url).toBe("/api/v1/local/control/v1/agents");
+    await ollamaCall("POST", "/api/%2e%2e/%2e%2e/control/v1/agents");
+    expect(received.at(-1).url).toBe("/api/v1/local/control/v1/agents");
+  });
+
+  it("refuses an absolute-form request", async () => {
+    const res = await ollamaCall("POST", "/api/chat", { absolute: true });
+    expect(res.status).toBe(400);
+    expect(received).toHaveLength(0);
   });
 });

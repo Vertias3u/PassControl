@@ -173,6 +173,14 @@ describe("the derivation's standing assumption", () => {
       '["responses"]',
       "OPENAI_EMBEDDINGS_PATH",
       '["embeddings"]',
+      // Recorded decision (2026-10-07, 1.3.0 #3): Ollama's own API on `local`.
+      // /api/chat and /api/generate are inference, model-bound like chat.
+      // /api/show is a POST that names a model and runs no inference: it is
+      // scope-exempt metadata and settles at zero, but its row carries the model,
+      // so it classifies as model-bound, keeping "every POST is model-bound" true.
+      '["api", "chat"]',
+      '["api", "generate"]',
+      '["api", "show"]',
     ]);
     // Recorded decision (2026-08-25): `VERSIONLESS_MODELS_PATH` (= ["models"])
     // arrived with the gemini provider, whose OpenAI-compat base already carries
@@ -184,6 +192,10 @@ describe("the derivation's standing assumption", () => {
       "OPENAI_MODELS_PATH",
       "VERSIONLESS_MODELS_PATH",
       '["models"]',
+      // Ollama's model listing and server version (2026-10-07): GET, no model,
+      // no inference. Housekeeping, like the listings above.
+      '["api", "tags"]',
+      '["api", "version"]',
     ]);
 
     const rules = [...block.matchAll(/method:\s*"([A-Z]+)",\s*path:\s*(\[[^\]]*\]|\w+)/g)];

@@ -68,8 +68,10 @@ export async function awaitApproval(input: {
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     // Telegram's long-poll returns the moment a tap arrives, so it is the wait.
-    // Leave a second for the store read after it.
-    const poll = await pollTelegramDecisions(request.userId, Math.floor(remaining / 1000) - 1).catch(() => null);
+    // Leave a second for the store read after it, and cut the request off at
+    // the deadline: a hung Telegram must not carry the call past the edge's
+    // 25-second first byte (tests/approval-gate-deadline.test.ts).
+    const poll = await pollTelegramDecisions(request.userId, Math.floor(remaining / 1000) - 1, remaining).catch(() => null);
     if (poll?.state !== "ok") await sleep(Math.min(TICK_MS, Math.max(0, deadline - Date.now())));
     let next;
     try {

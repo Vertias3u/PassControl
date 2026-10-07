@@ -143,6 +143,7 @@ const REFUSAL_TEST_CANDIDATES: Readonly<Record<ProviderId, readonly string[]>> =
   deepseek: ["deepseek-reasoner"],
   gemini: ["gemini-2.5-pro"],
   xai: ["grok-4.7", "grok-4.3"],
+  openrouter: ["openai/gpt-5", "anthropic/claude-sonnet-4.5"],
   // Azure's `model` is a deployment name the customer chose. These fall outside
   // the default `gpt-*` grant, so the demonstration works on the default scope;
   // a grant that covers them falls through to the synthetic id below.

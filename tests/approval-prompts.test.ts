@@ -173,6 +173,17 @@ describe("reading Telegram taps", () => {
     },
   });
 
+  it("aborts getUpdates at the caller's cap when that comes first", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    fetchMock.mockResolvedValue(json({ ok: true, result: [] }));
+    await pollTelegramDecisions("tenant-a", 14, 2_500);
+    expect(timeout).toHaveBeenCalledWith(2_500);
+    timeout.mockClear();
+    await pollTelegramDecisions("tenant-a", 5);
+    expect(timeout).toHaveBeenCalledWith(10_000);
+    timeout.mockRestore();
+  });
+
   it("does nothing when another poll holds the lock", async () => {
     m.claim.mockResolvedValue(false);
     expect(await pollTelegramDecisions("tenant-a", 5)).toEqual({ state: "busy" });

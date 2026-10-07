@@ -1,0 +1,202 @@
+{
+  "_source": "Codex CLI 0.160.1 `codex exec -p passcontrol`, with a real user config layered under it (plugins on), captured 2026-10-07. Instructions, input text, descriptions, schemas and every id/path scrubbed; field set and tool types are as sent.",
+  "model": "gpt-5-mini",
+  "instructions": "(scrubbed)",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "say hi"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "exec_command",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "function",
+      "name": "write_stdin",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "function",
+      "name": "list_mcp_resources",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "function",
+      "name": "list_mcp_resource_templates",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "function",
+      "name": "read_mcp_resource",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "function",
+      "name": "request_user_input",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "function",
+      "name": "view_image",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "namespace",
+      "name": "collaboration",
+      "tools": [
+        {
+          "type": "function",
+          "name": "followup_task",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "type": "function",
+          "name": "interrupt_agent",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "type": "function",
+          "name": "list_agents",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "type": "function",
+          "name": "send_message",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "type": "function",
+          "name": "spawn_agent",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "type": "function",
+          "name": "wait_agent",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ]
+    },
+    {
+      "type": "namespace",
+      "name": "mcp__node_repl",
+      "tools": [
+        {
+          "type": "function",
+          "name": "js",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "type": "function",
+          "name": "js_add_node_module_dir",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "type": "function",
+          "name": "js_reset",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ]
+    },
+    {
+      "type": "function",
+      "name": "get_goal",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "function",
+      "name": "create_goal",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "function",
+      "name": "update_goal",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "type": "web_search",
+      "external_web_access": false
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "reasoning": {
+    "effort": "medium",
+    "summary": "auto"
+  },
+  "store": false,
+  "stream": true,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "00000000-0000-0000-0000-000000000000",
+  "client_metadata": {
+    "session_id": "00000000-0000-0000-0000-000000000000"
+  }
+}

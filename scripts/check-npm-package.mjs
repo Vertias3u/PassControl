@@ -37,6 +37,11 @@ const allowed = new Set([
   "cli/config.mjs",
   "cli/integration-defaults.mjs",
   "cli/integration-defaults.d.mts",
+  // `configure claude-code` writes Claude Code's settings through it, and
+  // bin/passcontrol.mjs imports it at startup: Node built-ins only.
+  "cli/claude-code.mjs",
+  // `configure codex` writes a Codex profile through it; Node built-ins only.
+  "cli/codex.mjs",
   // Tier 1 passport custody is part of the executable's startup graph. It uses
   // only OS-shipped commands and Node built-ins; omitting it makes every
   // installed CLI fail before dispatch rather than merely disabling migration.

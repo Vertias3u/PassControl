@@ -154,14 +154,14 @@ in the generated configuration:
 passcontrol configure claude-desktop --write
 ```
 
-The cursor preset also writes configuration; claude-code prints its client-managed add command.
+The cursor preset also writes configuration. `passcontrol configure claude-code --write` routes Claude Code's own model calls through the sidecar by merging two keys into its settings. `passcontrol configure codex --write` does the same for Codex with a profile file of its own, used as `codex --profile passcontrol`.
 
 The sidecar listens on loopback by default and substitutes a visa for the client's dummy
 API key. Treat access to that local listener as access to the configured agent. It is
 not a sandbox against other processes running as you. Its provider CONNECT requests are
 refused; use base URLs rather than TLS interception.
 
-Presets (from `cli/presets.mjs`): `generic`, `openhands`, `litellm`, `aider`, `hermes`, `cline`, `continue`, `chatbox`, `jan`, `msty`, `cherry-studio`, `open-webui`, `librechat`; service presets: `github`, `telegram`, `brave`, `notion`, `discord`; MCP presets: `claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
+Presets (from `cli/presets.mjs`): `generic`, `openhands`, `litellm`, `aider`, `hermes`, `cline`, `continue`, `chatbox`, `jan`, `msty`, `cherry-studio`, `open-webui`, `librechat`; service presets: `github`, `telegram`, `brave`, `notion`, `discord`; coding agent: `codex`; MCP presets: `claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
 supported paths. [Hermes configuration](./docs/integrations/hermes.md).
 
 ## CLI configuration and key storage
@@ -325,6 +325,7 @@ All paths below are relative to `/api/v1/<provider>`. SDK base URLs and aliases 
 | `deepseek` | OpenAI-compatible Chat Completions | Not proxied |
 | `gemini` | Google's **OpenAI-compatible** Chat Completions | Models list/detail |
 | `xai` | **POST Responses** only (legacy Chat Completions refused) | Models list/detail |
+| `openrouter` | OpenRouter's Chat Completions, one key for its whole catalog; charged at the cost OpenRouter reports | Models list |
 | `azure` | Azure OpenAI v1: Chat Completions, **POST Responses** and **POST Embeddings**, at the resource address stored with the key | Models list |
 | `local` | A model server you run (Ollama, LM Studio, vLLM): Chat Completions at the address stored with the credential, self-host only | Models list |
 

@@ -43,6 +43,7 @@ export const PROVIDER_UPSTREAMS = {
   // permanently ineligible for `--allow-connect`.
   gemini: { hostname: "generativelanguage.googleapis.com", basePath: "/v1beta/openai" },
   xai: { hostname: "api.x.ai", basePath: "" },
+  openrouter: { hostname: "openrouter.ai", basePath: "/api" },
 };
 
 /**

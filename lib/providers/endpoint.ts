@@ -311,6 +311,19 @@ export function versionlessUpstreamPath(upstreamPath: readonly string[]): readon
   return first !== undefined && VERSION_SEGMENT.test(first) ? rest : upstreamPath;
 }
 
+/**
+ * The server root under a stored base: the base without a trailing version
+ * segment (`http://localhost:11434/v1` → `http://localhost:11434`). Only for the
+ * rules marked `root` (Ollama's own API), whose paths live at the root. Same
+ * host and port as the base the operator gate already admitted.
+ */
+export function serverRootOf(base: string): string {
+  const trimmed = base.replace(/\/+$/u, "");
+  const cut = trimmed.lastIndexOf("/");
+  const last = trimmed.slice(cut + 1);
+  return cut > trimmed.indexOf("//") + 1 && VERSION_SEGMENT.test(last) ? trimmed.slice(0, cut) : trimmed;
+}
+
 export function joinUpstream(base: string, upstreamPath: readonly string[]): string {
   for (const segment of upstreamPath) {
     if (segment === "" || isDotSegment(segment)) {

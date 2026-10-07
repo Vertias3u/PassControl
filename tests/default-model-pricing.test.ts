@@ -25,9 +25,13 @@ describe("hasListedPrice", () => {
 describe("default client models are priced by a specific row", () => {
   // Azure's default is a deployment-name guess on a provider that is never
   // priced (tests/azure-provider.test.ts), so it has no row to check. Neither
-  // has `local`: a model on the developer's own server has no price at all.
+  // has `local`: a model on the developer's own server has no price at all. Nor
+  // OpenRouter, priced per call from its own listing; its default is the free
+  // router, which costs nothing (tests/proxy-openrouter.test.ts).
   it.each(
-    (Object.entries(DEFAULT_CLIENT_MODELS) as [ProviderId, string][]).filter(([p]) => p !== "azure" && p !== "local")
+    (Object.entries(DEFAULT_CLIENT_MODELS) as [ProviderId, string][]).filter(
+      ([p]) => p !== "azure" && p !== "local" && p !== "openrouter"
+    )
   )(
     "%s default %s",
     (provider, model) => {
