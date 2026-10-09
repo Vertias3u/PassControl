@@ -156,5 +156,18 @@ export function createGatewayClient({
     async listModels() {
       return modelsFromVisa(await visas.getVisa());
     },
+
+    /** The agent's own scope and limits (GET /api/v1/self). Reads; spends nothing. */
+    async self() {
+      const response = await visas.fetchWithVisa((visa) =>
+        fetchImpl(`${baseUrl}/api/v1/self`, { method: "GET", headers: { authorization: `Bearer ${visa}` } })
+      );
+      if (!response.ok) throw new Error(proxyError(response.status, await response.text()));
+      try {
+        return await response.json();
+      } catch {
+        throw new Error("Gateway returned a non-JSON answer for the agent's limits.");
+      }
+    },
   };
 }

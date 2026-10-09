@@ -95,6 +95,8 @@ export const DEPARTURE_VERDICT: Record<
   credential_changed: { word: "ROTATED", tone: "held" },
   blocked_unpriced_endpoint: { word: "NO PRICE", tone: "held" },
   blocked_unpriced_model: { word: "UNPRICED", tone: "held" },
+  blocked_server_tool: { word: "TOOL", tone: "held" },
+  blocked_secret: { word: "SECRET", tone: "held" },
   // Not "NO VISA": a Direct Agent Key call never presents a visa, and a visa
   // call that is refused HAD one. What both lacked was access to this model.
   blocked_scope: { word: "NOT ALLOWED", tone: "held" },

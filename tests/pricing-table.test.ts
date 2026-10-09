@@ -30,7 +30,14 @@ const TABLE: Record<Exclude<ProviderId, "azure" | "local" | "openrouter">, { sou
       ["claude-opus-5-5", 4, 20], ["claude-opus-5", 5, 25],
       ["claude-opus-4-8", 5, 25], ["claude-opus-4-7", 5, 25], ["claude-opus-4-6", 5, 25], ["claude-opus-4-5", 5, 25],
       ["claude-opus-4-1", 15, 75], ["claude-opus-4", 15, 75],
+      // Read 2026-10-08 (same page). Mythos 5.1 and 5 are limited availability and the
+      // models pages do not list their ids; these follow the documented
+      // claude-{name}-{major}[-{minor}] scheme.
+      ["claude-sonnet-5-5", 2, 10], ["claude-mythos-5-1", 10, 50], ["claude-mythos-5", 10, 50],
       ["claude-sonnet-5", 2, 10], ["claude-sonnet-4-6", 3, 15], ["claude-sonnet-4-5", 3, 15], ["claude-sonnet-4", 3, 15],
+      // Haiku 5.5 is HELD at its over-100K rates; it settles by prompt length
+      // (tests/anthropic-haiku-tiers.test.ts). Read 2026-10-08.
+      ["claude-haiku-5-5", 0.5, 2.5],
       ["claude-haiku-4-5", 1, 5], ["claude-haiku-4-5-20251001", 1, 5], ["claude-3-5-haiku", 0.8, 4],
     ],
   },

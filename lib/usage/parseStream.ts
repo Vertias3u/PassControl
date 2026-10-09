@@ -11,7 +11,7 @@
 // message_start/message_delta.
 import { usesOpenAiUsageShape, type ProviderId } from "../providers";
 import { TopLevelUsageScanner } from "./topLevelUsage";
-import { xaiTicksToMicrocents, type HostedToolUse } from "@/lib/providers/hosted-tools";
+import { xaiTicksToMicrocents, type AdvisorIteration, type HostedToolUse } from "@/lib/providers/hosted-tools";
 import { openrouterReportedMicrocents } from "@/lib/providers/openrouter";
 
 /**
@@ -36,7 +36,8 @@ export type UsageProtocol = "provider" | "responses" | "embeddings" | "ollama";
  * really consumed ~18k, and a gateway reading only `inputTokens` under-counts a
  * token budget by orders of magnitude. They are separate fields rather than
  * folded into `inputTokens` because they are priced differently (see
- * costMicrocentsForUsage) — a cache read is a tenth of the input rate.
+ * costMicrocentsForUsage) — a cache read is a tenth of the input rate on most
+ * models, less on a few (lib/pricing.ts `claudeCacheRead`).
  *
  * They are always 0 for the OpenAI-shaped providers, and that is correct, not an
  * omission: `prompt_tokens` there ALREADY includes cached tokens
@@ -51,12 +52,46 @@ export type UsageProtocol = "provider" | "responses" | "embeddings" | "ollama";
 function anthropicServerToolUse(u: unknown): HostedToolUse | null {
   if (!u || typeof u !== "object") return null;
   const s = (u as Record<string, unknown>).server_tool_use;
-  if (!s || typeof s !== "object") return null;
+  const advisor = anthropicAdvisorIterations((u as Record<string, unknown>).iterations);
+  if ((!s || typeof s !== "object") && advisor === null) return null;
   const n = (k: string) => {
-    const v = (s as Record<string, unknown>)[k];
+    const v = s && typeof s === "object" ? (s as Record<string, unknown>)[k] : undefined;
     return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
   };
-  return { webSearch: n("web_search_requests"), webFetch: n("web_fetch_requests"), codeExecution: n("code_execution_requests") };
+  return {
+    webSearch: n("web_search_requests"),
+    webFetch: n("web_fetch_requests"),
+    codeExecution: n("code_execution_requests"),
+    ...(advisor !== null ? { advisor } : {}),
+  };
+}
+
+/**
+ * The advisor's sub-inferences from `usage.iterations`: `advisor_message` entries
+ * only, since `message` entries are already summed into the top-level usage
+ * (advisor-tool docs, read 2026-10-08). Each stream delta carries the WHOLE array,
+ * so a later one replaces an earlier one rather than adding to it. Null when there
+ * is no array; malformed entries are skipped, never guessed at.
+ */
+function anthropicAdvisorIterations(iterations: unknown): AdvisorIteration[] | null {
+  if (!Array.isArray(iterations)) return null;
+  const out: AdvisorIteration[] = [];
+  for (const it of iterations) {
+    if (!it || typeof it !== "object") continue;
+    const r = it as Record<string, unknown>;
+    if (r.type !== "advisor_message") continue;
+    const input = token(r.input_tokens);
+    const output = token(r.output_tokens);
+    if (input === null || output === null) continue;
+    out.push({
+      ...(typeof r.model === "string" && r.model ? { model: r.model.slice(0, 128) } : {}),
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadTokens: token(r.cache_read_input_tokens) ?? 0,
+      cacheWriteTokens: token(r.cache_creation_input_tokens) ?? 0,
+    });
+  }
+  return out;
 }
 
 /**

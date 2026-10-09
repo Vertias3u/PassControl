@@ -222,6 +222,21 @@ describe("configure --write", () => {
     expect(JSON.parse(await fs.readFile(path.join(tmp, ".claude", "settings.local.json"), "utf8"))).toEqual({});
   });
 
+  it("`configure claude-code --write --statusline` adds the budget line, and --remove takes it out", async () => {
+    const { out } = await runCli(["configure", "claude-code", "--write", "--statusline"]);
+    expect(out).toMatch(/status line/);
+    const file = path.join(tmp, ".claude", "settings.local.json");
+    const written = JSON.parse(await fs.readFile(file, "utf8"));
+    expect(written.statusLine).toEqual({ type: "command", command: "passcontrol statusline --port 8788" });
+    await runCli(["configure", "claude-code", "--remove"]);
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual({});
+  });
+
+  it("`configure claude-code` without --statusline offers it", async () => {
+    const { out } = await runCli(["configure", "claude-code"]);
+    expect(out).toContain("configure claude-code --write --statusline");
+  });
+
   it("`configure claude-code --write --global` writes the user settings", async () => {
     const { out } = await runCli(["configure", "claude-code", "--write", "--global"]);
     expect(out).toMatch(/wrote .*home\/\.claude\/settings\.json/);

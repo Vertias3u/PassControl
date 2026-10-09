@@ -78,6 +78,18 @@ const allowed = new Set([
   // it at load, so a missing file is a CLI that cannot start.
   "cli/local-stack.mjs",
   "cli/gateway-probe.mjs",
+  // The sidecar's receipt-id journal. cli/sidecar.mjs imports it at load, so a
+  // missing file is a sidecar that cannot start.
+  "cli/journal.mjs",
+  // The session a relayed call declared, for its journal line. cli/sidecar.mjs
+  // imports it at load, so a missing file is a sidecar that cannot start.
+  "cli/declared-session.mjs",
+  // How an agent's limits read to a person. cli/mcp/server.mjs imports it at load,
+  // so a missing file is an MCP server that cannot start.
+  "cli/budget-format.mjs",
+  // `passcontrol statusline`. bin/passcontrol.mjs imports it at load, so a missing
+  // file is a CLI that cannot start.
+  "cli/statusline.mjs",
   "cli/mcp/gateway.mjs",
   "cli/mcp/integration.mjs",
   "cli/mcp/README.md",

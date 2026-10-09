@@ -20,7 +20,13 @@
 
 type ToolCheck = (tool: Record<string, unknown>) => boolean;
 
-import { ANTHROPIC_PRICED_TOOLS, OPENAI_PRICED_TOOLS, XAI_PRICED_TOOLS } from "@/lib/providers/hosted-tools";
+import {
+  ANTHROPIC_ADVISOR_TYPES,
+  ANTHROPIC_PRICED_TOOLS,
+  anthropicAdvisor,
+  OPENAI_PRICED_TOOLS,
+  XAI_PRICED_TOOLS,
+} from "@/lib/providers/hosted-tools";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -104,15 +110,21 @@ const RULES: Readonly<Record<string, ProviderRule>> = {
     clientTools: OPENAI_CLIENT_TOOLS,
     refusedFields: ["web_search_options", "prompt"],
   },
-  // Claude Code's own tools are all untyped custom tools (captured 2026-10-07).
+  // Claude Code's own tools are untyped custom tools (captured 2026-10-07), plus,
+  // since 2.1.293, Anthropic's advisor on main-model calls (captured 2026-10-08).
   // Web search, web fetch and code execution are accepted and priced (owner,
-  // DECISIONS 2026-10-07). The advisor, tool search and MCP toolsets have no
-  // published per-use price, or reach servers the agent names, and stay refused.
+  // DECISIONS 2026-10-07); the advisor too, when its model has a price (P4,
+  // 2026-10-08). Tool search and MCP toolsets have no published per-use price, or
+  // reach servers the agent names, and stay refused.
   anthropic: {
     clientTools: {},
     untypedIsClient: true,
     clientTypePattern: ANTHROPIC_CLIENT_TOOL,
-    pricedTools: ANTHROPIC_PRICED_TOOLS,
+    // The advisor is priced when it names a model with a price row (P4, 2026-10-08).
+    pricedTools: {
+      ...ANTHROPIC_PRICED_TOOLS,
+      ...Object.fromEntries([...ANTHROPIC_ADVISOR_TYPES].map((type) => [type, (tool: Record<string, unknown>) => anthropicAdvisor(tool) !== null])),
+    },
     // Remote MCP servers Anthropic connects to. (`container` reuses a priced
     // code execution container across turns, so it passes.)
     refusedFields: ["mcp_servers"],
@@ -185,4 +197,36 @@ export function isServerSideSearchModel(provider: string, model: string): boolea
   // (openrouter.ai/docs/guides/features/plugins/web-search, read 2026-10-07).
   if (provider === "openrouter") return /:online$/iu.test(model);
   return provider === "openai" && /(^|-)search(-|$)/iu.test(model);
+}
+
+/**
+ * What to name in a refusal: the tool's own `type` where `why` points at a tools[]
+ * entry (`tools[3].type` → `advisor_20260301`), otherwise `why` itself (a refused
+ * field such as `mcp_servers`). Capped, since it echoes the caller's own input.
+ */
+export function serverToolLabel(body: unknown, why: string): string {
+  const index = /^tools\[(\d+)\]/.exec(why);
+  if (index && isRecord(body) && Array.isArray(body.tools)) {
+    const tool = body.tools[Number(index[1])];
+    if (isRecord(tool) && typeof tool.type === "string" && tool.type) return tool.type.slice(0, 64);
+  }
+  return why.slice(0, 64);
+}
+
+/**
+ * The sentence a refused agent (and the person reading its error) gets. Claude
+ * Code's advisor gets the two documented ways to turn it off
+ * (code.claude.com/docs/en/settings-reference, `advisorModel`, read 2026-10-08).
+ */
+export function serverToolRefusalMessage(tool: string): string {
+  if (tool.startsWith("advisor_")) {
+    return (
+      `PassControl cannot price this advisor call (${tool}), so the request was refused before anything was sent. ` +
+      "In Claude Code, run /advisor and pick No advisor, or start it with CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1, then retry."
+    );
+  }
+  return (
+    `The request uses a hosted tool PassControl does not price (${tool}), so it was refused before anything was sent. ` +
+    "Remove that tool, or call it outside PassControl."
+  );
 }

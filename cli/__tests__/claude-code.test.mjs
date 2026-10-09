@@ -17,7 +17,9 @@ import {
   claudeCodeEnv,
   claudeCodeSettingsPath,
   removeClaudeCodeSettings,
+  removeClaudeCodeStatusLine,
   writeClaudeCodeSettings,
+  writeClaudeCodeStatusLine,
 } from "../claude-code.mjs";
 
 let dir;
@@ -113,5 +115,83 @@ describe("removing", () => {
 
   it("is a no-op when there is no file", () => {
     expect(removeClaudeCodeSettings({ target: path.join(dir, "missing.json") })).toEqual({ changed: false });
+  });
+});
+
+// The budget in Claude Code's status line (1.4.0 candidate 2). Same rules as the
+// env keys: the file is the user's, a status line they already have is never
+// replaced, and only one this command wrote is ever removed.
+describe("the status line", () => {
+  const CMD = "passcontrol statusline --port 8788";
+
+  it("adds the status line beside whatever else the file holds", () => {
+    const target = path.join(dir, "settings.json");
+    fs.writeFileSync(target, JSON.stringify({ model: "opus", env: { FOO: "1" } }));
+    const out = writeClaudeCodeStatusLine({ target, command: CMD });
+    expect(out.changed).toBe(true);
+    expect(read(target)).toEqual({ model: "opus", env: { FOO: "1" }, statusLine: { type: "command", command: CMD } });
+    expect(fs.statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  it("is a no-op when it is already there", () => {
+    const target = path.join(dir, "settings.json");
+    writeClaudeCodeStatusLine({ target, command: CMD });
+    expect(writeClaudeCodeStatusLine({ target, command: CMD }).changed).toBe(false);
+  });
+
+  it("never replaces a status line the user already has", () => {
+    const target = path.join(dir, "settings.json");
+    const mine = { type: "command", command: "~/.claude/my-statusline.sh" };
+    fs.writeFileSync(target, JSON.stringify({ statusLine: mine }));
+    const out = writeClaudeCodeStatusLine({ target, command: CMD });
+    expect(out).toEqual({ changed: false, existing: "~/.claude/my-statusline.sh" });
+    expect(read(target)).toEqual({ statusLine: mine });
+  });
+
+  it("updates its own status line when the port changes", () => {
+    const target = path.join(dir, "settings.json");
+    writeClaudeCodeStatusLine({ target, command: CMD });
+    const out = writeClaudeCodeStatusLine({ target, command: "passcontrol statusline --port 9000" });
+    expect(out.changed).toBe(true);
+    expect(read(target).statusLine.command).toBe("passcontrol statusline --port 9000");
+  });
+
+  it("writes the env keys and the status line in ONE save, so the backup is the user's original", () => {
+    const target = path.join(dir, "settings.json");
+    const original = { model: "opus" };
+    fs.writeFileSync(target, JSON.stringify(original));
+    const out = writeClaudeCodeSettings({ target, baseUrl: BASE, statusLineCommand: CMD });
+    expect(out.statusLine).toEqual({ changed: true });
+    expect(read(target)).toEqual({ model: "opus", env: claudeCodeEnv(BASE), statusLine: { type: "command", command: CMD } });
+    expect(read(`${target}.bak`)).toEqual(original);
+  });
+
+  it("still writes the env keys when the user's own status line stays", () => {
+    const target = path.join(dir, "settings.json");
+    const mine = { type: "command", command: "~/.claude/my-statusline.sh" };
+    fs.writeFileSync(target, JSON.stringify({ statusLine: mine }));
+    const out = writeClaudeCodeSettings({ target, baseUrl: BASE, statusLineCommand: CMD });
+    expect(out.statusLine).toEqual({ changed: false, existing: "~/.claude/my-statusline.sh" });
+    expect(read(target)).toEqual({ statusLine: mine, env: claudeCodeEnv(BASE) });
+  });
+
+  it("--remove takes both out in one save, keeping the backup as it was before", () => {
+    const target = path.join(dir, "settings.json");
+    writeClaudeCodeSettings({ target, baseUrl: BASE, statusLineCommand: CMD });
+    const before = read(target);
+    expect(removeClaudeCodeSettings({ target }).changed).toBe(true);
+    expect(read(target)).toEqual({});
+    expect(read(`${target}.bak`)).toEqual(before);
+  });
+
+  it("removes only a status line it wrote", () => {
+    const target = path.join(dir, "settings.json");
+    writeClaudeCodeStatusLine({ target, command: CMD });
+    expect(removeClaudeCodeStatusLine({ target }).changed).toBe(true);
+    expect(read(target)).toEqual({});
+    const mine = { type: "command", command: "~/.claude/my-statusline.sh" };
+    fs.writeFileSync(target, JSON.stringify({ statusLine: mine }));
+    expect(removeClaudeCodeStatusLine({ target }).changed).toBe(false);
+    expect(read(target)).toEqual({ statusLine: mine });
   });
 });

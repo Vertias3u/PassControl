@@ -1,6 +1,7 @@
 // Audit-log writes (service role). agent_logs is the append-only source of truth;
 // agents.spent_* is a best-effort mirror for the dashboard.
 import { serviceClient } from "./supabase";
+import type { ClientLineage } from "./client-lineage";
 import { captureError } from "./observability";
 
 interface LogEntryBase {
@@ -63,6 +64,13 @@ interface LogEntryBase {
     // retry-after), a cumulative cap only clears when the owner raises it.
     | "blocked_budget_period"
     | "blocked_endpoint"
+    // A hosted tool PassControl does not price (Claude Code's advisor with an
+    // unpriced model, tool search, an MCP toolset, OpenAI image generation, …).
+    // Logged since P4 (2026-10-08). Refused before policy and hold, never sent.
+    | "blocked_server_tool"
+    // The secret guard refused a request carrying what looks like a key (2026-10-08,
+    // lib/secret-guard.ts). Never forwarded. The row carries no part of the key.
+    | "blocked_secret"
     | "blocked_killed"
     | "blocked_suspended"
     | "blocked_scope"
@@ -203,6 +211,11 @@ interface LogEntryBase {
    * call, e.g. `GET /repos/acme/*\/issues`. Absent when no rule matched.
    */
   endpoint?: string;
+  /**
+   * The session and sub-agent the client DECLARED (0079, lib/client-lineage.ts).
+   * Identifies the call; never authenticates it.
+   */
+  lineage?: ClientLineage | null;
 }
 
 export type AuthMethod = "passport" | "passport_proof_per_request" | "direct_key";
@@ -271,6 +284,18 @@ export async function writeLog(entry: LogEntry): Promise<void> {
     // An LLM row names neither column, so it is byte-identical to before.
     ...(entry.callKind ? { call_kind: entry.callKind } : {}),
     ...(entry.endpoint ? { endpoint: entry.endpoint } : {}),
+    // Conditional for exactly the reason above, one migration later (0079): a
+    // call that declared no lineage names no client column, so its row is
+    // byte-identical to before and a pre-0079 schema still accepts it. Agent and
+    // parent are omitted for the main agent, which is what NULL means there.
+    ...(entry.lineage
+      ? {
+          client_kind: entry.lineage.kind,
+          client_session: entry.lineage.session,
+          ...(entry.lineage.agent ? { client_agent: entry.lineage.agent } : {}),
+          ...(entry.lineage.parent ? { client_parent: entry.lineage.parent } : {}),
+        }
+      : {}),
     ...(entry.enforcedTokens != null ? { enforced_tokens: Math.round(entry.enforcedTokens) } : {}),
     ...(entry.enforcedMicrocents != null
       ? { enforced_microcents: Math.round(entry.enforcedMicrocents) }

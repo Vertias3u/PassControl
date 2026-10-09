@@ -29,6 +29,7 @@
 export const runtime = "edge";
 
 import { waitUntil } from "@vercel/functions";
+import { readClientLineage } from "@/lib/client-lineage";
 import {
   authenticateGatewayRequest,
   enforceSenderConstraint,
@@ -138,17 +139,26 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     senderProofWould = senderConstraint.would;
   }
 
+  // The session and sub-agent the client DECLARED (lib/client-lineage.ts). It is
+  // NOT identity, and nothing decides on it: it rides inside the two objects below
+  // only because they are spread into every receipt and log row this call writes,
+  // refusals included, so no path can forget it. Read from the headers alone, so
+  // a call refused before its body is read carries the same lineage as one that
+  // completed.
+  const lineage = readClientLineage(req.headers);
   const receiptIdentity =
     principal.kind === "passport"
       ? ({
           authMethod: passportAuthMethod,
           passportId: principal.passportId,
           visaJti: principal.visaJti,
+          lineage,
         } as const)
       : ({
           authMethod: "direct_key",
           agentAccessKeyId: principal.keyId,
           credentialUseId,
+          lineage,
         } as const);
   const logIdentity =
     principal.kind === "passport"
@@ -156,11 +166,13 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
           authMethod: passportAuthMethod,
           passportId: principal.passportId,
           jti: principal.visaJti,
+          lineage,
         } as const)
       : ({
           authMethod: "direct_key",
           agentAccessKeyId: principal.keyId,
           credentialUseId,
+          lineage,
         } as const);
 
   // Set as the call is decided, read by `record`.

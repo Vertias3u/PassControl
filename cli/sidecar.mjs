@@ -1,9 +1,12 @@
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import { Readable } from "node:stream";
 import { bareGatewayOrigin, fail, ok, step, warn } from "./config.mjs";
 import { classifyConnect, classifyProxyRequest, isLoopbackBindHost } from "./proxy-policy.mjs";
 import { createVisaClient } from "./visa-client.mjs";
+import { declaredSession } from "./declared-session.mjs";
+import { defaultJournalDir, openJournal } from "./journal.mjs";
 
 // Hop-by-hop headers plus the ones the sidecar rebuilds itself. `proxy-connection`
 // and friends only appear once something is used as a FORWARD proxy, which is
@@ -107,6 +110,11 @@ export function createSidecar({
   refreshSkewSeconds = 30,
   allowConnectHosts = [],
   onRefusal = (verdict) => warn(`${verdict.code}: ${verdict.message} → ${verdict.help}`),
+  // This run's id: stamped on every forwarded request as `x-passcontrol-run`, the
+  // fallback session for a client that declares none (lib/client-lineage.ts).
+  runId = randomUUID(),
+  // cli/journal.mjs, or null for `--no-journal`.
+  journal = null,
 }) {
   // The upstream URL below is built from this, not from the argument: the
   // sidecar forwards a bearer visa on every proxied request, so its destination
@@ -143,6 +151,8 @@ export function createSidecar({
       if (!isStripped(k) && typeof v === "string") headers[k] = v;
     }
     headers["authorization"] = `Bearer ${visa}`;
+    // Set after the copy, so a client cannot name the run: only the sidecar can.
+    headers["x-passcontrol-run"] = runId;
     headers["x-passcontrol-proof"] = visas.createProof(visa, req.method, new URL(path, origin));
     headers["accept-encoding"] = "identity";
     return fetch(`${origin}${path}`, { method: req.method, headers, body: body ?? undefined });
@@ -155,7 +165,19 @@ export function createSidecar({
   // URL — codeload for an archive download — passes through untouched.
   const toLocal = (value) => value.split(`${origin}/api/v1/`).join(`${localBaseUrl()}/api/v1/`);
 
-  function writeResponse(res, upstream) {
+  function writeResponse(res, upstream, reqHeaders) {
+    // At the headers, not at the end of the body: a streamed call whose client
+    // disconnects mid-stream still produced a receipt, and the user's record of
+    // it must not depend on how long they kept reading. With the session the call
+    // declared, read as the gateway reads it, so a seal is checked against its own.
+    journal?.record(
+      upstream.headers.get("x-passcontrol-receipt-id"),
+      upstream.status,
+      declaredSession((name) => {
+        const v = reqHeaders?.[name];
+        return Array.isArray(v) ? v[0] : v;
+      }, runId)
+    );
     const outHeaders = {};
     upstream.headers.forEach((v, k) => {
       const name = k.toLowerCase();
@@ -181,7 +203,7 @@ export function createSidecar({
     try {
       const body = await readBody(req);
       const upstream = await visas.fetchWithVisa((visa) => fetchUpstream(req, verdict.path, body, visa));
-      writeResponse(res, upstream);
+      writeResponse(res, upstream, req.headers);
     } catch (e) {
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "application/json" });
@@ -227,7 +249,7 @@ export function createSidecar({
         await upstream.body?.cancel().catch(() => {});
         return;
       }
-      writeResponse(res, upstream);
+      writeResponse(res, upstream, req.headers);
     } catch (e) {
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "application/json" });
@@ -280,7 +302,7 @@ export function createSidecar({
     clientSocket.on("close", () => upstream.destroy());
   });
 
-  return { server, ollamaServer, getVisa: visas.getVisa };
+  return { server, ollamaServer, getVisa: visas.getVisa, runId };
 }
 
 /**
@@ -303,7 +325,17 @@ export function assertBindHost(host, allowNonLoopback = false) {
 export function startSidecar(opts) {
   const { gateway, port = 8788, host = "127.0.0.1", allowNonLoopback = false, allowConnectHosts = [], ollamaPort = null } = opts;
   assertBindHost(host, allowNonLoopback);
-  const { server, ollamaServer, getVisa } = createSidecar(opts);
+  const runId = randomUUID();
+  // On unless the operator said --no-journal (D3). See cli/journal.mjs.
+  const journal = opts.noJournal
+    ? null
+    : openJournal({
+        dir: opts.journalDir ?? defaultJournalDir(),
+        runId,
+        onError: (e) =>
+          warn(`journal: could not write ${journal.path} (${e.message}). Calls are unaffected; this run is no longer being recorded.`),
+      });
+  const { server, ollamaServer, getVisa } = createSidecar({ ...opts, runId, journal });
   if (ollamaPort != null) {
     ollamaServer.listen(ollamaPort, host, () => {
       step(`Ollama API (local models) on http://${host}:${ollamaPort}: set OLLAMA_HOST=${host}:${ollamaPort}`);
@@ -314,6 +346,11 @@ export function startSidecar(opts) {
     step(`Listening on http://${host}:${port}`);
     step(`Point your agent at: http://${host}:${port}/api/v1/anthropic (or /api/v1/openai)`);
     step("API key = anything (ignored). Visa is minted + refreshed automatically.");
+    step(
+      journal
+        ? `Journal: ${journal.path} (receipt ids, times, statuses and declared sessions only; --no-journal turns it off)`
+        : "Journal: off (--no-journal). Session seals cannot be checked against this run."
+    );
     // Said at startup rather than only in a refusal, because the whole point of
     // HTTPS_PROXY is that nobody reads the docs first.
     step("HTTPS_PROXY: CONNECT to a provider is refused, not tunnelled — PassControl cannot");

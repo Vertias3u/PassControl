@@ -49,6 +49,8 @@ const MESSAGES: Record<string, string> = {
   statement_receipts_altered:
     "A call this statement committed to no longer matches what was signed. The statement itself is still valid and still signed — it is the underlying call that has changed, so no inclusion proof can be produced against it.",
   internal_error: "Something went wrong. Please try again.",
+  session_too_large: "This session has more calls than one seal can carry.",
+  seal_unavailable: "This instance has no signing key configured, so it cannot seal sessions.",
 };
 
 export function errorResponse(

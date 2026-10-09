@@ -25,3 +25,13 @@ export function demoPassportSecret(): string {
 export function demoControlKey(): string {
   return process.env.PASSCONTROL_DEMO_CONTROL_KEY?.trim() || SEEDED_DEMO_CONTROL_KEY;
 }
+
+/**
+ * The committed demo values, which anyone can read in the public repo: the secret
+ * guard (lib/secret-guard.ts) does not treat these as secrets. Deliberately the SEEDED
+ * values and not the accessors: a rotated value set through the environment is a real
+ * secret, and must be caught like one.
+ */
+export function publiclyCommittedDemoValues(): readonly string[] {
+  return [SEEDED_DEMO_CONTROL_KEY, SEEDED_DEMO_PASSPORT_SECRET];
+}

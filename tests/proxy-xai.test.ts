@@ -342,7 +342,8 @@ describe("governed xAI Responses", () => {
   ])("refuses %s before any reservation or provider contact", async (_name, extra) => {
     const res = await call(["v1", "responses"], { ...ASK, ...extra });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "server_side_tools_unsupported" });
+    // Since P4 (2026-10-08) the refusal names the tool and says why.
+    expect(await res.json()).toMatchObject({ error: "server_side_tools_unsupported", tool: expect.any(String), message: expect.any(String) });
     expect(openHoldMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });

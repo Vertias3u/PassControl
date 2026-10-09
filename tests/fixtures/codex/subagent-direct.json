@@ -1,0 +1,169 @@
+{
+  "_source": "Codex CLI 0.158.0-alpha.2.1 (bundled in ChatGPT.app) `codex exec`, scratch CODEX_HOME, multi_agent on by default, captured 2026-10-08 against a scripted fake upstream (direct), which answered the main agent's first turn with a spawn-sub-agent tool call. Every id is replaced by a placeholder of the same shape, consistently across requests; prompts, credentials, the sidecar proof and the installation id are removed. Header names and the set sent per role are as captured.",
+  "requests": [
+    {
+      "role": "main",
+      "method": "POST",
+      "path": "/v1/responses",
+      "headers": {
+        "accept": "text/event-stream",
+        "content-type": "application/json",
+        "originator": "codex_exec",
+        "session-id": "01a00000-0000-7000-8000-000000000001",
+        "thread-id": "01a00000-0000-7000-8000-000000000001",
+        "user-agent": "codex_exec/0.158.0-alpha.2.1 (Mac OS 27.0.0; arm64) Apple_Terminal/488 (codex_exec; 0.158.0-alpha.2.1)",
+        "x-client-request-id": "01a00000-0000-7000-8000-000000000001",
+        "x-codex-beta-features": "remote_compaction_v2",
+        "x-codex-turn-metadata": "{\"installation_id\":\"(scrubbed)\",\"session_id\":\"01a00000-0000-7000-8000-000000000001\",\"thread_id\":\"01a00000-0000-7000-8000-000000000001\",\"agent_name\":\"/root\",\"turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"window_id\":\"01a00000-0000-7000-8000-000000000001:0\",\"window_number\":0,\"context_window_id\":\"01a00000-0000-7000-8000-000000000003\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5-mini\"}",
+        "x-codex-window-id": "01a00000-0000-7000-8000-000000000001:0"
+      },
+      "body": {
+        "model": "gpt-5-mini",
+        "stream": true,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "multi_agent_v1",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null
+        ],
+        "client_metadata": {
+          "x-codex-turn-metadata": "{\"installation_id\":\"(scrubbed)\",\"session_id\":\"01a00000-0000-7000-8000-000000000001\",\"thread_id\":\"01a00000-0000-7000-8000-000000000001\",\"agent_name\":\"/root\",\"turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"window_id\":\"01a00000-0000-7000-8000-000000000001:0\",\"window_number\":0,\"context_window_id\":\"01a00000-0000-7000-8000-000000000003\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5-mini\"}",
+          "thread_id": "01a00000-0000-7000-8000-000000000001",
+          "x-codex-window-id": "01a00000-0000-7000-8000-000000000001:0",
+          "root_turn_id": "01a00000-0000-7000-8000-000000000002",
+          "session_id": "01a00000-0000-7000-8000-000000000001",
+          "turn_id": "01a00000-0000-7000-8000-000000000002"
+        }
+      }
+    },
+    {
+      "role": "main",
+      "method": "POST",
+      "path": "/v1/responses",
+      "headers": {
+        "accept": "text/event-stream",
+        "content-type": "application/json",
+        "originator": "codex_exec",
+        "session-id": "01a00000-0000-7000-8000-000000000001",
+        "thread-id": "01a00000-0000-7000-8000-000000000001",
+        "user-agent": "codex_exec/0.158.0-alpha.2.1 (Mac OS 27.0.0; arm64) Apple_Terminal/488 (codex_exec; 0.158.0-alpha.2.1)",
+        "x-client-request-id": "01a00000-0000-7000-8000-000000000001",
+        "x-codex-beta-features": "remote_compaction_v2",
+        "x-codex-turn-metadata": "{\"installation_id\":\"(scrubbed)\",\"session_id\":\"01a00000-0000-7000-8000-000000000001\",\"thread_id\":\"01a00000-0000-7000-8000-000000000001\",\"agent_name\":\"/root\",\"turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"window_id\":\"01a00000-0000-7000-8000-000000000001:0\",\"window_number\":0,\"context_window_id\":\"01a00000-0000-7000-8000-000000000003\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5-mini\"}",
+        "x-codex-window-id": "01a00000-0000-7000-8000-000000000001:0"
+      },
+      "body": {
+        "model": "gpt-5-mini",
+        "stream": true,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "multi_agent_v1",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null
+        ],
+        "client_metadata": {
+          "thread_id": "01a00000-0000-7000-8000-000000000001",
+          "x-codex-window-id": "01a00000-0000-7000-8000-000000000001:0",
+          "turn_id": "01a00000-0000-7000-8000-000000000002",
+          "session_id": "01a00000-0000-7000-8000-000000000001",
+          "x-codex-turn-metadata": "{\"installation_id\":\"(scrubbed)\",\"session_id\":\"01a00000-0000-7000-8000-000000000001\",\"thread_id\":\"01a00000-0000-7000-8000-000000000001\",\"agent_name\":\"/root\",\"turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"window_id\":\"01a00000-0000-7000-8000-000000000001:0\",\"window_number\":0,\"context_window_id\":\"01a00000-0000-7000-8000-000000000003\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5-mini\"}",
+          "root_turn_id": "01a00000-0000-7000-8000-000000000002"
+        }
+      }
+    },
+    {
+      "role": "subagent",
+      "method": "POST",
+      "path": "/v1/responses",
+      "headers": {
+        "accept": "text/event-stream",
+        "content-type": "application/json",
+        "originator": "codex_exec",
+        "session-id": "01a00000-0000-7000-8000-000000000001",
+        "thread-id": "01a00000-0000-7000-8000-000000000004",
+        "user-agent": "codex_exec/0.158.0-alpha.2.1 (Mac OS 27.0.0; arm64) Apple_Terminal/488 (codex_exec; 0.158.0-alpha.2.1)",
+        "x-client-request-id": "01a00000-0000-7000-8000-000000000004",
+        "x-codex-beta-features": "remote_compaction_v2",
+        "x-codex-parent-thread-id": "01a00000-0000-7000-8000-000000000001",
+        "x-codex-turn-metadata": "{\"installation_id\":\"(scrubbed)\",\"session_id\":\"01a00000-0000-7000-8000-000000000001\",\"thread_id\":\"01a00000-0000-7000-8000-000000000004\",\"agent_name\":\"/root\",\"turn_id\":\"01a00000-0000-7000-8000-000000000005\",\"window_id\":\"01a00000-0000-7000-8000-000000000004:0\",\"window_number\":0,\"context_window_id\":\"01a00000-0000-7000-8000-000000000006\",\"request_kind\":\"turn\",\"parent_thread_id\":\"01a00000-0000-7000-8000-000000000001\",\"parent_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"root_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"subagent_kind\":\"thread_spawn\",\"thread_source\":\"subagent\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5-mini\"}",
+        "x-codex-window-id": "01a00000-0000-7000-8000-000000000004:0",
+        "x-openai-subagent": "collab_spawn"
+      },
+      "body": {
+        "model": "gpt-5-mini",
+        "stream": true,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null
+        ],
+        "client_metadata": {
+          "session_id": "01a00000-0000-7000-8000-000000000001",
+          "x-codex-turn-metadata": "{\"installation_id\":\"(scrubbed)\",\"session_id\":\"01a00000-0000-7000-8000-000000000001\",\"thread_id\":\"01a00000-0000-7000-8000-000000000004\",\"agent_name\":\"/root\",\"turn_id\":\"01a00000-0000-7000-8000-000000000005\",\"window_id\":\"01a00000-0000-7000-8000-000000000004:0\",\"window_number\":0,\"context_window_id\":\"01a00000-0000-7000-8000-000000000006\",\"request_kind\":\"turn\",\"parent_thread_id\":\"01a00000-0000-7000-8000-000000000001\",\"parent_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"root_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"subagent_kind\":\"thread_spawn\",\"thread_source\":\"subagent\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5-mini\"}",
+          "root_turn_id": "01a00000-0000-7000-8000-000000000002",
+          "parent_turn_id": "01a00000-0000-7000-8000-000000000002",
+          "x-codex-parent-thread-id": "01a00000-0000-7000-8000-000000000001",
+          "thread_id": "01a00000-0000-7000-8000-000000000004",
+          "x-openai-subagent": "collab_spawn",
+          "x-codex-window-id": "01a00000-0000-7000-8000-000000000004:0",
+          "turn_id": "01a00000-0000-7000-8000-000000000005"
+        }
+      }
+    },
+    {
+      "role": "main",
+      "method": "POST",
+      "path": "/v1/responses",
+      "headers": {
+        "accept": "text/event-stream",
+        "content-type": "application/json",
+        "originator": "codex_exec",
+        "session-id": "01a00000-0000-7000-8000-000000000001",
+        "thread-id": "01a00000-0000-7000-8000-000000000001",
+        "user-agent": "codex_exec/0.158.0-alpha.2.1 (Mac OS 27.0.0; arm64) Apple_Terminal/488 (codex_exec; 0.158.0-alpha.2.1)",
+        "x-client-request-id": "01a00000-0000-7000-8000-000000000001",
+        "x-codex-beta-features": "remote_compaction_v2",
+        "x-codex-turn-metadata": "{\"installation_id\":\"(scrubbed)\",\"session_id\":\"01a00000-0000-7000-8000-000000000001\",\"thread_id\":\"01a00000-0000-7000-8000-000000000001\",\"agent_name\":\"/root\",\"turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"window_id\":\"01a00000-0000-7000-8000-000000000001:0\",\"window_number\":0,\"context_window_id\":\"01a00000-0000-7000-8000-000000000003\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5-mini\"}",
+        "x-codex-window-id": "01a00000-0000-7000-8000-000000000001:0"
+      },
+      "body": {
+        "model": "gpt-5-mini",
+        "stream": true,
+        "tools": [
+          "exec_command",
+          "write_stdin",
+          "request_user_input",
+          "view_image",
+          "multi_agent_v1",
+          "get_goal",
+          "create_goal",
+          "update_goal",
+          null
+        ],
+        "client_metadata": {
+          "session_id": "01a00000-0000-7000-8000-000000000001",
+          "root_turn_id": "01a00000-0000-7000-8000-000000000002",
+          "turn_id": "01a00000-0000-7000-8000-000000000002",
+          "x-codex-turn-metadata": "{\"installation_id\":\"(scrubbed)\",\"session_id\":\"01a00000-0000-7000-8000-000000000001\",\"thread_id\":\"01a00000-0000-7000-8000-000000000001\",\"agent_name\":\"/root\",\"turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"window_id\":\"01a00000-0000-7000-8000-000000000001:0\",\"window_number\":0,\"context_window_id\":\"01a00000-0000-7000-8000-000000000003\",\"request_kind\":\"turn\",\"root_turn_id\":\"01a00000-0000-7000-8000-000000000002\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"analytics_enabled\":true,\"model\":\"gpt-5-mini\"}",
+          "x-codex-window-id": "01a00000-0000-7000-8000-000000000001:0",
+          "thread_id": "01a00000-0000-7000-8000-000000000001"
+        }
+      }
+    }
+  ]
+}

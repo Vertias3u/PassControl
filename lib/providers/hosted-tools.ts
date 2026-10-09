@@ -27,7 +27,14 @@
 // minimum, free when the request carries web_search_20260209 / web_fetch_20260209
 // or later. The 1,550 free hours a month are ignored: over-counting is the safe
 // direction for a budget.
-import { costMicrocents, MICROCENTS_PER_CENT } from "@/lib/pricing";
+import {
+  cacheWriteHoldMultiplier,
+  costMicrocents,
+  costMicrocentsForUsage,
+  estimateTokenUsage,
+  hasListedPrice,
+  MICROCENTS_PER_CENT,
+} from "@/lib/pricing";
 import { openaiContainerTier, type MemoryTier } from "./openai-containers";
 
 /** The cap set on an uncapped hosted tool under a dollar limit (owner, 2026-10-07). */
@@ -49,6 +56,51 @@ function anthropicCodeExecutionMicrocents(durationMs: number): number {
 export const ANTHROPIC_CODE_EXECUTION_MIN_MICROCENTS = anthropicCodeExecutionMicrocents(0);
 
 type AnthropicKind = "web_search" | "web_fetch" | "code_execution";
+
+// ── Anthropic's advisor (P4, owner 2026-10-08) ────────────────────────────────
+// A second model Anthropic runs inside the call, "billed at the advisor model's
+// rates", reported in `usage.iterations[]` as `advisor_message` entries outside the
+// top-level usage (advisor-tool docs, read 2026-10-08). Claude Code sends it on
+// main-model calls when the user has picked an advisor
+// (tests/fixtures/claude-code/advisor-tool.json).
+export const ANTHROPIC_ADVISOR_TYPES: ReadonlySet<string> = new Set(["advisor_20260301"]);
+/**
+ * Under a dollar limit, an advisor the agent left uncapped gets one use and 4,096
+ * output tokens a call (Anthropic: typical advice is 1,400 to 1,800 tokens with
+ * thinking; the minimum allowed is 1,024). Uncapped, one Opus 5.5 use may write its
+ * whole 128K output cap, about $2.56, which no small limit could admit. A second
+ * call in the same request gets Anthropic's `max_uses_exceeded` result and the
+ * executor carries on. Owner-adjustable (sprint plan P4).
+ */
+export const ADVISOR_DEFAULT_USES = 1;
+export const ADVISOR_DEFAULT_MAX_TOKENS = 4096;
+/** The advisor's output when the tool sets no `max_tokens`: the model's output cap. */
+const ADVISOR_OUTPUT_CAP = 128_000;
+
+/** An advisor tool PassControl can price, or null: an exact version naming a priced model. */
+export function anthropicAdvisor(
+  tool: unknown
+): { model: string; uses: number; maxTokens: number; caching: 1 | 1.25 | 2 } | null {
+  if (!isRecord(tool) || typeof tool.type !== "string" || !ANTHROPIC_ADVISOR_TYPES.has(tool.type)) return null;
+  if (typeof tool.model !== "string" || !hasListedPrice(tool.model, "anthropic")) return null;
+  const caching = isRecord(tool.caching) ? cacheWriteHoldMultiplier({ cache_control: tool.caching }) : 1;
+  return {
+    model: tool.model,
+    uses: positiveInt(tool.max_uses) ?? 1,
+    maxTokens: positiveInt(tool.max_tokens) ?? ADVISOR_OUTPUT_CAP,
+    caching,
+  };
+}
+
+/** The accepted advisor in an Anthropic request body, or null. */
+export function requestAdvisor(body: unknown): ReturnType<typeof anthropicAdvisor> {
+  if (!isRecord(body) || !Array.isArray(body.tools)) return null;
+  for (const tool of body.tools) {
+    const advisor = anthropicAdvisor(tool);
+    if (advisor) return advisor;
+  }
+  return null;
+}
 
 /** Exact versions from @anthropic-ai/sdk 0.112.4's BetaToolUnion. */
 export const ANTHROPIC_PRICED_TOOLS: Readonly<Record<string, AnthropicKind>> = {
@@ -85,6 +137,21 @@ export interface HostedToolPlan {
   openai?: { calls: number; perCallMicrocents: number; containers: MemoryTier[]; searchMicrocents: number };
   /** xAI: no cap field, so the default number of calls per tool present. */
   xai?: { webSearches: number; xSearches: number; codeRuns: number; fileSearches: number };
+  /**
+   * Anthropic's advisor: its model, how many uses and output tokens it may spend,
+   * and the tokens each use reads (the request's prompt at the ADVISOR's tokenizer,
+   * plus the executor's output, which the advisor also sees).
+   */
+  advisor?: { model: string; uses: number; maxTokens: number; transcriptTokens: number; caching: 1 | 1.25 | 2 };
+}
+
+/** One advisor sub-inference, as Anthropic reported it. */
+export interface AdvisorIteration {
+  model?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 /** What a provider reported its hosted tools did. */
@@ -100,6 +167,8 @@ export interface HostedToolUse {
   xUsers?: number;
   /** xAI's exact charge for the whole call, tokens included (cost_in_usd_ticks / 100). */
   reportedMicrocents?: number;
+  /** Anthropic's advisor sub-inferences, from `usage.iterations` (never in top-level usage). */
+  advisor?: AdvisorIteration[];
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -193,6 +262,15 @@ export function withDefaultToolCaps(
   if (provider !== "anthropic") return body;
   let changed = false;
   const tools = body.tools.map((tool) => {
+    if (anthropicAdvisor(tool)) {
+      const t = tool as Record<string, unknown>;
+      const next: Record<string, unknown> = { ...t };
+      if (positiveInt(t.max_uses) === null) next.max_uses = ADVISOR_DEFAULT_USES;
+      if (positiveInt(t.max_tokens) === null) next.max_tokens = ADVISOR_DEFAULT_MAX_TOKENS;
+      if (next.max_uses === t.max_uses && next.max_tokens === t.max_tokens) return tool;
+      changed = true;
+      return next;
+    }
     const kind = anthropicKind(tool);
     if (kind !== "web_search" && kind !== "web_fetch") return tool;
     const t = tool as Record<string, unknown>;
@@ -256,6 +334,16 @@ export function hostedToolPlan(provider: string, body: unknown): HostedToolPlan 
   if (provider !== "anthropic") return null;
   let any = false;
   for (const tool of body.tools) {
+    const advisor = anthropicAdvisor(tool);
+    if (advisor) {
+      any = true;
+      // The advisor reads the whole transcript: this request's prompt, counted at
+      // the advisor model's own tokenizer and image ceiling, and whatever the
+      // executor has written so far (at most its own output allowance).
+      const transcriptTokens = estimateTokenUsage(body, 1000, advisor.model).totalTokens;
+      plan.advisor = { ...advisor, transcriptTokens };
+      continue;
+    }
     const kind = anthropicKind(tool);
     if (!kind) continue;
     any = true;
@@ -305,7 +393,20 @@ export function hostedToolReserve(
   const perUse =
     plan.searches * ANTHROPIC_WEB_SEARCH_MICROCENTS +
     (plan.codeExecutionFree ? 0 : plan.codeExecutions * ANTHROPIC_CODE_EXECUTION_MIN_MICROCENTS);
-  return { tokens, microcents: perUse + costMicrocents(model, tokens, 0, provider) };
+  const advisor = advisorReserve(plan.advisor);
+  return {
+    tokens: tokens + advisor.tokens,
+    microcents: perUse + costMicrocents(model, tokens, 0, provider) + advisor.microcents,
+  };
+}
+
+/** Every allowed advisor use: its transcript and its output cap, at the advisor's rates. */
+function advisorReserve(a: HostedToolPlan["advisor"]): { tokens: number; microcents: number } {
+  if (!a) return { tokens: 0, microcents: 0 };
+  const inputRate = costMicrocents(a.model, 1, 0, "anthropic");
+  const writeRate = a.caching === 1 ? inputRate : Math.ceil(inputRate * a.caching);
+  const perUse = a.transcriptTokens * writeRate + costMicrocents(a.model, 0, a.maxTokens, "anthropic");
+  return { tokens: a.uses * (a.transcriptTokens + a.maxTokens), microcents: a.uses * perUse };
 }
 
 /**
@@ -349,7 +450,21 @@ export function hostedToolUseCost(
   if (provider !== "anthropic") return 0;
   const searches = use.webSearch * ANTHROPIC_WEB_SEARCH_MICROCENTS;
   const code = plan?.codeExecutionFree ? 0 : use.codeExecution * anthropicCodeExecutionMicrocents(durationMs);
-  return searches + code;
+  // Each advisor sub-inference at its own model's rates, cache included; an entry
+  // naming no model is priced at the tool's.
+  const advisor = (use.advisor ?? []).reduce((sum, it) => {
+    const model = it.model ?? plan?.advisor?.model;
+    return model ? sum + costMicrocentsForUsage(it, model, "anthropic") : sum;
+  }, 0);
+  return searches + code + advisor;
+}
+
+/** Tokens a hosted tool processed outside the call's own usage (the advisor's), for a token cap. */
+export function hostedToolTokens(use: HostedToolUse | undefined): number {
+  return (use?.advisor ?? []).reduce(
+    (sum, it) => sum + it.inputTokens + it.outputTokens + it.cacheReadTokens + it.cacheWriteTokens,
+    0
+  );
 }
 
 /**

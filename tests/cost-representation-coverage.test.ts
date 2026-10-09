@@ -52,6 +52,11 @@ const COST_CONSUMERS = [
   "lib/dashboard-attention.ts",
   "lib/control-graph.ts",
   "lib/log.ts",
+  // Session seals (sprint Q7). Reads the stored cost for ONE thing: a covered call
+  // whose cost is null and not known-unpriceable is counted in `unk`, the same
+  // "unknown, not zero" the spend statement carries. The seal's `cost` comes from
+  // the signed receipts, never from this column, and it formats no money.
+  "lib/session-seal.ts",
   // Both of these present the AGGREGATE counter, `agents.spent_microcents`, and
   // reason about `agent_logs.cost_microcents` only to say what that counter is
   // NOT. The decision this list asks for is recorded there in full: the number

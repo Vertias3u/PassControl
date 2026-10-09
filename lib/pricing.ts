@@ -20,11 +20,25 @@ interface Price {
    */
   cachedInputMicrocentsPerToken?: number;
   /**
+   * Anthropic's rate for a cache READ (`cache_read_input_tokens`, which is ADDITIONAL
+   * to input, unlike the OpenAI field above), where the page publishes one other
+   * than the standard 0.1x of input. Absent: 0.1x (`CACHE_READ_RATE`).
+   */
+  cacheReadMicrocentsPerToken?: number;
+  /**
    * The rates a call SETTLES at, by context tier, where the model's page bills a
    * prompt above 272K input tokens at the long rates "for the full request" (GPT-6,
    * GPT-5.6). The fields above stay the long rates and remain what is HELD.
    */
   settle?: { short: TierRates; long: TierRates };
+  /**
+   * Anthropic's prompt-length pricing (Claude Haiku 5.5): the whole request settles at
+   * the tier its PROMPT falls in, the prompt being input plus cache reads plus cache
+   * writes, since Anthropic reports the cached parts outside `input_tokens`.
+   * `cachedInput` here is the cache-READ rate. The fields above are the long tier and
+   * remain what is HELD.
+   */
+  promptTiers?: { above: number; short: TierRates; long: TierRates };
 }
 
 /** µ¢ per token for one context tier. */
@@ -79,6 +93,15 @@ function model(provider: ProviderId, id: string, inputUsd: number, outputUsd: nu
   ];
 }
 
+/**
+ * An Anthropic model whose cache reads are not the standard 0.1x of input. The page
+ * gives these in a footnote, so the rate is listed here rather than derived:
+ * 0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and Mythos 5.1.
+ */
+function claudeCacheRead(id: string, inputUsd: number, outputUsd: number, cacheReadUsd: number): Price[] {
+  return model("anthropic", id, inputUsd, outputUsd).map((p) => ({ ...p, cacheReadMicrocentsPerToken: mc(cacheReadUsd) }));
+}
+
 type TierUsd = [input: number, cached: number, write: number, output: number];
 const tierRates = ([input, cached, write, output]: TierUsd): TierRates => ({
   input: mc(input),
@@ -106,6 +129,23 @@ function tiered(provider: ProviderId, id: string, short: TierUsd, long: TierUsd)
   ];
 }
 
+/**
+ * An Anthropic model priced by prompt length, with no service-tier condition
+ * (`claudePromptTiers`): held at the long tier, settled at the tier the prompt fell in.
+ */
+function claudePromptTiered(id: string, above: number, short: TierUsd, long: TierUsd): Price[] {
+  const rates = {
+    inputMicrocentsPerToken: mc(long[0]),
+    outputMicrocentsPerToken: mc(long[3]),
+    cacheReadMicrocentsPerToken: mc(long[1]),
+    promptTiers: { above, short: tierRates(short), long: tierRates(long) },
+  };
+  return [
+    { provider: "anthropic", pattern: id, ...rates },
+    { provider: "anthropic", pattern: `${id}-20*`, ...rates },
+  ];
+}
+
 // Every rate below was read from the provider's own pricing page on 2026-09-27
 // (tests/pricing-table.test.ts pins each one with its source). Two rules apply
 // wherever a page offers more than one number, in the spirit of `mc()`'s rounding:
@@ -122,10 +162,15 @@ function tiered(provider: ProviderId, id: string, short: TierUsd, long: TierUsd)
 // inference) are not in this table at all; under a dollar limit such a request
 // is refused instead (lib/gate.ts).
 const PRICES: Price[] = [
-  // Anthropic — platform.claude.com/docs/en/about-claude/pricing
-  ...model("anthropic", "claude-fable-5-1", 10, 50),
+  // Anthropic — platform.claude.com/docs/en/about-claude/pricing. Re-read 2026-10-08
+  // for the cache-read column and the Sonnet 5.5 and Mythos rows. The page does not
+  // list the Mythos ids (limited availability); they follow its documented
+  // claude-{name}-{major}[-{minor}] scheme.
+  ...claudeCacheRead("claude-fable-5-1", 10, 50, 0.25),
+  ...claudeCacheRead("claude-mythos-5-1", 10, 50, 0.25),
   ...model("anthropic", "claude-fable-5", 10, 50),
-  ...model("anthropic", "claude-opus-5-5", 4, 20),
+  ...model("anthropic", "claude-mythos-5", 10, 50),
+  ...claudeCacheRead("claude-opus-5-5", 4, 20, 0.2),
   ...model("anthropic", "claude-opus-5", 5, 25),
   ...model("anthropic", "claude-opus-4-8", 5, 25),
   ...model("anthropic", "claude-opus-4-7", 5, 25),
@@ -134,11 +179,14 @@ const PRICES: Price[] = [
   ...model("anthropic", "claude-opus-4-1", 15, 75),
   ...model("anthropic", "claude-opus-4-0", 15, 75),
   ...model("anthropic", "claude-opus-4", 15, 75),
+  ...claudeCacheRead("claude-sonnet-5-5", 2, 10, 0.1),
   ...model("anthropic", "claude-sonnet-5", 2, 10),
   ...model("anthropic", "claude-sonnet-4-6", 3, 15),
   ...model("anthropic", "claude-sonnet-4-5", 3, 15),
   ...model("anthropic", "claude-sonnet-4-0", 3, 15),
   ...model("anthropic", "claude-sonnet-4", 3, 15),
+  // Prompts up to 100,000 tokens, then over: [input, cache hit, 5m cache write, output].
+  ...claudePromptTiered("claude-haiku-5-5", 100_000, [0.1, 0.01, 0.125, 0.5], [0.5, 0.05, 0.625, 2.5]),
   ...model("anthropic", "claude-haiku-4-5", 1, 5),
   ...model("anthropic", "claude-3-5-haiku", 0.8, 4),
   ...model("anthropic", "claude-3-5-haiku-latest", 0.8, 4),
@@ -437,16 +485,75 @@ export function costMicrocents(
 // ── Prompt-cache rates ────────────────────────────────────────────────────────
 //
 // Anthropic prices cache traffic as a multiplier on the model's OWN input rate,
-// so these are derived rather than listed per model — a new model row gets
-// correct cache pricing for free, and the two can never drift apart.
+// so these are derived rather than listed per model:
 //
 //   read  — 0.1x. A cached prompt is the cheap case, and the reason agents cache.
+//           Except where a row lists its own (`claudeCacheRead`): the page prices
+//           reads on four models below 0.1x, and deriving them charged a cache-heavy
+//           session on Opus 5.5 twice the real rate and on Fable 5.1 four times.
+//           A NEW model row must be checked against the page's cache column: the
+//           derivation is a default, not a guarantee.
 //   write — 1.25x at the default 5-minute TTL.
 //
 // Rounded UP to a whole µ¢/token for the same reason `mc()` is: a fractional rate
 // would truncate to 0 for the cheap models and stop counting entirely.
 const CACHE_READ_RATE = (inputRate: number) => Math.ceil(inputRate * 0.1);
 const CACHE_WRITE_RATE = (inputRate: number) => Math.ceil(inputRate * 1.25);
+
+/** The rate for one Anthropic cache-read token on this row. */
+const cacheReadRate = (p: Price) => p.cacheReadMicrocentsPerToken ?? CACHE_READ_RATE(p.inputMicrocentsPerToken);
+
+/**
+ * How much more than the input rate an Anthropic request's prompt may cost to
+ * WRITE to the prompt cache: 1 when it asks for no caching, 1.25 for the default
+ * 5-minute TTL, 2 when any breakpoint asks for 1 hour (pricing page, read
+ * 2026-10-08). Any `cache_control`, on a block, a tool, the system prompt or the
+ * request itself (automatic caching), counts.
+ */
+export function cacheWriteHoldMultiplier(body: unknown): 1 | 1.25 | 2 {
+  let found: 1 | 1.25 | 2 = 1;
+  const walk = (value: unknown, depth: number): void => {
+    if (found === 2 || depth > 64 || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const v of value) walk(v, depth + 1);
+      return;
+    }
+    const o = value as Record<string, unknown>;
+    const cc = o.cache_control;
+    if (cc !== null && typeof cc === "object") {
+      found = (cc as { ttl?: unknown }).ttl === "1h" ? 2 : found === 1 ? 1.25 : found;
+    }
+    for (const [key, v] of Object.entries(o)) if (key !== "cache_control") walk(v, depth + 1);
+  };
+  walk(body, 0);
+  return found;
+}
+
+/**
+ * The hold for a call (P5.1, owner 2026-10-08): `costMicrocents`, except that an
+ * Anthropic request asking for caching holds its input at the cache-WRITE rate.
+ * Claude Code marks its prompt for the 5-minute cache, and a session's first call
+ * writes all of it at 1.25x; held at 1x it was held at ~94% of its cost even with
+ * the P1.6 estimate. Later calls read the cache at 0.1x or less, so this over-holds
+ * them, as every hold may; settlement charges what Anthropic reports.
+ */
+export function holdMicrocents(
+  model: string,
+  usage: { inputTokens: number; outputTokens: number },
+  provider: ProviderId,
+  body: unknown
+): number {
+  const base = costMicrocents(model, usage.inputTokens, usage.outputTokens, provider);
+  if (provider !== "anthropic") return base;
+  const multiplier = cacheWriteHoldMultiplier(body);
+  const p = multiplier === 1 ? undefined : priceFor(model, provider);
+  if (!p) return base;
+  const writeRate =
+    multiplier === 2
+      ? Math.ceil(p.inputMicrocentsPerToken * 2)
+      : (p.promptTiers?.long.cacheWrite ?? CACHE_WRITE_RATE(p.inputMicrocentsPerToken));
+  return usage.inputTokens * writeRate + usage.outputTokens * p.outputMicrocentsPerToken;
+}
 
 /** OpenAI's line between short- and long-context pricing: "more than 272K input tokens". */
 const LONG_CONTEXT_ABOVE = 272_000;
@@ -477,6 +584,24 @@ function tieredCost(
   const written = typeof w === "number" && Number.isSafeInteger(w) && w >= 0 && w <= uncached ? w : null;
   const input = written === null ? uncached * r.cacheWrite : (uncached - written) * r.input + written * r.cacheWrite;
   return input + cached * r.cachedInput + usage.outputTokens * r.output;
+}
+
+/**
+ * A prompt-length-tiered Anthropic settlement (`claudePromptTiered`). "Up to 100,000
+ * tokens" is the short tier, so the line itself is short.
+ */
+function claudePromptTierCost(
+  t: NonNullable<Price["promptTiers"]>,
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
+): number {
+  const prompt = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  const r = prompt > t.above ? t.long : t.short;
+  return (
+    usage.inputTokens * r.input +
+    usage.cacheReadTokens * r.cachedInput +
+    usage.cacheWriteTokens * r.cacheWrite +
+    usage.outputTokens * r.output
+  );
 }
 
 /**
@@ -529,6 +654,7 @@ export function costMicrocentsForUsage(
   if (!isPricedEndpoint(endpointBaseUrl)) return 0;
   const p = priceFor(model, provider);
   if (!p) return 0;
+  if (p.promptTiers) return claudePromptTierCost(p.promptTiers, usage);
   const reported = usage.cachedInputTokens ?? 0;
   const cached = reported > 0 && reported <= usage.inputTokens ? reported : 0;
   const tier = tieredCost(p, usage, cached);
@@ -537,7 +663,7 @@ export function costMicrocentsForUsage(
   if (tier !== null) {
     return (
       tier +
-      usage.cacheReadTokens * CACHE_READ_RATE(p.inputMicrocentsPerToken) +
+      usage.cacheReadTokens * cacheReadRate(p) +
       usage.cacheWriteTokens * CACHE_WRITE_RATE(p.inputMicrocentsPerToken)
     );
   }
@@ -545,7 +671,7 @@ export function costMicrocentsForUsage(
     (usage.inputTokens - cached) * p.inputMicrocentsPerToken +
     cached * cachedInputRate(p) +
     usage.outputTokens * p.outputMicrocentsPerToken +
-    usage.cacheReadTokens * CACHE_READ_RATE(p.inputMicrocentsPerToken) +
+    usage.cacheReadTokens * cacheReadRate(p) +
     usage.cacheWriteTokens * CACHE_WRITE_RATE(p.inputMicrocentsPerToken)
   );
 }
@@ -563,9 +689,10 @@ export function costMicrocentsForUsage(
  * This used to read `messages ?? input` alone, so a request whose weight was a
  * large `system` prompt or tool list reserved as if it were a one-line chat,
  * and an agent near its cap was admitted for a call its budget could not cover.
- * The estimate decides admission and the hold's size only; settlement still
- * charges the provider's reported usage, so a larger estimate refuses a
- * near-cap agent sooner and never over-charges one.
+ * The estimate decides admission and the hold's size; settlement charges the
+ * provider's reported usage where there is one, so there a larger estimate only
+ * refuses a near-cap agent sooner. On an outcome with no usage report the
+ * estimate itself is charged (see `estimateTokenUsage`).
  */
 const PROMPT_FIELDS = [
   "messages",
@@ -578,22 +705,135 @@ const PROMPT_FIELDS = [
   "systemInstruction",
 ] as const;
 
-/** Cheap pre-flight usage estimate from a request body. */
-export function estimateTokenUsage(body: unknown, fallback = 1000): TokenUsageEstimate {
+// ── How many tokens a prompt is, before the provider says ────────────────────
+//
+// UTF-8 bytes of the prompt fields' JSON per token, by the model's tokenizer.
+// Measured 2026-10-08 through the gateway (tests/estimate-tokenizer.test.ts has the
+// table): a real Claude Code request ran at 2.82 on Anthropic's newer tokenizer
+// (Claude 4.7 and later, Fable, Mythos) and 3.81 on the older one; source code at 2.65
+// and 3.29; Bulgarian at 4.46 on both. Characters ÷ 4, the old rule for every model,
+// held 70% of a Claude Code request and 61% of a Bulgarian one.
+const NEW_TOKENIZER_BYTES = 2.4;
+const OLD_TOKENIZER_BYTES = 3.2;
+const DEFAULT_BYTES = 4;
+// Base64 is not text: PDFs and other providers' images at ÷ 4, Claude images at a
+// per-image ceiling (see `promptMedia`, `claudeImageTokenCeiling`).
+const BASE64_BYTES = 4;
+
+/**
+ * The divisor for a model id, as a hold must assume it. Anthropic: "Claude 4.7 and
+ * later models and Claude Mythos Preview use a newer tokenizer" (pricing page, read
+ * 2026-10-08). Read from the id alone, so OpenRouter's `anthropic/claude-opus-4.7`
+ * gets it too. A Claude id this cannot read, and a routing id that names no model
+ * (`openrouter/auto`, a preset) and may land on Claude, get the newer, smaller
+ * divisor: an estimate errs high.
+ */
+export function promptBytesPerToken(model: unknown): number {
+  if (typeof model !== "string" || !model) return DEFAULT_BYTES;
+  const m = model.toLowerCase();
+  if (m === "openrouter/auto" || m.startsWith("openrouter/") || m.includes("@preset")) return NEW_TOKENIZER_BYTES;
+  if (!m.includes("claude")) return DEFAULT_BYTES;
+  if (/claude-\d/.test(m)) return OLD_TOKENIZER_BYTES; // claude-3-5-haiku, claude-3-opus
+  const v = /claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:[-.](\d{1,2})(?!\d))?/.exec(m);
+  if (!v) return NEW_TOKENIZER_BYTES;
+  if (v[1] === "fable" || v[1] === "mythos") return NEW_TOKENIZER_BYTES;
+  const major = Number(v[2]);
+  const minor = v[3] === undefined ? 0 : Number(v[3]);
+  return major > 4 || (major === 4 && minor >= 7) ? NEW_TOKENIZER_BYTES : OLD_TOKENIZER_BYTES;
+}
+
+const utf8 = new TextEncoder();
+
+/**
+ * Most visual tokens one image can cost on a Claude model: Anthropic resizes an
+ * image to at most 2576 px on the long edge / 4,784 tokens on Claude 4.7 and later,
+ * and 1568 px / 1,568 tokens on the rest (vision docs, read 2026-10-08). Null for a
+ * model that is not Claude: its images keep bytes ÷ 4.
+ */
+export function claudeImageTokenCeiling(model: unknown): number | null {
+  if (typeof model !== "string" || !model.toLowerCase().includes("claude")) return null;
+  return promptBytesPerToken(model) === NEW_TOKENIZER_BYTES ? 4_784 : 1_568;
+}
+
+const IMAGE_BLOCK_TYPES: ReadonlySet<string> = new Set(["image", "image_url", "input_image"]);
+
+/**
+ * The media inside a prompt value. `base64`: characters of base64 payload (an
+ * Anthropic image or document `source` of type base64, any `data:` URL, `file_data`);
+ * base64 is ASCII and JSON leaves it unescaped, so these are exactly the bytes it
+ * takes. `imageBase64`: the part of that inside image blocks. `images`: image blocks
+ * of any source (base64, URL, file id), Anthropic's and OpenAI's shapes.
+ */
+function promptMedia(value: unknown): { base64: number; imageBase64: number; images: number } {
+  const out = { base64: 0, imageBase64: 0, images: 0 };
+  const walk = (v: unknown, depth: number, inImage: boolean): void => {
+    if (depth > 64 || v === null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const item of v) walk(item, depth + 1, inImage);
+      return;
+    }
+    const o = v as Record<string, unknown>;
+    const isImage = !inImage && typeof o.type === "string" && IMAGE_BLOCK_TYPES.has(o.type);
+    if (isImage) out.images += 1;
+    const image = inImage || isImage;
+    for (const [key, item] of Object.entries(o)) {
+      if (typeof item === "string") {
+        if ((key === "data" && o.type === "base64") || key === "file_data" || item.startsWith("data:")) {
+          out.base64 += item.length;
+          if (image) out.imageBase64 += item.length;
+        }
+      } else {
+        walk(item, depth + 1, image);
+      }
+    }
+  };
+  walk(value, 0, false);
+  return out;
+}
+
+/**
+ * Cheap pre-flight usage estimate from a request body.
+ *
+ * `model` is the model this estimate is for: a fallback attempt passes its own,
+ * since the prompt is the same but the tokenizer may not be. Defaults to the body's.
+ *
+ * What it decides: admission against every limit and the hold's size, and, on the
+ * outcomes where a call may have been billed but reported nothing (`settleUnknown`,
+ * max(observed, estimate)), the amount charged. Where usage is reported, settlement
+ * charges the reported usage.
+ */
+export function estimateTokenUsage(body: unknown, fallback = 1000, model?: string): TokenUsageEstimate {
   try {
-    const b = body as Partial<Record<(typeof PROMPT_FIELDS)[number], unknown>>;
+    const b = body as Partial<Record<(typeof PROMPT_FIELDS)[number], unknown>> & { model?: unknown };
     // The LARGEST stated alias, times the choices asked for. This used to take
     // the first alias present and ignore `n`, and both under-reserve: a small
     // deprecated `max_tokens` beside a large `max_completion_tokens`, or `n: 4`
     // reserving one completion's worth. See lib/output-limit.ts.
     const max = largestStatedOutputLimit(body) ?? 0;
     const present = PROMPT_FIELDS.filter((field) => b[field] !== undefined && b[field] !== null);
-    // No prompt field at all keeps the old `JSON.stringify("")` floor (2 chars,
+    // No prompt field at all keeps the old `JSON.stringify("")` floor (2 bytes,
     // 1 token), so an empty body and the decision-trace projection are unchanged.
-    const promptChars = present.length
-      ? present.reduce((sum, field) => sum + JSON.stringify(b[field]).length, 0)
-      : JSON.stringify("").length;
-    const promptTokens = Math.ceil(promptChars / 4);
+    let textBytes = present.length ? 0 : JSON.stringify("").length;
+    let base64 = 0;
+    let imageBase64 = 0;
+    let images = 0;
+    for (const field of present) {
+      const media = promptMedia(b[field]);
+      textBytes += utf8.encode(JSON.stringify(b[field])).length - media.base64;
+      base64 += media.base64;
+      imageBase64 += media.imageBase64;
+      images += media.images;
+    }
+    const forModel = model ?? b?.model;
+    const divisor = promptBytesPerToken(forModel);
+    // A Claude image is billed by its pixels, capped per image (P5.2): hold each at
+    // the model's ceiling, whatever its bytes or source. Anything else keeps ÷ 4.
+    const ceiling = claudeImageTokenCeiling(forModel);
+    const mediaTokens =
+      ceiling === null
+        ? Math.ceil(base64 / BASE64_BYTES)
+        : Math.ceil((base64 - imageBase64) / BASE64_BYTES) + images * ceiling;
+    const promptTokens = Math.ceil(textBytes / divisor) + mediaTokens;
     const outputTokens = Math.max(0, Math.floor(max || 1024)) * choiceCountForEstimate(body);
     const totalTokens = promptTokens + outputTokens;
     if (totalTokens > 0) return { inputTokens: promptTokens, outputTokens, totalTokens };

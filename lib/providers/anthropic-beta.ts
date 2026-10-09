@@ -11,8 +11,12 @@
 // would bring the 400 back on its next release.
 //
 // Never forwarded, whatever their date: betas for tools PassControl refuses
-// (mcp-client, files-api, skills, advisor-tool), and context-1m, whose
-// long-context premium the price table does not hold. The priced hosted tools
+// (mcp-client, files-api, skills), advisor-tool unless the request's advisor was
+// accepted and priced, and context-1m. Every 1M-context
+// model (Claude 4.6 and later) has 1M by default at its flat rate, so the beta adds
+// nothing there; on the 200K models (Sonnet 4.5 and earlier) Anthropic's pricing
+// page states no 1M rate to price it at (read 2026-10-08;
+// tests/anthropic-long-context.test.ts). The priced hosted tools
 // (web search, web fetch, code execution: lib/providers/hosted-tools.ts) need no
 // beta: all three ran live without one on 2026-10-07, so theirs stay dropped too.
 //
@@ -33,7 +37,15 @@ const FORWARDED = new RegExp(`^(?:${FORWARDED_FAMILIES.join("|")})-(?:\\d{4}-\\d
 const MAX_HEADER_CHARS = 1024;
 const MAX_BETAS = 16;
 
-export function forwardableAnthropicBeta(raw: string | null): { header: string | null; dropped: string[] } {
+// The advisor's beta, forwarded only for a request whose advisor PassControl
+// accepted and priced (P4, 2026-10-08; lib/providers/hosted-tools.ts). Anthropic
+// refuses the advisor tool without it.
+const ADVISOR_BETA = /^advisor-tool-(?:\d{4}-\d{2}-\d{2}|\d{8})$/;
+
+export function forwardableAnthropicBeta(
+  raw: string | null,
+  options: { advisor?: boolean } = {}
+): { header: string | null; dropped: string[] } {
   if (!raw) return { header: null, dropped: [] };
   // A control character can only be an attempt to start a new header line.
   // Cut at the first one rather than joining across it.
@@ -43,7 +55,7 @@ export function forwardableAnthropicBeta(raw: string | null): { header: string |
   for (const part of line.split(",")) {
     const beta = part.trim();
     if (!beta || kept.includes(beta) || dropped.includes(beta)) continue;
-    if (FORWARDED.test(beta) && kept.length < MAX_BETAS) kept.push(beta);
+    if ((FORWARDED.test(beta) || (options.advisor === true && ADVISOR_BETA.test(beta))) && kept.length < MAX_BETAS) kept.push(beta);
     else dropped.push(beta.slice(0, 64));
   }
   return { header: kept.length ? kept.join(",") : null, dropped };

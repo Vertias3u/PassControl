@@ -9,7 +9,7 @@
 // edge runtimes, and the browser.
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha256";
-import { RECEIPT_PROTOCOL, STATEMENT_PROTOCOL } from "../cli/protocols.mjs";
+import { RECEIPT_PROTOCOL, SESSION_PROTOCOL, STATEMENT_PROTOCOL } from "../cli/protocols.mjs";
 
 export const RECEIPT_TYP = "passcontrol-receipt+jwt";
 export const AGENT_TOKEN_TYP = "passcontrol-agent+jwt";
@@ -511,6 +511,289 @@ export function verifyInclusion(
     // caller's verification path.
     return false;
   }
+}
+
+// ── Session seals ────────────────────────────────────────────────────────────
+
+export const SESSION_TYP = "passcontrol-session+jws";
+
+/** The newest session-seal version this verifier understands. See SESSION_PROTOCOL. */
+export const SESSION_SUPPORTED_VER = SESSION_PROTOCOL.maximum;
+
+/** One node of a session's agent tree. `agt: null` is the main agent; `par: null` is "spawned by the main agent". */
+export interface SessionTreeNode {
+  agt: string | null;
+  par: string | null;
+  n: number;
+  cost: number;
+  /** Calls the gateway refused (`res.status` starting `blocked_`). */
+  refused: number;
+}
+
+export interface SessionClaims {
+  iss: string;
+  /** The agent id. */
+  sub: string;
+  jti: string;
+  iat: number;
+  fmt: string;
+  v: number;
+  /** The session id and who declared it (`claude-code`, `codex`, `sidecar`). Declared by the client, never authenticated. */
+  ses: { id: string; src: string };
+  /** Half-open window `[from, to)`, epoch seconds. */
+  per: { from: number; to: number };
+  n: number;
+  nr: number;
+  cost: number;
+  unp: number;
+  unk: number;
+  root: string | null;
+  tree: SessionTreeNode[];
+  mdl: { mdl: string | null; n: number; cost: number }[];
+}
+
+/** Why one receipt in a bundle was not accepted as part of the session. */
+export type SessionReceiptRejection = VerifyFailure | "duplicate" | "other_session" | "other_agent" | "outside_period";
+
+export interface SessionVerifyResult {
+  /** All of: signature, bundle and receipts pass, and the journal check did not fail. */
+  ok: boolean;
+  /** Set when the seal itself failed, or when the bundle or journal could not be read. */
+  reason?: VerifyFailure | "malformed_bundle" | "malformed_journal";
+  claims?: SessionClaims;
+  /** null = not run. `journal` is null when no journal was given: the seal is then no stronger than a statement. */
+  checks: { signature: boolean; bundle: boolean | null; receipts: boolean | null; journal: boolean | null };
+  /** Seal claims that do not match what the bundle adds up to: root, n, cost, unp, tree, mdl. */
+  mismatched: string[];
+  rejected: { index: number; id: string | null; reason: SessionReceiptRejection }[];
+  /** Journaled receipt ids the bundle does not contain. MISSING, not proof of tampering: see verifySession. */
+  missing: string[];
+  /** Bundle receipts the journal never saw. Reported, never a failure. */
+  unjournaled: { id: string; why: "failover_predecessor" | "not_in_journal" }[];
+  /**
+   * Journal lines that name ANOTHER session (`ses`), left out of check 4: one sidecar
+   * run serves many sessions. A line that names none is checked as before.
+   */
+  otherSessions: number;
+}
+
+export interface SessionBundle {
+  seal: string;
+  /** Every receipt the seal covers, as compact JWS, in seal order. */
+  bundle: string[];
+  /** The user's sidecar journal: receipt ids, or `{ id, ... }` entries. */
+  journal?: unknown;
+}
+
+// The same hashing as verifyInclusion, restated for the same reason: this file
+// is vendored alone. Leaves in bundle order; an odd node is promoted unchanged.
+function sessionHash(prefix: number, ...parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((sum, p) => sum + p.length, 1);
+  const buf = new Uint8Array(total);
+  buf[0] = prefix;
+  let at = 1;
+  for (const p of parts) {
+    buf.set(p, at);
+    at += p.length;
+  }
+  return sha256(buf);
+}
+
+/** Platform-neutral (no Buffer): this file also runs in the browser. */
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function sessionRoot(bundle: string[]): string | null {
+  if (bundle.length === 0) return null;
+  let level = bundle.map((jws) => sessionHash(0x00, utf8(jws)));
+  while (level.length > 1) {
+    const next: Uint8Array[] = [];
+    for (let i = 0; i < level.length; i += 2) {
+      const right = level[i + 1];
+      next.push(right ? sessionHash(0x01, level[i]!, right) : level[i]!);
+    }
+    level = next;
+  }
+  return bytesToB64url(level[0]!);
+}
+
+type Loose = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+function decodePayload(jws: string): Loose | null {
+  try {
+    const claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(jws.split(".")[1] ?? "")));
+    return claims && typeof claims === "object" && !Array.isArray(claims) ? claims : null;
+  } catch {
+    return null;
+  }
+}
+
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+const orNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+type CanonKey = { name: string; text?: boolean };
+const TREE_KEYS: CanonKey[] = [{ name: "agt", text: true }, { name: "par", text: true }, { name: "n" }, { name: "cost" }, { name: "refused" }];
+const MODEL_KEYS: CanonKey[] = [{ name: "mdl", text: true }, { name: "n" }, { name: "cost" }];
+
+/** Tree and model lists, compared as sets: one canonical string each. */
+function canonical(entries: unknown, keys: CanonKey[]): string | null {
+  if (!Array.isArray(entries)) return null;
+  const rows = entries.map((e: Loose) => keys.map((k) => (k.text ? orNull(e?.[k.name]) : num(e?.[k.name]))));
+  const cmp = (a: unknown, b: unknown) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : JSON.stringify(a) > JSON.stringify(b) ? 1 : 0);
+  return JSON.stringify(rows.sort(cmp));
+}
+
+function bundleTotals(decoded: (Loose | null)[]) {
+  const tree = new Map<string, SessionTreeNode>();
+  const models = new Map<string, { mdl: string | null; n: number; cost: number }>();
+  let cost = 0;
+  let unp = 0;
+  for (const c of decoded) {
+    if (!c) continue;
+    const ctx: Loose = c.ctx && typeof c.ctx === "object" ? c.ctx : {};
+    const agt = orNull(ctx.agt);
+    const par = orNull(ctx.par);
+    const refused = typeof c.res?.status === "string" && c.res.status.startsWith("blocked_") ? 1 : 0;
+    const key = JSON.stringify([agt, par]);
+    const node = tree.get(key) ?? { agt, par, n: 0, cost: 0, refused: 0 };
+    node.n += 1;
+    node.cost += num(c.cost);
+    node.refused += refused;
+    tree.set(key, node);
+    const mdl = orNull(c.mdl);
+    const m = models.get(JSON.stringify(mdl)) ?? { mdl, n: 0, cost: 0 };
+    m.n += 1;
+    m.cost += num(c.cost);
+    models.set(JSON.stringify(mdl), m);
+    cost += num(c.cost);
+    if (c.unp === true) unp += 1;
+  }
+  return { cost, unp, tree: [...tree.values()], mdl: [...models.values()] };
+}
+
+/** This session's journaled ids (and lines naming no session), and how many named another. */
+function journalIds(journal: unknown, session: unknown): { ids: string[]; other: number } | null {
+  if (!Array.isArray(journal)) return null;
+  const ids: string[] = [];
+  let other = 0;
+  for (const entry of journal) {
+    const id = typeof entry === "string" ? entry : entry && typeof entry === "object" ? (entry as Loose).id : undefined;
+    if (typeof id !== "string" || id.length === 0) return null;
+    const ses = entry && typeof entry === "object" ? (entry as Loose).ses : undefined;
+    if (typeof ses === "string" && ses !== session) {
+      other += 1;
+      continue;
+    }
+    ids.push(id);
+  }
+  return { ids, other };
+}
+
+/**
+ * Verify a session seal against its bundle and, when given, the user's journal.
+ *
+ * Four checks: (1) the seal's signature; (2) its root and totals recompute from
+ * the bundle; (3) every receipt in the bundle verifies and belongs to this
+ * session, agent and window; (4) every receipt id the user's sidecar journaled is
+ * in the bundle, directly or through a receipt's `prev` link.
+ *
+ * WHAT CHECK 4 ADDS. A statement can only show the issuer committed to a set. The
+ * journal is the user's own independent list of their calls, so a call left out
+ * of the seal is caught. Without a journal a seal is no stronger than a statement,
+ * and `checks.journal` is null to say so.
+ *
+ * WHAT `missing` MEANS. A journaled id that is absent is MISSING, never proof of
+ * tampering: the gateway's log write is best-effort, so a lost row and an
+ * omission look the same from here. Receipts in the bundle but not the journal
+ * (failover predecessors, direct calls, another machine) are reported in
+ * `unjournaled` and never fail the session.
+ *
+ * The session id inside each receipt is DECLARED by the client. Check 3 shows the
+ * issuer grouped what the client declared; it does not show who made the call.
+ */
+export async function verifySession(input: SessionBundle, options: VerifyOptions): Promise<SessionVerifyResult> {
+  const jwksCache = options.jwksCache ?? new Map<string, PublicJwk[]>();
+  const result: SessionVerifyResult = {
+    ok: false,
+    checks: { signature: false, bundle: null, receipts: null, journal: null },
+    mismatched: [],
+    rejected: [],
+    missing: [],
+    unjournaled: [],
+    otherSessions: 0,
+  };
+
+  const sealed = await verifySigned<SessionClaims>(String(input?.seal ?? ""), SESSION_TYP, { ...options, jwksCache }, {
+    claim: "v",
+    max: SESSION_SUPPORTED_VER,
+  });
+  if (!sealed.ok) return { ...result, reason: sealed.reason };
+  const claims = sealed.claims;
+  result.claims = claims;
+  result.checks.signature = true;
+
+  const bundle = Array.isArray(input?.bundle) && input.bundle.every((j) => typeof j === "string") ? input.bundle : null;
+  if (!bundle) return { ...result, reason: "malformed_bundle", checks: { ...result.checks, bundle: false } };
+
+  // 2. The root and every total, recomputed from the bundle.
+  const decoded = bundle.map(decodePayload);
+  const totals = bundleTotals(decoded);
+  if (sessionRoot(bundle) !== (claims.root ?? null)) result.mismatched.push("root");
+  if (claims.n !== bundle.length) result.mismatched.push("n");
+  if (claims.cost !== totals.cost) result.mismatched.push("cost");
+  if (claims.unp !== totals.unp) result.mismatched.push("unp");
+  if (canonical(claims.tree, TREE_KEYS) !== canonical(totals.tree, TREE_KEYS)) result.mismatched.push("tree");
+  if (canonical(claims.mdl, MODEL_KEYS) !== canonical(totals.mdl, MODEL_KEYS)) result.mismatched.push("mdl");
+  result.checks.bundle = result.mismatched.length === 0;
+
+  // 3. Every receipt verifies, and belongs to this session, agent and window.
+  // Traced steps describe the seal only; the receipts are checked untraced.
+  const receiptOptions: VerifyOptions = { ...options, jwksCache, onStep: undefined };
+  const seen = new Set<string>();
+  for (let index = 0; index < bundle.length; index++) {
+    const id = orNull(decoded[index]?.jti);
+    const verified = await verifyReceipt(bundle[index]!, receiptOptions);
+    let reason: SessionReceiptRejection | null = verified.ok ? null : verified.reason;
+    if (verified.ok) {
+      const c = verified.claims as unknown as Loose;
+      const t = Math.floor(num(c.t0) / 1000);
+      if (seen.has(c.jti)) reason = "duplicate";
+      else if (c.ctx?.ses !== claims.ses?.id) reason = "other_session";
+      else if (c.agid !== claims.sub) reason = "other_agent";
+      else if (!(t >= num(claims.per?.from) && t < num(claims.per?.to))) reason = "outside_period";
+      seen.add(c.jti);
+    }
+    if (reason) result.rejected.push({ index, id, reason });
+  }
+  result.checks.receipts = result.rejected.length === 0;
+
+  // 4. The user's own record.
+  if (input.journal !== undefined) {
+    const journaled = journalIds(input.journal, claims.ses?.id);
+    if (!journaled) {
+      result.reason = "malformed_journal";
+      result.checks.journal = false;
+    } else {
+      const inBundle = new Set(decoded.map((c) => orNull(c?.jti)).filter((v): v is string => v !== null));
+      const predecessors = new Set(decoded.map((c) => orNull(c?.prev)).filter((v): v is string => v !== null));
+      result.otherSessions = journaled.other;
+      const ids = new Set(journaled.ids);
+      result.missing = [...ids].filter((id) => !inBundle.has(id) && !predecessors.has(id));
+      for (const id of inBundle) {
+        if (!ids.has(id)) {
+          result.unjournaled.push({ id, why: predecessors.has(id) ? "failover_predecessor" : "not_in_journal" });
+        }
+      }
+      result.checks.journal = result.missing.length === 0;
+    }
+  }
+
+  const { signature, bundle: b, receipts, journal } = result.checks;
+  result.ok = signature && b === true && receipts === true && journal !== false;
+  return result;
 }
 
 export interface VerifyAgentTokenOptions extends VerifyOptions {

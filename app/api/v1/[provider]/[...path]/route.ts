@@ -9,6 +9,7 @@
 export const runtime = "edge";
 
 import { waitUntil } from "@vercel/functions";
+import { readClientLineage } from "@/lib/client-lineage";
 import { verifyVisa } from "@/lib/auth/visa";
 import { readKillState } from "@/lib/state/killswitch";
 import {
@@ -43,6 +44,8 @@ import {
   isRootRelativeEndpoint,
   isEmbeddingsEndpoint,
   isResponsesEndpoint,
+  secretGuardMode,
+  subagentAllowlist,
 } from "@/lib/scope";
 import { filterModelListingToScope } from "@/lib/providers/model-listing";
 import {
@@ -58,6 +61,7 @@ import {
   demoCostMicrocents,
   estimateEmbeddingUsage,
   estimateTokenUsage,
+  holdMicrocents,
   isPricedEndpoint,
   MICROCENTS_PER_CENT,
   unpricedRequestOption,
@@ -71,7 +75,7 @@ import {
 } from "@/lib/usage/parseStream";
 import { writeLog, mirrorSpend } from "@/lib/log";
 import { outputLimitShape, requestedOutputTokens } from "@/lib/output-limit";
-import { serverSideToolUse } from "@/lib/providers/server-side-tools";
+import { serverSideToolUse, serverToolLabel, serverToolRefusalMessage } from "@/lib/providers/server-side-tools";
 import { periodStart, secondsUntilPeriodEnd, type PeriodKind, type PeriodLimit } from "@/lib/period";
 import { livePolicyRevision, shadowRevision, stampShadowVerdict } from "@/lib/policy-shadow";
 import { signReceipt, type OwnerClaim } from "@/lib/receipt";
@@ -110,11 +114,26 @@ import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 import { alertForGatewayStatus, notifyWorkspace } from "@/lib/alerts/workspace";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
+import {
+  createSecretWatchStream,
+  findSecrets,
+  redactSecrets,
+  redactSecretsInText as redactGuardedText,
+  secretKinds,
+  secretRefusalMessage,
+} from "@/lib/secret-guard";
 import { forwardableAnthropicBeta } from "@/lib/providers/anthropic-beta";
 import { openrouterHoldMicrocents, openrouterModelSelectionField, withMaxPrice } from "@/lib/providers/openrouter";
 import { openrouterCeilingFor } from "@/lib/providers/openrouter-price";
 import { withReportedServiceTier } from "@/lib/providers/service-tier";
-import { hostedToolPlan, hostedToolReserve, totalWithHostedTools, withDefaultToolCaps } from "@/lib/providers/hosted-tools";
+import {
+  hostedToolPlan,
+  hostedToolReserve,
+  hostedToolTokens,
+  requestAdvisor,
+  totalWithHostedTools,
+  withDefaultToolCaps,
+} from "@/lib/providers/hosted-tools";
 import { err, errMessage } from "@/lib/gateway/responses";
 import {
   authenticateGatewayRequest,
@@ -411,6 +430,13 @@ function shadowVerdict(
   try {
     if (shadow === null || shadow === undefined) return null;
     const policy: GatePolicyInput = { kind: "value", value: shadow };
+    // The DRAFT's sub-agent allowlist, not the live one: otherwise the counts
+    // would report "allow" for sub-agent calls the draft would refuse, and an
+    // operator would promote it on that evidence. A refusal by it is recorded as
+    // the draft's deny, which is what it is.
+    if (base.subagent) base = { ...base, subagent: { agent: base.subagent.agent, allow: subagentAllowlist(shadow) } };
+    const draftDeniedSubagent = (g: ReturnType<typeof evaluateGate>) =>
+      g.deniedBy === "scope" && g.steps.some((s) => s.rule === "scope:subagent_no_match");
     const policyFailClosed = process.env.POLICY_FAIL_CLOSED === "true";
 
     // First pass with no reading, exactly as the live evaluation begins. It
@@ -418,6 +444,7 @@ function shadowVerdict(
     // decides before the counter is ever consulted, and — if not — which cap the
     // candidate would need a reading for.
     const first = evaluateGate({ ...base, policy, policyFailClosed });
+    if (draftDeniedSubagent(first)) return "deny:policy";
     const needs = first.policyRateLimitRequired;
     if (needs === null) {
       if (first.deniedBy === "policy") return "deny:policy";
@@ -772,17 +799,26 @@ async function handle(req: Request, params: { provider: string; path: string[] }
 
   // Built from the result of the authentication path, never from the flag.
   // This value is carried unchanged into both the signed receipt and audit row.
+  // The session and sub-agent the client DECLARED (lib/client-lineage.ts). It is
+  // NOT identity, and nothing decides on it: it rides inside the two objects below
+  // only because they are spread into every receipt and log row this call writes,
+  // refusals included, so no path can forget it. Read from the headers alone, so
+  // a call refused before its body is read carries the same lineage as one that
+  // completed.
+  const lineage = readClientLineage(req.headers);
   const receiptIdentity =
     principal.kind === "passport"
       ? ({
           authMethod: passportAuthMethod,
           passportId: principal.passportId,
           visaJti: principal.visaJti,
+          lineage,
         } as const)
       : ({
           authMethod: "direct_key",
           agentAccessKeyId: principal.keyId,
           credentialUseId,
+          lineage,
         } as const);
   const logIdentity =
     principal.kind === "passport"
@@ -790,11 +826,13 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           authMethod: passportAuthMethod,
           passportId: principal.passportId,
           jti: principal.visaJti,
+          lineage,
         } as const)
       : ({
           authMethod: "direct_key",
           agentAccessKeyId: principal.keyId,
           credentialUseId,
+          lineage,
         } as const);
 
   // Names the receipt for a GOVERNED decision — one where the gate ran and a row
@@ -805,8 +843,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // rate limit: those write no row, so advertising an id there would hand the
   // caller a reference that 404s. The header's contract is "this id names a
   // decision the gateway recorded", and it has to stay true to be worth having.
-  const errR = (status: number, code: string) =>
-    new Response(JSON.stringify({ error: code }), {
+  const errR = (status: number, code: string, message?: string) =>
+    new Response(JSON.stringify(message ? { error: code, message } : { error: code }), {
       status,
       headers: { "content-type": "application/json", "x-passcontrol-receipt-id": receiptId },
     });
@@ -1056,12 +1094,31 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // allowlisted spelling. The gate exempts model listings by path.
     requestedOutput: requestedOutputTokens(outputLimitShape(provider, path), bodyObj),
     dollarLimited,
+    // The sub-agent allowlist (sprint C(a)): only for a call that DECLARES a
+    // sub-agent, and only from a readable live policy. Unreadable means unknown,
+    // and the policy step's posture decides that call (fail open by default,
+    // closed under POLICY_FAIL_CLOSED, as on Cloud).
+    ...(lineage?.agent
+      ? {
+          subagent: {
+            agent: lineage.agent,
+            allow:
+              currentPolicySnapshot.policy === POLICY_UNREADABLE ? null : subagentAllowlist(currentPolicySnapshot.policy),
+          },
+        }
+      : {}),
   };
   const prePolicyGate = evaluateGate(gateBase);
   if (prePolicyGate.deniedBy === "scope") {
     logBlocked("blocked_scope", model);
     captureBlocked("blocked_scope", 403);
-    return errR(403, "blocked_scope");
+    // A sub-agent refusal says which sub-agent and which model, so Claude Code or
+    // Codex shows the operator something they can act on. An ordinary scope miss
+    // keeps its bare code, exactly as before.
+    const scopeFail = prePolicyGate.steps.find((s) => s.name === "scope" && s.status === "fail");
+    return scopeFail?.rule === "scope:subagent_no_match"
+      ? errR(403, "blocked_scope", `PassControl refused this call. ${scopeFail.reason}`)
+      : errR(403, "blocked_scope");
   }
   if (
     prePolicyGate.deniedBy === "endpoint" &&
@@ -1104,12 +1161,20 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // and before any hold, so there is nothing to release.
   const embeddings = isEmbeddingsEndpoint(provider, req.method, path);
   if (embeddings && wantsStream) return err(400, "stream_unsupported");
-  // Hosted tools (OpenAI web search, file search, code interpreter, …) are
-  // billed per call or per session, outside token usage, so no budget here could
-  // hold them. Refused as a request this gateway does not carry — before policy
-  // and hold, and unlogged like `invalid_body` (lib/providers/server-side-tools.ts).
-  if (serverSideToolUse(provider, bodyObj) !== null) {
-    return err(400, "server_side_tools_unsupported");
+  // Hosted tools PassControl does not price are billed outside token usage, so no
+  // budget here could hold them: refused before policy and hold
+  // (lib/providers/server-side-tools.ts). LOGGED since P4 (2026-10-08): it used
+  // to be unlogged like `invalid_body`, and Claude Code's advisor showed what that
+  // costs — a bare 400 in the user's terminal and nothing on the owner's dashboard.
+  const serverTool = serverSideToolUse(provider, bodyObj);
+  if (serverTool !== null) {
+    const tool = serverToolLabel(bodyObj, serverTool);
+    logBlocked("blocked_server_tool", model, 400);
+    captureBlocked("blocked_server_tool", 400);
+    return new Response(
+      JSON.stringify({ error: "server_side_tools_unsupported", tool, message: serverToolRefusalMessage(tool) }),
+      { status: 400, headers: { "content-type": "application/json", "x-passcontrol-receipt-id": receiptId } }
+    );
   }
   // OpenRouter fields that pick the model behind `model`'s back (`models`
   // fallbacks, `route`, a preset): scope judges the model it can read, so they are
@@ -1157,6 +1222,86 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       : errR(policy.status, "blocked_policy");
   }
 
+  // ── 4b. The advisor's model (P4, 2026-10-08) ───────────────────────────────
+  // Anthropic's advisor is a second model the call reaches, so it passes the
+  // agent's model gates: the scope and the live policy's deny rules. Otherwise
+  // "deny Opus" would be one tool definition away from running Opus. NOT the
+  // sub-agent allowlist (owner, 2026-10-08): Claude Code attaches the user's own
+  // advisor to sub-agent calls too, and that list governs the model a sub-agent
+  // chooses; checking the advisor against it refused every sub-agent call of a
+  // user with an advisor picked (seen live). Pure evaluation: the policy's hourly
+  // counter was already taken once for this call above.
+  const advisor = provider === "anthropic" ? requestAdvisor(bodyObj) : null;
+  if (advisor) {
+    const { subagent: _subagentList, ...agentGate } = gateBase;
+    const advisorGate = evaluateGate({
+      ...agentGate,
+      model: advisor.model,
+      policy: currentPolicyGate.policy,
+      policyFailClosed,
+    });
+    if (advisorGate.deniedBy === "scope") {
+      logBlocked("blocked_scope", model);
+      captureBlocked("blocked_scope", 403);
+      return errR(
+        403,
+        "blocked_scope",
+        `PassControl refused this call: its advisor model ${advisor.model} is outside the models this agent may use. Pick another advisor (Claude Code: /advisor), or widen the agent's scope.`
+      );
+    }
+    if (advisorGate.deniedBy === "policy") {
+      const policy = policyBlockDetails(advisorGate);
+      logBlocked(BLOCKED_POLICY_STATUS, model, policy.status);
+      captureBlocked(`blocked_policy_${policy.reason}`, policy.status, policy.rule);
+      return errR(
+        policy.status,
+        "blocked_policy",
+        `PassControl refused this call: this agent's policy does not allow its advisor model ${advisor.model}.`
+      );
+    }
+  }
+
+  // ── 4c. The secret guard (2026-10-08, lib/secret-guard.ts) ──────────────────
+  // Off unless the live policy sets `secret_guard`. After every model gate, before
+  // any estimate, hold or key read: a refused call reserves and reveals nothing,
+  // and a redacted body is the one every attempt is built from and sized by. An
+  // unreadable policy applies no guard, under the policy step's posture. Nothing
+  // here records a secret: findings are kinds and JSON paths.
+  const guardMode =
+    currentPolicySnapshot.policy === POLICY_UNREADABLE ? null : secretGuardMode(currentPolicySnapshot.policy);
+  // Keyed per tenant and by the gateway's own secret, so a placeholder's
+  // fingerprint tells two keys apart and reveals nothing about either.
+  const guardKey = `secret-guard-v1:${userId}:${process.env.VISA_SECRET ?? ""}`;
+  let secretsRedacted = 0;
+  const reportSecrets = (event: string, code: string, kinds: readonly string[]) =>
+    waitUntil(
+      captureSecurityEvent(event, {
+        route: "api.proxy",
+        method: req.method,
+        provider,
+        agentId,
+        jti,
+        code: `${code}:${kinds.join(",")}`,
+      })
+    );
+  if (guardMode === "block") {
+    const findings = findSecrets(bodyObj);
+    if (findings.length > 0) {
+      logBlocked("blocked_secret", model);
+      reportSecrets("proxy.secret_in_request", "blocked_secret", secretKinds(findings));
+      return errR(403, "blocked_secret", secretRefusalMessage(findings));
+    }
+  } else if (guardMode === "redact") {
+    const redacted = redactSecrets(bodyObj, guardKey);
+    if (redacted.findings.length > 0) {
+      bodyObj = redacted.value;
+      secretsRedacted += redacted.findings.length;
+      reportSecrets("proxy.secret_in_request", "redacted_secret", secretKinds(redacted.findings));
+    }
+  }
+  const secretsHeader = (): Record<string, string> =>
+    secretsRedacted > 0 ? { "x-passcontrol-secrets-redacted": String(secretsRedacted) } : {};
+
   // ── 5–9, once per attempt ───────────────────────────────────────────────────
   //
   // Failover turns what was a straight line into a loop, so everything that
@@ -1175,8 +1320,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // An embeddings call generates nothing, so its hold reserves input alone (E1).
   // A fallback is only ever an embeddings endpoint too: `canonicalEndpointPath`
   // denies this path on a provider with no embeddings row.
-  const estimatedUsage = embeddings ? estimateEmbeddingUsage(bodyObj) : estimateTokenUsage(bodyObj);
-  const estimate = estimatedUsage.totalTokens;
+  // Chat and Responses calls are estimated per attempt, for that attempt's model.
+  const embeddingsUsage = embeddings ? estimateEmbeddingUsage(bodyObj) : null;
   // `seedSpent` USED TO BE HERE, and its deletion is the point.
   //
   // It NX-seeded `spent:` from the visa's `st` claim, which is minted from
@@ -1325,6 +1470,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   ): Promise<AttemptOutcome> => {
     const attemptProvider = target.provider;
     const attemptModel = target.model;
+    // This attempt's own estimate (P1.6): the prompt is the primary's, but a
+    // fallback's tokenizer may not be, and a new-tokenizer Claude model reads the
+    // same bytes as a third more tokens. The hold stores it, and every settlement
+    // of this attempt (charge-the-estimate paths included) reads it from the hold.
+    const attemptUsage = embeddingsUsage ?? estimateTokenUsage(bodyObj, 1000, attemptModel);
+    const attemptEstimate = attemptUsage.totalTokens;
     const attemptReceiptId = target.receiptId;
     const attemptId = guard.attemptId;
     const usageProtocol: UsageProtocol = isEmbeddingsEndpoint(attemptProvider, req.method, path)
@@ -1412,9 +1563,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       ? 0
       : attemptProvider === "openrouter"
         ? openrouterPrice
-          ? openrouterHoldMicrocents(openrouterPrice, estimatedUsage, bodyObj)
+          ? openrouterHoldMicrocents(openrouterPrice, attemptUsage, bodyObj)
           : 0
-        : costMicrocents(attemptModel, estimatedUsage.inputTokens, estimatedUsage.outputTokens, attemptProvider) +
+        : // A request that asks Anthropic to cache holds its input at the write rate (P5.1).
+          holdMicrocents(attemptModel, attemptUsage, attemptProvider, bodyObj) +
           toolReserve.microcents;
 
     // ── 5. Open the attempt's hold (atomic) ────────────────────────────────────
@@ -1426,7 +1578,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       attemptId,
       // Hosted-tool results arrive as input tokens inside the call: a token cap
       // has to hold room for them as well.
-      estimate: estimate + toolReserve.tokens,
+      estimate: attemptEstimate + toolReserve.tokens,
       estimateMicrocents,
       capTokens,
       capMicrocents,
@@ -1596,7 +1748,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         ...(reserve.reason === "tokens" || reserve.reason === "cost" || reserve.reason === "period"
           ? { reason: reserve.reason }
           : {}),
-        estimateTokens: estimate,
+        estimateTokens: attemptEstimate,
         estimateMicrocents,
         reservedTokens: reserve.reserved,
         reservedMicrocents: reserve.reservedMicrocents,
@@ -1673,8 +1825,14 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // ~18,000-token prompt — a cap set in the dashboard that the agent could
       // run straight through. Cache reads are cheap, not free, and they are not
       // absent.
+      // Plus the tokens Anthropic's advisor processed (P4), which its usage reports
+      // outside the top-level fields: a token cap is a limit on all of them.
       const billedTokens =
-        usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+        usage.inputTokens +
+        usage.outputTokens +
+        usage.cacheReadTokens +
+        usage.cacheWriteTokens +
+        hostedToolTokens(usage.hostedTools);
 
       // WHAT THE COST DIMENSION IS CHARGED, which is not always the price.
       //
@@ -2192,7 +2350,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // Claude Code's body needs its betas, and only betas that change neither reach
     // nor cost are passed. Set before the credential, which nothing can override.
     if (attemptProvider === "anthropic") {
-      const beta = forwardableAnthropicBeta(req.headers.get("anthropic-beta")).header;
+      // The advisor's beta only when this attempt carries an advisor PassControl
+      // accepted and holds for (P4); the plan says so.
+      const beta = forwardableAnthropicBeta(req.headers.get("anthropic-beta"), { advisor: Boolean(toolPlan?.advisor) }).header;
       if (beta) fwdHeaders.set("anthropic-beta", beta);
     }
     // OpenRouter credits traffic to the app these name; PassControl names itself,
@@ -2226,10 +2386,26 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const redactText = (text: string) => {
       const out = redactSecretsInText(text, echoSecrets);
       if (out.redacted) reportReflection();
-      return out.text;
+      if (!guardMode) return out.text;
+      // A key the model wrote into a buffered answer (the secret guard, either mode:
+      // once billed there is nothing to refuse, so it is replaced).
+      const guarded = redactGuardedText(out.text, guardKey);
+      if (guarded.findings.length > 0) {
+        secretsRedacted += guarded.findings.length;
+        reportSecrets("proxy.secret_in_response", "redacted_secret", secretKinds(guarded.findings.map((kind) => ({ kind }))));
+      }
+      return guarded.text;
     };
     const redactBody = (body: ReadableStream<Uint8Array>) =>
       echoSecrets.length ? body.pipeThrough(redactingStream(echoSecrets, reportReflection)) : body;
+    // A streamed answer is watched, not rewritten (secret guard v1): a key the model
+    // writes is reported, by kind, when the stream ends.
+    const watchSecrets = (body: ReadableStream<Uint8Array>) =>
+      guardMode
+        ? body.pipeThrough(
+            createSecretWatchStream((kinds) => reportSecrets("proxy.secret_in_response", "seen_in_stream", [...new Set(kinds)]))
+          )
+        : body;
 
 
     // ── THE DISPATCH BOUNDARY ────────────────────────────────────────────────
@@ -2519,7 +2695,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       );
       return {
         kind: "response",
-        response: new Response(redactBody(upstream.body).pipeThrough(stream), {
+        response: new Response(watchSecrets(redactBody(upstream.body)).pipeThrough(stream), {
           status: 200,
           headers: {
             // No content-length: redaction can change it.
@@ -2574,7 +2750,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       );
       return {
         kind: "response",
-        response: new Response(redactBody(upstream.body).pipeThrough(stream), {
+        response: new Response(watchSecrets(redactBody(upstream.body)).pipeThrough(stream), {
           status: 200,
           headers: {
             "content-type": usageProtocol === "ollama" ? "application/x-ndjson" : "text/event-stream; charset=utf-8",
@@ -2632,6 +2808,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         headers: {
           "content-type": "application/json",
           "x-passcontrol-receipt-id": attemptReceiptId,
+          // After the body argument above, so it counts what that redaction found.
+          ...secretsHeader(),
         },
       }),
       reconcile(
@@ -2694,6 +2872,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // A fallback's model must be priceable too, or failover would be a way
       // round the dollar limit the primary was held to.
       dollarLimited,
+      // And on a sub-agent's list, or failover would carry a sub-agent to a model
+      // its owner never allowed sub-agents to use (sprint C(a)).
+      ...(gateBase.subagent ? { subagent: gateBase.subagent } : {}),
     };
     const gate = evaluateGate({
       ...fallbackBase,
@@ -2903,17 +3084,26 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     senderProofWould = senderConstraint.would;
   }
 
+  // The session and sub-agent the client DECLARED (lib/client-lineage.ts). It is
+  // NOT identity, and nothing decides on it: it rides inside the two objects below
+  // only because they are spread into every receipt and log row this call writes,
+  // refusals included, so no path can forget it. Read from the headers alone, so
+  // a call refused before its body is read carries the same lineage as one that
+  // completed.
+  const lineage = readClientLineage(req.headers);
   const receiptIdentity =
     principal.kind === "passport"
       ? ({
           authMethod: passportAuthMethod,
           passportId: principal.passportId,
           visaJti: principal.visaJti,
+          lineage,
         } as const)
       : ({
           authMethod: "direct_key",
           agentAccessKeyId: principal.keyId,
           credentialUseId,
+          lineage,
         } as const);
   const logIdentity =
     principal.kind === "passport"
@@ -2921,11 +3111,13 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
           authMethod: passportAuthMethod,
           passportId: principal.passportId,
           jti: principal.visaJti,
+          lineage,
         } as const)
       : ({
           authMethod: "direct_key",
           agentAccessKeyId: principal.keyId,
           credentialUseId,
+          lineage,
         } as const);
 
   // Created up here rather than at the policy step below, because the owner read
@@ -2934,8 +3126,8 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   // Same contract as the real path: the header names a decision that WAS
   // recorded, so it only rides on responses that write a row. See the comment on
   // `errR` in handle().
-  const errR = (status: number, code: string) =>
-    new Response(JSON.stringify({ error: code }), {
+  const errR = (status: number, code: string, message?: string) =>
+    new Response(JSON.stringify(message ? { error: code, message } : { error: code }), {
       status,
       headers: { "content-type": "application/json", "x-passcontrol-receipt-id": receiptId },
     });

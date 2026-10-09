@@ -30,6 +30,7 @@ import { bytesToBase64url, utf8ToBytes } from "./encoding";
 import { instanceIssuer, loadInstanceSigner } from "./crypto/instanceKey";
 import { RECEIPT_TYP, signCompactJws } from "./crypto/jws";
 import type { LogEntry } from "./log";
+import type { ClientLineage } from "./client-lineage";
 
 /**
  * Additive-only. A verifier accepts `ver <= its own` and ignores claims it does
@@ -126,6 +127,12 @@ interface ReceiptInputBase {
   previousReceiptId?: string | null;
   /** Why the gateway moved on. Allowlisted; see FailoverReason. */
   failoverReason?: string | null;
+  /**
+   * The session and sub-agent the client DECLARED (lib/client-lineage.ts). Never
+   * authenticated: any local process can send these headers. Signed as `ctx`
+   * with `src: "declared"`, so it can never read as passport-proven.
+   */
+  lineage?: ClientLineage | null;
 }
 
 type PassportReceiptIdentity = {
@@ -237,6 +244,21 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
   // their presence alone means "this attempt followed another".
   if (input.previousReceiptId) claims.prev = input.previousReceiptId;
   if (input.failoverReason) claims.why = input.failoverReason;
+  // Additive for the same reason, `ver` unchanged on both doors: present only
+  // when something was declared, so a call without lineage signs the receipt it
+  // signed before this existed. `src: "declared"` is fixed, never derived: these
+  // values identify a call, they do not authenticate it (trust boundary 1).
+  // agt/par are omitted for the main agent, which is what their absence means.
+  if (input.lineage) {
+    const { kind, session, agent, parent } = input.lineage;
+    claims.ctx = {
+      src: "declared",
+      cli: kind,
+      ses: session,
+      ...(agent ? { agt: agent } : {}),
+      ...(parent ? { par: parent } : {}),
+    };
+  }
   return claims;
 }
 

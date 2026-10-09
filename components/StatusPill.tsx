@@ -54,6 +54,8 @@ const CONFIG: Record<StatusType, { Icon: typeof CheckCircle2; tone: Tone }> = {
   // the wording of a budget denial. The agent is not out of money.
   blocked_unpriced_endpoint: { Icon: AlertCircle, tone: "warning" },
   blocked_unpriced_model: { Icon: AlertCircle, tone: "warning" },
+  blocked_server_tool: { Icon: AlertCircle, tone: "warning" },
+  blocked_secret: { Icon: AlertCircle, tone: "warning" },
   upstream_error: { Icon: HelpCircle, tone: "warning" },
   // The call reached a provider and the accounting did not come back. Warning
   // rather than danger: nothing was refused and nothing necessarily failed.

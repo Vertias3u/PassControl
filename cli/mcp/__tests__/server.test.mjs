@@ -83,13 +83,54 @@ afterEach(async () => {
 });
 
 describe("PassControl MCP server", () => {
-  it("lists the chat and list_models tools", async () => {
+  it("lists the budget, chat and list_models tools", async () => {
     const client = await connectCli();
 
     const result = await client.listTools();
 
-    expect(result.tools.map((tool) => tool.name).sort()).toEqual(["chat", "list_models"]);
+    expect(result.tools.map((tool) => tool.name).sort()).toEqual(["budget", "chat", "list_models"]);
   }, 10000);
+
+  it("budget reads the agent's own limits from GET /api/v1/self with its visa", async () => {
+    // 1.4.0 candidate 2: an agent that can read its budget can pick a cheaper model
+    // before it is refused.
+    const fetchMock = vi.fn();
+    const self = {
+      agent_id: "agent-1",
+      auth: "passport",
+      scope: SCOPE,
+      as_of: "2026-10-08T12:00:00.000Z",
+      budget: {
+        tokens: null,
+        cost: null,
+        period: { kind: "day", limit_microcents: 200_000_000, used_microcents: 42_000_000, remaining_microcents: 158_000_000, resets_in_seconds: 39_600 },
+      },
+    };
+    challengeThen(fetchMock, jsonResponse(self));
+    const client = await connect(fetchMock);
+
+    const result = await client.callTool({ name: "budget", arguments: {} });
+
+    const [url, init] = fetchMock.mock.calls.at(-1);
+    expect(url).toBe(`${GATEWAY}/api/v1/self`);
+    expect((init.method ?? "GET").toUpperCase()).toBe("GET");
+    expect(new Headers(init.headers).get("authorization")).toMatch(/^Bearer /);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual(self);
+    expect(result.content[0].text).toContain("Today: $0.42 of $2.00 used, $1.58 left");
+  });
+
+  it("budget reports a refusal as a tool error, without inventing numbers", async () => {
+    const fetchMock = vi.fn();
+    challengeThen(fetchMock, jsonResponse({ error: "blocked_suspended" }, 403));
+    const client = await connect(fetchMock);
+
+    const result = await client.callTool({ name: "budget", arguments: {} });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("403");
+    expect(result.content[0].text).not.toContain("$");
+  });
 
   it("mints a visa and sends Anthropic chat input to the governed proxy path", async () => {
     const fetchMock = vi.fn();

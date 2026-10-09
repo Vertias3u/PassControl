@@ -53,7 +53,9 @@ describe("costMicrocents — sub-cent precision (no rounding to zero)", () => {
   it("never presents an unverified model name as a precise price row", () => {
     // These names intentionally use each provider's conservative fallback. A
     // new model gets an explicit row only after its official price is verified.
-    expect(costMicrocents("claude-mythos-5", 1, 1, "anthropic")).toBe(1500 + 7500);
+    // (claude-mythos-5 was the example here until its row was added from the
+    // pricing page, 2026-10-08, sprint P1.2.)
+    expect(costMicrocents("claude-opus-5-7", 1, 1, "anthropic")).toBe(1500 + 7500);
     expect(costMicrocents("gpt-5.4-codex", 1, 1, "openai")).toBe(15000 + 60000);
     expect(costMicrocents("qwen-3.6-27b", 1, 1, "groq")).toBe(80 + 400);
     expect(costMicrocents("moonshotai/Kimi-K2.6", 1, 1, "together")).toBe(104 + 120);

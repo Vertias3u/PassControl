@@ -1581,10 +1581,228 @@ describe("Anthropic hosted tools at the route", () => {
 
   it("refuses an unpriced hosted tool before any hold or upstream call", async () => {
     verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
-    const res = await POST(hostedReq({ tools: [{ type: "advisor_20260301", name: "advisor" }] }), params);
+    const res = await POST(hostedReq({ tools: [{ type: "tool_search_tool_regex_20251119", name: "tool_search" }] }), params);
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "server_side_tools_unsupported" });
+    const body = await res.json();
+    expect(body).toMatchObject({ error: "server_side_tools_unsupported", tool: "tool_search_tool_regex_20251119" });
+    expect(body.message).toContain("tool_search_tool_regex_20251119");
     expect(openHoldMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // P4 (2026-10-08): this refusal used to be unlogged and wordless, so Claude Code
+  // printed a bare 400 and the owner's dashboard showed nothing at all.
+  // P4 part (a), 2026-10-08: Claude Code's advisor, priced (tests/advisor-pricing.test.ts).
+  describe("Anthropic's advisor", () => {
+    const ADVISOR = { type: "advisor_20260301", name: "advisor", model: "claude-opus-5-5" };
+    const BETA = "claude-code-20250219,advisor-tool-2026-03-01,mid-conversation-system-2026-04-07";
+    function advisorReq(extra: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
+      return new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", "anthropic-beta": BETA, ...headers },
+        body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages: [{ role: "user", content: "plan" }], tools: [ADVISOR], ...extra }),
+      });
+    }
+    const advisorUsage = {
+      input_tokens: 400,
+      output_tokens: 50,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      iterations: [
+        { type: "message", input_tokens: 200, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        { type: "advisor_message", model: "claude-opus-5-5", input_tokens: 300, output_tokens: 1500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        { type: "message", input_tokens: 200, output_tokens: 30, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      ],
+    };
+
+    it("forwards the advisor with its beta, capped under a dollar limit, and charges the advisor at its own rates", async () => {
+      verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }], bc: 500 });
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ usage: advisorUsage }), { status: 200, headers: { "content-type": "application/json" } }));
+      const res = await POST(advisorReq(), params);
+      expect(res.status).toBe(200);
+      const [, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+      const sent = JSON.parse(String(init.body));
+      expect(sent.tools).toEqual([{ ...ADVISOR, max_uses: 1, max_tokens: 4096 }]);
+      const beta = new Headers(init.headers).get("anthropic-beta")!.split(",");
+      expect(beta).toContain("advisor-tool-2026-03-01");
+      expect(beta).not.toContain("mid-conversation-system-2026-04-07");
+      // The hold covers one advisor use at Opus 5.5's rates before anything is sent.
+      expect(openHoldMock.mock.calls[0]![0].estimateMicrocents).toBeGreaterThanOrEqual(4096 * 2_000);
+      await vi.waitFor(() => expect(settleHoldMock).toHaveBeenCalled());
+      const settled = settleHoldMock.mock.calls.at(-1)![0];
+      // Haiku 4.5 executor ($1/$5) for the top-level usage, Opus 5.5 ($4/$20) for the advice.
+      expect(settled.microcents).toBe(400 * 100 + 50 * 500 + 300 * 400 + 1500 * 2_000);
+      // A token cap counts the advisor's tokens too.
+      expect(settled.tokens).toBe(400 + 50 + 300 + 1500);
+    });
+
+    it("refuses an advisor model outside the agent's scope, logged as a scope refusal", async () => {
+      verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["claude-haiku-*"] }] });
+      const res = await POST(advisorReq(), params);
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toBe("blocked_scope");
+      expect(body.message).toContain("claude-opus-5-5");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(openHoldMock).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+      expect(writeLogMock.mock.calls.at(-1)![0]).toMatchObject({ status: "blocked_scope" });
+    });
+
+    it("refuses an advisor model the live policy denies", async () => {
+      verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+      getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { deny: [{ provider: "anthropic", models: ["claude-opus-*"] }] }, s: null }));
+      const res = await POST(advisorReq(), params);
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("blocked_policy");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    // Owner, 2026-10-08 (seen live: Claude Code attaches the advisor to sub-agent calls
+    // too, and a Haiku-only sub-agent list refused every one of them). The sub-agent list
+    // governs the model a sub-agent CHOOSES; the advisor is the user's own pick, checked
+    // against the agent's scope and deny rules like any second model.
+    it("checks a sub-agent's advisor against the agent's scope, not the sub-agent list", async () => {
+      verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+      getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { subagent_models: [{ provider: "anthropic", models: ["claude-haiku-*"] }] }, s: null }));
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ usage: advisorUsage }), { status: 200, headers: { "content-type": "application/json" } }));
+      const res = await POST(advisorReq({}, { "x-claude-code-session-id": "s-1", "x-claude-code-agent-id": "a-1" }), params);
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("still refuses a sub-agent's own model outside the list, advisor or not", async () => {
+      verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+      getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { subagent_models: [{ provider: "anthropic", models: ["claude-opus-*"] }] }, s: null }));
+      const res = await POST(advisorReq({}, { "x-claude-code-session-id": "s-1", "x-claude-code-agent-id": "a-1" }), params);
+      expect(res.status).toBe(403);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("forwards no advisor beta for a request without an accepted advisor", async () => {
+      verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+      fetchMock.mockResolvedValue(new Response(JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }), { status: 200, headers: { "content-type": "application/json" } }));
+      await POST(advisorReq({ tools: [] }), params);
+      const [, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+      expect(new Headers(init.headers).get("anthropic-beta")).toBe("claude-code-20250219");
+    });
+  });
+
+  it("logs the refusal, so the owner sees which tool was refused", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+    const res = await POST(hostedReq({ tools: [{ type: "mcp_toolset", mcp_server_name: "x" }] }), params);
+    expect(res.status).toBe(400);
+    expect(res.headers.get("x-passcontrol-receipt-id")).toBeTruthy();
+    await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+    expect(writeLogMock.mock.calls.at(-1)![0]).toMatchObject({ status: "blocked_server_tool" });
+  });
+
+  it("tells a Claude Code user how to turn the advisor off, when the advisor is what was refused", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+    // An advisor PassControl cannot price: a model with no price row.
+    const res = await POST(hostedReq({ tools: [{ type: "advisor_20260301", name: "advisor", model: "claude-nova-9" }] }), params);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.tool).toBe("advisor_20260301");
+    expect(body.message).toContain("/advisor");
+    expect(body.message).toContain("CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1");
+  });
+});
+
+// The secret guard in the proxy (owner, 2026-10-08; lib/secret-guard.ts). Off unless the
+// live policy sets `secret_guard`. It runs after every model gate and before any
+// estimate, hold or key read, on the body every failover attempt is built from.
+describe("the secret guard", () => {
+  const ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let n = 7;
+  const draw = (len: number) => Array.from({ length: len }, () => ALPHA[(n = (n * 48271) % 2147483647) % ALPHA.length]).join("");
+  // Built at run time: a literal key-shaped string in the source trips push protection.
+  const githubKey = () => ["ghp", draw(36)].join("_");
+  const params = { params: Promise.resolve({ provider: "anthropic", path: ["v1", "messages"] }) };
+  const guardReq = (text: string) =>
+    new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages", {
+      method: "POST",
+      headers: { authorization: "Bearer visa", "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages: [{ role: "user", content: [{ type: "text", text }] }] }),
+    });
+  const withGuard = (mode: "block" | "redact") =>
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { secret_guard: { mode } }, s: null }));
+  const okJson = (body: unknown) =>
+    new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  const usage = { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const sentBody = () => String((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).body);
+  /** Every argument every mock was ever called with, as one string. */
+  const everything = () =>
+    JSON.stringify(
+      [verifyVisaMock, serviceClientMock, openHoldMock, settleHoldMock, getCachedKeyMock, writeLogMock, mirrorSpendMock, fetchMock]
+        .flatMap((m) => m.mock.calls)
+        .map((args) => args.map((a: unknown) => (a instanceof Request ? "[request]" : a)))
+    );
+
+  beforeEach(() => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+  });
+
+  it("is off by default: a key goes through untouched", async () => {
+    const key = githubKey();
+    fetchMock.mockResolvedValue(okJson({ usage }));
+    await POST(guardReq(`use ${key}`), params);
+    expect(sentBody()).toContain(key);
+  });
+
+  it("block: refuses before any hold, key read or upstream call, and says how to recover", async () => {
+    withGuard("block");
+    const key = githubKey();
+    const res = await POST(guardReq(`here: ${key}`), params);
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("blocked_secret");
+    expect(body.message).toContain("github");
+    expect(body.message).toContain("messages[0].content[0].text");
+    expect(body.message).toContain("/rewind");
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(getCachedKeyMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+    expect(writeLogMock.mock.calls.at(-1)![0]).toMatchObject({ status: "blocked_secret" });
+    expect(JSON.stringify(body) + everything()).not.toContain(key);
+  });
+
+  it("redact: forwards a placeholder, deterministically, and never the key", async () => {
+    withGuard("redact");
+    const key = githubKey();
+    fetchMock.mockResolvedValue(okJson({ usage }));
+    const res = await POST(guardReq(`token ${key} ok`), params);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-passcontrol-secrets-redacted")).toBe("1");
+    const first = sentBody();
+    expect(first).toMatch(/token \[SECRET_REDACTED:github:[0-9a-f]{8}\] ok/);
+    await POST(guardReq(`token ${key} ok`), params);
+    expect(sentBody()).toBe(first);
+    expect(everything()).not.toContain(key);
+  });
+
+  it("the hold is sized from the body actually sent", async () => {
+    withGuard("redact");
+    fetchMock.mockResolvedValue(okJson({ usage }));
+    await POST(guardReq(`token ${githubKey()} ok`), params);
+    expect(openHoldMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("redacts a key in a buffered answer when the guard is on", async () => {
+    withGuard("block");
+    const key = githubKey();
+    fetchMock.mockResolvedValue(okJson({ content: [{ type: "text", text: `export GH=${key}` }], usage }));
+    const res = await POST(guardReq("write me a config"), params);
+    const text = await res.text();
+    expect(text).not.toContain(key);
+    expect(text).toContain("[SECRET_REDACTED:github:");
+    expect(res.headers.get("x-passcontrol-secrets-redacted")).toBe("1");
+  });
+
+  it("leaves a buffered answer alone when the guard is off", async () => {
+    const key = githubKey();
+    fetchMock.mockResolvedValue(okJson({ content: [{ type: "text", text: key }], usage }));
+    expect(await (await POST(guardReq("hi"), params)).text()).toContain(key);
   });
 });

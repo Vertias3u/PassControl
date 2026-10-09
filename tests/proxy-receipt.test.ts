@@ -419,3 +419,124 @@ describe("the owner claim rides on the receipt", () => {
     expect(signReceiptMock).toHaveBeenCalledWith(expect.objectContaining({ owner: null }));
   });
 });
+
+// Sprint Q5 (D1): the lineage a call DECLARES rides on every receipt and log row
+// the gateway writes for it, success and refusal alike. Read from the headers
+// only, so a call refused before its body is read carries the same lineage as
+// one that completed.
+describe("declared lineage reaches the receipt and the log", () => {
+  const LINEAGE_HEADERS = {
+    "x-claude-code-session-id": "00000000-0000-4000-8000-000000000001",
+    "x-claude-code-agent-id": "a0000000000000002",
+    "x-claude-code-parent-agent-id": "a0000000000000001",
+  };
+  const LINEAGE = {
+    kind: "claude-code",
+    session: "00000000-0000-4000-8000-000000000001",
+    agent: "a0000000000000002",
+    parent: "a0000000000000001",
+  };
+
+  function callWith(headers: Record<string, string>, scopeModel = "gpt-4o-mini") {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: [scopeModel] }] });
+    return POST(
+      new Request("https://gateway.test/api/v1/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", ...headers },
+        body: JSON.stringify(CHAT),
+      }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+  }
+
+  it("on a completed call", async () => {
+    expect((await callWith(LINEAGE_HEADERS)).status).toBe(200);
+    expect(signReceiptMock).toHaveBeenCalledWith(expect.objectContaining({ lineage: LINEAGE, status: "ok" }));
+    expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ lineage: LINEAGE, status: "ok" }));
+  });
+
+  it("on a refusal", async () => {
+    expect((await callWith(LINEAGE_HEADERS, "claude-*")).status).toBe(403);
+    expect(signReceiptMock).toHaveBeenCalledWith(expect.objectContaining({ lineage: LINEAGE, status: "blocked_scope" }));
+    expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ lineage: LINEAGE, status: "blocked_scope" }));
+  });
+
+  it("is null when the call declares nothing", async () => {
+    await callWith({});
+    expect(signReceiptMock.mock.calls[0]?.[0]?.lineage ?? null).toBeNull();
+    expect(writeLogMock.mock.calls[0]?.[0]?.lineage ?? null).toBeNull();
+  });
+
+  it("drops a malformed value instead of refusing the call", async () => {
+    const res = await callWith({ "x-claude-code-session-id": "s-1", "x-claude-code-agent-id": "x".repeat(200) });
+    expect(res.status).toBe(200);
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({ lineage: { kind: "claude-code", session: "s-1", agent: null, parent: null } })
+    );
+  });
+
+  it("never lets a declared value change the identity the call authenticated as", async () => {
+    await callWith(LINEAGE_HEADERS);
+    expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ passportId: "passport-id", jti: "visa-jti-1" }));
+  });
+});
+
+// Sprint Q8 (C(a), D5(a)): the live policy's sub-agent model allowlist refuses a
+// DECLARED sub-agent at the scope step, readably, and leaves the main agent alone.
+describe("the sub-agent model allowlist", () => {
+  const SUB = {
+    "x-claude-code-session-id": "00000000-0000-4000-8000-000000000001",
+    "x-claude-code-agent-id": "a0000000000000002",
+  };
+  const MAIN = { "x-claude-code-session-id": "00000000-0000-4000-8000-000000000001" };
+  const ONLY_41 = [{ provider: "openai", models: ["gpt-4.1-mini"] }];
+
+  function callWith(headers: Record<string, string>) {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "openai", models: ["gpt-4o-mini"] }] });
+    return POST(
+      new Request("https://gateway.test/api/v1/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", ...headers },
+        body: JSON.stringify(CHAT),
+      }),
+      { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
+    );
+  }
+
+  it("refuses a sub-agent asking for an unlisted model, with a sentence a coding tool can show", async () => {
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { subagent_models: ONLY_41 }, s: null }));
+    const res = await callWith(SUB);
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; message?: string };
+    expect(body.error).toBe("blocked_scope");
+    expect(body.message).toContain("Sub-agent a0000000000000002");
+    expect(body.message).toContain("openai/gpt-4o-mini");
+    expect(res.headers.get(RECEIPT_HEADER)).toMatch(UUID_RE);
+    expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ status: "blocked_scope" }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves the main agent's call with the same model alone", async () => {
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { subagent_models: ONLY_41 }, s: null }));
+    expect((await callWith(MAIN)).status).toBe(200);
+  });
+
+  it("admits the sub-agent when the list holds the model", async () => {
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { subagent_models: [{ provider: "openai", models: ["gpt-4o-*"] }] }, s: null }));
+    expect((await callWith(SUB)).status).toBe(200);
+  });
+
+  it("previews a DRAFT allowlist in shadow mode: admitted live, recorded as a would-deny", async () => {
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: { subagent_models: ONLY_41 } }));
+    expect((await callWith(SUB)).status).toBe(200);
+    const row = writeLogMock.mock.calls.find((c) => c[0]?.status === "ok")?.[0];
+    expect(String(row?.policyShadowWould ?? "")).toMatch(/^deny:policy/);
+  });
+
+  it("a draft allowlist does not touch the main agent's shadow verdict", async () => {
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: { subagent_models: ONLY_41 } }));
+    await callWith(MAIN);
+    const row = writeLogMock.mock.calls.find((c) => c[0]?.status === "ok")?.[0];
+    expect(String(row?.policyShadowWould ?? "")).toMatch(/^allow/);
+  });
+});

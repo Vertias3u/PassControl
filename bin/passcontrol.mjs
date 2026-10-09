@@ -90,7 +90,13 @@ import {
 import { isLocalGatewayOrigin, probeGatewayVersion, probeTimeoutMs } from "../cli/gateway-probe.mjs";
 import { dashboardOriginForOffset, portHolders, stackPortConflictMessage } from "../cli/local-stack.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
-import { claudeCodeEnv, claudeCodeSettingsPath, removeClaudeCodeSettings, writeClaudeCodeSettings } from "../cli/claude-code.mjs";
+import {
+  claudeCodeEnv,
+  claudeCodeSettingsPath,
+  removeClaudeCodeSettings,
+  writeClaudeCodeSettings,
+} from "../cli/claude-code.mjs";
+import { statuslineText } from "../cli/statusline.mjs";
 import { CODEX_PROFILE, codexProfilePath, codexProfileToml, codexStoresApiKey, removeCodexProfile, writeCodexProfile } from "../cli/codex.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
@@ -102,7 +108,7 @@ import {
   instanceKidFromSeed,
   retiredKeyEntry,
 } from "../cli/instance-key.mjs";
-import { FAILURE_REASONS, verifyAgentToken, verifyReceipt, verifyStatement } from "../cli/verify.mjs";
+import { FAILURE_REASONS, verifyAgentToken, verifyReceipt, verifySession, verifyStatement } from "../cli/verify.mjs";
 import { compareProtocolSets } from "../cli/protocols.mjs";
 import { defaultAllowedModelForProvider } from "../cli/integration-defaults.mjs";
 import {
@@ -200,7 +206,7 @@ ${heading("Quick start")}
   ${cmd} login [--project]        sign in through your browser and set this machine up
   ${cmd} call "hi"                mint a visa and make a governed model call
   ${cmd} mcp                      passport identity for Claude Desktop, Cursor, Claude Code
-  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]] [--ollama-port 11435]
+  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]] [--ollama-port 11435] [--no-journal]
                                  passport identity for any tool that takes an api_key
 
 ${heading("Operate")}
@@ -231,6 +237,11 @@ ${heading("Manage")}
                                  show governed call logs
   ${cmd} statements [--limit 20] [--json]
                                  show the chain of signed spend statements
+  ${cmd} sessions [--agent ID] [--limit 20] [--json]
+                                 list Claude Code / Codex sessions (declared by the client)
+  ${cmd} seal <session> --agent ID [--out FILE]
+  ${cmd} statusline [--port 8788]   one line for Claude Code's status line (configure claude-code --statusline)
+                                 sign one session; save the seal and its receipts
   ${cmd} kill on|off              toggle the tenant kill switch
   ${cmd} export [--out FILE]      save a workspace configuration snapshot
   ${cmd} import <file> [--confirm IMPORT]
@@ -2382,6 +2393,10 @@ async function sidecarCommand(rest, opts) {
       .map((entry) => entry.trim())
       .filter(Boolean),
     refreshSkewSeconds: Number(opts.refreshSkewSeconds ?? process.env.REFRESH_SKEW_SECONDS ?? 30),
+    // The receipt-id journal (cli/journal.mjs) is on unless the flag says off.
+    // A flag only, like --allow-non-loopback: whether this machine keeps a record
+    // is the operator's to state, not a config file's.
+    noJournal: opts.journal === false || Boolean(opts.noJournal),
   });
 
   if (opts.for) {
@@ -2403,6 +2418,27 @@ function sidecarPort(opts = {}) {
     throw new Error("--port must be an integer from 1 to 65535.");
   }
   return port;
+}
+
+/**
+ * The agent's budget as one line, read through the running sidecar (cli/statusline.mjs).
+ * Never throws: whatever happens, Claude Code gets one line and a clean exit.
+ */
+async function statuslineCommand(opts) {
+  try {
+    const port = sidecarPort(opts);
+    const cacheFile = path.join(path.dirname(globalConfigPath()), `statusline-${port}.json`);
+    return await statuslineText({ port, cacheFile });
+  } catch (error) {
+    return `PassControl · ${error instanceof Error && /--port/.test(error.message) ? "bad --port" : "unavailable"}`;
+  }
+}
+
+/** The command Claude Code's settings run: the installed binary, or this checkout's. */
+function statusLineSettingsCommand(port) {
+  const args = `statusline --port ${port}`;
+  if (process.env.npm_lifecycle_event !== "cli") return `passcontrol ${args}`;
+  return `node ${JSON.stringify(CLI_ENTRY)} ${args}`;
 }
 
 function sidecarBaseUrl(opts = {}) {
@@ -2619,15 +2655,28 @@ function configureClaudeCode(opts = {}) {
   if (!opts.write) {
     step(`Dry run only. Re-run with \`--write\` to merge these two keys${scope === "project" ? " (or --write --global for every session)" : ""}.`);
   } else {
-    const result = writeClaudeCodeSettings({ target, baseUrl, force: Boolean(opts.force) });
+    const result = writeClaudeCodeSettings({
+      target,
+      baseUrl,
+      force: Boolean(opts.force),
+      statusLineCommand: opts.statusline ? statusLineSettingsCommand(port) : null,
+    });
     if (!result.changed) ok(`${target} already routes Claude Code through PassControl`);
     else {
       if (result.backupPath) step(`backed up ${result.backupPath}`);
       ok(`wrote ${target}`);
     }
+    if (result.statusLine?.existing) {
+      warn(`${target} already has a status line (${result.statusLine.existing}); it was left as it is. To show the budget there, add \`${statusLineSettingsCommand(port)}\` to it yourself.`);
+    } else if (result.statusLine?.changed) ok("added the agent's budget to Claude Code's status line");
     if (result.rawKeyFound) {
       warn(`${target} also holds a raw ANTHROPIC_API_KEY. PassControl does not need it there; remove it so no key sits on disk.`);
     }
+  }
+  if (opts.statusline && !opts.write) {
+    step(`With --write, the status line would run: ${statusLineSettingsCommand(port)}`);
+  } else if (!opts.statusline) {
+    step(`Optional, the agent's budget in Claude Code's status line: ${cliCommand(`configure claude-code --write --statusline${scope === "user" ? " --global" : ""}`)}`);
   }
   step(`Start the sidecar before Claude Code: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
   step("The agent's Anthropic scope must allow the models Claude Code uses (its main model, and Haiku for small tasks).");
@@ -3033,11 +3082,12 @@ async function verifyCommand(rest, opts) {
   const artifact = rest[1];
   const issuer = String(opts.issuer || process.env.PASSCONTROL_ISSUER || "");
 
-  if ((what !== "token" && what !== "receipt" && what !== "statement") || !artifact) {
+  if ((what !== "token" && what !== "receipt" && what !== "statement" && what !== "session") || !artifact) {
     throw new Error(
       "Usage: passcontrol verify token <jwt> --audience <aud> --issuer <origin>\n" +
         "       passcontrol verify receipt <jws> --issuer <origin>\n" +
-        "       passcontrol verify statement <jws> --issuer <origin>"
+        "       passcontrol verify statement <jws> --issuer <origin>\n" +
+        "       passcontrol verify session <seal.json> [--journal <file>[,<file>]] --issuer <origin>"
     );
   }
   if (!issuer) {
@@ -3045,6 +3095,11 @@ async function verifyCommand(rest, opts) {
       "Set --issuer <https origin> (or PASSCONTROL_ISSUER). A verifier that trusts " +
         "whatever issuer the artifact names is not verifying anything."
     );
+  }
+
+  if (what === "session") {
+    await verifySessionCommand(artifact, opts, issuer);
+    return;
   }
 
   const result =
@@ -3096,12 +3151,201 @@ async function verifyCommand(rest, opts) {
     step(`Verdict:  ${c.res?.status} (HTTP ${c.res?.http})`);
     step(`Usage:    ${c.use?.in ?? 0} in / ${c.use?.out ?? 0} out · ${c.cost ?? 0} µ¢`);
     if (c.req) step(`Request:  ${c.req.alg} ${c.req.dig} (${c.req.len} bytes)`);
+    // Lineage is DECLARED by the client: any local process can send those
+    // headers. Say so on the same line, so nobody reads it as passport-proven.
+    // Printable ASCII only: a signed value is still not a terminal's to obey.
+    if (c.ctx?.ses) {
+      const shown = (v) => String(v).replace(/[^\x20-\x7e]/g, "?").slice(0, 128);
+      const who = c.ctx.agt
+        ? `sub-agent ${shown(c.ctx.agt)}${c.ctx.par ? `, spawned by ${shown(c.ctx.par)}` : ""}`
+        : "main agent";
+      step(`Session:  ${shown(c.ctx.ses)} · ${who}`);
+      step(`          declared by the client (${shown(c.ctx.cli ?? "unknown")}), not verified`);
+    }
   }
   if (c.own) {
     step(
       `Owner:    ${c.own.sub} (${c.own.tier === "unverified" ? "self-declared, unverified" : c.own.tier})`
     );
   }
+}
+
+// ── Session seals (sprint Q7) ───────────────────────────────────────────────
+
+const SESSION_ARG_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const shown = (v) => String(v ?? "").replace(/[^\x20-\x7e]/g, "?").slice(0, 128);
+
+/** The journal files the sidecar wrote (cli/journal.mjs): one JSON object per line. */
+function readJournals(spec) {
+  const entries = [];
+  for (const file of String(spec).split(",").map((f) => f.trim()).filter(Boolean)) {
+    const text = fs.readFileSync(file, "utf8");
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+        // An unreadable line is passed through as-is, so the verifier reports the
+        // journal as malformed instead of this command quietly skipping a call.
+        entries.push(line);
+      }
+    }
+  }
+  return entries;
+}
+
+async function verifySessionCommand(file, opts, issuer) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(String(file), "utf8"));
+  } catch (e) {
+    fail(`Could not read ${shown(file)}: ${e.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  // Accepts the control API's response as saved ({ data: { seal, bundle } }) or
+  // just { seal, bundle }, which is what `passcontrol seal` writes.
+  const doc = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+  const journal = opts.journal && opts.journal !== true ? readJournals(opts.journal) : undefined;
+  const r = await verifySession({ seal: doc?.seal, bundle: doc?.bundle, journal }, { issuer });
+
+  if (!r.checks.signature) {
+    fail(`Not valid: ${FAILURE_REASONS[r.reason] ?? r.reason}`);
+    process.exitCode = 1;
+    return;
+  }
+  const c = r.claims;
+  (r.ok ? ok : fail)(r.ok ? "Session seal is valid." : "Session seal did not pass every check.");
+  step(`Issuer:   ${shown(c.iss)}`);
+  step(`Agent:    ${shown(c.sub)}`);
+  step(`Session:  ${shown(c.ses?.id)} · declared by the client (${shown(c.ses?.src)}), not verified`);
+  step(`Window:   ${new Date(c.per?.from * 1000).toISOString()} → ${new Date(c.per?.to * 1000).toISOString()}`);
+  step(`Covers:   ${c.n} of ${c.nr} logged calls · ${c.cost} µ¢`);
+  if (c.unp) step(`          ${c.unp} call(s) could not be priced: that cost is unknown, not zero.`);
+  if (c.unk) step(`          ${c.unk} call(s) have no recorded cost and no recorded reason.`);
+  for (const node of Array.isArray(c.tree) ? c.tree : []) {
+    const who = node.agt ? `sub-agent ${shown(node.agt)}${node.par ? ` (spawned by ${shown(node.par)})` : ""}` : "main agent";
+    step(`          ${who}: ${node.n} call(s), ${node.cost} µ¢${node.refused ? `, ${node.refused} refused` : ""}`);
+  }
+  step("");
+
+  ok("Signature matches the issuer's published key");
+  if (r.checks.bundle) ok(`Bundle: the root and every total recompute from its ${doc.bundle.length} receipt(s)`);
+  else fail(`Bundle: these do not match the receipts it came with: ${r.mismatched.join(", ") || r.reason}`);
+  if (r.checks.receipts === null) step("Receipts: not checked");
+  else if (r.checks.receipts) ok("Receipts: every one verifies and belongs to this agent, session and window");
+  else {
+    fail(`Receipts: ${r.rejected.length} not accepted`);
+    for (const x of r.rejected) step(`          #${x.index} ${shown(x.id ?? "?")}: ${FAILURE_REASONS[x.reason] ?? x.reason}`);
+  }
+
+  if (r.checks.journal === null) {
+    step("No journal given. Without your own record this proves no more than a statement does:");
+    step("          that the issuer committed to these receipts, not that it left none out.");
+    step("          Pass --journal with the file your sidecar printed when it started.");
+  } else if (r.reason === "malformed_journal") {
+    fail("Journal: could not be read as a list of receipt ids.");
+  } else if (r.checks.journal) {
+    ok("Journal: every call your sidecar recorded is in the seal");
+  } else {
+    fail(`Journal: ${r.missing.length} call(s) your sidecar recorded are missing from the seal:`);
+    for (const id of r.missing) step(`          ${shown(id)}`);
+    step("          Missing means not in this seal. The gateway's log write can fail on its own,");
+    step("          so a missing call can be a lost record as easily as one left out.");
+  }
+  if (r.otherSessions) {
+    step(`Your journal also holds ${r.otherSessions} call(s) from other sessions of the same sidecar run; not checked against this seal.`);
+  }
+  if (r.unjournaled.length) {
+    step(`In the seal but not in your journal (reported, not a failure): ${r.unjournaled.length}`);
+    for (const x of r.unjournaled) {
+      step(`          ${shown(x.id)}${x.why === "failover_predecessor" ? " (an earlier attempt of a failed-over call)" : ""}`);
+    }
+  }
+  if (!r.ok) process.exitCode = 1;
+}
+
+async function sealCommand(rest, opts) {
+  const session = rest[0];
+  if (!session || !SESSION_ARG_RE.test(session)) {
+    throw new Error("Usage: passcontrol seal <session> --agent <agent-id> [--out FILE]");
+  }
+  if (!opts.agent || opts.agent === true) {
+    throw new Error("Name the agent: passcontrol seal <session> --agent <agent-id> (see `passcontrol sessions`).");
+  }
+  let data;
+  try {
+    data = await api("POST", `/sessions/${encodeURIComponent(session)}/seal`, { agent_id: String(opts.agent) });
+  } catch (e) {
+    // api() leads with the status, then the error code. The route's own 404 carries
+    // `not_found`; a gateway without the route (self-host: sealing is a hosted
+    // capability, the format and verifier are not) answers with no code at all.
+    const message = String(e?.message || "");
+    if (/^404 not_found\b/.test(message)) {
+      throw new Error(`No session ${session} for agent ${opts.agent} on this gateway (see \`passcontrol sessions\`).`);
+    }
+    if (/^404\b/.test(message)) {
+      throw new Error(
+        "This gateway does not seal sessions. Sealing is a hosted capability; checking a seal works anywhere:\n" +
+          "  passcontrol verify session <seal.json> --journal <file> --issuer <origin>"
+      );
+    }
+    throw e;
+  }
+  const file = String(opts.out && opts.out !== true ? opts.out : `session-${session}.seal.json`);
+  // It is spend and call volume: owner-only, like the journal it is checked against.
+  fs.writeFileSync(file, JSON.stringify({ seal: data.seal, bundle: data.bundle }, null, 2) + "\n", { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  ok(`Sealed ${data.bundle?.length ?? 0} receipt(s) → ${file}`);
+  // The issuer the seal names, not the gateway just called: the two can differ (a
+  // self-host behind a proxy), and the issuer is the one a verifier must trust.
+  // Read without verifying, only to print a suggestion; `verify session` checks it.
+  let issuer = requireControlGateway(config);
+  try {
+    const claims = JSON.parse(Buffer.from(String(data.seal).split(".")[1] ?? "", "base64url").toString("utf8"));
+    if (typeof claims?.iss === "string") issuer = shown(claims.iss);
+  } catch {
+    // Not a JWS: verify session will say so. Keep the gateway as the suggestion.
+  }
+  step(`Check it: passcontrol verify session ${file} --journal <your sidecar journal> --issuer ${issuer}`);
+}
+
+async function sessionsCommand(opts) {
+  let rows;
+  try {
+    rows = await api(
+      "GET",
+      controlPath("/sessions", { agent_id: opts.agent === true ? undefined : opts.agent, limit: safeLimit(opts.limit) })
+    );
+  } catch (e) {
+    if (/^404\b/.test(String(e?.message || ""))) {
+      step("This gateway does not serve sessions. Verifying a seal works anywhere:");
+      step("  passcontrol verify session <seal.json> --journal <file> --issuer <origin>");
+      return;
+    }
+    throw e;
+  }
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    step("No sessions yet. Calls appear here once Claude Code or Codex (or a sidecar run) declares one.");
+    return;
+  }
+  step("Sessions are declared by the client: they group calls, they do not prove who made them.");
+  console.table(
+    rows.map((row) => ({
+      session: shown(row.session_id).slice(0, 36),
+      via: row.client_kind,
+      agent: String(row.agent_id ?? "").slice(0, 8),
+      calls: row.calls,
+      "sub-agents": row.subagents,
+      refused: row.refused,
+      cost: usd(row.cost_microcents) + (Number(row.unknown_cost) ? ` + ${row.unknown_cost} unknown` : ""),
+      last: String(row.last_at ?? "").slice(0, 19),
+    }))
+  );
 }
 
 /**
@@ -3946,6 +4190,14 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
   const { opts, rest } = parseArgv(argv);
   const [command, ...commandRest] = rest;
 
+  // First, before the update check or anything else that could print or wait:
+  // Claude Code shows this command's whole stdout as its status line, runs it
+  // after every assistant message, and cancels a run that is still going.
+  if (command === "statusline") {
+    console.log(await statuslineCommand(opts));
+    return;
+  }
+
   // Started here and awaited at the very end, so the registry lookup overlaps
   // the command instead of being tacked onto the exit. On anything that touches
   // the network — which is most of this CLI — it costs nothing measurable, and
@@ -4074,6 +4326,12 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
       break;
     case "statements":
       await statementsCommand(opts);
+      break;
+    case "sessions":
+      await sessionsCommand(opts);
+      break;
+    case "seal":
+      await sealCommand(commandRest, opts);
       break;
     case "kill":
       await killCommand(commandRest);

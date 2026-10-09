@@ -384,7 +384,8 @@ describe("azure refuses what no budget can hold", () => {
     const res = await azureCall(["responses"], { input: "hi", tools: [{ type: "web_search_preview" }] });
 
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "server_side_tools_unsupported" });
+    // Since P4 (2026-10-08) the refusal names the tool and says why.
+    expect(await res.json()).toMatchObject({ error: "server_side_tools_unsupported", tool: expect.any(String), message: expect.any(String) });
     expect(openHoldMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });

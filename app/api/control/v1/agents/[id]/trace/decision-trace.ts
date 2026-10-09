@@ -19,9 +19,8 @@ import { isProvider, type ScopeProviderId } from "@/lib/providers";
 import { advertisedClientPath } from "@/lib/scope";
 import type { ScopeEntry } from "@/lib/auth/visa";
 import { readLiveGrant, unionScopes } from "@/lib/break-glass";
-import { readPeriodUsageMany } from "@/lib/state/holds";
-import { periodStart, type PeriodKind } from "@/lib/period";
-import { serviceClient } from "@/lib/supabase";
+import type { PeriodKind } from "@/lib/period";
+import { budgetView, readPeriodCounted } from "@/lib/budget-view";
 
 const TRACE_AGENT_COLUMNS =
   "id, status, allowed_scopes, budget_tokens, budget_cents, spent_tokens, spent_microcents";
@@ -38,34 +37,6 @@ interface TraceAgentRow {
   spent_microcents: number;
   budget_period?: unknown;
   budget_period_cents?: unknown;
-}
-
-/**
- * What the periodic limit has counted this period, as the gateway would count
- * it on the next call: its own snapshot when it has one, or the ledger's figure
- * when it would seed from it. Null when neither can be read — the trace then
- * makes no period claim at all rather than projecting an admission.
- */
-async function projectPeriodCounted(
-  agentId: string,
-  kind: PeriodKind,
-  nowMs: number
-): Promise<number | null> {
-  try {
-    const usage = (await readPeriodUsageMany([{ id: agentId, kind }], nowMs)).get(agentId);
-    if (!usage) return null;
-    if (usage.state === "tracked") return usage.usedMicrocents + usage.heldMicrocents;
-    const { data, error } = await serviceClient().rpc("agent_period_spend", {
-      p_agent_id: agentId,
-      p_since: periodStart(kind, nowMs).toISOString(),
-    });
-    if (error) return null;
-    const row = (Array.isArray(data) ? data[0] : data) as { spent_microcents?: unknown } | undefined;
-    const seed = Number(row?.spent_microcents);
-    return Number.isFinite(seed) ? seed + usage.heldMicrocents : null;
-  } catch {
-    return null;
-  }
 }
 
 export interface DecisionTrace {
@@ -198,18 +169,20 @@ function projectBudget(
   // number matters most — "cannot reserve 2001" alone does not tell an operator
   // whether they are 500 tokens over or 500,000, and the browser is where that
   // omission showed: the allow path carried the room and the deny path did not.
+  //
+  // The same arithmetic `GET /api/v1/self` answers an agent with (lib/budget-view.ts),
+  // so an owner's trace and the agent's own view of its room cannot disagree.
+  const view = budgetView({
+    capTokens,
+    capMicrocents,
+    snapshot: { ...snapshot, spentTokens, spentMicrocents },
+    mirror: null,
+    period: { mode: "none" },
+    nowMs: 0,
+  });
   const headroom = {
-    ...(capTokens === null
-      ? {}
-      : { headroomTokens: Math.max(0, capTokens - reservedTokens - spentTokens) }),
-    ...(capMicrocents === null
-      ? {}
-      : {
-          headroomMicrocents: Math.max(
-            0,
-            capMicrocents - reservedMicrocents - spentMicrocents
-          ),
-        }),
+    ...(view.tokens === null ? {} : { headroomTokens: view.tokens.remaining ?? 0 }),
+    ...(view.cost === null ? {} : { headroomMicrocents: view.cost.remaining_microcents ?? 0 }),
   };
 
   if (
@@ -307,7 +280,7 @@ export async function evaluateDecisionTrace(
       : null;
   const periodCounted =
     periodKind !== null && periodCents !== null
-      ? await projectPeriodCounted(input.agentId, periodKind, input.evaluatedAt.getTime())
+      ? await readPeriodCounted(input.agentId, periodKind, input.evaluatedAt.getTime())
       : null;
   const budget = projectBudget(
     agent,

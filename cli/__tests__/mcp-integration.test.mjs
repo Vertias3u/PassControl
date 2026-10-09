@@ -95,7 +95,7 @@ describe("first-class MCP CLI integration", () => {
     try {
       await client.connect(transport);
       const result = await client.listTools();
-      expect(result.tools.map((tool) => tool.name).sort()).toEqual(["chat", "list_models"]);
+      expect(result.tools.map((tool) => tool.name).sort()).toEqual(["budget", "chat", "list_models"]);
     } finally {
       await client.close();
     }

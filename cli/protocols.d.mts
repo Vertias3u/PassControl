@@ -11,6 +11,8 @@ export const WORKSPACE_EXPORT_PROTOCOL: ProtocolRange;
 // Signed spend statements. Its own version line, and part of CLIENT_PROTOCOLS
 // since the format was published — see the note in protocols.mjs.
 export const STATEMENT_PROTOCOL: ProtocolRange;
+// Session seals. Its own line; in CLIENT_PROTOCOLS since the seal route shipped.
+export const SESSION_PROTOCOL: ProtocolRange;
 export const CLIENT_PROTOCOLS: Readonly<Record<string, ProtocolRange>>;
 export function compareProtocolRanges(client: ProtocolRange, server: unknown): "compatible" | "partial" | "update-required" | "unavailable";
 export function compareProtocolSets(serverProtocols: unknown): {

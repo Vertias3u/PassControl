@@ -151,6 +151,26 @@ function AgentPolicySummary({ policy }: { policy: AgentPolicyView }) {
                 : `${policy.maxOutputTokens.toLocaleString()} tokens per request — requests must state a limit at or under it`}
             </dd>
           </div>
+          <div>
+            <dt className="font-semibold text-foreground">Sub-agent models</dt>
+            <dd className="mt-1 text-muted-foreground" data-policy-summary="subagent_models">
+              {policy.subagentModels === null
+                ? "Not restricted"
+                : policy.subagentModels.length === 0
+                  ? "None: a declared sub-agent may call no model"
+                  : policy.subagentModels.map((e) => `${e.provider}: ${e.models.join(", ")}`).join(" · ")}
+            </dd>
+          </div>
+          <div>
+            <dt className="font-semibold text-foreground">Keys in requests</dt>
+            <dd className="mt-1 text-muted-foreground" data-policy-summary="secret_guard">
+              {policy.secretGuard === "block"
+                ? "Refused"
+                : policy.secretGuard === "redact"
+                  ? "Replaced with a placeholder"
+                  : "Not checked"}
+            </dd>
+          </div>
         </dl>
       )}
     </section>

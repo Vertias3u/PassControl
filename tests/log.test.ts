@@ -377,3 +377,57 @@ describe("the audit status model stays the single source of truth", () => {
     }
   });
 });
+
+describe("recording the lineage a call declared (0079)", () => {
+  beforeEach(() => {
+    insert.mockResolvedValue({ error: null });
+  });
+
+  const base = {
+    agentId: "agent-1",
+    userId: "user-1",
+    passportId: "passport-1",
+    jti: "visa-1",
+    provider: "anthropic",
+    status: "ok" as const,
+  };
+
+  it("writes the four client columns when lineage was declared", async () => {
+    await writeLog({ ...base, lineage: { kind: "claude-code", session: "s-1", agent: "a-2", parent: "a-1" } });
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({ client_kind: "claude-code", client_session: "s-1", client_agent: "a-2", client_parent: "a-1" })
+    );
+  });
+
+  it("omits agent and parent for the main agent rather than sending null", async () => {
+    await writeLog({ ...base, lineage: { kind: "codex", session: "s-1", agent: null, parent: null } });
+    const row = insert.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(row.client_session).toBe("s-1");
+    expect("client_agent" in row).toBe(false);
+    expect("client_parent" in row).toBe(false);
+  });
+
+  it("names no client column at all without lineage, so a pre-0079 schema still gets its row", async () => {
+    // PostgREST rejects the WHOLE insert on an unknown column.
+    for (const lineage of [undefined, null]) {
+      insert.mockClear();
+      await writeLog({ ...base, lineage });
+      const row = insert.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(Object.keys(row).filter((k) => k.startsWith("client_"))).toEqual([]);
+    }
+  });
+
+  it("writes lineage on a Direct Agent Key row too", async () => {
+    await writeLog({
+      agentId: "agent-1",
+      userId: "user-1",
+      authMethod: "direct_key",
+      agentAccessKeyId: "key-1",
+      credentialUseId: "use-1",
+      provider: "anthropic",
+      status: "ok",
+      lineage: { kind: "claude-code", session: "s-1", agent: null, parent: null },
+    });
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ auth_method: "direct_key", client_session: "s-1" }));
+  });
+});

@@ -171,6 +171,7 @@ export const GROUPS = [
       // reading of it is a money question. Verifying somebody ELSE's statement
       // is the evidence question, and that one sits with the other verifiers.
       command({ id: "statements", label: "Signed spend statements", run: ["statements"], detail: "statements", description: "Show the daily chain committing to every receipt in each window.", network: "gateway" }),
+      command({ id: "sessions", label: "Coding sessions", run: ["sessions"], detail: "sessions", description: "Claude Code and Codex sessions: sub-agents and spend, as declared.", network: "gateway" }),
     ],
   },
   {
@@ -261,6 +262,8 @@ export const HIDDEN = {
   keygen: "reached through its `instance` subcommand under Trust",
   verify: "reached through its subcommands under Evidence",
   try: "kept as an explanatory compatibility error, but no longer performs an operation",
+  seal: "needs a session and an agent, both named by `sessions`, which is listed under Money",
+  statusline: "Claude Code runs it, not a person; `configure claude-code --statusline` installs it",
 };
 
 /** Every top-level command name the menu can reach, flattened. */

@@ -98,6 +98,14 @@ export interface GateInput {
    * with provider-reported counts, which are real for any model.
    */
   dollarLimited?: boolean;
+  /**
+   * The call's DECLARED sub-agent and the live policy's sub-agent allowlist
+   * (lib/scope.ts subagentAllowlist; sprint C(a)). Absent for a call that
+   * declares no sub-agent. `allow: null` restricts nothing; `[]` admits no model.
+   * It can only narrow: the agent's own scope is checked first. A guard rail
+   * against a misbehaving model, not a security boundary: the header is declared.
+   */
+  subagent?: { agent: string; allow: readonly ScopeEntry[] | null };
 }
 
 export interface GatePolicyResult {
@@ -255,6 +263,13 @@ export function evaluateGate(input: GateInput): GateEvaluation {
         "scope",
         `${input.provider}/${input.model || "(no model)"} is outside the visa scope.`,
         "scope:no_match",
+        403
+      );
+    } else if (input.subagent && input.subagent.allow !== null && !scopeRuleMatch(input.subagent.allow, input.provider, input.model)) {
+      fail(
+        "scope",
+        `Sub-agent ${input.subagent.agent} may not use ${input.provider}/${input.model}: it is not on this agent's sub-agent model list.`,
+        "scope:subagent_no_match",
         403
       );
     } else {

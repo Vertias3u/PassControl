@@ -6,10 +6,12 @@
 // Bearer token with no "use this API key?" prompt. The sidecar strips it and the
 // gateway injects the real key, so Claude Code never holds one.
 //
-// The settings file belongs to the user. Only these two keys are written or
-// removed, the previous file is backed up, a file that is not a JSON object is
-// refused rather than overwritten, and a different gateway already configured is
-// not replaced without --force.
+// The settings file belongs to the user. Only these two keys, and with
+// --statusline a `statusLine` running `passcontrol statusline`, are written or
+// removed, in one save; the previous file is backed up, a file that is not a JSON
+// object is refused rather than overwritten, a different gateway already
+// configured is not replaced without --force, and a status line the user already
+// has is never replaced at all.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -63,34 +65,96 @@ function save(target, value, exists) {
   return backupPath;
 }
 
-export function writeClaudeCodeSettings({ target, baseUrl, force = false }) {
+/**
+ * The env keys, and with `statusLineCommand` the status line too, in ONE save:
+ * two saves would back up the first save's output and lose the user's original.
+ */
+export function writeClaudeCodeSettings({ target, baseUrl, force = false, statusLineCommand = null }) {
   const { exists, value } = readSettings(target);
   const env = typeof value.env === "object" && value.env !== null && !Array.isArray(value.env) ? value.env : {};
   const rawKeyFound = typeof env.ANTHROPIC_API_KEY === "string" && env.ANTHROPIC_API_KEY.length > 0;
   const current = env.ANTHROPIC_BASE_URL;
-  if (current === baseUrl && env.ANTHROPIC_AUTH_TOKEN === CLAUDE_CODE_AUTH_PLACEHOLDER) {
-    return { changed: false, backupPath: null, rawKeyFound };
-  }
-  if (typeof current === "string" && current && current !== baseUrl && !force) {
+  const envDone = current === baseUrl && env.ANTHROPIC_AUTH_TOKEN === CLAUDE_CODE_AUTH_PLACEHOLDER;
+  if (!envDone && typeof current === "string" && current && current !== baseUrl && !force) {
     throw new Error(
       `${target} already points Claude Code at ${current}. Re-run with --force to replace that address with PassControl's.`
     );
   }
-  const backupPath = save(target, { ...value, env: { ...env, ...claudeCodeEnv(baseUrl) } }, exists);
-  return { changed: true, backupPath, rawKeyFound };
+  let next = envDone ? value : { ...value, env: { ...env, ...claudeCodeEnv(baseUrl) } };
+  let statusLine;
+  if (statusLineCommand) {
+    const line = withStatusLine(next, statusLineCommand);
+    next = line.value;
+    statusLine = line.existing !== undefined ? { changed: false, existing: line.existing } : { changed: line.changed };
+  }
+  const changed = !envDone || Boolean(statusLine?.changed);
+  const backupPath = changed ? save(target, next, exists) : null;
+  return { changed, backupPath, rawKeyFound, ...(statusLine ? { statusLine } : {}) };
 }
 
+/** PassControl's two env keys and its status line, in one save. */
 export function removeClaudeCodeSettings({ target }) {
   if (!fs.existsSync(target)) return { changed: false };
   const { value } = readSettings(target);
+  let next = value;
   const env = typeof value.env === "object" && value.env !== null && !Array.isArray(value.env) ? value.env : null;
   // Only an address this command could have written: a gateway someone else set
   // up is not ours to remove.
-  if (!env || env.ANTHROPIC_AUTH_TOKEN !== CLAUDE_CODE_AUTH_PLACEHOLDER) return { changed: false };
-  const { ANTHROPIC_BASE_URL: _url, ANTHROPIC_AUTH_TOKEN: _token, ...rest } = env;
-  const next = { ...value };
-  if (Object.keys(rest).length) next.env = rest;
-  else delete next.env;
+  if (env && env.ANTHROPIC_AUTH_TOKEN === CLAUDE_CODE_AUTH_PLACEHOLDER) {
+    const { ANTHROPIC_BASE_URL: _url, ANTHROPIC_AUTH_TOKEN: _token, ...rest } = env;
+    next = { ...value };
+    if (Object.keys(rest).length) next.env = rest;
+    else delete next.env;
+  }
+  if (isOurStatusLine(next.statusLine)) {
+    const { statusLine: _ours, ...rest } = next;
+    next = rest;
+  }
+  if (next === value) return { changed: false };
   save(target, next, true);
+  return { changed: true };
+}
+
+/**
+ * Whether a status line is one `configure claude-code --statusline` wrote: the
+ * installed `passcontrol` binary, or this repo's own bin run through node.
+ */
+function isOurStatusLine(statusLine) {
+  const command = typeof statusLine?.command === "string" ? statusLine.command : "";
+  return /^(passcontrol|node "[^"]*passcontrol\.mjs") statusline\b/.test(command);
+}
+
+/**
+ * `value` with PassControl's status line set, unless the user already has one of
+ * their own: then `existing` names it and `value` is unchanged.
+ */
+function withStatusLine(value, command) {
+  const current = value.statusLine;
+  if (current && !isOurStatusLine(current)) {
+    return { value, changed: false, existing: typeof current.command === "string" ? current.command : "(not a command)" };
+  }
+  if (current && current.type === "command" && current.command === command) return { value, changed: false };
+  return { value: { ...value, statusLine: { type: "command", command } }, changed: true };
+}
+
+/**
+ * The agent's budget in Claude Code's status line, on its own. A status line the
+ * user already has is never replaced: the answer names it and nothing is written.
+ */
+export function writeClaudeCodeStatusLine({ target, command }) {
+  const { exists, value } = readSettings(target);
+  const line = withStatusLine(value, command);
+  if (line.existing !== undefined) return { changed: false, existing: line.existing };
+  if (!line.changed) return { changed: false };
+  save(target, line.value, exists);
+  return { changed: true };
+}
+
+export function removeClaudeCodeStatusLine({ target }) {
+  if (!fs.existsSync(target)) return { changed: false };
+  const { value } = readSettings(target);
+  if (!isOurStatusLine(value.statusLine)) return { changed: false };
+  const { statusLine: _ours, ...rest } = value;
+  save(target, rest, true);
   return { changed: true };
 }

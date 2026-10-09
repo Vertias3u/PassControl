@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod/v4";
 import { PACKAGE_VERSION, PROVIDERS } from "../config.mjs";
+import { budgetLines } from "../budget-format.mjs";
 import { createGatewayClient } from "./gateway.mjs";
 
 const messageSchema = z.object({
@@ -97,6 +98,32 @@ export function createMcpServer(options) {
         return {
           content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
           structuredContent,
+        };
+      } catch (error) {
+        return toolError(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "budget",
+    {
+      title: "Budget and limits",
+      description:
+        "Read this agent's own spending and token limits: what is used, what is left, and when a daily or monthly limit resets. Check it before an expensive call; a cheaper model may fit where this one would be refused.",
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        const self = await gateway.self();
+        return {
+          content: [{ type: "text", text: budgetLines(self).join("\n") }],
+          structuredContent: self,
         };
       } catch (error) {
         return toolError(error);

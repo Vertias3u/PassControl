@@ -686,3 +686,100 @@ describe("the shadow verdict follows the attempt, not the primary", () => {
     expect(loggedShadow()).toEqual(["allow", "allow"]);
   });
 });
+
+// Sprint Q8 (C(a)): failover builds its own gate input, so the sub-agent model
+// allowlist has to ride on it too. Otherwise a sub-agent whose primary failed
+// could be carried to a model its owner never allowed sub-agents to use.
+describe("the sub-agent allowlist holds across failover", () => {
+  const ALLOW_PRIMARY_ONLY = JSON.stringify({
+    p: { subagent_models: [{ provider: "openai", models: ["gpt-4o-mini"] }] },
+    s: null,
+  });
+  function callAs(headers: Record<string, string>) {
+    return POST(
+      new Request("https://gateway.test/api/v1/openai/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", ...headers },
+        body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "hi" }] }),
+      }),
+      { params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }) }
+    );
+  }
+
+  it("does not fail a sub-agent over to a model outside its list", async () => {
+    getCachedAgentPolicyMock.mockResolvedValue(ALLOW_PRIMARY_ONLY);
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
+    await callAs({ "x-claude-code-session-id": "s-1", "x-claude-code-agent-id": "a-1" });
+    expect(forwardedTo()).toEqual(["api.openai.com"]);
+  });
+
+  it("still fails the main agent over, under the same policy", async () => {
+    getCachedAgentPolicyMock.mockResolvedValue(ALLOW_PRIMARY_ONLY);
+    fetchMock.mockResolvedValueOnce(upstream(QUOTA, 429)).mockResolvedValue(upstream(JSON.stringify({ usage: { prompt_tokens: 1, completion_tokens: 1 } }), 200));
+    await callAs({ "x-claude-code-session-id": "s-1" });
+    expect(forwardedTo()).toEqual(["api.openai.com", "api.groq.com"]);
+  });
+});
+
+// P1.6 (owner, 2026-10-08): each attempt's hold is sized for ITS model's tokenizer,
+// so the proxy must hand the hold the estimate for the model it is about to call.
+describe("the hold is sized for the attempt's own tokenizer", () => {
+  const prompt = "x".repeat(24_000);
+  const messages = [{ role: "user", content: prompt }];
+  const bytes = Buffer.byteLength(JSON.stringify(messages));
+
+  it("a new-tokenizer Claude call holds bytes ÷ 2.4, not characters ÷ 4", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["claude-*"] }] });
+    readFallbacksMock.mockResolvedValue([]);
+    fetchMock.mockResolvedValue(upstream(JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1 } }), 200));
+    await POST(
+      new Request("https://gateway.test/api/v1/anthropic/v1/messages", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 10, messages }),
+      }),
+      { params: Promise.resolve({ provider: "anthropic", path: ["v1", "messages"] }) }
+    );
+    const [hold] = openHoldMock.mock.calls[0] as [{ estimate: number }];
+    expect(hold.estimate).toBe(Math.ceil(bytes / 2.4) + 10);
+  });
+
+  it("the same prompt to an OpenAI model keeps ÷ 4", async () => {
+    readFallbacksMock.mockResolvedValue([]);
+    fetchMock.mockResolvedValue(upstream(JSON.stringify({ usage: { prompt_tokens: 1, completion_tokens: 1 } }), 200));
+    await POST(
+      new Request("https://gateway.test/api/v1/openai/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4o-mini", max_tokens: 10, messages }),
+      }),
+      { params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }) }
+    );
+    const [hold] = openHoldMock.mock.calls[0] as [{ estimate: number }];
+    expect(hold.estimate).toBe(Math.ceil(bytes / 4) + 10);
+  });
+});
+
+// P5.1 (owner, 2026-10-08): a request that asks Anthropic to cache its prompt is held
+// at the cache-write rate, as its first call is billed.
+describe("a caching request is held at the cache-write rate", () => {
+  it("holds a Claude Code-shaped request's input at 1.25x", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["claude-*"] }] });
+    readFallbacksMock.mockResolvedValue([]);
+    fetchMock.mockResolvedValue(upstream(JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1 } }), 200));
+    const system = [{ type: "text", text: "x".repeat(12_000), cache_control: { type: "ephemeral" } }];
+    const messages = [{ role: "user", content: "hi" }];
+    await POST(
+      new Request("https://gateway.test/api/v1/anthropic/v1/messages", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 10, system, messages }),
+      }),
+      { params: Promise.resolve({ provider: "anthropic", path: ["v1", "messages"] }) }
+    );
+    const input = Math.ceil((Buffer.byteLength(JSON.stringify(messages)) + Buffer.byteLength(JSON.stringify(system))) / 2.4);
+    const [hold] = openHoldMock.mock.calls[0] as [{ estimateMicrocents: number }];
+    // Sonnet 5: $2 in (200 µ¢; the 5-minute write rate is 250), $10 out (1,000 µ¢).
+    expect(hold.estimateMicrocents).toBe(input * 250 + 10 * 1_000);
+  });
+});

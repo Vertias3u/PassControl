@@ -1,6 +1,6 @@
 # PassControl MCP server
 
-`passcontrol mcp` starts a local stdio MCP server with `chat` and `list_models`.
+`passcontrol mcp` starts a local stdio MCP server with `chat`, `list_models` and `budget`.
 It reads the same environment, nearest `.passcontrol`, and global
 `~/.config/passcontrol/config` sources as the rest of the CLI. MCP client setup requires a
 passport in the global profile so clients can launch from any working directory without
@@ -65,6 +65,9 @@ config contains a passport secret or provider key.
 `chat` sends a bearer visa, without a sender proof. Required sender-proof mode
 therefore refuses it; use off/observe for this client. `list_models` reads model patterns
 from the visa scope, not a live upstream model catalog; a wildcard is not a callable model.
+`budget` reads the agent's own limits from the gateway (`GET /api/v1/self`): what is used,
+what is left, and when a daily or monthly limit resets. It spends nothing and writes no log
+row; like `chat`, it sends a bearer visa, so required sender-proof mode refuses it.
 Providers: OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek, and Gemini (OpenAI-compatible).
 The global profile can use the CLI OS credential store (`passcontrol key status`) rather
 than containing the Passport secret. Custody declarations do not prove storage.

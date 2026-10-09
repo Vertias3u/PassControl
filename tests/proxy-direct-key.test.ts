@@ -590,3 +590,31 @@ describe("Direct Agent Key gateway authentication", () => {
     });
   });
 });
+
+// Sprint Q5 (D1): the Direct Agent Key door records declared lineage exactly as
+// the passport door does. The headers arrive straight from the client (no
+// sidecar), and remain declared, never identity: the row is still a direct_key row.
+describe("declared lineage on the Direct Agent Key door", () => {
+  it("rides to the log with the direct-key identity unchanged", async () => {
+    const res = await call({
+      "x-api-key": DIRECT_KEY,
+      "session-id": "01a00000-0000-7000-8000-000000000001",
+      "thread-id": "01a00000-0000-7000-8000-000000000004",
+      "x-codex-parent-thread-id": "01a00000-0000-7000-8000-000000000001",
+      "x-openai-subagent": "collab_spawn",
+      originator: "codex_exec",
+    });
+    expect(res.status).toBe(200);
+    expect(writeLogMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authMethod: "direct_key",
+        lineage: { kind: "codex", session: "01a00000-0000-7000-8000-000000000001", agent: "01a00000-0000-7000-8000-000000000004", parent: null },
+      })
+    );
+  });
+
+  it("is null without lineage headers", async () => {
+    await call();
+    expect(writeLogMock.mock.calls[0]?.[0]?.lineage ?? null).toBeNull();
+  });
+});

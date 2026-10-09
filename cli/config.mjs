@@ -671,7 +671,7 @@ export function formatProxyError(status, body) {
     return `${blocked}\n→ The workspace has no provider key stored for this provider.\n→ Fix: add one under Settings → Provider credentials in the dashboard.`;
   }
   if (status === 400 && error === "server_side_tools_unsupported") {
-    return `${blocked}\n→ The request uses a hosted tool PassControl does not price, such as image generation or an MCP server.\n→ Fix: remove that tool, or call it outside PassControl. Priced tools such as web search pass.`;
+    return `${blocked}\n→ The request uses a hosted tool PassControl does not price, such as image generation, an MCP server, or Claude Code's advisor with an unpriced model.\n→ Fix: remove that tool, or call it outside PassControl (Claude Code: /advisor → No advisor). Priced tools such as web search pass.`;
   }
   // 402 is also how the gateway refuses a call it cannot price under a dollar
   // limit; a bigger budget fixes none of those, so each gets its own advice.

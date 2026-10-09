@@ -53,6 +53,15 @@ interface Draft {
   cap: string;
   /** `max_output_tokens`. A string so a half-typed number is not lost. */
   ceiling: string;
+  /** `subagent_models` rows: what a DECLARED sub-agent may call (sprint C(a)). */
+  subagentRules: DenyDraft[];
+  /**
+   * The explicit "sub-agents may call no model" choice, stored as `[]`. Its own
+   * control, so a cleared list can only ever mean "not restricted".
+   */
+  subagentNone: boolean;
+  /** `secret_guard.mode`, or "" for off. */
+  secretGuard: "" | "block" | "redact";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -81,7 +90,17 @@ export function toDraft(policy: unknown): Draft {
   // Round-tripped, so saving a draft that already carries a ceiling cannot drop
   // it — this form is the only browser route to the live policy, via Promote.
   const ceiling = typeof source.max_output_tokens === "number" ? String(source.max_output_tokens) : "";
-  return { deny, windows, cap, ceiling };
+  // Round-tripped for the same reason as the ceiling.
+  const subagentList = Array.isArray(source.subagent_models) ? source.subagent_models.filter(isRecord) : null;
+  const subagentRules = (subagentList ?? []).map((rule) => ({
+    provider: typeof rule.provider === "string" ? rule.provider : "",
+    models: Array.isArray(rule.models) ? rule.models.filter((m): m is string => typeof m === "string").join(", ") : "",
+  }));
+  const subagentNone = Array.isArray(source.subagent_models) && source.subagent_models.length === 0;
+  // Round-tripped for the same reason as the ceiling.
+  const guardMode = isRecord(source.secret_guard) ? source.secret_guard.mode : undefined;
+  const secretGuard = guardMode === "block" || guardMode === "redact" ? guardMode : "";
+  return { deny, windows, cap, ceiling, subagentRules, subagentNone, secretGuard };
 }
 
 /**
@@ -135,7 +154,169 @@ export function toPolicy(draft: Draft): unknown {
     policy.max_output_tokens = ceiling;
   }
 
+  // Absent unless the operator listed something or chose "no model at all".
+  // A cleared list is "not restricted", never `[]`.
+  if (draft.subagentNone) {
+    policy.subagent_models = [];
+  } else {
+    const subagent = draft.subagentRules
+      .map((rule) => ({
+        provider: rule.provider.trim(),
+        models: rule.models
+          .split(",")
+          .map((m) => m.trim())
+          .filter(Boolean),
+      }))
+      .filter((rule) => rule.provider && rule.models.length > 0);
+    if (subagent.length) policy.subagent_models = subagent;
+  }
+
+  if (draft.secretGuard) policy.secret_guard = { mode: draft.secretGuard };
+
   return Object.keys(policy).length === 0 ? null : policy;
+}
+
+const SECRET_GUARD_CHOICES = [
+  { value: "", label: "Off" },
+  {
+    value: "redact",
+    label: "Replace with a placeholder",
+    help: "The call goes through with the key swapped for a placeholder naming its kind, so the model never sees it. In a coding agent, a file the model then rewrites gets the placeholder back, not the key.",
+  },
+  {
+    value: "block",
+    label: "Refuse the call",
+    help: "Nothing is sent. Claude Code and Codex re-send the whole conversation on every call, so once a key is in it every later call is refused too, until the user removes it (/rewind or /clear).",
+  },
+] as const;
+
+/**
+ * `secret_guard` (2026-10-08): what to do when a request carries something that looks
+ * like a key (lib/secret-guard.ts). Exported on its own so it can be rendered and
+ * tested without opening the whole form.
+ */
+export function SecretGuardField({
+  draft,
+  setDraft,
+  pending,
+}: {
+  draft: Draft;
+  setDraft: (update: (prev: Draft) => Draft) => void;
+  pending: boolean;
+}) {
+  return (
+    <fieldset className="m-0 grid gap-3 border-0 border-t border-border p-0 pt-4" data-policy-field="secret_guard">
+      <legend className="m-0 p-0 text-sm font-semibold text-foreground">Keys in requests</legend>
+      <p className="m-0 text-xs leading-5 text-muted-foreground">
+        When a request carries something that looks like a key (a provider key, a GitHub or cloud token, a private
+        key, a PassControl key), PassControl can stop it reaching the provider. Made-up test values and base64
+        images are left alone. Takes effect when promoted; shadow mode does not measure it.
+      </p>
+      {SECRET_GUARD_CHOICES.map((choice) => (
+        <label key={choice.value || "off"} className="flex items-start gap-2 text-sm">
+          <input
+            type="radio"
+            name="secret_guard"
+            value={choice.value}
+            checked={draft.secretGuard === choice.value}
+            disabled={pending}
+            onChange={() => setDraft((prev) => ({ ...prev, secretGuard: choice.value }))}
+          />
+          <span className="grid gap-1">
+            <span>{choice.label}</span>
+            {"help" in choice ? <span className="text-xs leading-5 text-muted-foreground">{choice.help}</span> : null}
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+/**
+ * `subagent_models` (sprint C(a)): which models a sub-agent of this agent may
+ * call. Exported on its own so it can be rendered and tested without opening the
+ * whole form.
+ */
+export function SubagentModelsField({
+  draft,
+  setDraft,
+  pending,
+}: {
+  draft: Draft;
+  setDraft: (update: (prev: Draft) => Draft) => void;
+  pending: boolean;
+}) {
+  const setRule = (index: number, patch: Partial<DenyDraft>) =>
+    setDraft((prev) => ({
+      ...prev,
+      subagentRules: prev.subagentRules.map((r, i) => (i === index ? { ...r, ...patch } : r)),
+    }));
+  return (
+    <div className="grid gap-3 border-t border-border pt-4" data-policy-field="subagent_models">
+      <p className="m-0 text-sm font-semibold text-foreground">Sub-agent models</p>
+      <p className="m-0 text-xs leading-5 text-muted-foreground">
+        When Claude Code or Codex declares that a sub-agent made the call, it may only use these models; the main
+        agent keeps its full scope. A guard rail against a misbehaving model, not a security boundary: the
+        sub-agent is declared by the client, and a call that declares none is treated as the main agent. Leave it
+        empty for no restriction.
+      </p>
+      {draft.subagentRules.map((rule, index) => (
+        <div key={index} className="grid gap-3 sm:grid-cols-[10rem_1fr_auto] sm:items-end">
+          <label className="grid gap-1 text-sm">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">Provider</span>
+            <input
+              value={rule.provider}
+              onChange={(e) => setRule(index, { provider: e.target.value })}
+              placeholder="anthropic"
+              spellCheck={false}
+              disabled={draft.subagentNone}
+              className="h-10 rounded-lg border border-border bg-background px-3 text-sm"
+            />
+          </label>
+          <label className="grid gap-1 text-sm">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">
+              Models — comma separated, <code>*</code> allowed
+            </span>
+            <input
+              value={rule.models}
+              onChange={(e) => setRule(index, { models: e.target.value })}
+              placeholder="claude-haiku-*"
+              spellCheck={false}
+              disabled={draft.subagentNone}
+              className="h-10 rounded-lg border border-border bg-background px-3 text-sm"
+            />
+          </label>
+          <button
+            type="button"
+            className="ghost"
+            disabled={pending}
+            onClick={() => setDraft((prev) => ({ ...prev, subagentRules: prev.subagentRules.filter((_, i) => i !== index) }))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <div className="flex flex-wrap items-center gap-4">
+        <button
+          type="button"
+          className="ghost"
+          disabled={pending || draft.subagentNone || draft.subagentRules.length >= MAX_DENY_RULES}
+          onClick={() => setDraft((prev) => ({ ...prev, subagentRules: [...prev.subagentRules, { provider: "", models: "" }] }))}
+        >
+          Add sub-agent model
+        </button>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={draft.subagentNone}
+            disabled={pending}
+            onChange={(e) => setDraft((prev) => ({ ...prev, subagentNone: e.target.checked }))}
+          />
+          Sub-agents may call no model at all
+        </label>
+      </div>
+    </div>
+  );
 }
 
 /** "attempt" / "attempts". The unit is load-bearing here, so it should read right. */
@@ -544,6 +725,10 @@ export function PolicyShadowPanel({
               default, so watch this draft&rsquo;s counts before promoting it.
             </p>
           </div>
+
+          <SubagentModelsField draft={draft} setDraft={setDraft} pending={pending} />
+
+          <SecretGuardField draft={draft} setDraft={setDraft} pending={pending} />
 
           <p className="m-0 rounded-lg border border-border bg-background p-3 text-xs leading-5 text-muted-foreground">
             Saving a draft changes nothing about enforcement. An empty draft turns shadow mode off.

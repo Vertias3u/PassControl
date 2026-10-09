@@ -29,6 +29,19 @@ export const WORKSPACE_EXPORT_PROTOCOL = { minimum: 1, maximum: 1 };
  */
 export const STATEMENT_PROTOCOL = { minimum: 1, maximum: 1 };
 
+/**
+ * Session seals (`passcontrol-session+jws`): one signed commitment over every
+ * receipt in one working session. Its own version line for the statement's
+ * reason: a seal carries `v`, and gating it on another artifact's maximum would
+ * let a newer seal through a verifier that only understands v1.
+ *
+ * In CLIENT_PROTOCOLS since the seal route (/api/control/v1/sessions/{id}/seal)
+ * shipped with it. KNOWN CONSEQUENCE, the statement's: this CLI reports a gateway
+ * that predates seals as "unavailable", which is true — `verify session` has
+ * nothing to verify there — and the release note must say so.
+ */
+export const SESSION_PROTOCOL = { minimum: 1, maximum: 1 };
+
 export const CLIENT_PROTOCOLS = Object.freeze({
   control_api: CONTROL_API_PROTOCOL,
   gateway_api: GATEWAY_API_PROTOCOL,
@@ -36,6 +49,7 @@ export const CLIENT_PROTOCOLS = Object.freeze({
   agent_token: AGENT_TOKEN_PROTOCOL,
   workspace_export: WORKSPACE_EXPORT_PROTOCOL,
   statement: STATEMENT_PROTOCOL,
+  session: SESSION_PROTOCOL,
 });
 
 const validRange = (value) =>

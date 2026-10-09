@@ -63,6 +63,8 @@ export const CALL_OUTCOME: Record<LogEntry["status"], { category: OutcomeCategor
   // its dollar cap cannot be enforced against a destination nobody can price.
   blocked_unpriced_endpoint: { category: "refused_budget", label: "Cost cap cannot be priced here" },
   blocked_unpriced_model: { category: "refused_budget", label: "Cost cap cannot price this model" },
+  blocked_server_tool: { category: "refused_access", label: "Hosted tool not supported" },
+  blocked_secret: { category: "refused_access", label: "Request carried a key" },
   blocked_suspended: { category: "stopped", label: "Stopped: agent suspended" },
   blocked_killed: { category: "stopped", label: "Stopped: kill switch" },
   upstream_error: { category: "provider_failure", label: "Provider error" },

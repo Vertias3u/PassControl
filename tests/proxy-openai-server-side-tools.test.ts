@@ -279,11 +279,13 @@ describe("OpenAI hosted tools: priced ones pass, the rest are refused", () => {
     const res = await call(path as string[], body);
     await flushPending();
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "server_side_tools_unsupported" });
+    // Since P4 (2026-10-08) the refusal names the tool and says why.
+    expect(await res.json()).toMatchObject({ error: "server_side_tools_unsupported", tool: expect.any(String), message: expect.any(String) });
     expect(openHoldMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
-    // Answered like invalid_body: a malformed request is not an audit row.
-    expect(writeLogMock).not.toHaveBeenCalled();
+    // Logged since P4 (2026-10-08): an unlogged refusal left the owner's dashboard
+    // blank while the agent failed (Claude Code's advisor).
+    expect(writeLogMock.mock.calls.map(([e]) => (e as { status: string }).status)).toEqual(["blocked_server_tool"]);
   });
 
   it("forwards function tools unchanged", async () => {

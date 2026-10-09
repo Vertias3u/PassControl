@@ -15,7 +15,7 @@ const MAX_PROVIDER_LEN = 50;
 // sides: a scope entry that never matches denies, and a deny rule that trips
 // this makes the whole document malformed, which also denies.
 const MAX_WILDCARDS = 4;
-const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens"]);
+const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens", "subagent_models", "secret_guard"]);
 // Exported for the policy editor, which must offer exactly the days the parser
 // accepts. Retyping them there is how the form ends up letting an operator save
 // a window the gateway reads as malformed — the failure mode validateFallbacks
@@ -199,7 +199,20 @@ interface AgentPolicy {
   windows: TimeWindow[];
   maxRequestsPerHour: number | null;
   maxOutputTokens: number | null;
+  /**
+   * `subagent_models`: the models a DECLARED sub-agent may call (sprint C(a)).
+   * null = the key is absent, no restriction; [] = sub-agents may call nothing.
+   * Enforced at the gate's scope step, never here: see subagentAllowlist.
+   */
+  subagentModels: ScopeEntry[] | null;
+  /**
+   * `secret_guard: { mode }` (2026-10-08): what the proxy does with a key found in a
+   * request (lib/secret-guard.ts). null = absent, the guard is off.
+   */
+  secretGuard: SecretGuardMode | null;
 }
+
+export type SecretGuardMode = "block" | "redact";
 
 export interface AgentPolicyView {
   configured: boolean;
@@ -208,6 +221,8 @@ export interface AgentPolicyView {
   windows: TimeWindow[];
   maxRequestsPerHour: number | null;
   maxOutputTokens: number | null;
+  subagentModels: ScopeEntry[] | null;
+  secretGuard: SecretGuardMode | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -262,7 +277,13 @@ function validPattern(value: unknown): value is string {
 export const POLICY_LIMITS = {
   denyRules: 25,
   modelsPerRule: 100,
-  /** Total deny patterns across all rules. The bound that actually matters. */
+  /**
+   * Total patterns across all deny rules AND the sub-agent allowlist. The bound
+   * that actually matters. Shared rather than one budget each, so adding the
+   * allowlist left the per-request worst case where tests/policy-bounds.test.ts
+   * measured it; no existing document carries the new key, so sharing tightens
+   * nothing retroactively.
+   */
   denyPatterns: 100,
   windows: 25,
   /** There are seven days. Longer means duplicates, and duplicates are a payload. */
@@ -282,17 +303,20 @@ export const POLICY_LIMITS = {
 
 function parsePolicy(value: unknown): AgentPolicy | null {
   // Existing rows and pre-policy visas must preserve the legacy path exactly.
-  if (value === null) return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null };
+  if (value === null) {
+    return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null, subagentModels: null, secretGuard: null };
+  }
   if (!isRecord(value)) return null;
   if (Object.keys(value).some((key) => !POLICY_KEYS.has(key))) return null;
 
   const deny: DenyRule[] = [];
+  // One budget for every pattern in the document: deny rules and sub-agent allowlist.
+  let patterns = 0;
   if ("deny" in value) {
     if (!Array.isArray(value.deny)) return null;
     // Length first: rejecting a million-entry array must not cost a million
     // iterations, which is the shape of the problem being fixed.
     if (value.deny.length > POLICY_LIMITS.denyRules) return null;
-    let patterns = 0;
     for (const candidate of value.deny) {
       if (!isRecord(candidate)) return null;
       if (Object.keys(candidate).some((key) => key !== "provider" && key !== "models")) {
@@ -378,7 +402,65 @@ function parsePolicy(value: unknown): AgentPolicy | null {
     maxOutputTokens = value.max_output_tokens;
   }
 
-  return { deny, windows, maxRequestsPerHour, maxOutputTokens };
+  // Same entry shape and bounds as a deny rule, and the same pattern budget.
+  let subagentModels: ScopeEntry[] | null = null;
+  if ("subagent_models" in value) {
+    if (!Array.isArray(value.subagent_models)) return null;
+    if (value.subagent_models.length > POLICY_LIMITS.denyRules) return null;
+    subagentModels = [];
+    for (const candidate of value.subagent_models) {
+      if (!isRecord(candidate)) return null;
+      if (Object.keys(candidate).some((key) => key !== "provider" && key !== "models")) return null;
+      if (
+        typeof candidate.provider !== "string" ||
+        candidate.provider.length === 0 ||
+        candidate.provider.length > MAX_PROVIDER_LEN ||
+        !Array.isArray(candidate.models) ||
+        candidate.models.length > POLICY_LIMITS.modelsPerRule ||
+        !candidate.models.every(validPattern)
+      ) {
+        return null;
+      }
+      patterns += candidate.models.length;
+      if (patterns > POLICY_LIMITS.denyPatterns) return null;
+      subagentModels.push({ provider: candidate.provider, models: [...candidate.models] });
+    }
+  }
+
+  // An object with exactly one key, so v2 can add fields without a format change.
+  let secretGuard: SecretGuardMode | null = null;
+  if ("secret_guard" in value) {
+    const guard = value.secret_guard;
+    if (!isRecord(guard) || Object.keys(guard).length !== 1 || (guard.mode !== "block" && guard.mode !== "redact")) {
+      return null;
+    }
+    secretGuard = guard.mode;
+  }
+
+  return { deny, windows, maxRequestsPerHour, maxOutputTokens, subagentModels, secretGuard };
+}
+
+/**
+ * What the secret guard does for this live policy: "block", "redact", or null (off,
+ * or a document the reader refuses, which the policy step denies anyway). The caller
+ * passes nothing for an UNREADABLE policy: the guard is then not applied, under the
+ * policy step's posture, as for the sub-agent allowlist.
+ */
+export function secretGuardMode(value: unknown): SecretGuardMode | null {
+  return parsePolicy(value)?.secretGuard ?? null;
+}
+
+/**
+ * The sub-agent model allowlist a live policy sets, or null for "no restriction".
+ *
+ * null also for a document the reader refuses: a malformed live policy is denied
+ * by the policy step (`policy:malformed`) whatever this says, so it has nothing to
+ * add. The caller passes nothing for an UNREADABLE policy: the allowlist is then
+ * unknown and is not applied, under the policy step's posture (fail open by
+ * default, closed where POLICY_FAIL_CLOSED is set, as on Cloud).
+ */
+export function subagentAllowlist(value: unknown): ScopeEntry[] | null {
+  return parsePolicy(value)?.subagentModels ?? null;
 }
 
 /**
@@ -410,6 +492,8 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
       windows: [],
       maxRequestsPerHour: null,
       maxOutputTokens: null,
+      subagentModels: null,
+      secretGuard: null,
     };
   }
   return {
@@ -419,6 +503,8 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
     windows: policy.windows.map((window) => ({ ...window, days: [...window.days] })),
     maxRequestsPerHour: policy.maxRequestsPerHour,
     maxOutputTokens: policy.maxOutputTokens,
+    subagentModels: policy.subagentModels?.map((entry) => ({ ...entry, models: [...entry.models] })) ?? null,
+    secretGuard: policy.secretGuard,
   };
 }
 

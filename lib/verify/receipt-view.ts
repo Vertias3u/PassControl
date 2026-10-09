@@ -458,6 +458,18 @@ const VERDICTS: Record<string, VerdictPresentation> = {
   // misdelivered — which is the entire reason the call was refused.
   // A refusal a reader of someone else's receipt must not mistake for "out of
   // money". It says the opposite: the limit could not be applied at all.
+  blocked_secret: {
+    label: "Refused — the request carried what looks like a key",
+    detail:
+      "The agent's owner set the gateway to refuse requests that carry something shaped like a key or token. This one did, so it was never sent and nothing was charged. The receipt does not contain the key.",
+    tone: "held",
+  },
+  blocked_server_tool: {
+    label: "Refused — the request asked for a hosted tool the gateway cannot price",
+    detail:
+      "The call asked the provider to run a tool on its own side (an advisor model, tool search, an MCP connector) whose cost is billed outside the call's tokens and which the gateway has no price for. Rather than let a cost no limit could hold go out, the gateway refused the call. It was never sent and nothing was charged.",
+    tone: "held",
+  },
   blocked_unpriced_model: {
     label: "Refused — the spending limit could not be applied to this model",
     detail:
