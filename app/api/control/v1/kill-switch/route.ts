@@ -33,7 +33,9 @@ const putHandler = control("write", async ({ req, userId, db, keyId, requestId }
     action: "killswitch.master",
     metadata: { on, via: "api", key_id: keyId, affected: r.value.affected },
   });
-  return jsonResponse({ data: { armed: on, affected: r.value.affected } }, requestId);
+  // `durable: false`: in force in Redis, but not saved to the record (0083), so a
+  // Redis loss would undo it. The caller can PUT again to save it.
+  return jsonResponse({ data: { armed: on, affected: r.value.affected, durable: r.value.durable } }, requestId);
 });
 
 export function PUT(req: Request): Promise<Response> {

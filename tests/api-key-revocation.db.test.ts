@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { retryOnDeadlock, retryThrowingOnDeadlock } from "./db-deadlock-retry";
 
 /**
  * Revocation is terminal, proved against a real Postgres.
@@ -37,21 +38,27 @@ import { describe, expect, it } from "vitest";
 const CONTAINER = process.env.KEYS_DB_CONTAINER ?? "supabase_db_PassControl";
 const DB = process.env.KEYS_DB ?? "postgres";
 
-function psql(sql: string): string {
+function psqlOnce(sql: string): string {
   return execFileSync(
     "docker",
     ["exec", "-i", CONTAINER, "psql", "-U", "postgres", "-d", DB, "-v", "ON_ERROR_STOP=1", "-tAc", sql],
     { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
   ).trim();
 }
+function psql(sql: string): string {
+  return retryThrowingOnDeadlock(() => psqlOnce(sql));
+}
 
-function tryPsql(sql: string): { ok: boolean; out: string } {
+function tryPsqlOnce(sql: string): { ok: boolean; out: string } {
   try {
     return { ok: true, out: psql(sql) };
   } catch (error) {
     const e = error as { stderr?: Buffer; stdout?: Buffer };
     return { ok: false, out: String(e.stderr ?? "") + String(e.stdout ?? "") };
   }
+}
+function tryPsql(sql: string): { ok: boolean; out: string } {
+  return retryOnDeadlock(() => tryPsqlOnce(sql));
 }
 
 function live(): boolean {

@@ -134,10 +134,10 @@ const baseClaims = {
   scope: [{ provider: "demo", models: ["*"] }],
 };
 
-function demoRequest(body?: unknown) {
+function demoRequest(body?: unknown, extraHeaders: Record<string, string> = {}) {
   return new Request("https://gateway.test/api/v1/demo/chat/completions", {
     method: "POST",
-    headers: { authorization: "Bearer visa", "content-type": "application/json" },
+    headers: { authorization: "Bearer visa", "content-type": "application/json", ...extraHeaders },
     body: JSON.stringify(
       body ?? { model: "demo-1", max_tokens: 16, messages: [{ role: "user", content: "hi there" }] }
     ),
@@ -255,6 +255,41 @@ describe("keyless demo provider", () => {
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ error: "blocked_suspended" });
     expect(openHoldMock).not.toHaveBeenCalled();
+  });
+
+  // F4: a stopped session refuses its demo calls exactly as it refuses billed
+  // ones (sprint T8), and says so; the agent's other sessions run on. The demo
+  // handler used to read only the agent's suspension, so a session stop never
+  // reached a demo call at all.
+  it("refuses a stopped session's demo calls, by name, and only that session's", async () => {
+    isSuspendedMock.mockImplementation(async (_agent: string, session?: string | null) =>
+      session === "run-stopped" ? "session" : false
+    );
+
+    const stopped = await POST(demoRequest(undefined, { "x-passcontrol-run": "run-stopped" }), {
+      params: Promise.resolve({ provider: "demo", path: ["chat", "completions"] }),
+    });
+    expect(stopped.status).toBe(403);
+    const body = await stopped.json();
+    expect(body.error).toBe("blocked_suspended");
+    expect(body.message).toContain("run-stopped");
+    expect(isSuspendedMock).toHaveBeenCalledWith(baseClaims.agid, "run-stopped");
+    expect(openHoldMock).not.toHaveBeenCalled();
+
+    const other = await POST(demoRequest(undefined, { "x-passcontrol-run": "run-other" }), {
+      params: Promise.resolve({ provider: "demo", path: ["chat", "completions"] }),
+    });
+    expect(other.status).toBe(200);
+  });
+
+  it("keeps an agent-level suspension opaque on a call that names a session", async () => {
+    isSuspendedMock.mockResolvedValue(true);
+
+    const res = await POST(demoRequest(undefined, { "x-passcontrol-run": "run-1" }), {
+      params: Promise.resolve({ provider: "demo", path: ["chat", "completions"] }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "blocked_suspended" });
   });
 
   it("enforces scope on demo calls", async () => {

@@ -97,7 +97,9 @@ export function AuditLogTable({
                 <small className="mono block muted">
                   {l.auth_method === "direct_key"
                     ? `Direct Agent Key ${l.agent_access_key_id?.slice(0, 8) ?? ""}`
-                    : l.passport_id
+                    : l.auth_method === "delegated" || l.auth_method === "delegated_proof_per_request"
+                      ? "Worker under a delegation"
+                      : l.passport_id
                       ? `Passport ${l.passport_id.slice(0, 12)}…`
                       : ""}
                 </small>

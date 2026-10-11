@@ -137,6 +137,8 @@ vi.mock("@/lib/ratelimit", () => ({ rateLimit: (...args: unknown[]) => rateLimit
 vi.mock("@/lib/providers/available", () => ({
   readProvidersWithKeys: (...args: unknown[]) => readProvidersWithKeysMock(...args),
 }));
+// Bet D: a worker's revocation read. Clear unless a test says otherwise.
+vi.mock("@/lib/state/delegation", () => ({ readDelegationRevocation: async () => false }));
 vi.mock("@/lib/state/fallbacks", () => ({
   readCurrentAgentFallbacks: (...args: unknown[]) => readFallbacksMock(...args),
 }));
@@ -781,5 +783,41 @@ describe("a caching request is held at the cache-write rate", () => {
     const [hold] = openHoldMock.mock.calls[0] as [{ estimateMicrocents: number }];
     // Sonnet 5: $2 in (200 µ¢; the 5-minute write rate is 250), $10 out (1,000 µ¢).
     expect(hold.estimateMicrocents).toBe(input * 250 + 10 * 1_000);
+  });
+});
+
+// Bet D: a worker's visa carries the DELEGATION's scope, not the agent's. Fallback
+// routes are configured on the agent, so failover must still be judged against the
+// worker's own scope, and the chain's caps must ride every attempt.
+describe("failover for a worker under a delegation", () => {
+  const NOW_S = Math.floor(Date.now() / 1000);
+  const delegated = (scope: { provider: string; models: string[] }[]) => ({
+    ...baseClaims,
+    ver: 3,
+    scope,
+    act: { sub: "W".repeat(43), dlg: "jti-0000000000000001", dep: 1, ch: "c".repeat(43) },
+    dc: [{ dlg: "jti-0000000000000001", cap: 50_000_000, iat: NOW_S - 5, exp: NOW_S + 600 }],
+  });
+
+  it("never fails over to a provider the agent may use but the worker may not", async () => {
+    verifyVisaMock.mockResolvedValue(delegated([{ provider: "openai", models: ["gpt-4o-mini"] }]));
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
+    await callProxy();
+    expect(forwardedTo()).toEqual(["api.openai.com"]);
+  });
+
+  it("carries the delegation's caps on every attempt it does make", async () => {
+    verifyVisaMock.mockResolvedValue(
+      delegated([...baseClaims.scope, { provider: "groq", models: ["openai/gpt-oss-20b"] }])
+    );
+    // A PRICED fallback: a worker's call is dollar-limited, so an unpriced one is skipped.
+    readFallbacksMock.mockResolvedValue([{ provider: "groq", model: "openai/gpt-oss-20b" }]);
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
+    await callProxy();
+    expect(forwardedTo()).toEqual(["api.openai.com", "api.groq.com"]);
+    expect(openHoldMock.mock.calls.length).toBe(2);
+    for (const [args] of openHoldMock.mock.calls) {
+      expect(args.delegation).toEqual({ links: [{ jti: "jti-0000000000000001", capMicrocents: 50_000_000 }] });
+    }
   });
 });

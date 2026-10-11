@@ -79,6 +79,41 @@ Replay-protected (single-use nonce, ±90s clock window). Rate-limited per IP. Er
 **You don't normally call this by hand — use the SDK**, which mints, caches, and refreshes
 visas for you.
 
+### A worker under a delegation
+
+`POST /api/auth/delegated`
+
+A worker holding a signed delegation from an agent (`passport.delegate()` in the SDK) exchanges
+it for a visa. The body is the challenge above, signed by the **worker's own key** (its public key
+is the `passport_id`), plus the chain the worker was handed:
+
+```jsonc
+{ "payload": "base64url(JSON{ passport_id: <worker key>, ts, nonce })", "signature": "…", "chain": ["<link 1>", "<link 2>?"] }
+```
+
+```jsonc
+// 200
+{ "visa": "<jwt>", "token_type": "Bearer", "expires_in": 300, "jti": "…", "delegation": { "jti": "…", "cap_microcents": 50000000, "expires_at": 1760100000 } }
+```
+
+The chain is checked against the agent's passport and its **current** scope, and the visa never
+widens it (temporary capability grants do not apply). Errors: `400 invalid_delegation` (a
+malformed chain), `401 invalid_delegation` (any chain rule, or a challenge not signed by the
+worker's key), `401 stale_timestamp | replay_detected`, `403 agent_not_active | passport_expired`,
+`403 delegation_revoked`, `503 delegation_state_unavailable` (the revocation record could not be
+read; refused rather than guessed), `503 delegation_unavailable` (the instance has no issuer
+configured), `429 rate_limited`. `PassControl.fromDelegation()` calls it for you.
+
+**Seeing and revoking an agent's delegations.** A delegation is signed offline, so the gateway
+learns of one at its worker's first exchange. The agent's page lists those in its **Workers**
+section, and so does `passcontrol agent delegations <agent-id>` (control API:
+`GET /api/control/v1/agents/{id}/delegations`). Revoke one link and everything under it, or
+every delegation the agent signed before now, seen or not, from the same section,
+`passcontrol agent revoke-delegation <agent-id> <jti>|--all`, or
+`POST /api/control/v1/agents/{id}/delegations/revoke` with `{ "jti": "…" }` or `{ "all": true }`.
+A revocation is permanent and is published on the signed revocation list
+(`/.well-known/passport-revocations`).
+
 ---
 
 ## Data plane — proxy a model call
@@ -304,7 +339,7 @@ embeddings on providers other than OpenAI, Mistral and Azure, files, fine-tuning
 verifies the visa → checks kill switch → checks scope → checks endpoint allowlist → reserves
 budget → injects your real provider key → streams the response back, and attempts to log the call. It does not return the injected provider key.
 
-Errors: `401 missing_visa | invalid_visa | invalid_credential | passport_secret_presented_as_bearer`, `503 blocked_budget_state`, `402 blocked_budget`, `402 blocked_budget_period` (with `retry-after` to the next UTC period boundary), `403 blocked_policy` (an output-ceiling refusal adds `rule: "max_output_tokens"`, `reason` and `limit` to the body and an `x-passcontrol-policy-rule` header), `403 blocked_suspended |
+Errors: `401 missing_visa | invalid_visa | invalid_credential | passport_secret_presented_as_bearer`, `503 blocked_budget_state`, `402 blocked_budget`, `402 blocked_budget_period` (with `retry-after` to the next UTC period boundary), `402 blocked_budget_subagent` (a declared sub-agent passed the policy's `subagent_session_cap_cents` for its session), `402 blocked_budget_delegation` (a worker's delegation, or one above it, used its cap), `403 delegation_revoked` (the worker's delegation was revoked, or issued before the agent's revoke-all point), `503 delegation_state_unavailable` (PassControl could not confirm the delegation is still valid; delegations fail closed), `403 delegated_visa_not_accepted` (a worker's visa on a route that does not take one), `403 blocked_policy` (an output-ceiling refusal adds `rule: "max_output_tokens"`, `reason` and `limit` to the body and an `x-passcontrol-policy-rule` header), `403 blocked_suspended |
 blocked_scope | blocked_endpoint`, `404 unknown_provider`, `413 payload_too_large`,
 `429 rate_limited`, `502 upstream_unreachable`. `429 rate_limited` also answers a client IP that
 has sent too many FAILED visas in a window (`VISA_FAIL_IP_LIMIT`, default 60 per 60 s); valid visas
@@ -1247,6 +1282,21 @@ A consumer must verify issuer/key/type and apply its own freshness policy to sig
 Passport is active; use public `/verify/<passportId>` or the corresponding verification
 API for current lifecycle status. Receipt signature verification does not automatically
 perform this lifecycle check or fetch this list.
+
+Delegated workers (signed delegation) appear in two more arrays in the same signed
+payload; `entries` is unchanged and `covers.includes` names all four kinds:
+- `delegations`: `{ id, jti, notValidAfter }` for each delegation link its owner revoked,
+  under the root passport `id` it belongs to. A worker receipt's `sub` is that passport
+  and it lists every link it ran under in `dc[].dlg`; match **both** `id` = `sub` and the
+  jti. A call under a revoked link, or any link below it, is not valid after that instant.
+  A jti alone is not an identifier: the delegating agent chooses it.
+- `delegationWatermarks`: `{ id, issuedAtOrBefore, notValidAfter }` for each time an
+  owner revoked every delegation of an agent. Every delegation rooted in passport `id`
+  (a worker receipt's `sub`) whose link `iat` is at or before `issuedAtOrBefore` is not
+  valid after `notValidAfter`. Each revocation is its own entry; none replaces another.
+If the gateway could not apply a delegation revocation at once, a worker could still
+call for up to one visa lifetime (5 minutes by default); such a receipt postdates its
+entry, and the list then reports it as issued after revocation.
 
 ## Custom endpoints and egress
 

@@ -177,7 +177,13 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "agent.service_rules",
         "approval.decide",
         "agent.suspend",
+        // One declared session stopped or resumed (sprint T8).
+        "agent.session_stop",
+        // A worker's delegation revoked, one or all (Bet D).
+        "agent.delegation_revoke",
         "agent.revoke",
+        // A new agent created without the default daily limit, by choice (F1).
+        "agent.spending_limit_removed",
         "killswitch.master",
         // Any-API phase 2: one service stopped or resumed for the workspace.
         "killswitch.service",

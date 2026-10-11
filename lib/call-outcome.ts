@@ -59,6 +59,10 @@ export const CALL_OUTCOME: Record<LogEntry["status"], { category: OutcomeCategor
   blocked_policy: { category: "refused_policy", label: "Blocked by a policy rule" },
   blocked_budget: { category: "refused_budget", label: "Blocked by a budget cap" },
   blocked_budget_period: { category: "refused_budget", label: "Blocked by the daily/monthly limit" },
+  blocked_budget_subagent: { category: "refused_budget", label: "Blocked by a sub-agent session cap" },
+  blocked_budget_delegation: { category: "refused_budget", label: "Blocked by a delegation cap" },
+  blocked_delegation_revoked: { category: "stopped", label: "Stopped: delegation revoked" },
+  blocked_delegation_unavailable: { category: "stopped", label: "Stopped: delegation could not be confirmed" },
   // A configuration answer, not a spend answer: the agent is not out of money,
   // its dollar cap cannot be enforced against a destination nobody can price.
   blocked_unpriced_endpoint: { category: "refused_budget", label: "Cost cap cannot be priced here" },
@@ -122,7 +126,12 @@ export function scopeRefusalExplanation(authMethod: AuthMethod | null | undefine
   if (authMethod === "direct_key") {
     return "This agent's allowed access, read when the request arrived, did not include this provider and model. Nothing was forwarded.";
   }
-  if (authMethod === "passport" || authMethod === "passport_proof_per_request") {
+  if (
+    authMethod === "passport" ||
+    authMethod === "passport_proof_per_request" ||
+    authMethod === "delegated" ||
+    authMethod === "delegated_proof_per_request"
+  ) {
     return "The work-visa presented carries the access it was issued with, and that access did not include this provider and model. Nothing was forwarded.";
   }
   return "The agent's allowed access did not include this provider and model. This older row does not record which credential was presented. Nothing was forwarded.";

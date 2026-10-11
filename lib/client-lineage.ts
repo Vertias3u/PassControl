@@ -106,10 +106,59 @@ function codex(h: HeaderSource, body: unknown): ClientLineage | null {
  * sidecar can serve Claude Code and Codex at once, so the run id is the coarser
  * grouping. When the CLI's session is missing or malformed the run id stands in,
  * WITHOUT the CLI's agent ids, which name agents inside a session we could not read.
+ *
+ * Beside the run id, a client that is neither CLI can declare its own sub-agent
+ * (`x-passcontrol-agent`, and `x-passcontrol-parent` for one spawned by another):
+ * the public demo's adapter does (F4). Declared like the rest, and never read
+ * next to a CLI's session, whose own agent ids are the ones that count there.
  */
 export function readClientLineage(headers: HeaderSource, body?: unknown): ClientLineage | null {
   const cli = claudeCode(headers) ?? codex(headers, body);
   if (cli) return cli;
   const run = declared(headers.get("x-passcontrol-run"));
-  return run ? { kind: "sidecar", session: run, agent: null, parent: null } : null;
+  if (!run) return null;
+  const agent = declared(headers.get("x-passcontrol-agent"));
+  const parent = agent ? declared(headers.get("x-passcontrol-parent")) : null;
+  return { kind: "sidecar", session: run, agent, parent };
+}
+
+/**
+ * The refusal a call from a session its owner stopped gets (sprint T8). It names
+ * the session and says what the stop does NOT cover: it is keyed on the session
+ * the client declared, so a new session starts unstopped. The id was already held
+ * to DECLARED above, so it is safe to echo.
+ */
+export function sessionStoppedMessage(sessionId: string): string {
+  return (
+    `PassControl refused this call: the agent's owner stopped this session (${sessionId}). ` +
+    "Other sessions of this agent are not affected, and a new session is not stopped. " +
+    "The owner can resume it from the agent's Sessions view."
+  );
+}
+
+/**
+ * The refusal a sub-agent gets at its per-session cap (C(b), 2026-10-10). Names the
+ * sub-agent, the cap and the session, and says who is not affected. The ids were
+ * held to DECLARED above, so they are safe to echo. `subagent_ledgers` is the bound
+ * on NEW sub-agent ledgers per hour, which exists because the ids are declared.
+ */
+export function subagentCapMessage(
+  reason: "subagent" | "subagent_ledgers",
+  ledger: { session: string; agent: string; capMicrocents: number }
+): string {
+  if (reason === "subagent_ledgers") {
+    return (
+      "PassControl refused this call: this agent started more new sub-agents this hour than its sub-agent " +
+      "spending cap can track. Wait for the hour to turn, or finish with the sub-agents already running."
+    );
+  }
+  // What did not fit is this call's hold, the most it could cost, on top of what
+  // the sub-agent already spent. "Has used its cap" was wrong: live on 2026-10-10 a
+  // sub-agent was refused at $0.0036 of a $0.03 cap.
+  const dollars = `$${(ledger.capMicrocents / 100_000_000).toFixed(2)}`;
+  return (
+    `PassControl refused this call: sub-agent ${ledger.agent} has a ${dollars} spending cap for this session ` +
+    `(${ledger.session}), and the most this call could cost, added to what it has already spent, would pass it. ` +
+    "The main agent and other sub-agents are not affected. The agent's owner sets this cap in its policy."
+  );
 }

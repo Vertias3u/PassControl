@@ -129,7 +129,10 @@ describe("the registry is pinned to the dispatch", () => {
     // gained the line, so both servers are listed now, in one group.
     const servers = GROUPS.find((group) => group.title === "Connect an agent");
     expect(servers, "the servers group should exist").toBeTruthy();
-    expect(servers.items.map((item) => item.run[0])).toEqual(["sidecar", "mcp"]);
+    // `watch` (F6) joined them on the same terms: it holds the terminal until q, so
+    // it is a `needsArgs` row that prints its command and returns, like both servers.
+    expect(servers.items.map((item) => item.run[0])).toEqual(["sidecar", "watch", "mcp"]);
+    expect(servers.items.every((item) => item.needsArgs && item.effect === "long_running")).toBe(true);
     expect(HIDDEN).not.toHaveProperty("mcp");
     expect(HIDDEN).not.toHaveProperty("sidecar");
   });

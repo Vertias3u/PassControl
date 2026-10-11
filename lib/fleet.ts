@@ -14,8 +14,9 @@ import {
   type SenderConstraintMode,
 } from "./sender-constraint";
 import { purgeAgentPolicy } from "./state/redis";
-import { armTenantKill } from "@/lib/state/killswitch";
-import { suspendAgent, unsuspendAgent, purgeAgentCaches } from "@/lib/state/redis";
+import { setTenantKillDurably } from "@/lib/state/killswitch";
+import { deleteKillRecord, saveKillRecord } from "@/lib/state/kill-record";
+import { suspendAgent, unsuspendAgent, purgeAgentCaches, stopSession, resumeSession } from "@/lib/state/redis";
 // The scope bounds an elevation is checked against now live with the union that
 // is checked (lib/break-glass.ts), so LIMITS is no longer read directly here.
 import { validateAgentInput, validateAgentProfileInput, validateAgentUpdate, validateScopes } from "@/lib/validate";
@@ -69,11 +70,23 @@ function passportExpiry(value: unknown, now: number = Date.now()): string | null
   return new Date(at).toISOString();
 }
 
+/**
+ * A periodic spend limit set at creation. Handed over by a caller that decided it
+ * (the dashboard's new-agent default, lib/new-agent-spend-limit.ts), never read
+ * from the request body: the control API passes a caller's raw JSON here, and
+ * creation through it must stay exactly as it was.
+ */
+export type CreationPeriodLimit = {
+  budget_period: "day" | "month" | null;
+  budget_period_cents: number | null;
+};
+
 /** Create an agent for a tenant (validates input; passport_pubkey must be unique). */
 export async function createAgent(
   db: SupabaseClient,
   userId: string,
-  input: unknown
+  input: unknown,
+  options: { period?: CreationPeriodLimit } = {}
 ): Promise<FleetResult<{ id: string; name: string; createdAt: string; expiresAt: string | null }>> {
   let clean;
   let expiresAt: string | null;
@@ -93,6 +106,9 @@ export async function createAgent(
       allowed_scopes: clean.scopes,
       budget_tokens: clean.budget_tokens,
       budget_cents: clean.budget_cents,
+      ...(options.period
+        ? { budget_period: options.period.budget_period, budget_period_cents: options.period.budget_period_cents }
+        : {}),
       expires_at: expiresAt,
     })
     // created_at comes back so onboarding can prove the new passport against calls
@@ -145,7 +161,8 @@ function rpcErrorCode(error: unknown): string {
 export async function createDirectAgent(
   db: DirectKeyDatabase,
   userId: string,
-  input: unknown
+  input: unknown,
+  options: { period?: CreationPeriodLimit } = {}
 ): Promise<FleetResult<{
   agentId: string;
   keyId: string;
@@ -178,6 +195,12 @@ export async function createDirectAgent(
     p_key_hash: directAgentKeyHash(key),
     p_key_suffix: directAgentKeySuffix(key),
     p_expires_at: keyMetadata.expiresAt,
+    // Only when there is a limit to set (0082). Without one the call keeps the
+    // pre-0082 argument list, so an agent with no limit can still be created on a
+    // database that has not had 0082 applied yet.
+    ...(options.period?.budget_period
+      ? { p_budget_period: options.period.budget_period, p_budget_period_cents: options.period.budget_period_cents }
+      : {}),
   });
   if (error) {
     if (rpcErrorCode(error) === "active_key_limit") {
@@ -392,6 +415,50 @@ export async function setAgentSuspended(
     await unsuspendAgent(agentId);
   }
   return { ok: true, value: { id: agentId } };
+}
+
+const FLEET_AGENT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The declared-session rule the gateway reads (lib/client-lineage.ts, lib/sessions.ts). */
+const FLEET_SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/**
+ * Stop or resume ONE declared session of an agent (sprint T8, D9). The gateway
+ * refuses that session's calls at the revocation step and the agent's other
+ * sessions run on. Any non-revoked agent of the caller's own: a stop on a
+ * suspended agent still holds after the agent is resumed. Keyed on the session
+ * the client declares, so a new session starts unstopped; the view says so.
+ * The service-role client bypasses RLS, so the user_id filter is the boundary.
+ */
+export async function setSessionStopped(
+  db: SupabaseClient,
+  userId: string,
+  agentId: string,
+  sessionId: string,
+  stopped: boolean
+): Promise<FleetResult<{ id: string; sessionId: string; stopped: boolean; durable: boolean }>> {
+  if (!FLEET_AGENT_ID_RE.test(agentId)) return { ok: false, status: 404, code: "not_found" };
+  if (!FLEET_SESSION_ID_RE.test(sessionId)) return { ok: false, status: 400, code: "invalid_session" };
+  const { data: agent, error } = await db
+    .from("agents")
+    .select("id, status")
+    .eq("user_id", userId)
+    .eq("id", agentId)
+    .maybeSingle();
+  if (error) return { ok: false, status: 500, code: "query_failed" };
+  if (!agent || agent.status === "revoked") return { ok: false, status: 404, code: "not_found" };
+  // Redis and the durable record (0083), in the master kill's order
+  // (setTenantKillDurably): a stop is in force before it is recorded, and a
+  // resume clears the record before Redis, so a reload between can only re-stop.
+  const stop = { kind: "session" as const, agentId, sessionId };
+  let durable: boolean;
+  if (stopped) {
+    await stopSession(agentId, sessionId);
+    durable = await saveKillRecord(userId, stop);
+  } else {
+    durable = await deleteKillRecord(userId, stop);
+    await resumeSession(agentId, sessionId);
+  }
+  return { ok: true, value: { id: agentId, sessionId, stopped, durable } };
 }
 
 /**
@@ -918,8 +985,9 @@ export async function setTenantKill(
   db: SupabaseClient,
   userId: string,
   on: boolean
-): Promise<FleetResult<{ affected: number }>> {
-  await armTenantKill(userId, on);
+): Promise<FleetResult<{ affected: number; durable: boolean }>> {
+  // Redis and the durable record (0083): a Redis loss no longer lifts it.
+  const { durable } = await setTenantKillDurably(userId, on);
   const { data: agents } = await db.from("agents").select("id").eq("user_id", userId);
-  return { ok: true, value: { affected: (agents ?? []).length } };
+  return { ok: true, value: { affected: (agents ?? []).length, durable } };
 }

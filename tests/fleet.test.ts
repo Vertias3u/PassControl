@@ -10,7 +10,7 @@ const { suspendAgent, unsuspendAgent, purgeAgentCaches, purgeAgentPolicy, armTen
   unsuspendAgent: vi.fn(async () => {}),
   purgeAgentCaches: vi.fn(async () => true),
   purgeAgentPolicy: vi.fn(async () => true),
-  armTenantKill: vi.fn(async () => {}),
+  armTenantKill: vi.fn(async (_userId: string, _on: boolean) => ({ durable: true })),
 }));
 vi.mock("@/lib/state/redis", () => ({
   suspendAgent,
@@ -19,7 +19,10 @@ vi.mock("@/lib/state/redis", () => ({
   // A budget edit invalidates the policy cache the live gate reads (S3-04).
   purgeAgentPolicy,
 }));
-vi.mock("@/lib/state/killswitch", () => ({ armTenantKill }));
+// fleet.setTenantKill goes through the durable setter (0083); `armTenantKill`
+// names the mock for the Redis-and-record write it stands for.
+vi.mock("@/lib/state/killswitch", () => ({ setTenantKillDurably: armTenantKill }));
+vi.mock("@/lib/state/kill-record", () => ({ saveKillRecord: vi.fn(async () => true), deleteKillRecord: vi.fn(async () => true) }));
 
 import {
   createAgent,
@@ -315,7 +318,7 @@ describe("setTenantKill", () => {
   it("arms only the tenant kill flag; it never overwrites individual suspension state", async () => {
     const { db, calls } = makeDb({ data: [{ id: "a1" }, { id: "a2" }], error: null });
     const r = await setTenantKill(db, "u1", true);
-    expect(r).toEqual({ ok: true, value: { affected: 2 } });
+    expect(r).toEqual({ ok: true, value: { affected: 2, durable: true } });
     expect(armTenantKill).toHaveBeenCalledWith("u1", true);
     expect(calls.eq).toContainEqual(["user_id", "u1"]);
     expect(suspendAgent).not.toHaveBeenCalled();
@@ -330,6 +333,12 @@ describe("setTenantKill", () => {
     expect(suspendAgent).not.toHaveBeenCalled();
     expect(unsuspendAgent).not.toHaveBeenCalled();
     expect(purgeAgentCaches).not.toHaveBeenCalled();
+  });
+
+  it("passes on a kill that is in force but not saved to the record, rather than failing it", async () => {
+    armTenantKill.mockResolvedValueOnce({ durable: false });
+    const { db } = makeDb({ data: [], error: null });
+    expect(await setTenantKill(db, "u1", true)).toEqual({ ok: true, value: { affected: 0, durable: false } });
   });
 });
 

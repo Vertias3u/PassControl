@@ -3,6 +3,7 @@
 // (Tension 2 / S3) so reserve+check+rollback never races across round-trips.
 import { Redis } from "@upstash/redis";
 import { logFailOpen } from "../observability";
+import { sessionStopKey } from "./kill-keys";
 
 let _redis: Redis | null = null;
 export function redis(): Redis {
@@ -52,6 +53,11 @@ const k = {
   policy: (uid: string, agid: string) => `policy4:${uid}:${agid}`,
   fallbacks: (uid: string, agid: string) => `fallbacks:${uid}:${agid}`,
   suspended: (agid: string) => `suspended:${agid}`,
+  // One declared session of an agent, stopped by its owner (sprint T8). The id
+  // is the client's declared session, already held to DECLARED_SESSION below.
+  sessionStop: sessionStopKey,
+  // A declared session's settled spend, for "this session passed $X" (candidate 3).
+  sessionSpend: (agid: string, ses: string) => `ssp:${agid}:${ses}`,
   owner: (uid: string) => `owner:${uid}`,
   // Which providers a tenant holds a credential for. Names no secret and no
   // credential id — only the provider list, used to say what an agent could fail
@@ -618,9 +624,29 @@ export async function purgeAgentCaches(agentId: string, providers: string[]): Pr
 }
 
 // ── Per-agent fast revocation ─────────────────────────────────────────────────
-export async function isSuspended(agentId: string): Promise<boolean> {
+
+/** The declared-session rule (lib/client-lineage.ts, lib/sessions.ts SESSION_ID_RE). */
+const DECLARED_SESSION = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/**
+ * Is this agent suspended, or, given the call's declared session, is that one
+ * session stopped (sprint T8)? `true` = the agent is suspended (it wins, so its
+ * opaque refusal is unchanged), `"session"` = only this session is stopped,
+ * `false` = neither. A session is read in the SAME round-trip as the agent flag
+ * (one MGET), so declaring one costs no extra billed command. A caller that
+ * treats the answer as a boolean reads "session" as truthy, i.e. refuses.
+ * A session id the gateway would not accept is ignored, never put in a key.
+ */
+export async function isSuspended(agentId: string): Promise<boolean>;
+export async function isSuspended(agentId: string, sessionId: string | null | undefined): Promise<boolean | "session">;
+export async function isSuspended(agentId: string, sessionId?: string | null): Promise<boolean | "session"> {
   try {
-    return (await redis().exists(k.suspended(agentId))) === 1;
+    if (!sessionId || !DECLARED_SESSION.test(sessionId)) {
+      return (await redis().exists(k.suspended(agentId))) === 1;
+    }
+    const [agent, session] = await redis().mget(k.suspended(agentId), k.sessionStop(agentId, sessionId));
+    if (agent !== null && agent !== undefined) return true;
+    return session !== null && session !== undefined ? "session" : false;
   } catch {
     logFailOpen("suspend_read");
     // Match the Redis-backed kill switch: fail open by default to avoid blocking
@@ -653,6 +679,63 @@ export async function suspendAgent(agentId: string): Promise<void> {
 
 export async function unsuspendAgent(agentId: string): Promise<void> {
   await redis().del(k.suspended(agentId));
+}
+
+/**
+ * Stop or resume one declared session (sprint T8). No expiry, like suspend: a
+ * Claude Code session resumed days later keeps its id, and a stop must still
+ * hold. Keyed on the DECLARED session, so a new session starts unstopped; the
+ * dashboard says so.
+ *
+ * `ttlSeconds` is for the public demo only (F4): each visitor's stop clears
+ * itself, so abandoned stops never pile up. An owner's stop never expires.
+ */
+export async function stopSession(agentId: string, sessionId: string, opts: { ttlSeconds?: number } = {}): Promise<void> {
+  if (!DECLARED_SESSION.test(sessionId)) throw new Error("invalid_session");
+  if (opts.ttlSeconds === undefined) {
+    await redis().set(k.sessionStop(agentId, sessionId), 1);
+    return;
+  }
+  if (!Number.isInteger(opts.ttlSeconds) || opts.ttlSeconds <= 0) throw new Error("invalid_ttl");
+  await redis().set(k.sessionStop(agentId, sessionId), 1, { ex: opts.ttlSeconds });
+}
+
+export async function resumeSession(agentId: string, sessionId: string): Promise<void> {
+  if (!DECLARED_SESSION.test(sessionId)) throw new Error("invalid_session");
+  await redis().del(k.sessionStop(agentId, sessionId));
+}
+
+/** A session's spend counter idles out after this long; a resumed session counts afresh. */
+export const SESSION_SPEND_TTL_S = 24 * 3600;
+
+/**
+ * Add one settled charge to a declared session's running total (candidate 3) and
+ * return the new total, or null when the id is not one the gateway accepts or the
+ * write failed. For an ALERT only: it never decides a call, so a lost counter can
+ * re-send or miss one alert and nothing else.
+ */
+export async function addSessionSpend(agentId: string, sessionId: string, deltaMicrocents: number): Promise<{ total: number } | null> {
+  if (!DECLARED_SESSION.test(sessionId)) return null;
+  try {
+    const key = k.sessionSpend(agentId, sessionId);
+    const delta = Math.max(0, Math.round(deltaMicrocents));
+    const [total] = (await redis().pipeline().incrby(key, delta).expire(key, SESSION_SPEND_TTL_S).exec()) as [number, unknown];
+    return { total: Number(total) };
+  } catch {
+    return null;
+  }
+}
+
+/** Which of these sessions are stopped, for display; null when the read failed. */
+export async function readSessionStops(agentId: string, sessionIds: string[]): Promise<Set<string> | null> {
+  const ids = sessionIds.filter((id) => DECLARED_SESSION.test(id));
+  if (!ids.length) return new Set();
+  try {
+    const values = await redis().mget(...ids.map((id) => k.sessionStop(agentId, id)));
+    return new Set(ids.filter((_, i) => values[i] !== null && values[i] !== undefined));
+  } catch {
+    return null;
+  }
 }
 
 // ── last_seen (write-coalesced; flushed to Postgres by the reconcile cron) ────

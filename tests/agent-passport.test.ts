@@ -385,6 +385,18 @@ describe("Agent Passport view model", () => {
     ]);
   });
 
+  it("marks a daily limit at the deployment's default amount as the default (F1)", () => {
+    const at = (cents: number, kind = "day") =>
+      buildAgentPassportView({ ...agentA, budget_period: kind, budget_period_cents: cents } as never, [], undefined, undefined, undefined, null, null, [], null, 2000)
+        .budgets.period;
+    expect(at(2000)).toMatchObject({ kind: "day", capCents: 2000, isDefault: true });
+    expect(at(1500)).toMatchObject({ isDefault: false });
+    expect(at(2000, "month")).toMatchObject({ isDefault: false });
+    // No default configured: nothing is labelled one.
+    const off = buildAgentPassportView({ ...agentA, budget_period: "day", budget_period_cents: 2000 } as never, []);
+    expect(off.budgets.period).toMatchObject({ isDefault: false });
+  });
+
   it("surfaces validated policy rules read-only", () => {
     const view = buildAgentPassportView(agentA, []);
 
@@ -404,6 +416,8 @@ describe("Agent Passport view model", () => {
       // K2: no ceiling in this agent's policy is a known absence, not unknown.
       maxOutputTokens: null,
       subagentModels: null,
+      subagentSessionCapCents: null,
+      sessionAlertCents: null,
       secretGuard: null,
     });
 
@@ -421,6 +435,8 @@ describe("Agent Passport view model", () => {
       maxRequestsPerHour: null,
       maxOutputTokens: null,
       subagentModels: null,
+      subagentSessionCapCents: null,
+      sessionAlertCents: null,
       secretGuard: null,
     });
   });

@@ -18,7 +18,16 @@ export const AUDIT_ACTIONS = [
   "agent.direct_key.revoke",
   "agent.update",
   "agent.suspend",
+  // One declared session of an agent stopped or resumed (sprint T8). Its own
+  // action: logged as agent.suspend, the history would say the whole agent was.
+  "agent.session_stop",
+  // A worker's delegation revoked: one link, or every delegation before now (Bet D).
+  "agent.delegation_revoke",
   "agent.revoke",
+  // A new dashboard agent created WITHOUT the default daily spending limit (F1).
+  // Its own row, holding the statement the owner ticked, so the trail shows the
+  // limit was refused on purpose rather than never offered.
+  "agent.spending_limit_removed",
   "provider_key.add",
   "provider_key.rotate",
   "provider_key.endpoint",

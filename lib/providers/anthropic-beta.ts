@@ -12,7 +12,8 @@
 //
 // Never forwarded, whatever their date: betas for tools PassControl refuses
 // (mcp-client, files-api, skills), advisor-tool unless the request's advisor was
-// accepted and priced, and context-1m. Every 1M-context
+// accepted and priced, the per-message betas below unless the body's use of them
+// was checked, and context-1m. Every 1M-context
 // model (Claude 4.6 and later) has 1M by default at its flat rate, so the beta adds
 // nothing there; on the 200K models (Sonnet 4.5 and earlier) Anthropic's pricing
 // page states no 1M rate to price it at (read 2026-10-08;
@@ -42,9 +43,23 @@ const MAX_BETAS = 16;
 // refuses the advisor tool without it.
 const ADVISOR_BETA = /^advisor-tool-(?:\d{4}-\d{2}-\d{2}|\d{8})$/;
 
+// Claude Code 2.1.295's per-message betas (sprint T3, D8), forwarded only for a
+// body whose use of them the gateway understands
+// (lib/providers/anthropic-message-controls.ts): per-turn effort (Claude Code's
+// name, and the name Anthropic documents), and tools added or removed inside
+// `messages`, by reference or by value.
+const PER_TURN_EFFORT_BETA = /^(?:per-turn-control|mid-conversation-output-config)-(?:\d{4}-\d{2}-\d{2}|\d{8})$/;
+const TOOL_CHANGES_BETA = /^(?:mid-conversation-tool-changes|inline-tools)-(?:\d{4}-\d{2}-\d{2}|\d{8})$/;
+
+// Auto mode's server-side checks (sprint P7), forwarded only for a body whose
+// `safeguards` the gateway understood (lib/providers/anthropic-message-controls.ts).
+// `afk-mode-*` travels with it from Claude Code but no body field uses it, so it
+// stays dropped, as does `auto-mode-classifier-*`.
+const SAFEGUARDS_BETA = /^dangerous-tool-use-(?:\d{4}-\d{2}-\d{2}|\d{8})$/;
+
 export function forwardableAnthropicBeta(
   raw: string | null,
-  options: { advisor?: boolean } = {}
+  options: { advisor?: boolean; perTurnEffort?: boolean; toolChanges?: boolean; safeguards?: boolean } = {}
 ): { header: string | null; dropped: string[] } {
   if (!raw) return { header: null, dropped: [] };
   // A control character can only be an attempt to start a new header line.
@@ -55,7 +70,13 @@ export function forwardableAnthropicBeta(
   for (const part of line.split(",")) {
     const beta = part.trim();
     if (!beta || kept.includes(beta) || dropped.includes(beta)) continue;
-    if ((FORWARDED.test(beta) || (options.advisor === true && ADVISOR_BETA.test(beta))) && kept.length < MAX_BETAS) kept.push(beta);
+    const allowed =
+      FORWARDED.test(beta) ||
+      (options.advisor === true && ADVISOR_BETA.test(beta)) ||
+      (options.perTurnEffort === true && PER_TURN_EFFORT_BETA.test(beta)) ||
+      (options.toolChanges === true && TOOL_CHANGES_BETA.test(beta)) ||
+      (options.safeguards === true && SAFEGUARDS_BETA.test(beta));
+    if (allowed && kept.length < MAX_BETAS) kept.push(beta);
     else dropped.push(beta.slice(0, 64));
   }
   return { header: kept.length ? kept.join(",") : null, dropped };

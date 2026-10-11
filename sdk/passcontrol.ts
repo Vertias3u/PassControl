@@ -15,6 +15,7 @@
 // an end-user browser bundle even though the underlying Web APIs are portable.
 import { ed25519 } from "@noble/curves/ed25519";
 import { requireGatewayOrigin } from "./gateway.js";
+import { createDelegationLink } from "../cli/delegation.mjs";
 
 export type ProviderId =
   | "openai"
@@ -45,6 +46,34 @@ export interface PassControlOptions {
   refreshSkewSeconds?: number;
   /** Override the transport (tests / custom fetch). Defaults to global fetch. */
   fetch?: typeof fetch;
+}
+
+/** A worker's side of a signed delegation (Bet D). */
+export interface PassControlDelegationOptions {
+  gateway: string;
+  /** The chain the worker was handed, root first. */
+  chain: string[];
+  /** The worker's own private key. Its public half is the chain's last `sub`. */
+  workerPrivateKey: string;
+  refreshSkewSeconds?: number;
+  fetch?: typeof fetch;
+}
+
+export interface DelegateOptions {
+  /** The worker's public key. The worker keeps its private key; the parent never holds it. */
+  workerPublicKey: string;
+  scope: { provider: ProviderId | string; models: string[] }[];
+  /** The most this delegation and everything under it may spend, in micro-cents. */
+  capMicrocents: number;
+  /** At most 24 hours, and never past the signer's own delegation. */
+  ttlSeconds: number;
+  /** false: the worker may not delegate on. */
+  allowFurtherDelegation?: boolean;
+  /**
+   * The gateway's issuer (receipts' `iss`). Defaults to the gateway origin, which is
+   * the issuer unless the gateway is reached through another address.
+   */
+  audience?: string;
 }
 
 interface ChallengeResponse {
@@ -111,6 +140,9 @@ export class PassControl {
   private readonly skewMs: number;
   private readonly transport: typeof fetch;
 
+  /** Set only on a worker's client: its chain, sent to /api/auth/delegated. */
+  private delegationChain: string[] | null = null;
+
   private cached: { token: string; expiresAt: number } | null = null;
   private inflight: Promise<string> | null = null;
 
@@ -143,11 +175,18 @@ export class PassControl {
     const payload = bytesToB64url(payloadBytes);
     const signature = bytesToB64url(ed25519.sign(payloadBytes, this.secret));
 
-    const res = await this.transport(`${this.gateway}/api/auth/challenge`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ payload, signature }),
-    });
+    // A worker exchanges its chain, signing the challenge with its OWN key: the
+    // delegation token alone does nothing at the gateway.
+    const res = await this.transport(
+      `${this.gateway}/api/auth/${this.delegationChain ? "delegated" : "challenge"}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          this.delegationChain ? { payload, signature, chain: this.delegationChain } : { payload, signature }
+        ),
+      }
+    );
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
       throw new Error(`PassControl: challenge failed (${res.status}) ${detail}`.trim());
@@ -178,6 +217,47 @@ export class PassControl {
   /** Drop the cached visa so the next getVisa() re-mints. */
   invalidate(): void {
     this.cached = null;
+  }
+
+  /**
+   * A client for a WORKER holding a delegation (Bet D). Its calls are refused past the
+   * delegation's scope, cap or expiry, and the agent's kill switch and suspension stop
+   * it too. Its receipts name the worker, never the agent's passport.
+   */
+  static fromDelegation(opts: PassControlDelegationOptions): PassControl {
+    if (!Array.isArray(opts.chain) || opts.chain.length < 1) {
+      throw new Error("PassControl: fromDelegation needs the chain the worker was handed.");
+    }
+    const priv = b64urlToBytes(opts.workerPrivateKey);
+    if (priv.length !== 32) throw new Error("PassControl: workerPrivateKey must encode 32 bytes.");
+    const client = new PassControl({
+      gateway: opts.gateway,
+      passportId: bytesToB64url(ed25519.getPublicKey(priv)),
+      passportSecret: opts.workerPrivateKey,
+      ...(opts.refreshSkewSeconds !== undefined ? { refreshSkewSeconds: opts.refreshSkewSeconds } : {}),
+      ...(opts.fetch ? { fetch: opts.fetch } : {}),
+    });
+    client.delegationChain = [...opts.chain];
+    return client;
+  }
+
+  /**
+   * Hand a worker a narrower slice of this client's authority: signed here, offline,
+   * by this client's key (the agent's passport, or a worker's own key one level down).
+   * Returns the chain to give the worker, root first.
+   */
+  delegate(opts: DelegateOptions): { token: string; chain: string[] } {
+    const token = createDelegationLink({
+      signerPrivateKey: bytesToB64url(this.secret),
+      audience: opts.audience ?? this.gatewayOrigin,
+      workerPublicKey: opts.workerPublicKey,
+      scope: opts.scope,
+      capMicrocents: opts.capMicrocents,
+      ttlSeconds: opts.ttlSeconds,
+      ...(opts.allowFurtherDelegation !== undefined ? { allowFurtherDelegation: opts.allowFurtherDelegation } : {}),
+      ...(this.delegationChain ? { parentChain: this.delegationChain } : {}),
+    });
+    return { token, chain: [...(this.delegationChain ?? []), token] };
   }
 
   /** A `fetch` that injects the visa and refreshes it transparently. Pass this as

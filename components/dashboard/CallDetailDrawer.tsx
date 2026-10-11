@@ -26,7 +26,7 @@ import { isServiceId } from "@/lib/services/catalog";
 import { SERVICE_DISPLAY } from "@/lib/services/display";
 import type { LogEntry } from "@/lib/log";
 import { parseShadowVerdict } from "@/lib/policy-shadow";
-import { readRecordedEndpoint } from "@/lib/verify/receipt-view";
+import { describeLineage, readRecordedEndpoint } from "@/lib/verify/receipt-view";
 import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
 import { authenticationProofLabel } from "@/lib/first-call-activation";
 
@@ -59,6 +59,10 @@ const STATUS: Record<LogEntry["status"], { explanation: string }> = {
   blocked_policy: { explanation: "The live policy recorded on this attempt refused it." },
   blocked_budget: { explanation: "The PassControl budget gate refused the attempt before provider forwarding." },
   blocked_budget_period: { explanation: "The agent's daily or monthly spend limit was used up for the current UTC period, so PassControl refused the attempt before provider forwarding. It clears on its own at the next UTC period boundary; raising the limit clears it sooner." },
+  blocked_budget_subagent: { explanation: "A sub-agent used the spending cap its agent's policy sets for one sub-agent in one session, so PassControl refused this call before provider forwarding. The agent's main thread and its other sub-agents keep running. The sub-agent and session ids are declared by the coding tool, so a new session or a new sub-agent starts at zero; the agent's own limits still apply to all of it." },
+  blocked_budget_delegation: { explanation: "A worker acting under a delegation from this agent reached the spending cap of its delegation, or of a delegation above it, so PassControl refused this call before provider forwarding. The agent itself and its other workers keep running." },
+  blocked_delegation_revoked: { explanation: "A worker presented a delegation from this agent that the owner revoked (one delegation, or every delegation issued before a point in time). PassControl refused the call before provider forwarding." },
+  blocked_delegation_unavailable: { explanation: "A worker's call was refused because PassControl could not confirm its delegation is still valid: the revocation record could not be read, or the delegation's spending ledger was lost. Delegations fail closed, so nothing was sent." },
   usage_unknown: { explanation: "PassControl allowed the attempt and it went upstream, but no usage report ever came back \u2014 the stream broke, or it closed without one. The provider may have billed for work nobody could measure, so this attempt was charged at the greater of what was observed and what was reserved. The tokens and cost shown are what was OBSERVED, and are marked unconfirmed; where the row records them, the figures charged to the budget are shown separately below." },
   dispatch_unavailable: { explanation: "Each attempt claims a single, one-use permission to reach the provider in the instant before the request is sent, and this attempt could not claim its own. Either its record was unreadable, or another handler already held it and may be inside that provider call right now. Sending anyway risks the same request being billed twice, so nothing was sent. The reservation this attempt made is deliberately still held rather than returned \u2014 handing it back would free capacity that another handler may be about to spend. No cap was reached and raising one will not change this." },
   blocked_budget_state: { explanation: "PassControl refused before forwarding because its own spend counters for this agent were lost, and it will not invent a starting balance \u2014 doing so would hand back the difference as spendable capacity. This is not a budget denial and raising the cap will not fix it. An operator rebuilds the agent's spend from the audit trail, which is authoritative." },
@@ -137,6 +141,8 @@ export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null)
       break;
     case "blocked_budget":
     case "blocked_budget_period":
+    case "blocked_budget_subagent":
+    case "blocked_budget_delegation":
     case "blocked_unpriced_endpoint":
     case "blocked_unpriced_model":
       if (agent) actions.push({ href: `${agent}#agent-operate`, label: "Review this agent's caps" });
@@ -261,6 +267,10 @@ export function CallDetailDrawer({
             ? "Not reported"
             : "Not sent — nothing to measure";
   const endpoint = readRecordedEndpoint(row?.receipt);
+  // The client's declared session and sub-agent (0079), in the CLI's words.
+  const lineage = row
+    ? describeLineage({ cli: row.client_kind, ses: row.client_session, agt: row.client_agent, par: row.client_parent })
+    : null;
   const upstreamStatus = row ? recordedUpstreamStatus(row) : null;
   const upstreamMeaning = upstreamStatus === null || !row ? null : upstreamMeaningFor(row, upstreamStatus);
   const nextActions = row ? nextActionsFor(row, upstreamStatus) : [];
@@ -346,6 +356,12 @@ export function CallDetailDrawer({
               read as a call whose model failed to record. */}
           <div><dt>Destination</dt><dd>{departureProvider(row) ?? "Not recorded"} / {departureDestination(row)}</dd></div>
           <div><dt>Call class</dt><dd>{isHousekeeping(row) ? "SDK housekeeping — preserved in the record, not counted as agent activity" : "Agent call"}</dd></div>
+          {lineage ? (
+            <div data-lineage="declared">
+              <dt>Session · {lineage.who}</dt>
+              <dd><code>{lineage.session}</code><small> {lineage.note}</small></dd>
+            </div>
+          ) : null}
           {/* The one thing a blocked_endpoint row could never tell you: which
               endpoint. It has always been in the receipt; nothing showed it.
               Worded as RECORDED, not proven — these claims are decoded without

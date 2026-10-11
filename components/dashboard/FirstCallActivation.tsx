@@ -93,7 +93,12 @@ export function FirstCallActivation({
   configuredProviders,
   storedServices,
   logsAvailable,
+  defaultDailyLimitCents,
 }: {
+  /** This deployment's daily limit for a new agent, in cents (null: switched
+   *  off). Resolved on the server, so the form shows what the server applies. */
+  defaultDailyLimitCents?: number | null;
+
   /** Services with a stored token, offered pre-ticked by "Connect an agent". */
   storedServices?: readonly string[];
   userId: string;
@@ -329,7 +334,7 @@ export function FirstCallActivation({
           <nav className="pc-first-call__controls" aria-label="Next steps">
             <Link href={`/dashboard/agents/${state.agentId}`} data-control="agent">Operate {state.agentName || "this agent"}</Link>
             <Link href="/dashboard#activity" data-control="receipt">Inspect stored calls</Link>
-            <DirectAgentConnect triggerLabel="Connect another worker" initialProvider={defaultProvider} configuredProviders={configuredProviders} storedServices={storedServices} />
+            <DirectAgentConnect triggerLabel="Connect another worker" initialProvider={defaultProvider} configuredProviders={configuredProviders} storedServices={storedServices} defaultDailyLimitCents={defaultDailyLimitCents} />
           </nav>
           <button type="button" className="pc-first-call__dismiss" onClick={dismiss} aria-label="Dismiss completed first-call proof">
             <X aria-hidden="true" /> Dismiss
@@ -403,6 +408,7 @@ export function FirstCallActivation({
               userId={userId}
               integrations={integrations}
               onRevealChange={(on) => setRevealing(on ? "provider" : null)}
+              defaultDailyLimitCents={defaultDailyLimitCents}
             />
           </div>
         ) : null}
@@ -414,11 +420,12 @@ export function FirstCallActivation({
               <p>Use a Direct Agent Key for static-key tools, or a Passport for code that can sign challenges with the PassControl SDK.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <DirectAgentConnect triggerLabel="Direct Agent Key" initialProvider={defaultProvider} configuredProviders={configuredProviders} storedServices={storedServices} />
+              <DirectAgentConnect triggerLabel="Direct Agent Key" initialProvider={defaultProvider} configuredProviders={configuredProviders} storedServices={storedServices} defaultDailyLimitCents={defaultDailyLimitCents} />
               <PassportIssuanceModal
                 userId={userId}
                 integrations={integrations}
                 onRevealChange={(on) => setRevealing(on ? "agent" : null)}
+                defaultDailyLimitCents={defaultDailyLimitCents}
               />
             </div>
           </div>

@@ -312,7 +312,7 @@ export function AgentServiceAccess({
             <code>getChat</code>, matched in any case, over GET or POST. File downloads and uploads are not
             supported (send a file by URL or <code>file_id</code>). A rule for <code>sendMessage</code> reaches any
             chat the bot is in: the chat is chosen in the request, not the rule. Agents sharing one bot share its{" "}
-            <code>getUpdates</code> queue. Point the agent at <code>{base}/api/v1/svc/{service}/&lt;method&gt;</code>{" "}
+            <code>getUpdates</code> queue. Point the agent at <code className="break-all">{base}/api/v1/svc/{service}/&lt;method&gt;</code>{" "}
             with its PassControl credential (as <code>Authorization: Bearer</code> or <code>x-api-key</code>); the
             bot token is added by the gateway.
           </p>
@@ -322,7 +322,7 @@ export function AgentServiceAccess({
             <code>GET</code>. <code>*</code> matches one path segment; <code>**</code> matches one or more
             segments at the end and is for <code>GET</code> rules only, so a write rule names its path exactly,
             and <code>/repos/acme/web/**</code> does not cover <code>/repos/acme/web</code> itself. Point the
-            agent&apos;s {serviceLabel} client at <code>{base}/api/v1/svc/{service}</code>, giving it the
+            agent&apos;s {serviceLabel} client at <code className="break-all">{base}/api/v1/svc/{service}</code>, giving it the
             agent&apos;s PassControl credential in place of a {serviceLabel} token (as{" "}
             <code>Authorization: Bearer</code>, <code>x-api-key</code> or <code>Authorization: token</code>), or
             use <code>passcontrol env {service}</code> through the sidecar.

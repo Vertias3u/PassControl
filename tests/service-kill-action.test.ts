@@ -22,7 +22,7 @@ vi.mock("@/lib/alert", () => ({ dispatchSecurityAlert: (...a: unknown[]) => h.al
 vi.mock("@/lib/seclog", () => ({ logSecurityEvent: (...a: unknown[]) => h.seclog(...a) }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => ({}) }));
 vi.mock("@/lib/state/killswitch", () => ({
-  armServiceKill: (...a: unknown[]) => h.arm(...a),
+  setServiceKillDurably: (...a: unknown[]) => h.arm(...a),
   observeServiceKill: (...a: unknown[]) => h.observe(...a),
 }));
 
@@ -31,7 +31,7 @@ import { observeServiceKillAction, setServiceKill } from "@/app/dashboard/servic
 beforeEach(() => {
   vi.clearAllMocks();
   h.getUser.mockResolvedValue({ data: { user: { id: "tenant-a" } } });
-  h.arm.mockResolvedValue(undefined);
+  h.arm.mockResolvedValue({ durable: true });
   h.observe.mockResolvedValue(true);
   h.gate.mockResolvedValue({ ok: false, reason: "step_up_required" });
 });
@@ -44,7 +44,18 @@ describe("setServiceKill", () => {
       expect.objectContaining({ userId: "tenant-a", action: "killswitch.service", metadata: { service: "github", on: true } })
     );
     expect(h.alert).toHaveBeenCalled();
-    expect(result).toEqual({ requested: true, armed: true, confirmed: true });
+    expect(result).toEqual({ requested: true, armed: true, confirmed: true, durable: true });
+  });
+
+  // 0083: the record refusing the write is not the stop failing. Redis holds it,
+  // so it is audited and alerted like any arm, and the operator is told it is
+  // not saved.
+  it("an arm in force but not saved is still audited and alerted, and says so", async () => {
+    h.arm.mockResolvedValue({ durable: false });
+    const result = await setServiceKill("github", true);
+    expect(h.audit).toHaveBeenCalled();
+    expect(h.alert).toHaveBeenCalled();
+    expect(result).toEqual({ requested: true, armed: true, confirmed: true, durable: false });
   });
 
   it("needs no two-factor step-up: a stop is always reachable", async () => {
@@ -55,7 +66,7 @@ describe("setServiceKill", () => {
 
   it("says it could not confirm when the read-back fails or disagrees", async () => {
     h.observe.mockResolvedValue(null);
-    expect(await setServiceKill("github", true)).toEqual({ requested: true, armed: null, confirmed: false });
+    expect(await setServiceKill("github", true)).toEqual({ requested: true, armed: null, confirmed: false, durable: true });
     h.observe.mockResolvedValue(false);
     expect(await setServiceKill("github", true)).toMatchObject({ confirmed: false });
   });

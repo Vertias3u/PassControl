@@ -362,7 +362,9 @@ describe("server-side provider model probe", () => {
         name: "Imported agent",
         passportPubkey: PASSPORT_ID,
         scopes: [{ provider: "anthropic", models: ["claude-sonnet-*"] }],
-      })
+      }),
+      // F1: an imported agent starts with the default daily limit.
+      { period: { budget_period: "day", budget_period_cents: 2000 } }
     );
   });
 

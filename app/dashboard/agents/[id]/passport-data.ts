@@ -1,4 +1,6 @@
 import { notFound as nextNotFound } from "next/navigation";
+import { isDefaultDailyLimit } from "@/lib/new-agent-spend-limit";
+import { deploymentDefaultDailyLimitCents } from "@/lib/new-agent-spend-limit.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { agentPolicyForDisplay, type AgentPolicyView } from "@/lib/scope";
@@ -174,7 +176,8 @@ export interface AgentPassportView {
     tokens: PassportTokenBudgetView;
     cost: PassportCostBudgetView;
     /** The periodic limit (K1), or null for none (or a database without 0073). */
-    period: { kind: PeriodKind; capCents: number; usage: PeriodUsageView | null } | null;
+    /** isDefault: the deployment's default new-agent limit, by amount (F1). */
+    period: { kind: PeriodKind; capCents: number; usage: PeriodUsageView | null; isDefault: boolean } | null;
   };
 }
 
@@ -317,7 +320,8 @@ export function buildAgentPassportView(
   shadowSince?: string | null,
   breakGlass: BreakGlassGrant | null = null,
   directKeys: readonly AgentAccessKeyView[] = [],
-  periodUsage: PeriodUsageView | null = null
+  periodUsage: PeriodUsageView | null = null,
+  defaultDailyLimitCents: number | null = null
 ): AgentPassportView {
   const agent: Record<string, unknown> = isRecord(rawAgent) ? rawAgent : {};
   const verdicts = normalizeVerdicts(Array.isArray(rawLogs) ? rawLogs : []);
@@ -373,7 +377,12 @@ export function buildAgentPassportView(
     budgets: {
       period:
         periodKind !== null && periodCapCents !== null
-          ? { kind: periodKind, capCents: periodCapCents, usage: periodUsage }
+          ? {
+              kind: periodKind,
+              capCents: periodCapCents,
+              usage: periodUsage,
+              isDefault: isDefaultDailyLimit(periodKind, periodCapCents, defaultDailyLimitCents),
+            }
           : null,
       tokens: {
         spentTokens,
@@ -717,6 +726,7 @@ export async function requireAgentPassport(
     shadowSince,
     breakGlass,
     directKeys,
-    periodUsage
+    periodUsage,
+    deploymentDefaultDailyLimitCents()
   );
 }

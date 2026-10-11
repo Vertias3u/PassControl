@@ -41,7 +41,7 @@ export type { DepartureRow };
 
 const MAX_ROWS = 40;
 const PAGE_ROWS = 40;
-const DEPARTURE_COLUMNS = "id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would, call_kind, endpoint";
+const DEPARTURE_COLUMNS = "id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would, call_kind, endpoint, client_kind, client_session, client_agent, client_parent";
 
 /** The board's cap-charge cell. A row that cannot say what it was charged says so. */
 function capChargeText(charge: CapCharge): string {
@@ -59,7 +59,9 @@ export function departureIdentity(
   const name = (row.agent_id && agentNames[row.agent_id]) || (row.agent_id ? `Agent ${row.agent_id.slice(0, 8)}` : "Unknown agent");
   const credential = row.auth_method === "direct_key"
     ? `Direct Agent Key ${row.agent_access_key_id?.slice(0, 8) ?? ""}`.trim()
-    : row.passport_id
+    : row.auth_method === "delegated" || row.auth_method === "delegated_proof_per_request"
+      ? "Worker under a delegation"
+      : row.passport_id
       ? `Passport ${row.passport_id.slice(0, 10)}…`
       : "Credential not recorded";
   return { name, credential };

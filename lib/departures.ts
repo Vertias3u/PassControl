@@ -42,6 +42,11 @@ export interface DepartureRow {
   call_kind?: string | null;
   /** Service calls: METHOD + the matched rule's template. Null when no rule matched. */
   endpoint?: string | null;
+  /** The client's DECLARED lineage (0079): which tool, session and sub-agent. Never authenticated. */
+  client_kind?: string | null;
+  client_session?: string | null;
+  client_agent?: string | null;
+  client_parent?: string | null;
 }
 
 export type DepartureTone = "clear" | "held" | "denied";
@@ -75,6 +80,10 @@ export const DEPARTURE_VERDICT: Record<
   dispatch_unavailable: { word: "NOT CLEARED", tone: "held" },
   blocked_budget: { word: "NO FUNDS", tone: "held" },
   blocked_budget_period: { word: "LIMIT REACHED", tone: "held" },
+  blocked_budget_subagent: { word: "SUB-AGENT CAP", tone: "held" },
+  blocked_budget_delegation: { word: "WORKER CAP", tone: "held" },
+  blocked_delegation_revoked: { word: "WORKER REVOKED", tone: "held" },
+  blocked_delegation_unavailable: { word: "WORKER UNCONFIRMED", tone: "held" },
   // Deliberately not a variant of NO FUNDS. That word means PassControl's own
   // budget stopped the call; this one means the call went out and the PROVIDER
   // said the account is empty. An operator who reads them as the same thing

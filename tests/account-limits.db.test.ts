@@ -2,6 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { retryOnDeadlock, retryThrowingOnDeadlock } from "./db-deadlock-retry";
 
 /**
  * Per-account object limits (0076), proved against a real Postgres.
@@ -24,21 +25,27 @@ const MIGRATION = readFileSync(
   "utf8"
 );
 
-function psql(sql: string, db = DB): string {
+function psqlOnce(sql: string, db = DB): string {
   return execFileSync(
     "docker",
     ["exec", "-i", CONTAINER, "psql", "-U", "postgres", "-d", db, "-v", "ON_ERROR_STOP=1", "-tA"],
     { input: sql, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
   ).trim();
 }
+function psql(sql: string, db = DB): string {
+  return retryThrowingOnDeadlock(() => psqlOnce(sql, db));
+}
 
-function tryPsql(sql: string, db = DB): { ok: boolean; out: string } {
+function tryPsqlOnce(sql: string, db = DB): { ok: boolean; out: string } {
   try {
     return { ok: true, out: psql(sql, db) };
   } catch (error) {
     const e = error as { stderr?: Buffer | string; stdout?: Buffer | string };
     return { ok: false, out: String(e.stderr ?? "") + String(e.stdout ?? "") };
   }
+}
+function tryPsql(sql: string, db = DB): { ok: boolean; out: string } {
+  return retryOnDeadlock(() => tryPsqlOnce(sql, db));
 }
 
 function live(): boolean {

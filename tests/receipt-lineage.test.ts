@@ -79,7 +79,8 @@ describe("the ctx claim", () => {
       credentialUseId: "use-1",
       lineage,
     } as never);
-    expect(direct.ver).toBe(RECEIPT_VER);
+    // Pinned at 2 since the maximum moved to 3 for delegated receipts (Bet D).
+    expect(direct.ver).toBe(2);
     expect(direct.ctx).toEqual({ src: "declared", cli: "claude-code", ses: "s-1" });
   });
 

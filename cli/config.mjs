@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WORKSPACE_EXPORT_PROTOCOL } from "./protocols.mjs";
+import { profilePath, readProfile, selectedProfile } from "./profiles.mjs";
 import {
   createPassportCredentialStore,
   keyStorageDeclaration,
@@ -164,7 +165,10 @@ export function loadConfigSources({ cwd = process.cwd(), env = process.env } = {
  */
 export const configInjectedKeys = new Set();
 
-export function applyConfigSourcesToEnv({ cwd = process.cwd(), env = process.env } = {}) {
+export function applyConfigSourcesToEnv({ cwd = process.cwd(), env = process.env, argv = process.argv } = {}) {
+  // The profile is chosen BEFORE any file lands in the environment: a project's
+  // `.passcontrol` must not pick which identity this machine speaks as.
+  const profile = selectedProfile(argv, env);
   const sources = loadConfigSources({ cwd, env });
   const merged = {};
   for (const source of sources) Object.assign(merged, source.values);
@@ -173,6 +177,21 @@ export function applyConfigSourcesToEnv({ cwd = process.cwd(), env = process.env
       env[key] = value;
       configInjectedKeys.add(key);
     }
+  }
+  if (profile !== null) {
+    // One identity per coding tool (cli/profiles.mjs). The named profile beats the
+    // config FILES (naming it is the more specific statement); the operator's shell
+    // still beats everything.
+    const file = profilePath(profile, env);
+    const values = readProfile(profile, env);
+    if (!values) throw new Error(`No profile named ${profile}. List them with \`passcontrol profile list\`.`);
+    for (const [key, value] of Object.entries(values)) {
+      if (env[key] === undefined || configInjectedKeys.has(key)) {
+        env[key] = value;
+        configInjectedKeys.add(key);
+      }
+    }
+    sources.push({ type: "profile", name: profile, path: file, values });
   }
   return sources;
 }
@@ -286,12 +305,15 @@ function currentConfig() {
     provider,
     model: resolveModel(provider),
     sources: configSources,
+    profile: configSources.find((source) => source.type === "profile")?.name ?? null,
   };
 }
 
 export const config = currentConfig();
 
 export function configPathLabel(sources = configSources) {
+  const profile = sources.find((source) => source.type === "profile");
+  if (profile) return profile.path;
   const project = sources.find((source) => source.type === "project");
   const global = sources.find((source) => source.type === "global");
   if (project) return project.path;
@@ -654,6 +676,18 @@ export function formatProxyError(status, body) {
   const blocked = `Proxy blocked the call with ${status}: ${detail}`;
   if (status === 402 && error === "blocked_budget_period") {
     return `${blocked}\n→ The agent's daily or monthly limit is spent; it resets at the next UTC day or month (see the retry-after header).\n→ Fix: wait for the reset, or raise the limit in the dashboard.`;
+  }
+  if (status === 402 && error === "blocked_budget_delegation") {
+    return `${blocked}\n→ This worker's delegation (or one above it) used its spending cap.\n→ Fix: ask the agent that delegated to it for a new delegation with a larger cap.`;
+  }
+  if (status === 403 && error === "delegation_revoked") {
+    return `${blocked}\n→ The owner revoked this worker's delegation, or every delegation issued before a point in time.\n→ Fix: ask the agent that delegated to it for a new one.`;
+  }
+  if (status === 503 && error === "delegation_state_unavailable") {
+    return `${blocked}\n→ PassControl could not confirm this delegation is still valid, so it refused rather than guess.\n→ Fix: retry shortly; if it persists, ask for a new delegation.`;
+  }
+  if (status === 402 && error === "blocked_budget_subagent") {
+    return `${blocked}\n→ A sub-agent used the per-session cap the agent's policy sets for each sub-agent. The main agent and other sub-agents keep running.\n→ Fix: start a new session, or raise subagent_session_cap_cents in the agent's policy.`;
   }
   if (status === 403 && error === "blocked_policy" && rule === "max_output_tokens") {
     const ceiling = Number.isSafeInteger(limit) ? ` (${limit})` : "";

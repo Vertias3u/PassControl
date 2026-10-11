@@ -103,7 +103,7 @@ export function telegramTarget(destination: AlertDestination): { endpoint: strin
   return { endpoint: `https://${url.hostname}${url.pathname}`, chatId: url.searchParams.get("chat_id") ?? "" };
 }
 
-export type WorkspaceAlertType = "refused" | "budget" | "passport_rotated" | "break_glass" | "test";
+export type WorkspaceAlertType = "refused" | "budget" | "passport_rotated" | "break_glass" | "session_spend" | "test";
 
 export interface WorkspaceAlert {
   type: WorkspaceAlertType;
@@ -115,7 +115,13 @@ export interface WorkspaceAlert {
   at: Date;
   /** Built by this server from its own origin, never from request input. */
   dashboardUrl: string;
+  /** session_spend: the DECLARED session id (held to the declared-id alphabet), its total and the threshold. */
+  session?: string;
+  spentMicrocents?: number;
+  thresholdMicrocents?: number;
 }
+
+const dollars = (microcents: number) => `$${(Math.max(0, microcents) / 100_000_000).toFixed(2)}`;
 
 /** Same alphabet a usable model id has (lib/agent-connect.ts), so nothing in
  * it can start a mention, a link or a formatting run; anything else shows as ?. */
@@ -153,11 +159,20 @@ function sentence(alert: WorkspaceAlert, code: (value: string) => string): strin
     case "budget":
       return alert.status === "blocked_budget_period"
         ? `${agent} reached its budget for this period. PassControl is refusing its calls until the period resets.`
-        : `${agent} ran out of budget. PassControl is refusing its calls until the budget is raised.`;
+        : alert.status === "blocked_budget_subagent"
+          ? `A sub-agent of ${agent} reached its per-session spending cap. Its calls are refused; the main agent and other sub-agents keep running.`
+          : alert.status === "blocked_budget_delegation"
+            ? `A worker acting for ${agent} reached its delegation's spending cap. Its calls are refused; ${agent} keeps running.`
+            : `${agent} ran out of budget. PassControl is refusing its calls until the budget is raised.`;
     case "passport_rotated":
       return `The passport for ${agent} was rotated. If you did not do this, suspend the agent now.`;
     case "break_glass":
       return `A break-glass grant was opened for ${agent}. If you did not do this, suspend the agent now.`;
+    case "session_spend":
+      return (
+        `A session of ${agent} passed ${dollars(alert.thresholdMicrocents ?? 0)}: ${dollars(alert.spentMicrocents ?? 0)} so far ` +
+        `(session ${code(inertModel(alert.session ?? "?"))}). Nothing is paused. To stop it, use Stop on the agent's Sessions view.`
+      );
   }
 }
 

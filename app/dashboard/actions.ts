@@ -51,6 +51,12 @@ import { normalizeUserCode } from "@/lib/device-codes";
 import { open, seal } from "@/lib/crypto/aesgcm";
 import { stashKeyImport, takeKeyImport } from "@/lib/state/redis";
 import * as fleet from "@/lib/fleet";
+import {
+  REMOVE_SPENDING_LIMIT_STATEMENT,
+  resolveNewAgentSpendLimit,
+  type NewAgentSpendLimit,
+} from "@/lib/new-agent-spend-limit";
+import { deploymentDefaultDailyLimitCents } from "@/lib/new-agent-spend-limit.server";
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import { observeKillState } from "@/lib/state/killswitch";
 
@@ -72,6 +78,14 @@ type CreateAgentInput = {
   budget_cents?: number | null;
   /** Omit for the product default; explicit null is the deliberate never-expire opt-out. */
   expiresAt?: string | null;
+} & NewAgentSpendLimitChoice;
+/**
+ * The new-agent spending limit as a form states it (F1). Omitting both fields is
+ * the default, never a removal: only `removeSpendingLimit: true` removes it.
+ */
+type NewAgentSpendLimitChoice = {
+  dailyLimitCents?: number | null;
+  removeSpendingLimit?: boolean;
 };
 type ProviderKeyInput = {
   provider: string;
@@ -132,6 +146,33 @@ function formCheck<T>(check: () => T): T {
   }
 }
 
+/**
+ * The spending limit a new dashboard agent is created with (F1,
+ * lib/new-agent-spend-limit.ts). Used by createAgentForUser and
+ * issueDirectAgentForUser only, which between them serve both dashboard forms
+ * and both on-ramp paths. The control API and workspace import never reach it.
+ */
+function newAgentSpendLimit(input: { scopes?: unknown } & NewAgentSpendLimitChoice): NewAgentSpendLimit {
+  const scopes = Array.isArray(input?.scopes) ? (input.scopes as { provider: string }[]) : [];
+  return formCheck(() => resolveNewAgentSpendLimit(scopes, input ?? {}, deploymentDefaultDailyLimitCents()));
+}
+
+/** The audit side of a new agent's limit: what was applied, on the create row,
+ * and a row of its own when the owner removed it. */
+function spendLimitAuditFields(limit: NewAgentSpendLimit) {
+  return { spending_limit: limit.source, daily_limit_cents: limit.budget_period_cents };
+}
+async function recordSpendLimitRemoval(userId: string, agentId: string, limit: NewAgentSpendLimit) {
+  if (limit.source !== "removed") return;
+  await recordAdminAction({
+    userId,
+    action: "agent.spending_limit_removed",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: { statement: REMOVE_SPENDING_LIMIT_STATEMENT, via: "dashboard" },
+  });
+}
+
 function failGeneric(
   context: string,
   error: { code?: string; message?: string } | null
@@ -156,9 +197,15 @@ export interface KillObservation {
   tenant: boolean | null;
   platform: boolean | null;
   confirmed: boolean;
+  /**
+   * Whether the change also reached the durable record (0083). Present only
+   * after a change; `false` is a stop in force that a Redis loss would undo.
+   */
+  durable?: boolean;
 }
 
-/** Per-tenant master kill: flip Redis `killswitch:tenant:<uid>`, and nothing else.
+/** Per-tenant master kill: flip Redis `killswitch:tenant:<uid>` and its durable
+ * record (0083, so a Redis loss no longer lifts it), and nothing else.
  *
  * It does NOT suspend agent rows and does NOT purge the provider-key cache. Both claims
  * used to sit here and both were false: `purgeAgentCaches` is reached only from the
@@ -170,8 +217,10 @@ export interface KillObservation {
 async function setMasterKillBody(on: boolean): Promise<KillObservation> {
   const { db, user } = await requireUser();
   let applied = false;
+  let durable: boolean | undefined;
   try {
-    await fleet.setTenantKill(db, user.id, on);
+    const result = await fleet.setTenantKill(db, user.id, on);
+    if (result.ok) durable = result.value.durable;
     applied = true;
   } catch {
     // Reported through the readback below: an operator pressing Stop needs
@@ -184,7 +233,12 @@ async function setMasterKillBody(on: boolean): Promise<KillObservation> {
   }
   const observed = await observeKillState(user.id);
   revalidatePath("/");
-  return { requested: on, ...observed, confirmed: observed.tenant === on };
+  return {
+    requested: on,
+    ...observed,
+    confirmed: observed.tenant === on,
+    ...(durable === undefined ? {} : { durable }),
+  };
 }
 
 /** Read-only re-check of the fleet kill switch, behind "Refresh status". */
@@ -316,6 +370,7 @@ async function createAgentForUser(
   input: CreateAgentInput
 ): Promise<{ id: string; name: string; createdAt: string; expiresAt: string | null }> {
   await requireCredentialMfa(db, user);
+  const spendLimit = newAgentSpendLimit(input);
   // Ensure profile row exists (FK target). Service role, not `db`: 0032 revokes
   // INSERT on public.users from `authenticated` for the same reason 0028 revoked
   // it on `agents`. This call used to run under the caller's JWT AND discard its
@@ -329,7 +384,9 @@ async function createAgentForUser(
   // their own passport_pubkey and mint visas against the tenant's provider key.
   // The gate above is now the only way in, and `user.id` comes from the verified
   // server-side user (requireUser -> getUser), never from client input.
-  const r = await fleet.createAgent(serviceClient(), user.id, input);
+  const r = await fleet.createAgent(serviceClient(), user.id, input, {
+    period: { budget_period: spendLimit.budget_period, budget_period_cents: spendLimit.budget_period_cents },
+  });
   if (!r.ok) {
     console.error("[dashboard:createAgent]", r.code, r.message ?? "");
     throw new ActionError(r.message ?? "Something went wrong. Please try again.");
@@ -339,8 +396,9 @@ async function createAgentForUser(
     action: "agent.create",
     targetType: "agent",
     targetId: r.value.id,
-    metadata: { name: r.value.name },
+    metadata: { name: r.value.name, ...spendLimitAuditFields(spendLimit) },
   });
+  await recordSpendLimitRemoval(user.id, r.value.id, spendLimit);
   return r.value;
 }
 
@@ -396,7 +454,7 @@ type DirectAgentInput = {
   expiresAt?: string | null;
   /** Service access ticked in "Connect an agent" (lib/services/presets.ts, WIZARD_SERVICE_DEFAULTS). */
   services?: WizardServiceChoice[];
-};
+} & NewAgentSpendLimitChoice;
 type IssuedDirectAgent = {
   agentId: string;
   keyId: string;
@@ -463,6 +521,7 @@ async function issueDirectAgentForUser(
   const { db, user } = auth;
   await requireCredentialMfa(db, user);
   await requireStoredProviders(auth, input?.scopes);
+  const spendLimit = newAgentSpendLimit(input);
   // Checked before anything is created: a bad choice must not leave an agent
   // behind with a key nobody saw.
   const services = wizardServiceRules(input?.services);
@@ -476,7 +535,9 @@ async function issueDirectAgentForUser(
     failGeneric("issueDirectAgent.profile", { code: "profile_row_unavailable" });
   }
 
-  const result = await fleet.createDirectAgent(serviceClient(), user.id, input);
+  const result = await fleet.createDirectAgent(serviceClient(), user.id, input, {
+    period: { budget_period: spendLimit.budget_period, budget_period_cents: spendLimit.budget_period_cents },
+  });
   if (!result.ok) throw new ActionError(result.message ?? "The Direct Agent Key could not be created.");
 
   await recordAdminAction({
@@ -490,8 +551,10 @@ async function issueDirectAgentForUser(
       key_name: result.value.keyName,
       suffix: result.value.key.slice(-8),
       expires_at: result.value.expiresAt,
+      ...spendLimitAuditFields(spendLimit),
     },
   });
+  await recordSpendLimitRemoval(user.id, result.value.agentId, spendLimit);
   // Service access, written AFTER the agent exists (create_direct_agent takes
   // no rules) and never allowed to fail the call: the key below is shown once,
   // so a failed write is reported beside it rather than thrown over it.
@@ -1157,7 +1220,7 @@ async function completeKeyImportBody(input: {
   name: string;
   passportPubkey: string;
   models: string[];
-}): Promise<{
+} & NewAgentSpendLimitChoice): Promise<{
   agentId: string;
   createdAt: string;
   provider: ProviderId;
@@ -1165,6 +1228,9 @@ async function completeKeyImportBody(input: {
 }> {
   const auth = await requireUser();
   await requireAgentCapacity(auth, { withKey: false });
+  // Checked before the handoff is spent: a bad amount must not cost the import.
+  const choice = { dailyLimitCents: input.dailyLimitCents, removeSpendingLimit: input.removeSpendingLimit };
+  newAgentSpendLimit({ scopes: [{ provider: input.provider }], ...choice });
   const handoff = await redeemKeyImport(auth, input);
 
   const keyInput = formCheck(() => validateProviderKeyInput({
@@ -1192,7 +1258,7 @@ async function completeKeyImportBody(input: {
   // destroys that secret. KeyImportOnramp refreshes only after acknowledgement.
   const credentialId = await addProviderKeyForUser(auth, keyInput, false);
   const created = await withImportedCredential(auth, credentialId, provider, () =>
-    createAgentForUser(auth, agentInput)
+    createAgentForUser(auth, { ...agentInput, ...choice })
   );
   return { agentId: created.id, createdAt: created.createdAt, provider, scope };
 }
@@ -1213,7 +1279,7 @@ async function completeKeyImportDirectBody(input: {
   name: string;
   keyName: string;
   models: string[];
-}): Promise<IssuedDirectAgent & { provider: ProviderId }> {
+} & NewAgentSpendLimitChoice): Promise<IssuedDirectAgent & { provider: ProviderId }> {
   const auth = await requireUser();
   await requireAgentCapacity(auth, { withKey: true });
   // `input.provider` is safe to use before the redeem: redeemKeyImport refuses
@@ -1224,13 +1290,17 @@ async function completeKeyImportDirectBody(input: {
     scopes: [{ provider: input.provider, models: Array.isArray(input.models) ? input.models : [] }],
     budget_tokens: null,
     budget_cents: null,
+    dailyLimitCents: input.dailyLimitCents,
+    removeSpendingLimit: input.removeSpendingLimit,
   };
   // fleet.createDirectAgent checks these again. Checking first means a bad
-  // name is refused before the provider key is stored or the handoff spent.
+  // name, or a bad daily limit, is refused before the provider key is stored or
+  // the handoff spent.
   formCheck(() => {
     validateAgentProfileInput(agentInput);
     validateDirectKeyMetadata({ name: agentInput.keyName });
   });
+  newAgentSpendLimit(agentInput);
   const handoff = await redeemKeyImport(auth, input);
   const keyInput = formCheck(() => validateProviderKeyInput({
     provider: input.provider,

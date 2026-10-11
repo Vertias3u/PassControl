@@ -94,12 +94,23 @@ export function anthropicAdvisor(
 
 /** The accepted advisor in an Anthropic request body, or null. */
 export function requestAdvisor(body: unknown): ReturnType<typeof anthropicAdvisor> {
-  if (!isRecord(body) || !Array.isArray(body.tools)) return null;
+  return requestAdvisors(body)[0] ?? null;
+}
+
+/**
+ * EVERY accepted advisor in the body (P6.3, 2026-10-10). The model gate checks each
+ * one: checking only the first let an allowed advisor in front put a forbidden one
+ * through. Anthropic may refuse two advisors in one request; the gateway does not
+ * rely on that.
+ */
+export function requestAdvisors(body: unknown): NonNullable<ReturnType<typeof anthropicAdvisor>>[] {
+  if (!isRecord(body) || !Array.isArray(body.tools)) return [];
+  const out: NonNullable<ReturnType<typeof anthropicAdvisor>>[] = [];
   for (const tool of body.tools) {
     const advisor = anthropicAdvisor(tool);
-    if (advisor) return advisor;
+    if (advisor) out.push(advisor);
   }
-  return null;
+  return out;
 }
 
 /** Exact versions from @anthropic-ai/sdk 0.112.4's BetaToolUnion. */
@@ -341,7 +352,12 @@ export function hostedToolPlan(provider: string, body: unknown): HostedToolPlan 
       // the advisor model's own tokenizer and image ceiling, and whatever the
       // executor has written so far (at most its own output allowance).
       const transcriptTokens = estimateTokenUsage(body, 1000, advisor.model).totalTokens;
-      plan.advisor = { ...advisor, transcriptTokens };
+      const candidate = { ...advisor, transcriptTokens };
+      // Two advisors: hold for the dearest (P6.3). Keeping the last one under-held a
+      // request whose cheap advisor came after a dear one.
+      if (!plan.advisor || advisorReserve(candidate).microcents > advisorReserve(plan.advisor).microcents) {
+        plan.advisor = candidate;
+      }
       continue;
     }
     const kind = anthropicKind(tool);

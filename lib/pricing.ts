@@ -113,8 +113,9 @@ const tierRates = ([input, cached, write, output]: TierUsd): TierRates => ({
 /**
  * A model whose page prices prompts above 272K input tokens at long-context rates
  * for the full request, with cache writes above the input rate. It is HELD at the
- * long tier (input at the dearer of input and cache write), as every row is, and
- * settled at the tier the call was billed at (`costMicrocentsForUsage`).
+ * long tier (input at the dearer of input and cache write): a project billed at a Fast
+ * service tier pays more with nothing in the request to say so. It is settled at the
+ * tier the call was billed at (`costMicrocentsForUsage`).
  */
 function tiered(provider: ProviderId, id: string, short: TierUsd, long: TierUsd): Price[] {
   const rates = {
@@ -131,7 +132,9 @@ function tiered(provider: ProviderId, id: string, short: TierUsd, long: TierUsd)
 
 /**
  * An Anthropic model priced by prompt length, with no service-tier condition
- * (`claudePromptTiers`): held at the long tier, settled at the tier the prompt fell in.
+ * (`claudePromptTiers`): held at the short tier when the prompt's estimate is at most
+ * half the line, at the long tier otherwise (`holdMicrocents`, 2026-10-10), and settled
+ * at the tier the prompt fell in.
  */
 function claudePromptTiered(id: string, above: number, short: TierUsd, long: TierUsd): Price[] {
   const rates = {
@@ -151,7 +154,9 @@ function claudePromptTiered(id: string, above: number, short: TierUsd, long: Tie
 // wherever a page offers more than one number, in the spirit of `mc()`'s rounding:
 // charge the HIGHER, because a budget that under-reserves does not hold.
 //   * Long-context rates (OpenAI above 272K, Gemini 3.1 Pro above 200K) are what
-//     every row HOLDS: a hold cannot know the prompt's length. GPT-6 and GPT-5.6
+//     these rows HOLD: a hold cannot know the prompt's length. The exception is a
+//     prompt-tiered Claude row (Haiku 5.5), held short when its estimate is well under
+//     the line (`holdMicrocents`). GPT-6 and GPT-5.6
 //     SETTLE at the tier the call was billed at (`tiered`); everything else settles
 //     at the row too.
 //   * Input is the higher of the input and cache-WRITE rates where a cache write
@@ -536,13 +541,32 @@ export function cacheWriteHoldMultiplier(body: unknown): 1 | 1.25 | 2 {
  * writes all of it at 1.25x; held at 1x it was held at ~94% of its cost even with
  * the P1.6 estimate. Later calls read the cache at 0.1x or less, so this over-holds
  * them, as every hold may; settlement charges what Anthropic reports.
+ *
+ * A prompt-length-tiered row (`claudePromptTiered`, Haiku 5.5) is held at its SHORT
+ * tier when the prompt's estimate, plus what hosted tools may add to it inside the
+ * call (`addedPromptTokens`), is at most half the line (owner, 2026-10-10). The
+ * estimate already runs high (P1.6: 2.4 bytes per token assumed, 2.82 measured on
+ * Claude Code), so a prompt estimated at half the line would need ~1.2 bytes per
+ * token to cross it. Above half, the long tier as before. It covers the whole prompt,
+ * cached parts included, which is what Anthropic's tier counts. Held at the long tier
+ * a Claude Code sub-agent call held 8x what it settled (2026-10-10, live).
  */
 export function holdMicrocents(
   model: string,
   usage: { inputTokens: number; outputTokens: number },
   provider: ProviderId,
-  body: unknown
+  body: unknown,
+  options: { addedPromptTokens?: number } = {}
 ): number {
+  if (provider === "anthropic") {
+    const tiers = priceFor(model, provider)?.promptTiers;
+    if (tiers && usage.inputTokens + Math.max(0, options.addedPromptTokens ?? 0) <= tiers.above / 2) {
+      const r = tiers.short;
+      const multiplier = cacheWriteHoldMultiplier(body);
+      const inputRate = multiplier === 1 ? r.input : multiplier === 2 ? Math.ceil(r.input * 2) : r.cacheWrite;
+      return usage.inputTokens * inputRate + usage.outputTokens * r.output;
+    }
+  }
   const base = costMicrocents(model, usage.inputTokens, usage.outputTokens, provider);
   if (provider !== "anthropic") return base;
   const multiplier = cacheWriteHoldMultiplier(body);

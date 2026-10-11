@@ -12,6 +12,10 @@ const MESSAGES: Record<string, string> = {
   insufficient_scope: "This operation requires a key with 'write' scope.",
   rate_limited: "Too many requests. Slow down and retry after the indicated delay.",
   invalid_id: "The resource id is malformed.",
+  invalid_jti: "The delegation id (jti) is malformed.",
+  invalid_delegation_revoke: "Send either { \"jti\": \"...\" } to revoke one delegation, or { \"all\": true } to revoke every delegation issued before now.",
+  agent_not_found: "No agent with this id in this workspace.",
+  revoke_failed: "The revocation could not be recorded. Nothing was changed; try again.",
   invalid_request: "The request body is invalid.",
   // Used by every control route that parses a body. It had no entry here, so
   // a malformed body answered the generic "Request failed." — which reads as a

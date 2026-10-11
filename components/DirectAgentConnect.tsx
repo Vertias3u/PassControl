@@ -15,6 +15,8 @@ import { buttonVariants } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { DirectAgentKeyReveal, type RevealedDirectAgent } from "@/components/DirectAgentKeyReveal";
 import { serviceNames } from "@/lib/services/display";
+import { NewAgentSpendLimitField, useNewAgentSpendLimit } from "@/components/NewAgentSpendLimitField";
+import { DEFAULT_DAILY_LIMIT_CENTS } from "@/lib/new-agent-spend-limit";
 import { SERVICE_CATALOG, isServiceId } from "@/lib/services/catalog";
 import { WIZARD_SERVICE_DEFAULTS, presetsFor, serviceHasWrites, type WizardServiceChoice } from "@/lib/services/presets";
 
@@ -33,7 +35,12 @@ export function DirectAgentConnect({
   initialProvider = "openai",
   configuredProviders,
   storedServices,
+  defaultDailyLimitCents = DEFAULT_DAILY_LIMIT_CENTS,
 }: {
+  /** This deployment's daily limit for a new agent, in cents (null: switched
+   *  off). Resolved on the server, so the form shows what the server applies. */
+  defaultDailyLimitCents?: number | null;
+
   /**
    * Services the workspace holds a token for. Those the wizard can grant at
    * creation (WIZARD_SERVICE_DEFAULTS) are shown, pre-ticked.
@@ -54,6 +61,7 @@ export function DirectAgentConnect({
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [keyName, setKeyName] = useState(DEFAULT_INSTALLATION_NAME);
+  const spendLimit = useNewAgentSpendLimit(defaultDailyLimitCents);
   // What the worker calls. "services": catalog services only, so the agent is
   // created with NO model access at all (any model call is refused) and the
   // provider, model and budget fields do not apply.
@@ -106,6 +114,7 @@ export function DirectAgentConnect({
 
   const reset = () => {
     setOpen(false);
+    spendLimit.reset();
     setTarget("models");
     setName("");
     setKeyName(DEFAULT_INSTALLATION_NAME);
@@ -144,12 +153,14 @@ export function DirectAgentConnect({
       if (!clientModelIsUsable(callableModel) || !scopeAllows([{ provider, models: allowedModels }], provider, callableModel)) {
         throw new Error("Client model must be a concrete model covered by the allowed patterns.");
       }
+      const scopes = [{ provider, models: allowedModels }];
       const issued = await issueDirectAgent({
         name,
         keyName,
-        scopes: [{ provider, models: allowedModels }],
+        scopes,
         budget_tokens: parseTokenBudgetInput(tokenBudget),
         budget_cents: parseUsdBudgetToCents(costBudgetUsd),
+        ...spendLimit.choice(scopes),
         expiresAt: expiresAt ? new Date(`${expiresAt}T23:59:59`).toISOString() : null,
         services: serviceChoices,
       });
@@ -366,9 +377,14 @@ export function DirectAgentConnect({
                   <span className="text-xs text-muted-foreground">Blank means no scheduled outage.</span>
                 </label>
               </div>
+              <NewAgentSpendLimitField
+                state={spendLimit}
+                defaultCents={defaultDailyLimitCents}
+                scopes={servicesOnly ? [] : [{ provider }]}
+              />
               {!servicesOnly ? (
               <p className="m-0 text-xs leading-5 text-muted-foreground">
-                Blank budgets mean no PassControl cap on this worker. This flow never asks the worker to hold your provider key.
+                Token and cost budgets are lifetime caps; blank means none. This flow never asks the worker to hold your provider key.
               </p>
               ) : null}
               {availability === "missing" ? (

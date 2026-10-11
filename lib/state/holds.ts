@@ -99,7 +99,75 @@ const k = {
    * `periodLimit` on openHold for the rules.
    */
   pbase: (agid: string) => `pbase:${agid}`,
+  /** C(b): new sub-ledgers opened this hour, for the bound on declared ids. */
+  slnew: (agid: string, hour: number) => `slnew:${agid}:${hour}`,
 };
+
+// ── C(b): a dollar cap per sub-agent per session ────────────────────────────
+//
+// One SUB-LEDGER per (agent, declared session, declared sub-agent): a hash with
+// `r` (reserved µ¢) and `s` (spent µ¢). OPEN_LUA checks it and reserves on it in
+// the same eval as the agent's own hold, all-or-nothing, and stamps its key on
+// the hold (`sl`), so settle moves exactly that key whatever a caller says later
+// (plans/delegation-design.md §7, owner 2026-10-10).
+//
+// A MISSING LEDGER READS AS ZERO, deliberately and unlike the agent's counters,
+// which refuse when lost. The ids are DECLARED by the client: a fresh ledger is
+// always one new id away, so this is a guard rail against a misbehaving model,
+// not a boundary against a lying process, and the agent's own limits stay the
+// hard ones. Settle never recreates a missing ledger (an INCRBY on a missing key
+// would write a negative reservation). Because the ids are declared, the number
+// of NEW ledgers an agent may open per hour is bounded too: keys and commands are
+// both metered on the free tier.
+
+/** A sub-ledger idles out after this long without a call. A new one starts at zero. */
+export const SUBAGENT_LEDGER_TTL_S = 24 * 3600;
+/** New sub-ledgers one agent may open per hour. Generous: Claude Code spawns tens. */
+export const SUBAGENT_NEW_LEDGERS_PER_HOUR = 200;
+/** The declared-id rule (lib/client-lineage.ts DECLARED); nothing else becomes a key. */
+const DECLARED_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
+export function subLedgerKey(agentId: string, session: string, subAgent: string): string {
+  if (!DECLARED_ID.test(session) || !DECLARED_ID.test(subAgent)) throw new Error("invalid_declared_id");
+  return `sl:${agentId}:${session}:${subAgent}`;
+}
+
+// ── Bet D: a delegation's caps, one ledger per link ─────────────────────────
+//
+// Same shape as the sub-ledger (`r` reserved, `s` spent, µ¢), checked and moved in
+// the same eval as the agent's own hold, all-or-nothing, stamped on the hold (`dl`)
+// so settle moves exactly those keys (plans/delegation-design.md §7, §13).
+//
+// THE OPPOSITE MISSING-LEDGER RULE: a missing delegation ledger REFUSES. The jti is
+// signed by the parent's key, not declared, so a worker cannot mint a fresh one; and
+// only the first exchange of a link (an insert into delegation_exchanges that CREATED
+// the row) creates its ledger. A ledger lost to eviction is therefore never recreated
+// at zero, which would hand the worker its whole cap again: the delegation is refused
+// until it expires (24 h at most) and the parent delegates anew.
+
+const DELEGATION_JTI = /^[A-Za-z0-9_-]{16,64}$/;
+/** A ledger outlives its link by this long, so a call open at expiry still settles. */
+export const DELEGATION_LEDGER_GRACE_S = 3600;
+
+export function delegationLedgerKey(agentId: string, jti: string): string {
+  if (!DELEGATION_JTI.test(jti)) throw new Error("invalid_delegation_jti");
+  return `dl:${agentId}:${jti}`;
+}
+
+const CREATE_LEDGER_LUA = `
+redis.call('HSETNX', KEYS[1], 'r', '0')
+redis.call('HSETNX', KEYS[1], 's', '0')
+redis.call('EXPIREAT', KEYS[1], ARGV[1])
+return 1
+`;
+
+/**
+ * Create a link's ledger at zero. ONLY for the exchange whose first-exchange insert
+ * created the row; never resets a ledger that exists.
+ */
+export async function createDelegationLedger(agentId: string, jti: string, expSeconds: number): Promise<void> {
+  await redis().eval(CREATE_LEDGER_LUA, [delegationLedgerKey(agentId, jti)], [String(Math.floor(expSeconds) + DELEGATION_LEDGER_GRACE_S)]);
+}
 
 // ── Periods (K1) ───────────────────────────────────────────────────────────
 // The pure half lives in lib/period.ts, so a caller that mocks this module (the
@@ -150,7 +218,7 @@ export interface OpenHoldResult {
    * stops retrying, which is the wrong response to an operator-recoverable
    * infrastructure fault. See the early return in the proxy.
    */
-  reason?: "tokens" | "cost" | "state" | "period";
+  reason?: "tokens" | "cost" | "state" | "period" | "subagent" | "subagent_ledgers" | "delegation" | "delegation_state";
   /**
    * The agent has a periodic limit and no valid snapshot of when this period
    * began (a new limit, a changed period, a new generation, or a lost key).
@@ -258,6 +326,16 @@ local dayKey        = ARGV[15] or ''
 local monthKey      = ARGV[16] or ''
 local periodCap     = tonumber(ARGV[17] or '-1')
 local periodSeed    = ARGV[18] or ''
+-- C(b): KEYS[10] the sub-ledger, KEYS[11] this hour's new-ledger counter, only
+-- when the call declares a capped sub-agent.
+local subCap        = tonumber(ARGV[19] or '-1')
+local subKey        = nil
+if subCap >= 0 then subKey = KEYS[10] end
+local subTtl        = tonumber(ARGV[20] or '0')
+local subNewMax     = tonumber(ARGV[21] or '0')
+-- Bet D: the chain's ledgers are the LAST dlN keys, their caps ARGV[23..].
+local dlN           = tonumber(ARGV[22] or '0')
+local dlBase        = #KEYS - dlN
 
 -- Integers as integer strings. A Lua number handed to redis.call is formatted
 -- with %.14g, which turns a large micro-cent figure into "1.2345678901234e+14";
@@ -490,6 +568,42 @@ end
 if periodLimit >= 0 and (periodLimit == 0 or (spentCost - periodBase) + reservedCost > periodLimit) then
   return {-5, 0, 0, epochOut}
 end
+-- ── THE DELEGATION'S LEDGERS (Bet D) ───────────────────────────────────────
+-- Before the sub-agent block, whose new-ledger counter has a side effect: every
+-- refusal here moves nothing. A missing ledger refuses (see the TS header).
+for i = 1, dlN do
+  local key = KEYS[dlBase + i]
+  local cap = tonumber(ARGV[22 + i])
+  if redis.call('EXISTS', key) == 0 then
+    return {-8, 0, 0, epochOut}
+  end
+  local cur = redis.call('HMGET', key, 'r', 's')
+  if cap == 0 or (tonumber(cur[2] or '0') + tonumber(cur[1] or '0') + costEstimate) > cap then
+    return {-9, 0, 0, epochOut}
+  end
+end
+-- ── THE SUB-AGENT'S LEDGER (C(b)) ──────────────────────────────────────────
+-- After the agent's own limits, so a call both would refuse gets the agent's
+-- reason. A missing ledger is zero (see the TS header); zero refuses everything.
+local subFresh = false
+if subKey then
+  local cur = redis.call('HMGET', subKey, 'r', 's')
+  local subR = tonumber(cur[1] or '0')
+  local subS = tonumber(cur[2] or '0')
+  if subCap == 0 or (subS + subR + costEstimate) > subCap then
+    return {-6, 0, 0, epochOut}
+  end
+  subFresh = redis.call('EXISTS', subKey) == 0
+  if subFresh then
+    -- A new declared id: bounded per hour, since the client can mint them.
+    local n = redis.call('INCR', KEYS[11])
+    if n == 1 then redis.call('EXPIRE', KEYS[11], 3600) end
+    if n > subNewMax then
+      redis.call('DECR', KEYS[11])
+      return {-7, 0, 0, epochOut}
+    end
+  end
+end
 
 redis.call('INCRBY', KEYS[1], tokenEstimate)
 redis.call('INCRBY', KEYS[3], costEstimate)
@@ -507,6 +621,21 @@ redis.call('HSET', KEYS[5],
   'pv', provider,
   'md', model)
 redis.call('ZADD', KEYS[6], nowMs, attemptId)
+if subKey then
+  redis.call('HINCRBY', subKey, 'r', istr(costEstimate))
+  redis.call('EXPIRE', subKey, subTtl)
+  -- Immutable attempt state: settle moves exactly this ledger.
+  redis.call('HSET', KEYS[5], 'sl', subKey)
+end
+if dlN > 0 then
+  local stamped = {}
+  for i = 1, dlN do
+    local key = KEYS[dlBase + i]
+    redis.call('HINCRBY', key, 'r', istr(costEstimate))
+    stamped[i] = key
+  end
+  redis.call('HSET', KEYS[5], 'dl', table.concat(stamped, ','))
+end
 return {1, reservedTokens, reservedCost, epochOut}
 `;
 
@@ -532,6 +661,7 @@ local tokenCertainty = ARGV[6]
 local moneyCertainty = ARGV[7]
 local dayKey       = ARGV[8] or ''
 local monthKey     = ARGV[9] or ''
+local subTtl       = tonumber(ARGV[10] or '0')
 
 local state = redis.call('HGET', KEYS[5], 'st')
 
@@ -662,6 +792,29 @@ if degraded == 0 then
   redis.call('DECRBY', KEYS[3], estCost)
   if appliedTokens > 0 then redis.call('INCRBY', KEYS[2], appliedTokens) end
   if appliedCost   > 0 then redis.call('INCRBY', KEYS[4], appliedCost) end
+end
+
+-- C(b): the sub-agent's ledger stamped at open, moved whether or not the agent's
+-- own counters are degraded (it is independent of them). Never recreated when it
+-- has idled out: an INCRBY on a missing key would write a negative reservation.
+local subKey = redis.call('HGET', KEYS[5], 'sl')
+if subKey and subKey ~= false and subKey ~= '' and redis.call('EXISTS', subKey) == 1 then
+  redis.call('HINCRBY', subKey, 'r', string.format('%.0f', -estCost))
+  if appliedCost > 0 then redis.call('HINCRBY', subKey, 's', string.format('%.0f', appliedCost)) end
+  redis.call('EXPIRE', subKey, subTtl)
+end
+
+-- Bet D: the delegation ledgers stamped at open, moved the same way. Their expiry
+-- was set when they were created and is left alone; a ledger already gone is not
+-- recreated.
+local dlKeys = redis.call('HGET', KEYS[5], 'dl')
+if dlKeys and dlKeys ~= false and dlKeys ~= '' then
+  for key in string.gmatch(dlKeys, '[^,]+') do
+    if redis.call('EXISTS', key) == 1 then
+      redis.call('HINCRBY', key, 'r', string.format('%.0f', -estCost))
+      if appliedCost > 0 then redis.call('HINCRBY', key, 's', string.format('%.0f', appliedCost)) end
+    end
+  end
 end
 
 redis.call('HSET', KEYS[5],
@@ -847,6 +1000,17 @@ export async function openHold(params: {
    * already exists — a second caller racing the first seed uses the first one.
    */
   periodSeedMicrocents?: number;
+  /**
+   * C(b): the call's DECLARED session and sub-agent, and that sub-agent's cap per
+   * session in micro-cents. Only for a sub-agent call on an agent whose policy
+   * sets a cap. `newPerHour` overrides SUBAGENT_NEW_LEDGERS_PER_HOUR (tests).
+   */
+  subLedger?: { session: string; agent: string; capMicrocents: number; newPerHour?: number };
+  /**
+   * Bet D: a worker's call. Every link of its chain, root first, with that link's cap
+   * in micro-cents (the visa's `dc`). Each link's ledger must already exist.
+   */
+  delegation?: { links: { jti: string; capMicrocents: number }[] };
   /** The clock, for tests. Decides the period and the hold's `cr`. */
   nowMs?: number;
 }): Promise<OpenHoldResult> {
@@ -874,6 +1038,8 @@ export async function openHold(params: {
   const nowMs = params.nowMs ?? Date.now();
   const keys = periodKeys(nowMs);
   const period = params.periodLimit ?? { mode: "skip" as const };
+  const dlLinks = params.delegation?.links ?? [];
+  if (dlLinks.length > 2) throw new Error("a delegation chain has at most two links");
 
   const res = await redis().eval(
     OPEN_LUA,
@@ -887,6 +1053,13 @@ export async function openHold(params: {
       k.epoch(params.agentId),
       k.fmt(params.agentId),
       k.pbase(params.agentId),
+      ...(params.subLedger
+        ? [
+            subLedgerKey(params.agentId, params.subLedger.session, params.subLedger.agent),
+            k.slnew(params.agentId, Math.floor(nowMs / 3_600_000)),
+          ]
+        : []),
+      ...dlLinks.map((l) => delegationLedgerKey(params.agentId, l.jti)),
     ],
     [
       String(tokenCap),
@@ -907,6 +1080,11 @@ export async function openHold(params: {
       keys.month,
       period.mode === "set" ? String(Math.max(0, Math.round(period.capMicrocents))) : "-1",
       params.periodSeedMicrocents == null ? "" : String(int(params.periodSeedMicrocents)),
+      params.subLedger ? String(Math.max(0, Math.round(params.subLedger.capMicrocents))) : "-1",
+      String(SUBAGENT_LEDGER_TTL_S),
+      String(params.subLedger?.newPerHour ?? SUBAGENT_NEW_LEDGERS_PER_HOUR),
+      String(dlLinks.length),
+      ...dlLinks.map((l) => String(Math.max(0, Math.round(l.capMicrocents)))),
     ]
   );
 
@@ -917,11 +1095,15 @@ export async function openHold(params: {
   // protect, since that check only enforces for agents Postgres calls
   // established.
   const liveEpoch = Array.isArray(res) ? String(res[3] ?? "") : "";
-  const denied = (reason: "tokens" | "cost" | "state" | "period"): OpenHoldResult =>
+  const denied = (reason: NonNullable<OpenHoldResult["reason"]>): OpenHoldResult =>
     liveEpoch ? { ok: false, reason, epochToPersist: liveEpoch } : { ok: false, reason };
   if (code === -1) return denied("tokens");
   if (code === -2) return denied("cost");
   if (code === -5) return denied("period");
+  if (code === -6) return denied("subagent");
+  if (code === -7) return denied("subagent_ledgers");
+  if (code === -8) return denied("delegation_state");
+  if (code === -9) return denied("delegation");
   // Not a denial: nothing was decided and nothing reserved. The epoch still
   // rides out, because a first call may have minted one on this very reply.
   if (code === -4) {
@@ -979,6 +1161,7 @@ async function settle(
       moneyCertainty,
       keys.day,
       keys.month,
+      String(SUBAGENT_LEDGER_TTL_S),
     ]
   );
   const [code, appliedTokens, appliedMicrocents] = codes(res);

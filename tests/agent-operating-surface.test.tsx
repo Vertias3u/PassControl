@@ -128,6 +128,21 @@ describe("agent operating header", () => {
     expect(clean).not.toContain("data-passport-secret-exposed");
   });
 
+  // F1: a new dashboard agent starts at $20 a day. The page says when the limit
+  // is that default, so an owner refused at it knows nobody chose it on purpose.
+  it("labels a daily limit at the default amount as the default", () => {
+    const period = { kind: "day" as const, capCents: 2000, usage: null };
+    const labelled = renderToStaticMarkup(
+      <AgentOperatingHeader {...base} budgets={{ ...base.budgets, period: { ...period, isDefault: true } }} hasPassport activeDirectKeys={0} />
+    );
+    expect(labelled).toContain('data-operate="period-default"');
+    expect(labelled).toMatch(/\(default\)/);
+    const own = renderToStaticMarkup(
+      <AgentOperatingHeader {...base} budgets={{ ...base.budgets, period: { ...period, isDefault: false } }} hasPassport activeDirectKeys={0} />
+    );
+    expect(own).not.toContain('data-operate="period-default"');
+  });
+
   it("tells the three stop actions apart and promises no recall", () => {
     const html = renderToStaticMarkup(<AgentOperatingHeader {...base} hasPassport={false} activeDirectKeys={1} />);
     expect(html).toMatch(/Revoking one installation key stops only that key/);

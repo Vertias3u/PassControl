@@ -144,6 +144,21 @@ export type PublicPassportResult =
 
 type VerifyDatabase = Pick<SupabaseClient, "rpc">;
 
+/**
+ * Which rate-limit counter a lookup spends. The page spends `verify:<ip>`, one
+ * person's browsing. A shared link's image is fetched by Slack, X, Discord or
+ * GitHub's image proxy, each from a handful of IPs serving everyone at once,
+ * so those images get their own counter and a larger allowance, and a busy
+ * unfurler can never throttle a person reading the page. The CDN cache absorbs
+ * repeats, so this counter mostly sees cache misses.
+ */
+export interface PublicVerifyBucket {
+  prefix: string;
+  limit: number;
+}
+
+const PAGE_BUCKET: PublicVerifyBucket = { prefix: "verify", limit: PUBLIC_VERIFY_LIMIT };
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -331,14 +346,15 @@ function isAmbiguous(row: Record<string, unknown>): boolean {
 export async function lookupPublicPassport(
   db: VerifyDatabase,
   passportId: unknown,
-  clientIp: string
+  clientIp: string,
+  bucket: PublicVerifyBucket = PAGE_BUCKET
 ): Promise<PublicPassportResult> {
   if (!isPassportIdShape(passportId)) return { ok: false, reason: "not_found" };
   const id = (passportId as string).trim();
 
   const limit = await rateLimit(
-    `verify:${clientIp}`,
-    PUBLIC_VERIFY_LIMIT,
+    `${bucket.prefix}:${clientIp}`,
+    bucket.limit,
     PUBLIC_VERIFY_WINDOW_SECONDS
   );
   if (!limit.success) return { ok: false, reason: "throttled" };

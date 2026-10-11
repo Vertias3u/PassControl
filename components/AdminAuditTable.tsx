@@ -44,8 +44,16 @@ function describe(row: AdminAuditRow): { label: string; Icon: typeof UserPlus; t
       if (fields === "passport_pubkey") return { label: "Passport key replaced", Icon: KeyRound, tone: "warning" };
       return { label: "Agent updated", Icon: Activity, tone: "info" };
     }
+    case "agent.spending_limit_removed":
+      return { label: "Created without a spending limit", Icon: ShieldAlert, tone: "warning" };
     case "agent.break_glass":
       return { label: "Temporary access granted (break glass)", Icon: ShieldAlert, tone: "warning" };
+    case "agent.delegation_revoke":
+      return { label: m.all === true ? "All delegations revoked" : "Delegation revoked", Icon: Power, tone: "warning" };
+    case "agent.session_stop":
+      return m.stopped === false
+        ? { label: "Session resumed", Icon: PlayCircle, tone: "info" }
+        : { label: "Session stopped", Icon: Power, tone: "warning" };
     case "agent.suspend":
       return m.suspended === false
         ? { label: "Agent resumed", Icon: PlayCircle, tone: "info" }

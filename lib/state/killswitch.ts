@@ -6,10 +6,20 @@
 // Per-agent suspension lives in redis.ts (suspended:<agid>) and is checked in
 // parallel by the proxy as the instant per-agent layer.
 //
-// (Reads are 3 concurrent Redis ops; could be folded into one pipeline later to
-// cut request count — kept as Promise.all here for clarity. Correctness first.)
+//
+// Durable record (0083, 2026-10-10). The tenant kill, per-service kills and
+// session stops are ALSO rows in Postgres (kill-record.ts); Redis is the copy
+// read per call. Before this, losing Redis lifted all of them silently. A
+// per-tenant `loaded` marker rides in the same MGET as the tenant flag: when it
+// is missing (Redis lost, or a tenant not loaded since this shipped), that
+// tenant's stops are reloaded from the record, written back, and THIS call is
+// decided from them. The reload only ever adds stops, so a stop armed before
+// 0083 (no row) is never lifted by it. The ops-only platform flag and denylist
+// have no record: nothing in code writes them.
 import { logFailOpen } from "../observability";
 import { redis } from "./redis";
+import { sessionStopKey } from "./kill-keys";
+import { deleteKillRecord, loadKillRecords, saveKillRecord, type KillRecord } from "./kill-record";
 
 const KEY = {
   platform: "killswitch:platform",
@@ -18,7 +28,34 @@ const KEY = {
   // access, keep Claude"). Read only when a service route names its service.
   service: (userId: string, service: string) => `killswitch:tenant:${userId}:svc:${service}`,
   denylist: "killswitch:denylist",
+  // Present once this tenant's stops have been loaded from the durable record.
+  loaded: (userId: string) => `killswitch:loaded:${userId}`,
 };
+
+function recordKey(userId: string, stop: KillRecord): string {
+  if (stop.kind === "tenant") return KEY.tenant(userId);
+  if (stop.kind === "service") return KEY.service(userId, stop.service);
+  return sessionStopKey(stop.agentId, stop.sessionId);
+}
+
+type RedisClient = ReturnType<typeof redis>;
+
+/**
+ * Load one tenant's stops from the record and write them back to Redis, then
+ * mark the tenant loaded. Throws only when the RECORD cannot be read (the
+ * caller's fail posture decides); a failed write-back is swallowed and leaves
+ * the marker unset, so the next call loads again. Adds keys, never deletes one.
+ */
+async function reloadFromRecord(r: RedisClient, userId: string): Promise<KillRecord[]> {
+  const stops = await loadKillRecords(userId);
+  try {
+    await Promise.all(stops.map((stop) => r.set(recordKey(userId, stop), 1)));
+    await r.set(KEY.loaded(userId), 1);
+  } catch {
+    // The stops still decide this call; the next one tries the write-back again.
+  }
+  return stops;
+}
 
 export interface KillState {
   platformKill: boolean;
@@ -30,6 +67,13 @@ export interface KillState {
    * model route's test — never reads it.
    */
   serviceKill?: boolean;
+  /**
+   * Session stops just reloaded from the durable record. Present only on the
+   * call that did the reload: the proxy reads suspension in PARALLEL with this
+   * function, so that read saw the empty Redis, and `withRecordedSessionStop`
+   * lets these overrule it. Every later call finds them in Redis.
+   */
+  recordedSessionStops?: ReadonlyArray<{ agentId: string; sessionId: string }>;
 }
 
 /**
@@ -44,17 +88,45 @@ export async function readKillState(
 ): Promise<KillState> {
   try {
     const r = redis();
-    const [platform, tenant, denylist, service] = await Promise.all([
-      r.get(KEY.platform),
-      userId ? r.get(KEY.tenant(userId)) : Promise.resolve(null),
-      r.smembers(KEY.denylist),
-      userId && options.service ? r.get(KEY.service(userId, options.service)) : Promise.resolve(null),
-    ]);
-    return {
+    // One MGET: the platform flag, the tenant flag, the tenant's loaded marker
+    // and the named service's flag. The marker costs no extra command.
+    const keys = [KEY.platform];
+    if (userId) keys.push(KEY.tenant(userId), KEY.loaded(userId));
+    if (userId && options.service) keys.push(KEY.service(userId, options.service));
+    const [values, denylist] = await Promise.all([r.mget(...keys), r.smembers(KEY.denylist)]);
+    const [platform, tenant, loaded, service] = values as unknown[];
+    const state: KillState = {
       platformKill: Boolean(platform),
       userKill: Boolean(tenant),
       denylist: Array.isArray(denylist) ? (denylist as string[]) : [],
       ...(options.service ? { serviceKill: Boolean(service) } : {}),
+    };
+    if (!userId || (loaded !== null && loaded !== undefined)) return state;
+
+    let stops: KillRecord[];
+    try {
+      stops = await reloadFromRecord(r, userId);
+    } catch {
+      // The record could not be read: the kill switch's own posture, as a failed
+      // Redis read below. What Redis DID hold still counts either way.
+      logFailOpen("kill_record_read");
+      if (process.env.KILL_SWITCH_FAIL_CLOSED === "true") return { ...state, platformKill: true };
+      return state;
+    }
+    const sessions = stops.flatMap((stop) =>
+      stop.kind === "session" ? [{ agentId: stop.agentId, sessionId: stop.sessionId }] : []
+    );
+    return {
+      ...state,
+      userKill: state.userKill || stops.some((stop) => stop.kind === "tenant"),
+      ...(options.service
+        ? {
+            serviceKill:
+              state.serviceKill === true ||
+              stops.some((stop) => stop.kind === "service" && stop.service === options.service),
+          }
+        : {}),
+      ...(sessions.length ? { recordedSessionStops: sessions } : {}),
     };
   } catch {
     logFailOpen("kill_read");
@@ -90,11 +162,51 @@ export async function observeKillState(
     }
   })();
   if (!r) return { platform: null, tenant: null };
-  const [platform, tenant] = await Promise.all([
+  const [platform, tenant, loaded] = await Promise.all([
     r.get(KEY.platform).then((value) => Boolean(value), () => null),
     r.get(KEY.tenant(userId)).then((value) => Boolean(value), () => null),
+    r.get(KEY.loaded(userId)).then((value) => Boolean(value), () => null),
   ]);
+  // Redis answered "clear" for a tenant it has not loaded: the record decides,
+  // as it will for the gateway's next call. Unreadable record = unknown.
+  if (tenant === false && loaded === false) {
+    const stops = await reloadFromRecord(r, userId).catch(() => null);
+    return { platform, tenant: stops === null ? null : stops.some((stop) => stop.kind === "tenant") };
+  }
   return { platform, tenant };
+}
+
+/**
+ * The proxy's suspension read, corrected by any session stop the kill read just
+ * reloaded from the record (see `KillState.recordedSessionStops`). Never weakens
+ * the read: a suspended agent stays suspended.
+ */
+export function withRecordedSessionStop(
+  suspended: boolean | "session",
+  state: KillState,
+  agentId: string,
+  sessionId: string | null | undefined
+): boolean | "session" {
+  if (suspended !== false || !sessionId) return suspended;
+  const stopped = state.recordedSessionStops?.some(
+    (stop) => stop.agentId === agentId && stop.sessionId === sessionId
+  );
+  return stopped ? "session" : false;
+}
+
+/**
+ * Make sure this tenant's recorded stops are in Redis, for a screen about to
+ * read them there (the sessions panel). `false` when that could not be done.
+ */
+export async function ensureKillRecordLoaded(userId: string): Promise<boolean> {
+  try {
+    const r = redis();
+    if (await r.get(KEY.loaded(userId))) return true;
+    await reloadFromRecord(r, userId);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function isBlocked(state: KillState, agentId: string): boolean {
@@ -188,8 +300,54 @@ export async function armServiceKill(userId: string, service: string, on: boolea
  */
 export async function observeServiceKill(userId: string, service: string): Promise<boolean | null> {
   try {
-    return Boolean(await redis().get(KEY.service(userId, service)));
+    const r = redis();
+    const [armed, loaded] = await Promise.all([r.get(KEY.service(userId, service)), r.get(KEY.loaded(userId))]);
+    if (armed || loaded) return Boolean(armed);
+    // Not loaded since Redis lost its data: the record decides (observeKillState).
+    const stops = await reloadFromRecord(r, userId);
+    return stops.some((stop) => stop.kind === "service" && stop.service === service);
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether an arm or disarm reached the durable record as well as Redis. Redis is
+ * what stops calls, so `durable: false` is a stop in force (or lifted) that a
+ * Redis loss would undo; the operator is told, and can press again.
+ */
+export interface DurableKillResult {
+  durable: boolean;
+}
+
+/**
+ * The dashboard's and the control API's master kill: Redis AND the record.
+ * Arm writes Redis first, so the stop is in force at once, then the record.
+ * Disarm clears the record first, then Redis: a reload that lands in between
+ * finds Redis still armed, so the worst it can do is re-arm. A Redis failure
+ * throws, as before: nothing claims a stop that is not in force.
+ * Not for the demo's self-expiring arm or the account-erasure guard, which stay
+ * Redis-only through `armTenantKill`.
+ */
+export async function setTenantKillDurably(userId: string, on: boolean): Promise<DurableKillResult> {
+  const stop: KillRecord = { kind: "tenant" };
+  if (on) {
+    await armTenantKill(userId, true);
+    return { durable: await saveKillRecord(userId, stop) };
+  }
+  const durable = await deleteKillRecord(userId, stop);
+  await armTenantKill(userId, false);
+  return { durable };
+}
+
+/** One service's stop, recorded the same way as the master kill. */
+export async function setServiceKillDurably(userId: string, service: string, on: boolean): Promise<DurableKillResult> {
+  const stop: KillRecord = { kind: "service", service };
+  if (on) {
+    await armServiceKill(userId, service, true);
+    return { durable: await saveKillRecord(userId, stop) };
+  }
+  const durable = await deleteKillRecord(userId, stop);
+  await armServiceKill(userId, service, false);
+  return { durable };
 }

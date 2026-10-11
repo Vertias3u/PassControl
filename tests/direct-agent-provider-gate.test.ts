@@ -168,7 +168,9 @@ describe("the key-import on-ramp can finish with a Direct Agent Key", () => {
     expect(mocks.createDirectAgent).toHaveBeenCalledWith(
       mocks.serviceDb,
       "tenant-a",
-      expect.objectContaining({ scopes: [{ provider: "openai", models: ["gpt-5-mini"] }], keyName: "My installation" })
+      expect.objectContaining({ scopes: [{ provider: "openai", models: ["gpt-5-mini"] }], keyName: "My installation" }),
+      // F1: the on-ramp's worker starts with the default daily limit.
+      { period: { budget_period: "day", budget_period_cents: 2000 } }
     );
     expect(result.key).toMatch(/^pc_agent_/);
     expect(JSON.stringify(result)).not.toContain(RAW_PROVIDER_KEY);

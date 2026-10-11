@@ -52,6 +52,20 @@ export type PassportPrincipal = {
   spentMicrocents: number;
   passportId: string;
   visaJti: string;
+  /**
+   * Present only on a WORKER's visa (ver 3, Bet D). `passportId` and `agentId` stay
+   * the root passport and its agent, so every kill, suspend, denylist and budget check
+   * still applies; this names who actually acts and the caps it acts under.
+   */
+  delegation?: PrincipalDelegation;
+};
+
+export type PrincipalDelegation = {
+  actor: string;
+  jti: string;
+  depth: number;
+  chainHash: string;
+  links: { dlg: string; cap: number; iat: number; exp: number }[];
 };
 
 export type GatewayPrincipal = PassportPrincipal | DirectKeyPrincipal;
@@ -61,7 +75,8 @@ export type GatewayAuthentication =
   | { ok: true; principal: GatewayPrincipal; db: ServiceDatabase; credentialToken: string }
   | { ok: false; response: Response };
 
-export type PassportAuthMethod = Exclude<AuthMethod, "direct_key">;
+/** What the sender-constraint check can yield. A worker's method is set by the provider route alone. */
+export type PassportAuthMethod = "passport" | "passport_proof_per_request";
 
 export type SenderConstraintResult =
   | { ok: true; authMethod: PassportAuthMethod; would?: SenderProofObservation }
@@ -102,7 +117,9 @@ export async function evaluateSenderProof(
     method: req.method,
     url: req.url,
     visa: credentialToken,
-    passportId: principal.passportId,
+    // A worker's visa binds the WORKER's key (cnf = thumbprint of act.sub): a proof
+    // made with the parent's passport key must not pass for it.
+    passportId: principal.delegation?.actor ?? principal.passportId,
   });
   if (!proof.ok) {
     if (proof.reason === "missing") return { verdict: "missing" };
@@ -268,7 +285,7 @@ export async function authenticateGatewayRequest(
   route: string = "api.proxy",
   // Also read `Authorization: token <x>`, after Bearer and x-api-key. The
   // service route only: it is what GitHub's own clients send.
-  options: { tokenScheme?: boolean } = {}
+  options: { tokenScheme?: boolean; acceptDelegated?: boolean } = {}
 ): Promise<GatewayAuthentication> {
   // extractVisaToken is intentionally still the one header-precedence source:
   // Authorization Bearer wins over x-api-key, including when they carry
@@ -417,6 +434,13 @@ export async function authenticateGatewayRequest(
     );
     return { ok: false, response: err(401, "invalid_visa") };
   }
+  // A worker's visa is refused at every door that has not opted in: /api/v1/self
+  // would report the PARENT's budget as the worker's own, and service scopes are
+  // not part of a delegation. Only the provider route opts in, because it is the
+  // one that enforces the delegation's caps and revocations.
+  if (claims.act && options.acceptDelegated !== true) {
+    return { ok: false, response: err(403, "delegated_visa_not_accepted") };
+  }
   return {
     ok: true,
     db,
@@ -432,6 +456,17 @@ export async function authenticateGatewayRequest(
       spentMicrocents: Number(claims.sc ?? 0),
       passportId: claims.sub,
       visaJti: claims.jti,
+      ...(claims.act && claims.dc
+        ? {
+            delegation: {
+              actor: claims.act.sub,
+              jti: claims.act.dlg,
+              depth: claims.act.dep,
+              chainHash: claims.act.ch,
+              links: claims.dc.map((l) => ({ dlg: l.dlg, cap: l.cap, iat: l.iat, exp: l.exp })),
+            },
+          }
+        : {}),
     },
   };
 }

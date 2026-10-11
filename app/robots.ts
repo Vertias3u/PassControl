@@ -5,6 +5,8 @@ import { instanceIssuer } from "@/lib/crypto/instanceKey";
 // Same reasoning as app/sitemap.ts: the instance's own issuer, or nothing.
 const BASE = instanceIssuer() ?? "";
 
+const DISALLOW = ["/dashboard", "/login/verify", "/api/", "/verify/", "/u/"];
+
 // Emitted at /robots.txt. Allow crawling of the public marketing surface; keep
 // the authenticated app + API out of the index. Points crawlers at the sitemap.
 export default function robots(): MetadataRoute.Robots {
@@ -29,7 +31,7 @@ export default function robots(): MetadataRoute.Robots {
         // rewrites one onto the other. Both would index as duplicate content,
         // so only the canonical /@ form is offered; every page sets
         // alternates.canonical to match.
-        disallow: ["/dashboard", "/login/verify", "/api/", "/verify/", "/u/"],
+        disallow: DISALLOW,
       },
     ],
     // Both are absolute-URL fields; with no configured issuer there is no honest

@@ -46,7 +46,10 @@ vi.mock("@/lib/auth/visa", async (importOriginal) => ({
 vi.mock("@/lib/state/policy", () => ({
   readCurrentAgentPolicyAndShadow: (...args: unknown[]) => currentPolicyMock(...args),
 }));
-vi.mock("@/lib/state/killswitch", () => ({
+vi.mock("@/lib/state/killswitch", async (importOriginal) => ({
+  // The real module otherwise: the demo path now folds recorded session stops
+  // into its suspend read (F4), as the billed path does.
+  ...(await importOriginal<typeof import("@/lib/state/killswitch")>()),
   readKillState: (...args: unknown[]) => readKillStateMock(...args),
 }));
 vi.mock("@/lib/state/redis", () => ({

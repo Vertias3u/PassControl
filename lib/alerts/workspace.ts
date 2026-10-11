@@ -25,6 +25,8 @@ const GATEWAY_ALERTS: Partial<Record<string, "refused" | "budget">> = {
   blocked_policy: "refused",
   blocked_budget: "budget",
   blocked_budget_period: "budget",
+  blocked_budget_subagent: "budget",
+  blocked_budget_delegation: "budget",
 };
 
 /**
@@ -42,6 +44,8 @@ const KIND: Record<Exclude<WorkspaceAlertType, "test">, AlertKind> = {
   budget: "budget",
   passport_rotated: "security",
   break_glass: "security",
+  // A spend notice, so it rides the workspace's "budget" switch.
+  session_spend: "budget",
 };
 
 const SEND_TIMEOUT_MS = 3000;
@@ -88,11 +92,18 @@ export async function notifyWorkspace(input: {
   type: Exclude<WorkspaceAlertType, "test">;
   status?: string;
   model?: string;
+  /** session_spend: which session, its total and the threshold it passed. */
+  session?: string;
+  spentMicrocents?: number;
+  thresholdMicrocents?: number;
   /** This deployment's own origin, e.g. new URL(req.url).origin. */
   origin: string;
 }): Promise<void> {
   try {
-    if (!(await claimAlertSlot(input.userId, input.type, input.agentId))) return;
+    // A session alert is throttled per SESSION, so two sessions crossing within
+    // ten minutes both arrive. Every other type keeps one slot per agent.
+    const slot = input.type === "session_spend" && input.session ? `session_spend:${input.session}` : input.type;
+    if (!(await claimAlertSlot(input.userId, slot, input.agentId))) return;
 
     const db = serviceClient();
     // Missing table (before 0078) or no row: no alerts, never an error.
@@ -122,7 +133,11 @@ export async function notifyWorkspace(input: {
       status: input.status,
       model: input.model,
       at: new Date(),
-      dashboardUrl: agentDashboardUrl(input.origin, input.agentId),
+      dashboardUrl:
+        agentDashboardUrl(input.origin, input.agentId) + (input.type === "session_spend" ? "#agent-sessions" : ""),
+      ...(input.type === "session_spend"
+        ? { session: input.session, spentMicrocents: input.spentMicrocents, thresholdMicrocents: input.thresholdMicrocents }
+        : {}),
     });
   } catch {
     // Best-effort by contract: the audit row is the durable record.

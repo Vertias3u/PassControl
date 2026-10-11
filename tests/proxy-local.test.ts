@@ -377,6 +377,27 @@ describe("local under a dollar limit", () => {
     expect(openHoldMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  // F1: new dashboard agents get a $20 a day limit by default. An owner who later
+  // points one at a local server is refused for a reason they did not choose, so
+  // the refusal says which limit and where it is removed. Only for a periodic
+  // limit: an agent with a lifetime cap set on purpose keeps the bare code.
+  it("names the daily limit, and where to remove it, when that is what refused it", async () => {
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    getCachedEndpointMock.mockResolvedValue(`${CRED}|${OLLAMA}`);
+    getCachedAgentPolicyMock.mockResolvedValue(
+      JSON.stringify({ p: {}, s: null, r: "off", be: "epoch-1", bs: true, bk: true, bt: null, bc: null, pdk: true, pdp: "day", pdc: 2000 })
+    );
+    const res = await localCall();
+
+    expect(res.status).toBe(402);
+    const body = await res.json();
+    expect(body.error).toBe("unpriced_endpoint");
+    expect(body.message).toMatch(/spending limit/i);
+    expect(body.message).toMatch(/\$20 a day/);
+    expect(body.message).toMatch(/agent's page/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 // Ollama's own API through the gateway (1.3.0 #3). Built on the injected request

@@ -413,7 +413,7 @@ describe("azure under a periodic limit alone", () => {
     const res = await azureCall();
 
     expect(res.status).toBe(402);
-    expect(await res.json()).toEqual({ error: "unpriced_endpoint" });
+    expect(await res.json()).toEqual({ error: "unpriced_endpoint", message: expect.stringMatching(/spending limit of \$5 a day.*agent's page/) });
     expect(openHoldMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });

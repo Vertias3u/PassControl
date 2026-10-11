@@ -28,6 +28,7 @@ import {
   hostedToolReserve,
   hostedToolTokens,
   hostedToolUseCost,
+  requestAdvisors,
   withDefaultToolCaps,
 } from "@/lib/providers/hosted-tools";
 import { serverSideToolUse } from "@/lib/providers/server-side-tools";
@@ -218,5 +219,28 @@ describe("the advisor beta header", () => {
     expect(header?.split(",")).toContain("advisor-tool-2026-03-01");
     // And nothing else the default would drop.
     expect(header?.split(",")).not.toContain("mid-conversation-system-2026-04-07");
+  });
+});
+
+
+// P6.3 (2026-10-10): with two advisors in tools[], the plan kept the LAST one, so a cheap
+// advisor after a dear one under-held the call. The hold now covers the dearest.
+describe("two advisors in one request", () => {
+  const dear = { ...ADVISOR, model: "claude-opus-5-5", max_uses: 1, max_tokens: 4096 };
+  const cheap = { ...ADVISOR, model: "claude-haiku-5-5", max_uses: 1, max_tokens: 4096 };
+  const twoBody = (tools: unknown[]) => ({ model: "claude-haiku-4-5", max_tokens: 10, messages: [{ role: "user", content: "plan" }], tools });
+
+  it.each([
+    ["dear then cheap", [dear, cheap]],
+    ["cheap then dear", [cheap, dear]],
+  ])("holds for the dearest advisor (%s)", (_label, tools) => {
+    const plan = hostedToolPlan("anthropic", twoBody(tools))!;
+    expect(plan.advisor!.model).toBe("claude-opus-5-5");
+  });
+
+  it("lists every advisor for the model gate", () => {
+    expect(requestAdvisors(twoBody([cheap, dear])).map((a) => a.model)).toEqual(["claude-haiku-5-5", "claude-opus-5-5"]);
+    expect(requestAdvisors(twoBody([]))).toEqual([]);
+    expect(requestAdvisors({ tools: "x" })).toEqual([]);
   });
 });

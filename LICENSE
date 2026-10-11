@@ -8,7 +8,9 @@ License text copyright © 2017 MariaDB Corporation Ab, All Rights Reserved.
 Parameters
 
 Licensor:             Kristiyan Ivanov, operating under the Vertias name
-Licensed Work:        PassControl
+Licensed Work:        PassControl, excluding the plugins/passcontrol/ directory,
+                      which is licensed under the MIT License (see the
+                      LICENSE file in that directory).
                       The Licensed Work is © 2026 Kristiyan Ivanov.
 Additional Use Grant: You may make production use of the Licensed Work, provided
                       that you do not offer the Licensed Work to third parties as

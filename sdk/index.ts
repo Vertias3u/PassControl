@@ -17,7 +17,17 @@
 // whole `sdk/` directory; it only needs @noble/curves + the platform fetch/crypto.
 
 export { PassControl } from "./passcontrol.js";
-export type { PassControlOptions, ProviderId } from "./passcontrol.js";
+export type { PassControlOptions, PassControlDelegationOptions, DelegateOptions, ProviderId } from "./passcontrol.js";
+// Signed delegation (Bet D): sign a link for a worker, and check a worker's receipt
+// against the chain that authorised it.
+export {
+  createDelegationLink,
+  checkDelegationChain,
+  verifyReceiptDelegation,
+  generateWorkerKey,
+  delegationChainHash,
+  DELEGATION_TYP,
+} from "../cli/delegation.mjs";
 
 export { ControlClient, ControlApiError } from "./control.js";
 export type { ControlClientOptions, WriteOpts } from "./control.js";

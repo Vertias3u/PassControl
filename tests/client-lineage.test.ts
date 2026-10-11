@@ -108,6 +108,43 @@ describe("the sidecar's run id is the fallback session", () => {
     expect(readClientLineage(h)).toEqual({ kind: "claude-code", session: "cc-1", agent: null, parent: null });
   });
 
+  // F4: a PassControl client that is not Claude Code or Codex (the public demo's
+  // own adapter, or any framework behind the sidecar) can declare its sub-agents
+  // next to the run id. Declared like every other value here: it identifies the
+  // call on the receipt and in the Sessions view, and never authenticates it.
+  it("carries a sub-agent declared beside the run id", () => {
+    expect(readClientLineage(raw({ "x-passcontrol-run": "run-1", "x-passcontrol-agent": "researcher" }))).toEqual({
+      kind: "sidecar",
+      session: "run-1",
+      agent: "researcher",
+      parent: null,
+    });
+    expect(
+      readClientLineage(raw({ "x-passcontrol-run": "run-1", "x-passcontrol-agent": "a2", "x-passcontrol-parent": "a1" }))
+    ).toEqual({ kind: "sidecar", session: "run-1", agent: "a2", parent: "a1" });
+  });
+
+  it("drops a parent with no agent, and a malformed agent, without dropping the run", () => {
+    expect(readClientLineage(raw({ "x-passcontrol-run": "run-1", "x-passcontrol-parent": "a1" }))).toEqual({
+      kind: "sidecar",
+      session: "run-1",
+      agent: null,
+      parent: null,
+    });
+    expect(
+      readClientLineage(raw({ "x-passcontrol-run": "run-1", "x-passcontrol-agent": "bad agent", "x-passcontrol-parent": "a1" }))
+    ).toEqual({ kind: "sidecar", session: "run-1", agent: null, parent: null });
+  });
+
+  it("never lets a sidecar-declared agent ride on a CLI's session", () => {
+    const h = raw({ "x-passcontrol-run": "run-1", "x-claude-code-session-id": "cc-1", "x-passcontrol-agent": "researcher" });
+    expect(readClientLineage(h)).toEqual({ kind: "claude-code", session: "cc-1", agent: null, parent: null });
+  });
+
+  it("declares no sub-agent without a run id to hang it on", () => {
+    expect(readClientLineage(raw({ "x-passcontrol-agent": "researcher" }))).toBeNull();
+  });
+
   it("takes over when the CLI's session is malformed, without the CLI's agent ids", () => {
     const h = raw({ "x-passcontrol-run": "run-1", "x-claude-code-session-id": "bad value", "x-claude-code-agent-id": "a1" });
     expect(readClientLineage(h)).toEqual({ kind: "sidecar", session: "run-1", agent: null, parent: null });

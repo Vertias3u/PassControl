@@ -4,6 +4,7 @@ import { observeMasterKill, setMasterKill } from "@/app/dashboard/actions-client
 import type { KillObservation } from "@/app/dashboard/actions";
 import { CheckCircle2, AlertTriangle, HelpCircle, Loader2, RefreshCw, ShieldOff } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
+import { notDurableMessage, notDurableRetryLabel } from "@/lib/kill-durability";
 
 export type KillSwitchPhase = "disarmed" | "arming" | "armed" | "disarming" | "checking" | "unknown" | "unconfirmed";
 type KillBusy = { kind: "apply"; next: boolean } | { kind: "refresh" } | null;
@@ -83,12 +84,16 @@ export function GlobalKillSwitchBar({
   // switch had applied. The readback commits on its own, as
   // AgentSuspendControl's does.
   const [busy, setBusy] = useState<KillBusy>(null);
+  // The last change applied but did not reach the durable record (0083).
+  const [notDurable, setNotDurable] = useState<boolean | null>(null);
   const pending = busy !== null;
 
   const phase = killSwitchPhase({ busy, tenant: observed.tenant, lost: unconfirmed?.lost ?? false });
 
   const settle = (result: KillObservation) => {
     setObserved({ tenant: result.tenant, platform: result.platform });
+    // A refresh carries no `durable`, and leaves the last change's warning standing.
+    if (result.durable !== undefined) setNotDurable(result.durable ? null : result.requested);
     setUnconfirmed(result.confirmed ? null : { requested: result.requested, lost: false });
     setAnnouncement(
       !result.confirmed
@@ -179,6 +184,14 @@ export function GlobalKillSwitchBar({
         <p role="status" className="pc-inline-error" data-kill-layer="platform">
           PassControl has stopped all traffic platform-wide. This switch cannot override it, and disarming it
           will not resume calls until the platform stop is lifted.
+        </p>
+      ) : null}
+      {notDurable !== null && !unconfirmed ? (
+        <p role="status" className="pc-inline-notice is-warning" data-kill-durable="false">
+          {notDurableMessage(notDurable)}{" "}
+          <button type="button" className="ghost" disabled={pending} onClick={() => void apply(notDurable)} data-control="retry-kill-save">
+            {notDurableRetryLabel(notDurable)}
+          </button>
         </p>
       ) : null}
       {unconfirmed ? (

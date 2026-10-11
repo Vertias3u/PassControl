@@ -64,7 +64,11 @@ export interface ReceiptClaims {
   vjti?: string;
   auth?:
     | { kind: "direct_key"; kid: string; use: string }
-    | { kind: "passport_proof_per_request" };
+    | { kind: "passport_proof_per_request" }
+    // ver 3: a WORKER acting under a signed delegation from the agent. `sub` is the
+    // root passport; `act` is the worker's key; `ch` commits to the chain
+    // (verifyDelegationChain checks a chain you hold against it).
+    | { kind: "delegated"; act: string; dlg: string; dep: number; ch: string; prf?: true };
   prov: string;
   mdl: string | null;
   mth: string;

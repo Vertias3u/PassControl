@@ -32,6 +32,7 @@ import {
   describeReceiptAuthentication,
   describeFailure,
   describeOwner,
+  describeLineage,
   describeFailover,
   describeVerdict,
   formatCost,
@@ -458,6 +459,7 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
   const owner = describeOwner(claims.own ?? null);
   const cost = formatCost(claims.cost, claims.unp);
   const failover = describeFailover(claims.why);
+  const lineage = describeLineage(claims.ctx);
   const tone =
     verdict.tone === "clear"
       ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600"
@@ -550,7 +552,7 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
               {authentication.subject}
               {authentication.keyId ? (
                 <span className="mt-1 block text-xs text-muted-foreground">
-                  Direct key {authentication.keyId}
+                  {authentication.keyIdLabel} {authentication.keyId}
                 </span>
               ) : null}
             </dd>
@@ -579,6 +581,21 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
               </dd>
             )}
           </div>
+          {lineage ? (
+            <div className="sm:col-span-2" data-lineage="declared">
+              <dt className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                Session
+              </dt>
+              <dd className="mt-1 mb-0">
+                <span className="break-all font-mono text-[0.8rem] leading-5 text-foreground">{lineage.session}</span>
+                <span className="text-sm text-foreground"> · {lineage.who}</span>
+                <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                  {lineage.note[0]!.toUpperCase() + lineage.note.slice(1)}. Any program on the same machine could send
+                  different values; they group calls, and the identity above still says which agent made this one.
+                </span>
+              </dd>
+            </div>
+          ) : null}
           {claims.req ? (
             <div className="sm:col-span-2">
               <dt className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">

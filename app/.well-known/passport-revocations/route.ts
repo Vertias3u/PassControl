@@ -81,12 +81,13 @@ export async function GET(req: Request): Promise<Response> {
       ? errorResponse(429, "rate_limited", { "retry-after": "60" })
       : unavailable("revocation_list_unavailable");
   }
-  const entries = list.entries;
+  const { entries, delegations, delegationWatermarks } = list;
 
   const jws = signCompactJws({
     typ: REVOCATION_LIST_TYP,
     kid: signer.kid,
-    claims: buildRevocationListClaims({ issuer, entries }),
+    // Delegations ride beside the passport entries (P2.4), additive, same signature.
+    claims: buildRevocationListClaims({ issuer, entries, delegations, delegationWatermarks }),
     seed: signer.seed,
   });
 

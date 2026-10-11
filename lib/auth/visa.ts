@@ -17,6 +17,14 @@ export const VISA_ISS = "passport.gateway";
 export const VISA_AUD = "llm-proxy";
 export const VISA_VER = 2;
 export const VISA_PREVIOUS_VER = 1;
+/**
+ * A WORKER's visa, minted from a signed delegation (Bet D, plans/delegation-design.md §5).
+ * Its own version, never the default: `sub` stays the root passport, so every
+ * passport-keyed check covers the whole tree, and `act`/`cnf` name the worker's key.
+ * A v1/v2 visa carrying `act` or `dc` is refused, so this layout cannot be smuggled
+ * into an older version.
+ */
+export const VISA_DELEGATED_VER = 3;
 export const SENDER_PROOF_HEADER = "x-passcontrol-proof";
 export const SENDER_PROOF_WINDOW_SECONDS = 30;
 
@@ -36,7 +44,48 @@ export interface VisaClaims extends JWTPayload {
   st: number; // spent_tokens snapshot at mint (seeds the Redis counter NX)
   sc: number; // spent_microcents snapshot at mint (seeds the Redis cost counter NX)
   ver: number;
-  cnf?: { jkt: string }; // v2+: RFC 7638 thumbprint of the passport public key
+  cnf?: { jkt: string }; // v2: thumbprint of the passport key; v3: of the WORKER's key (act.sub)
+  act?: VisaActor; // v3 only: who actually acts
+  dc?: VisaDelegationLink[]; // v3 only: every link's cap, root first
+}
+
+/** v3: the worker acting under a delegation. */
+export interface VisaActor {
+  sub: string; // the worker's Ed25519 public key (passport-id shape)
+  dlg: string; // the leaf delegation's jti
+  dep: number; // the leaf's depth, 1 or 2
+  ch: string; // SHA-256 of the whole chain, base64url (lib/delegation/chain.ts)
+}
+
+/** v3: one link of the chain, as the budget gate enforces it. */
+export interface VisaDelegationLink {
+  dlg: string;
+  cap: number; // micro-cents, the most this link and everything under it may spend
+  iat: number; // checked against the agent's delegation watermark
+  exp: number;
+}
+
+const DELEGATION_JTI_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const isSafeInt = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
+
+/** The v3 claims well-formed and agreeing with each other. Pure; no signature here. */
+function delegationClaimsValid(act: unknown, dc: unknown): act is VisaActor {
+  if (typeof act !== "object" || act === null || Array.isArray(act)) return false;
+  const a = act as Record<string, unknown>;
+  if (Object.keys(a).length !== 4) return false;
+  if (typeof a.sub !== "string" || a.sub.length !== 43 || !passportIdToPublicKey(a.sub)) return false;
+  if (typeof a.dlg !== "string" || !DELEGATION_JTI_RE.test(a.dlg)) return false;
+  if (a.dep !== 1 && a.dep !== 2) return false;
+  if (typeof a.ch !== "string" || a.ch.length !== 43) return false;
+  if (!Array.isArray(dc) || dc.length !== a.dep) return false;
+  for (const link of dc) {
+    if (typeof link !== "object" || link === null || Array.isArray(link)) return false;
+    const l = link as Record<string, unknown>;
+    if (Object.keys(l).length !== 4) return false;
+    if (typeof l.dlg !== "string" || !DELEGATION_JTI_RE.test(l.dlg)) return false;
+    if (!isSafeInt(l.cap) || l.cap < 0 || !isSafeInt(l.iat) || !isSafeInt(l.exp)) return false;
+  }
+  return (dc[dc.length - 1] as VisaDelegationLink).dlg === a.dlg;
 }
 
 export type SenderProofResult =
@@ -258,6 +307,52 @@ export async function mintVisa(input: MintVisaInput): Promise<{ token: string; e
   return { token, expSeconds: ttl };
 }
 
+export interface MintDelegatedVisaInput extends MintVisaInput {
+  /** The worker's key: the leaf link's `sub`. `passportId` stays the ROOT passport. */
+  actor: string;
+  delegationJti: string;
+  depth: number;
+  chainHash: string;
+  links: VisaDelegationLink[];
+}
+
+/**
+ * Mint a worker's visa (ver 3). Only the exchange route calls this, after the chain
+ * verified, the revocations were read and the first-exchange record exists. Refuses
+ * to sign anything `verifyVisa` would not accept, and never outlives the delegation.
+ */
+export async function mintDelegatedVisa(
+  input: MintDelegatedVisaInput
+): Promise<{ token: string; expSeconds: number }> {
+  const act: VisaActor = { sub: input.actor, dlg: input.delegationJti, dep: input.depth, ch: input.chainHash };
+  if (!delegationClaimsValid(act, input.links)) throw new Error("malformed delegation for a visa");
+  const now = Math.floor(Date.now() / 1000);
+  const ttl = Math.min(visaTtlSeconds(), ...input.links.map((l) => l.exp - now));
+  if (ttl <= 0) throw new Error("the delegation has expired");
+  const token = await new SignJWT({
+    agid: input.agentId,
+    uid: input.userId,
+    scope: input.scope,
+    bt: input.budgetTokens,
+    bc: input.budgetCents,
+    st: input.spentTokens,
+    sc: input.spentMicrocents,
+    ver: VISA_DELEGATED_VER,
+    cnf: { jkt: jwkThumbprint(input.actor) },
+    act,
+    dc: input.links.map((l) => ({ dlg: l.dlg, cap: l.cap, iat: l.iat, exp: l.exp })),
+  })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuer(VISA_ISS)
+    .setAudience(VISA_AUD)
+    .setSubject(input.passportId)
+    .setJti(input.jti)
+    .setIssuedAt(now)
+    .setExpirationTime(now + ttl)
+    .sign(currentSecret());
+  return { token, expSeconds: ttl };
+}
+
 /** Verify a visa against current (and previous) secrets. Returns claims or null. */
 export async function verifyVisa(token: string): Promise<VisaClaims | null> {
   for (const secret of acceptedSecrets()) {
@@ -283,6 +378,16 @@ export async function verifyVisa(token: string): Promise<VisaClaims | null> {
         return null;
       if (!(claims.bc == null || (typeof claims.bc === "number" && Number.isFinite(claims.bc))))
         return null;
+      if (claims.ver === VISA_DELEGATED_VER) {
+        // The worker's key, not the root's, is the one a sender proof must come from.
+        if (!delegationClaimsValid(claims.act, claims.dc)) return null;
+        if (typeof claims.cnf !== "object" || claims.cnf === null || claims.cnf.jkt !== jwkThumbprint(claims.act.sub)) {
+          return null;
+        }
+        return claims;
+      }
+      // No older version may carry the delegated layout.
+      if ("act" in claims || "dc" in claims) return null;
       if (claims.ver !== VISA_VER && claims.ver !== VISA_PREVIOUS_VER) return null;
       if (
         claims.ver === VISA_VER &&

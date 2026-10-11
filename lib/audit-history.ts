@@ -61,8 +61,11 @@ export interface CapabilityChange {
 const AGENT_ACTIONS = new Set([
   "agent.update",
   "agent.suspend",
+  "agent.session_stop",
+  "agent.delegation_revoke",
   "agent.revoke",
   "agent.create",
+  "agent.spending_limit_removed",
   "agent.direct_key.create",
   "agent.direct_key.revoke",
   // The most privileged of them. Capability history shipped BEFORE break-glass
@@ -736,6 +739,38 @@ export function summariseChange(raw: unknown): CapabilityChange | null {
       ...base,
       summary: metadata.suspended === true ? "Agent suspended." : "Agent resumed.",
       detail: null,
+      recorded: true,
+      snapshot: "recorded",
+    };
+  }
+  if (action === "agent.delegation_revoke") {
+    return {
+      ...base,
+      summary:
+        metadata.all === true
+          ? "Every delegation this agent issued before now was revoked."
+          : `Delegation ${text(metadata.jti) || "(unknown)"} was revoked.`,
+      detail: ["Workers holding it are refused; the agent itself keeps running. Revocation is permanent."],
+      recorded: true,
+      snapshot: "recorded",
+    };
+  }
+  if (action === "agent.spending_limit_removed") {
+    const statement = text(metadata.statement);
+    return {
+      ...base,
+      summary: "Created without the default daily spending limit, by the owner's choice.",
+      detail: statement ? [`Ticked: “${statement}”`] : null,
+      recorded: true,
+      snapshot: "recorded",
+    };
+  }
+  if (action === "agent.session_stop") {
+    const session = text(metadata.session) || "a session";
+    return {
+      ...base,
+      summary: metadata.stopped === true ? `Session ${session} stopped.` : `Session ${session} resumed.`,
+      detail: ["Only that session's calls are refused; the agent's other sessions run on."],
       recorded: true,
       snapshot: "recorded",
     };

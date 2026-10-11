@@ -48,6 +48,8 @@ import { buildSpendReconciliation } from "@/lib/spend-reconciliation";
 // The shipped CLI is plain ESM and intentionally has no TypeScript declaration.
 // @ts-expect-error Import the preset source of truth on the server only.
 import { SIDECAR_PRESETS } from "@/cli/presets.mjs";
+import { HashLanding } from "@/components/HashLanding";
+import { deploymentDefaultDailyLimitCents } from "@/lib/new-agent-spend-limit.server";
 
 export const dynamic = "force-dynamic";
 
@@ -140,7 +142,7 @@ export default async function ControlTowerPage() {
     db.from("agents").select("*").order("created_at", { ascending: false }),
     db
       .from("agent_logs")
-      .select("id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would, call_kind, endpoint")
+      .select("id, agent_id, user_id, created_at, passport_id, jti, auth_method, agent_access_key_id, credential_use_id, provider, model, input_tokens, output_tokens, cost_microcents, enforced_tokens, enforced_microcents, status, latency_ms, receipt, policy_shadow_would, call_kind, endpoint, client_kind, client_session, client_agent, client_parent")
       .gte("created_at", attentionCutoff)
       .order("created_at", { ascending: false })
       .limit(ATTENTION_SCAN_LIMIT),
@@ -284,6 +286,8 @@ export default async function ControlTowerPage() {
   // null = the read failed, which the connect form reports as "could not
   // confirm" rather than as "no key stored".
   const configuredProviders = providerKeys.error ? null : storedLlmProviders;
+  // F1: what a new agent's daily limit starts at here, handed to every create form.
+  const defaultDailyLimitCents = deploymentDefaultDailyLimitCents();
   // Services with a stored token (`svc:<service>` credentials), for the
   // service access "Connect an agent" offers pre-ticked.
   const storedServices = (providerKeys.data ?? [])
@@ -323,12 +327,18 @@ export default async function ControlTowerPage() {
             initialProvider={firstStoredProvider}
             configuredProviders={configuredProviders}
             storedServices={storedServices}
+            defaultDailyLimitCents={defaultDailyLimitCents}
           />
-          <PassportIssuanceModal userId={user.id} integrations={SIDECAR_PRESETS.map(String)} />
+          <PassportIssuanceModal
+            userId={user.id}
+            integrations={SIDECAR_PRESETS.map(String)}
+            defaultDailyLimitCents={defaultDailyLimitCents}
+          />
         </div>
       }
     >
-        <section id="overview" aria-label="Fleet safety controls">
+        <HashLanding />
+        <section id="overview" className="scroll-mt-28" aria-label="Fleet safety controls">
         <GlobalKillSwitchBar
           initial={killObserved}
           failClosed={process.env.KILL_SWITCH_FAIL_CLOSED === "true"}
@@ -363,6 +373,7 @@ export default async function ControlTowerPage() {
           configuredProviders={configuredProviders}
           storedServices={storedServices}
           logsAvailable={logsAvailable}
+          defaultDailyLimitCents={defaultDailyLimitCents}
         />
 
         <FleetOverviewCards

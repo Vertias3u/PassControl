@@ -7,6 +7,7 @@ const { store, sets, redisMock, logFailOpenMock } = vi.hoisted(() => {
   const sets = new Map<string, Set<string>>();
   const redisMock = {
     get: vi.fn(async (k: string) => store.get(k) ?? null),
+    mget: vi.fn(async (...ks: string[]) => ks.map((k) => store.get(k) ?? null)),
     set: vi.fn(async (k: string, v: unknown) => { store.set(k, v); return "OK"; }),
     del: vi.fn(async (...ks: string[]) => { let n = 0; for (const k of ks) if (store.delete(k)) n++; return n; }),
     smembers: vi.fn(async (k: string) => [...(sets.get(k) ?? [])]),
@@ -17,6 +18,13 @@ const { store, sets, redisMock, logFailOpenMock } = vi.hoisted(() => {
 });
 vi.mock("../lib/state/redis", () => ({ redis: () => redisMock }));
 vi.mock("../lib/observability", () => ({ logFailOpen: logFailOpenMock }));
+// The durable record (0083) is out of scope here: nothing recorded, and every
+// tenant reads as loaded once it has been asked (tests/kill-record-rebuild.test.ts).
+vi.mock("../lib/state/kill-record", () => ({
+  loadKillRecords: async () => [],
+  saveKillRecord: async () => true,
+  deleteKillRecord: async () => true,
+}));
 
 import {
   readKillState,
@@ -91,7 +99,7 @@ describe("kill switch (Redis-backed)", () => {
   });
 
   it("fails open by default if Redis read throws (no block-everyone path)", async () => {
-    redisMock.get.mockRejectedValueOnce(new Error("redis down"));
+    redisMock.mget.mockRejectedValueOnce(new Error("redis down")); // the kill read is one MGET (0083)
     const s = await readKillState("userA");
     expect(s).toEqual({ platformKill: false, userKill: false, denylist: [] });
     expect(isBlocked(s, "anyAgent")).toBe(false);
@@ -103,7 +111,7 @@ describe("kill switch (Redis-backed)", () => {
   // kill-switch read failure BLOCK rather than pass through.
   it("fails CLOSED when KILL_SWITCH_FAIL_CLOSED=true (block on read failure)", async () => {
     process.env.KILL_SWITCH_FAIL_CLOSED = "true";
-    redisMock.get.mockRejectedValueOnce(new Error("redis down"));
+    redisMock.mget.mockRejectedValueOnce(new Error("redis down")); // the kill read is one MGET (0083)
     const s = await readKillState("userA");
     expect(isBlocked(s, "anyAgent")).toBe(true); // read failure => blocked
     expect(logFailOpenMock).toHaveBeenCalledOnce();

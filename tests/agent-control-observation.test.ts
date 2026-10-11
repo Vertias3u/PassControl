@@ -26,7 +26,7 @@ const mocks = vi.hoisted(() => {
       }),
     },
     fleetSetAgentSuspended: vi.fn(async () => ({ ok: true as const, value: { id: AGENT } })),
-    setTenantKill: vi.fn(async () => undefined),
+    setTenantKill: vi.fn(async () => ({ ok: true as const, value: { affected: 0, durable: true as boolean } })),
     observeKillState: vi.fn(async (): Promise<{ platform: boolean | null; tenant: boolean | null }> => ({ platform: false, tenant: true })),
     readSuspensionFlag: vi.fn(async (): Promise<boolean | null> => true),
     recordAdminAction: vi.fn(async () => undefined),
@@ -62,7 +62,7 @@ beforeEach(() => {
   mocks.agentRow.error = null;
   mocks.readSuspensionFlag.mockResolvedValue(true);
   mocks.fleetSetAgentSuspended.mockResolvedValue({ ok: true, value: { id: AGENT } });
-  mocks.setTenantKill.mockResolvedValue(undefined);
+  mocks.setTenantKill.mockResolvedValue({ ok: true, value: { affected: 0, durable: true } });
   mocks.observeKillState.mockResolvedValue({ platform: false, tenant: true });
 });
 
@@ -145,7 +145,15 @@ describe("observeAgentControl reads without changing anything", () => {
 
 describe("the fleet kill switch reports what it observed", () => {
   it("confirms arming only when the tenant flag reads armed", async () => {
-    expect(await setMasterKill(true)).toEqual({ requested: true, tenant: true, platform: false, confirmed: true });
+    expect(await setMasterKill(true)).toEqual({ requested: true, tenant: true, platform: false, confirmed: true, durable: true });
+    expect(mocks.recordAdminAction).toHaveBeenCalledOnce();
+  });
+
+  // 0083: a kill in force in Redis but not saved to the record is still a kill
+  // that was armed: audited, and reported as not saved rather than as a failure.
+  it("audits a kill that is in force but not saved, and reports it as not saved", async () => {
+    mocks.setTenantKill.mockResolvedValueOnce({ ok: true as const, value: { affected: 0, durable: false } });
+    expect(await setMasterKill(true)).toMatchObject({ confirmed: true, durable: false });
     expect(mocks.recordAdminAction).toHaveBeenCalledOnce();
   });
 

@@ -63,6 +63,16 @@ interface LogEntryBase {
     // opposite one: this clears by itself at the next boundary (the 402 carries
     // retry-after), a cumulative cap only clears when the owner raises it.
     | "blocked_budget_period"
+    // A DECLARED sub-agent used its per-session cap (C(b), 2026-10-10). The agent's
+    // main thread and other sub-agents keep running, and a new session starts at zero.
+    | "blocked_budget_subagent"
+    // Bet D: a WORKER's call. A link of its delegation chain used its cap...
+    | "blocked_budget_delegation"
+    // ...the owner revoked the delegation, or every delegation before a watermark...
+    | "blocked_delegation_revoked"
+    // ...or its state could not be vouched for (an unreadable revocation, a lost
+    // ledger). Fails closed by owner decision P2.3.
+    | "blocked_delegation_unavailable"
     | "blocked_endpoint"
     // A hosted tool PassControl does not price (Claude Code's advisor with an
     // unpriced model, tool search, an MCP toolset, OpenAI image generation, …).
@@ -218,16 +228,35 @@ interface LogEntryBase {
   lineage?: ClientLineage | null;
 }
 
-export type AuthMethod = "passport" | "passport_proof_per_request" | "direct_key";
+export type AuthMethod =
+  | "passport"
+  | "passport_proof_per_request"
+  | "direct_key"
+  // Bet D (0081): a WORKER under a delegation from the agent, on a bearer visa or a
+  // per-request proof made by the worker's key. `passportId` stays the ROOT passport.
+  | "delegated"
+  | "delegated_proof_per_request";
+
+/** The delegation a worker's call was made under. Required with a delegated method. */
+export type LogDelegation = {
+  jti: string;
+  actor: string;
+  chainHash: string;
+  links: string[];
+};
 
 type PassportLogIdentity = {
   /** Omitted keeps the passport writer compatible with the expansion migration. */
   authMethod?: Exclude<AuthMethod, "direct_key">;
   passportId: string;
   jti: string;
+  delegation?: LogDelegation;
   agentAccessKeyId?: never;
   credentialUseId?: never;
 };
+
+const isDelegatedMethod = (m: AuthMethod | undefined): m is "delegated" | "delegated_proof_per_request" =>
+  m === "delegated" || m === "delegated_proof_per_request";
 
 type DirectKeyLogIdentity = {
   authMethod: "direct_key";
@@ -240,6 +269,13 @@ type DirectKeyLogIdentity = {
 export type LogEntry = LogEntryBase & (PassportLogIdentity | DirectKeyLogIdentity);
 
 export async function writeLog(entry: LogEntry): Promise<void> {
+  // A delegated method with no delegation would be refused by 0081's shape check,
+  // and a delegation under a non-delegated method would read as the parent's own
+  // call. Neither is written.
+  if (entry.authMethod !== "direct_key" && isDelegatedMethod(entry.authMethod) !== Boolean(entry.delegation)) {
+    void captureError(new Error("agent_logs: delegated method and delegation disagree"), { route: "lib.log", code: "delegation_shape" }).catch(() => undefined);
+    return;
+  }
   const db = serviceClient();
   // Record annotation prevents the direct/passport identity branch from
   // becoming a structural UNION at the Supabase call. PostgREST receives one
@@ -316,6 +352,17 @@ export async function writeLog(entry: LogEntry): Promise<void> {
           // about a proof this request actually passed, not an identity default.
           ...(entry.authMethod === "passport_proof_per_request"
             ? { auth_method: "passport_proof_per_request" }
+            : {}),
+          // A worker's call (0081). Conditional like lineage: every other row
+          // names none of these, so a pre-0081 schema still accepts it.
+          ...(isDelegatedMethod(entry.authMethod) && entry.delegation
+            ? {
+                auth_method: entry.authMethod,
+                delegation_jti: entry.delegation.jti,
+                delegation_actor: entry.delegation.actor,
+                delegation_chain_hash: entry.delegation.chainHash,
+                delegation_links: entry.delegation.links,
+              }
             : {}),
           passport_id: entry.passportId,
           jti: entry.jti,

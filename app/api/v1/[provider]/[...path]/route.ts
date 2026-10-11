@@ -9,9 +9,9 @@
 export const runtime = "edge";
 
 import { waitUntil } from "@vercel/functions";
-import { readClientLineage } from "@/lib/client-lineage";
+import { readClientLineage, sessionStoppedMessage, subagentCapMessage } from "@/lib/client-lineage";
 import { verifyVisa } from "@/lib/auth/visa";
-import { readKillState } from "@/lib/state/killswitch";
+import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
 import {
   isSuspended,
   getCachedEndpoint,
@@ -31,6 +31,7 @@ import {
   type SettleResult,
   type DispatchPermissionResult,
 } from "@/lib/state/holds";
+import { readDelegationRevocation } from "@/lib/state/delegation";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
@@ -46,6 +47,8 @@ import {
   isResponsesEndpoint,
   secretGuardMode,
   subagentAllowlist,
+  subagentSessionCapCents,
+  sessionAlertCents,
 } from "@/lib/scope";
 import { filterModelListingToScope } from "@/lib/providers/model-listing";
 import {
@@ -73,7 +76,7 @@ import {
   type Usage,
   type UsageProtocol,
 } from "@/lib/usage/parseStream";
-import { writeLog, mirrorSpend } from "@/lib/log";
+import { writeLog, mirrorSpend, type AuthMethod } from "@/lib/log";
 import { outputLimitShape, requestedOutputTokens } from "@/lib/output-limit";
 import { serverSideToolUse, serverToolLabel, serverToolRefusalMessage } from "@/lib/providers/server-side-tools";
 import { periodStart, secondsUntilPeriodEnd, type PeriodKind, type PeriodLimit } from "@/lib/period";
@@ -113,6 +116,7 @@ import { rateLimit } from "@/lib/ratelimit";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 import { alertForGatewayStatus, notifyWorkspace } from "@/lib/alerts/workspace";
+import { noteSessionSpend } from "@/lib/alerts/session-spend";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 import {
   createSecretWatchStream,
@@ -123,6 +127,7 @@ import {
   secretRefusalMessage,
 } from "@/lib/secret-guard";
 import { forwardableAnthropicBeta } from "@/lib/providers/anthropic-beta";
+import { anthropicMessageControls } from "@/lib/providers/anthropic-message-controls";
 import { openrouterHoldMicrocents, openrouterModelSelectionField, withMaxPrice } from "@/lib/providers/openrouter";
 import { openrouterCeilingFor } from "@/lib/providers/openrouter-price";
 import { withReportedServiceTier } from "@/lib/providers/service-tier";
@@ -130,7 +135,7 @@ import {
   hostedToolPlan,
   hostedToolReserve,
   hostedToolTokens,
-  requestAdvisor,
+  requestAdvisors,
   totalWithHostedTools,
   withDefaultToolCaps,
 } from "@/lib/providers/hosted-tools";
@@ -143,6 +148,7 @@ import {
   type VisaScope,
 } from "@/lib/gateway/authenticate";
 import { PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S } from "@/lib/gateway/limits";
+import { unpricedUnderPeriodLimitMessage } from "@/lib/new-agent-spend-limit";
 
 
 const KEY_CACHE_TTL_S = 60;
@@ -742,7 +748,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   }
 
   // ── 1. Authenticate passport visa or Direct Agent Key ─────────────────────
-  const authentication = await authenticateGatewayRequest(req, provider);
+  // This route accepts a WORKER's visa (Bet D, ver 3): it is the one route that
+  // enforces a delegation's revocations and caps, below. No other door opts in.
+  const authentication = await authenticateGatewayRequest(req, provider, "api.proxy", { acceptDelegated: true });
   if (!authentication.ok) return authentication.response;
   const { principal, db, credentialToken } = authentication;
   const agentId = principal.agentId;
@@ -781,7 +789,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   let currentPolicySnapshot:
     | Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>>
     | null = null;
-  let passportAuthMethod: PassportAuthMethod = "passport";
+  // Wider than PassportAuthMethod: below, a worker's call becomes `delegated`.
+  let passportAuthMethod: Exclude<AuthMethod, "direct_key"> = "passport";
   // Only ever set by observe mode. Rides to the audit row and stops there.
   let senderProofWould: SenderProofObservation | undefined;
   if (principal.kind === "passport") {
@@ -796,6 +805,13 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     passportAuthMethod = senderConstraint.authMethod;
     senderProofWould = senderConstraint.would;
   }
+  // A worker acting under a signed delegation from this agent (Bet D). Same
+  // enforcement as any passport call, recorded under its own method, because a
+  // worker's call must never read as the agent's own (trust boundary 1).
+  const delegation = principal.kind === "passport" ? principal.delegation : undefined;
+  if (delegation) {
+    passportAuthMethod = passportAuthMethod === "passport_proof_per_request" ? "delegated_proof_per_request" : "delegated";
+  }
 
   // Built from the result of the authentication path, never from the flag.
   // This value is carried unchanged into both the signed receipt and audit row.
@@ -807,9 +823,17 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // completed.
   const lineage = readClientLineage(req.headers);
   const receiptIdentity =
-    principal.kind === "passport"
+    principal.kind === "passport" && delegation && (passportAuthMethod === "delegated" || passportAuthMethod === "delegated_proof_per_request")
       ? ({
           authMethod: passportAuthMethod,
+          passportId: principal.passportId,
+          visaJti: principal.visaJti,
+          delegation: { actor: delegation.actor, jti: delegation.jti, depth: delegation.depth, chainHash: delegation.chainHash },
+          lineage,
+        } as const)
+      : principal.kind === "passport"
+      ? ({
+          authMethod: passportAuthMethod === "passport_proof_per_request" ? "passport_proof_per_request" : "passport",
           passportId: principal.passportId,
           visaJti: principal.visaJti,
           lineage,
@@ -827,6 +851,16 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           passportId: principal.passportId,
           jti: principal.visaJti,
           lineage,
+          ...(delegation
+            ? {
+                delegation: {
+                  jti: delegation.jti,
+                  actor: delegation.actor,
+                  chainHash: delegation.chainHash,
+                  links: delegation.links.map((l) => l.dlg),
+                },
+              }
+            : {}),
         } as const)
       : ({
           authMethod: "direct_key",
@@ -911,7 +945,34 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // Two refusals hang off it and must agree — an unpriced model (the gate's
   // `endpoint:unpriced_model`) and an unpriced custom endpoint (step 5b) — so
   // both read this one value.
-  const dollarLimited = capMicrocents != null || livePeriod.mode === "set";
+  // C(b), owner 2026-10-10: a DECLARED sub-agent's cap per session, from the live
+  // policy. Only for a call that declares a sub-agent; the main agent is never
+  // under it. It is a dollar limit like the others, so unpriced models and
+  // endpoints are refused for that call, and the hold is fenced like K1's.
+  const subagentCapCents = lineage?.agent ? subagentSessionCapCents(currentPolicySnapshot.policy) : null;
+  const subLedger =
+    subagentCapCents != null && lineage?.agent
+      ? { session: lineage.session, agent: lineage.agent, capMicrocents: subagentCapCents * MICROCENTS_PER_CENT }
+      : undefined;
+  // Bet D: a worker's call always carries its delegation's caps, so it is
+  // dollar-limited even when the parent agent has no $ limit. Otherwise an unpriced
+  // model or endpoint would walk past the cap.
+  const delegationLedger = delegation
+    ? { links: delegation.links.map((l) => ({ jti: l.dlg, capMicrocents: l.cap })) }
+    : undefined;
+  const dollarLimited =
+    capMicrocents != null || livePeriod.mode === "set" || subLedger !== undefined || delegationLedger !== undefined;
+  // F1: when the periodic limit is the ONLY dollar limit, an unpriced refusal
+  // says so and where it is removed. New dashboard agents start with one ($20 a
+  // day), so the owner refused here usually never chose it. Any other dollar
+  // limit keeps the bare code: removing the period would not admit the call.
+  const unpricedReason =
+    livePeriod.mode === "set" && capMicrocents == null && subLedger === undefined && delegationLedger === undefined
+      ? unpricedUnderPeriodLimitMessage(livePeriod.kind, livePeriod.capMicrocents / MICROCENTS_PER_CENT)
+      : undefined;
+  // Candidate 3: the live policy's "session passed $X" threshold, in micro-cents.
+  const sessionAlertCentsValue = lineage ? sessionAlertCents(currentPolicySnapshot.policy) : null;
+  const sessionAlertThreshold = sessionAlertCentsValue == null ? null : sessionAlertCentsValue * MICROCENTS_PER_CENT;
   const policyRevision = effectiveLivePolicyRevision(
     currentPolicySnapshot.policy,
     scopes,
@@ -991,8 +1052,15 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     );
 
   // ── 2. Kill switch (Redis: platform + this tenant + denylist; Redis per-agent suspend) ──
-  const [kill, redisSuspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
-  const suspended = redisSuspended || principalSuspended(principal);
+  // The declared session rides in the same read (sprint T8): "session" means its
+  // owner stopped this one session, and the agent's other sessions run on.
+  const [kill, suspendRead] = await Promise.all([readKillState(userId), isSuspended(agentId, lineage?.session ?? null)]);
+  // A kill read that just reloaded the tenant's stops from the record (Redis had
+  // lost them) carries its session stops: the suspend read above ran in parallel
+  // against the empty Redis, so this is the call that used to get through.
+  const redisSuspended = withRecordedSessionStop(suspendRead, kill, agentId, lineage?.session ?? null);
+  const sessionStopped = redisSuspended === "session" && !principalSuspended(principal);
+  const suspended = redisSuspended !== false || principalSuspended(principal);
   const revocationGate = evaluateGate({
     agentId,
     killState: kill,
@@ -1007,8 +1075,45 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // Log and alert on the control that actually fired; answer the wire with the
     // single opaque code so a caller still cannot probe which one it tripped.
     logBlocked(blocked);
+    if (revocationGate.deniedBy === "suspend" && sessionStopped && lineage) {
+      // Only this session was stopped, by the agent's owner: say so, so the
+      // person in Claude Code sees why, and that a new session is not stopped.
+      // Kill and agent-level suspension above stay opaque.
+      captureBlocked(blocked, 403, "session");
+      return errR(403, "blocked_suspended", sessionStoppedMessage(lineage.session));
+    }
     captureBlocked(blocked, 403);
     return errR(403, "blocked_suspended");
+  }
+
+  // ── 2b. A worker's delegation: revoked, or past the agent's watermark ───────
+  // Its own read, NOT the kill switch's: that one fails open by default, and an
+  // unreadable revocation for a delegation fails CLOSED (owner decision P2.3). Kill
+  // and suspend above already cover the whole tree, since `agid` is the parent.
+  if (delegation) {
+    let revoked: boolean;
+    try {
+      revoked = await readDelegationRevocation(agentId, delegation.links);
+    } catch {
+      waitUntil(
+        captureError(new Error("delegation revocation unreadable"), {
+          route: "api.proxy",
+          method: req.method,
+          status: 503,
+          provider,
+          agentId,
+          jti,
+          code: "delegation_state_unavailable",
+        })
+      );
+      logBlocked("blocked_delegation_unavailable", undefined, 503);
+      return errR(503, "delegation_state_unavailable");
+    }
+    if (revoked) {
+      logBlocked("blocked_delegation_revoked");
+      captureBlocked("blocked_delegation_revoked", 403);
+      return errR(403, "delegation_revoked");
+    }
   }
 
   // ── 3. Per-agent request-rate limit (call-volume DoS / abuse guard) ─────────
@@ -1129,7 +1234,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // endpoint at step 5b, given here because it is known before the hold.
     logBlocked("blocked_unpriced_endpoint", model);
     captureBlocked("blocked_unpriced_endpoint", 402);
-    return errR(402, "unpriced_endpoint");
+    return errR(402, "unpriced_endpoint", unpricedReason);
   }
   if (
     prePolicyGate.deniedBy === "endpoint" &&
@@ -1140,7 +1245,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // the agent tried and can add a price or change the limit.
     logBlocked("blocked_unpriced_model", model);
     captureBlocked("blocked_unpriced_model", 402);
-    return errR(402, "unpriced_model");
+    return errR(402, "unpriced_model", unpricedReason);
   }
   if (prePolicyGate.deniedBy === "endpoint") {
     logBlocked("blocked_endpoint", model);
@@ -1194,7 +1299,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // body and its shape family, so checking it once covers failover too.
   const pricedAbove = dollarLimited && isProvider(provider) ? unpricedRequestOption(provider, bodyObj) : null;
   if (pricedAbove !== null) {
-    return new Response(JSON.stringify({ error: "unpriced_option", field: pricedAbove }), {
+    return new Response(JSON.stringify({ error: "unpriced_option", field: pricedAbove, ...(unpricedReason ? { message: unpricedReason } : {}) }), {
       status: 402,
       headers: { "content-type": "application/json" },
     });
@@ -1231,8 +1336,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // chooses; checking the advisor against it refused every sub-agent call of a
   // user with an advisor picked (seen live). Pure evaluation: the policy's hourly
   // counter was already taken once for this call above.
-  const advisor = provider === "anthropic" ? requestAdvisor(bodyObj) : null;
-  if (advisor) {
+  // Every advisor in tools[], not only the first (P6.3, 2026-10-10).
+  for (const advisor of provider === "anthropic" ? requestAdvisors(bodyObj) : []) {
     const { subagent: _subagentList, ...agentGate } = gateBase;
     const advisorGate = evaluateGate({
       ...agentGate,
@@ -1342,7 +1447,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // on its own — with no cap to protect, "unknown" must not become a new
   // denial path — but a budgeted agent passes it on, so the script can apply
   // the last limit it enforced.
-  const budgeted = capTokens != null || capMicrocents != null || livePeriod.mode === "set";
+  const budgeted =
+    capTokens != null ||
+    capMicrocents != null ||
+    livePeriod.mode === "set" ||
+    subLedger !== undefined ||
+    delegationLedger !== undefined;
   const budgetState = budgeted ? currentPolicyGate.budgetState : undefined;
   const periodLimit: PeriodLimit | undefined = budgeted ? livePeriod : undefined;
 
@@ -1566,7 +1676,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           ? openrouterHoldMicrocents(openrouterPrice, attemptUsage, bodyObj)
           : 0
         : // A request that asks Anthropic to cache holds its input at the write rate (P5.1).
-          holdMicrocents(attemptModel, attemptUsage, attemptProvider, bodyObj) +
+          // A prompt-tiered row holds at its short tier when the prompt, plus what
+          // hosted tools may add to it, is well under the line (2026-10-10).
+          holdMicrocents(attemptModel, attemptUsage, attemptProvider, bodyObj, { addedPromptTokens: toolReserve.tokens }) +
           toolReserve.microcents;
 
     // ── 5. Open the attempt's hold (atomic) ────────────────────────────────────
@@ -1591,6 +1703,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       ...(attemptModel ? { model: attemptModel } : {}),
       ...(budgetState ? { budgetState } : {}),
       ...(periodLimit ? { periodLimit } : {}),
+      // Every attempt, failover included: a fallback must not carry the sub-agent past its cap.
+      ...(subLedger ? { subLedger } : {}),
+      // Every attempt, failover included: a fallback spends against the same chain.
+      ...(delegationLedger ? { delegation: delegationLedger } : {}),
       nowMs: attemptNowMs,
     };
     let reserve = await openHold(holdArgs);
@@ -1709,6 +1825,14 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // out of the gate also keeps the gate's budget contract exactly "a cap
     // denied this" rather than widening it to a third meaning — so only
     // `tokens` / `cost` are ever passed in below.
+    if (!reserve.ok && reserve.reason === "delegation_state") {
+      // A link's ledger is gone. It is never recreated at zero (lib/state/holds.ts),
+      // so this delegation is refused until it expires. Fails closed, like P2.3.
+      if (!primary) return { kind: "skipped" };
+      logBlocked("blocked_delegation_unavailable", attemptModel, 503);
+      captureBlocked("blocked_delegation_unavailable", 503);
+      return { kind: "response", response: errR(503, "delegation_state_unavailable") };
+    }
     if (!reserve.ok && reserve.reason === "state") {
       // A fallback cannot rescue this: the counters are lost for the AGENT, not
       // for one provider, so every attempt would be refused identically.
@@ -1763,6 +1887,26 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         logBlocked("blocked_budget_period", attemptModel, 402);
         captureBlocked("blocked_budget_period", 402);
         return { kind: "response", response: periodRefusal(attemptNowMs) };
+      }
+      if (reserve.reason === "delegation" && delegationLedger) {
+        logBlocked("blocked_budget_delegation", attemptModel, 402);
+        captureBlocked("blocked_budget_delegation", 402);
+        return {
+          kind: "response",
+          response: errR(
+            402,
+            "blocked_budget_delegation",
+            "The most this call could cost, added to what this worker's delegation (or one above it) has already spent, would pass that delegation's spending cap. Ask the agent that delegated to it for a new delegation."
+          ),
+        };
+      }
+      if ((reserve.reason === "subagent" || reserve.reason === "subagent_ledgers") && subLedger) {
+        logBlocked("blocked_budget_subagent", attemptModel, 402);
+        captureBlocked("blocked_budget_subagent", 402);
+        return {
+          kind: "response",
+          response: errR(402, "blocked_budget_subagent", subagentCapMessage(reserve.reason, subLedger)),
+        };
       }
       logBlocked("blocked_budget", attemptModel, 402);
       captureBlocked("blocked_budget", 402);
@@ -2033,6 +2177,20 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         if (applied?.applied && (status === "ok" || status === "usage_unknown")) {
           tasks.push(mirrorSpend(agentId, applied.appliedTokens, applied.appliedMicrocents));
         }
+        // Candidate 3: "this session passed $X". The APPLIED charge only, never a
+        // replay's, so a session is not counted twice. Alerts, never refuses.
+        if (sessionAlertThreshold != null && lineage && applied?.applied && applied.appliedMicrocents > 0) {
+          tasks.push(
+            noteSessionSpend({
+              userId,
+              agentId,
+              session: lineage.session,
+              deltaMicrocents: applied.appliedMicrocents,
+              thresholdMicrocents: sessionAlertThreshold,
+              origin: new URL(req.url).origin,
+            })
+          );
+        }
         return Promise.all(tasks);
       })();
 
@@ -2123,7 +2281,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // reservation in full, so the momentary hold costs the agent nothing.
     if (custom && dollarLimited) {
       return terminal(
-        errR(402, "unpriced_endpoint"),
+        errR(402, "unpriced_endpoint", unpricedReason),
         reconcile(NO_USAGE, "blocked_unpriced_endpoint", "not_dispatched", 402)
       );
     }
@@ -2142,7 +2300,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         waitUntil(settle.done);
         return { kind: "skipped" };
       }
-      return terminal(errR(402, "unpriced_model"), settle);
+      return terminal(errR(402, "unpriced_model", unpricedReason), settle);
     }
 
     // ── 6. Resolve provider key (encrypted cache, else Vault RPC) ──────────────
@@ -2351,8 +2509,17 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // nor cost are passed. Set before the credential, which nothing can override.
     if (attemptProvider === "anthropic") {
       // The advisor's beta only when this attempt carries an advisor PassControl
-      // accepted and holds for (P4); the plan says so.
-      const beta = forwardableAnthropicBeta(req.headers.get("anthropic-beta"), { advisor: Boolean(toolPlan?.advisor) }).header;
+      // accepted and holds for (P4); the plan says so. Per-turn effort and tool
+      // changes inside `messages` only when the body sent uses them in a way the
+      // gateway checked (T3, lib/providers/anthropic-message-controls.ts). Auto
+      // mode's server-side checks likewise, for understood `safeguards` only (P7).
+      const controls = anthropicMessageControls(cappedBody);
+      const beta = forwardableAnthropicBeta(req.headers.get("anthropic-beta"), {
+        advisor: Boolean(toolPlan?.advisor),
+        perTurnEffort: controls.perTurnEffort,
+        toolChanges: controls.toolChanges,
+        safeguards: controls.safeguards,
+      }).header;
       if (beta) fwdHeaders.set("anthropic-beta", beta);
     }
     // OpenRouter credits traffic to the app these name; PassControl names itself,
@@ -2838,11 +3005,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // the next call going out, so an operator who arms the switch mid-failover
     // must not have it go out. One Redis round-trip, on a call that has already
     // failed.
-    const [freshKill, freshRedisSuspended] = await Promise.all([
+    const [freshKill, freshSuspendRead] = await Promise.all([
       readKillState(userId),
-      isSuspended(agentId),
+      isSuspended(agentId, lineage?.session ?? null),
     ]);
-    const freshSuspended = freshRedisSuspended || principalSuspended(principal);
+    const freshRedisSuspended = withRecordedSessionStop(freshSuspendRead, freshKill, agentId, lineage?.session ?? null);
+    const freshSuspended = freshRedisSuspended !== false || principalSuspended(principal);
     const revocation = evaluateGate({
       agentId,
       killState: freshKill,
@@ -3213,9 +3381,13 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       })
     );
 
-  // 2. Kill switch (platform + tenant + denylist; per-agent suspend).
-  const [kill, redisSuspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
-  const suspended = redisSuspended || principalSuspended(principal);
+  // 2. Kill switch (platform + tenant + denylist; per-agent suspend), and the
+  // declared session's stop, read exactly as the billed path reads it (sprint T8).
+  // The public demo's per-visitor Stop (F4) lands here.
+  const [kill, suspendRead] = await Promise.all([readKillState(userId), isSuspended(agentId, lineage?.session ?? null)]);
+  const redisSuspended = withRecordedSessionStop(suspendRead, kill, agentId, lineage?.session ?? null);
+  const sessionStopped = redisSuspended === "session" && !principalSuspended(principal);
+  const suspended = redisSuspended !== false || principalSuspended(principal);
   const revocationGate = evaluateGate({
     agentId,
     killState: kill,
@@ -3227,8 +3399,12 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   });
   if (revocationGate.deniedBy === "kill" || revocationGate.deniedBy === "suspend") {
     const blocked = revocationGate.deniedBy === "kill" ? "blocked_killed" : "blocked_suspended";
-    // Attribute in the log; keep the wire response opaque (see the other handler).
+    // Attribute in the log; keep the wire response opaque (see the other handler),
+    // except to say that only this session was stopped.
     logBlocked(blocked);
+    if (revocationGate.deniedBy === "suspend" && sessionStopped && lineage) {
+      return errR(403, "blocked_suspended", sessionStoppedMessage(lineage.session));
+    }
     return errR(403, "blocked_suspended");
   }
 

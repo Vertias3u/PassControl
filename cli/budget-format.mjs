@@ -74,3 +74,40 @@ export function budgetLines(self) {
   if (lines.length === 0) lines.push("No spending or token limit is set for this agent.");
   return lines;
 }
+
+/**
+ * Every limit as a [label, value] row, for the `/passcontrol` panel in Claude Code
+ * (`passcontrol statusline --panel`): "Today", "$0.42 of $10.00 · $9.58 left · resets in 7h".
+ */
+export function panelRows(self) {
+  const b = self?.budget ?? {};
+  const rows = [];
+  if (b.period && b.period.unknown) {
+    rows.push(["Limit", "could not be read right now"]);
+  } else if (b.period) {
+    const reset = resetsIn(b.period.resets_in_seconds);
+    rows.push([
+      PERIOD_LABEL[b.period.kind] ?? "This period",
+      `${formatUsd(b.period.used_microcents)} of ${formatUsd(b.period.limit_microcents)} · ${formatUsd(b.period.remaining_microcents)} left${reset ? ` · resets in ${reset}` : ""}`,
+    ]);
+  }
+  if (b.cost) {
+    rows.push(["Lifetime", `${formatUsd(b.cost.used_microcents)} of ${formatUsd(b.cost.limit_microcents)} · ${formatUsd(b.cost.remaining_microcents)} left`]);
+  }
+  if (b.tokens) {
+    rows.push(["Tokens", `${formatTokens(b.tokens.used)} of ${formatTokens(b.tokens.limit)} · ${formatTokens(b.tokens.remaining)} left`]);
+  }
+  if (rows.length === 0) rows.push(["Limit", "none set"]);
+  return rows;
+}
+
+/** Whether a limit has nothing left, so the gateway refuses calls until it resets or is raised. */
+export function limitReached(self) {
+  const b = self?.budget ?? {};
+  const spent = (left) => left !== null && left !== undefined && Number.isFinite(Number(left)) && Number(left) <= 0;
+  return Boolean(
+    (b.period && !b.period.unknown && spent(b.period.remaining_microcents)) ||
+      (b.cost && spent(b.cost.remaining_microcents)) ||
+      (b.tokens && spent(b.tokens.remaining))
+  );
+}

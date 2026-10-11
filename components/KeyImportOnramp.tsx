@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { ed25519 } from "@noble/curves/ed25519";
 import { ArrowRight, Check, KeyRound, Plus, ShieldCheck, Upload, X } from "lucide-react";
 import { completeKeyImport, completeKeyImportDirect, probeProviderKey } from "@/app/dashboard/actions-client";
+import { NewAgentSpendLimitField, useNewAgentSpendLimit } from "@/components/NewAgentSpendLimitField";
+import { DEFAULT_DAILY_LIMIT_CENTS } from "@/lib/new-agent-spend-limit";
 import {
   clientModelIsUsable,
   DEFAULT_CLIENT_MODELS,
@@ -41,9 +43,14 @@ export function KeyImportOnramp({
   userId,
   integrations,
   onRevealChange,
+  defaultDailyLimitCents = DEFAULT_DAILY_LIMIT_CENTS,
 }: {
   userId: string;
   integrations: string[];
+  /** This deployment's daily limit for a new agent, in cents (null: switched
+   *  off). Resolved on the server, so the form shows what the server applies. */
+  defaultDailyLimitCents?: number | null;
+
   /** Fired while this component is displaying a passport secret that exists
    *  nowhere else. The parent renders it inside a stage branch, so it must not
    *  advance that stage until this goes false. */
@@ -70,6 +77,7 @@ export function KeyImportOnramp({
   const [agentId, setAgentId] = useState("");
   const [issuedAt, setIssuedAt] = useState("");
   const [credential, setCredential] = useState<WorkerCredential>("direct");
+  const spendLimit = useNewAgentSpendLimit(defaultDailyLimitCents);
   const [directIssued, setDirectIssued] = useState<RevealedDirectAgent | null>(null);
   const [stored, setStored] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -171,6 +179,13 @@ export function KeyImportOnramp({
       setError("Model to call must be a concrete provider model id covered by the allowed models.");
       return;
     }
+    let limit: ReturnType<typeof spendLimit.choice>;
+    try {
+      limit = spendLimit.choice([{ provider }]);
+    } catch (cause) {
+      setError((cause as Error).message);
+      return;
+    }
     setBusy(true);
     setError(null);
     if (credential === "direct") {
@@ -182,6 +197,7 @@ export function KeyImportOnramp({
           name,
           keyName: DEFAULT_INSTALLATION_NAME,
           models: selectedModels,
+          ...limit,
         });
         setDirectIssued({ ...result, provider: result.provider, model: concreteModel });
         setHandoff("");
@@ -204,6 +220,7 @@ export function KeyImportOnramp({
         name,
         passportPubkey: publicId,
         models: selectedModels,
+        ...limit,
       });
       setPassportId(publicId);
       setPassportSecret(bytesToBase64url(privateKey));
@@ -432,6 +449,7 @@ export function KeyImportOnramp({
               <ModelChips models={otherShown} onAdd={addModel} label="Other models from this provider" />
             </details>
           ) : null}
+          <NewAgentSpendLimitField state={spendLimit} defaultCents={defaultDailyLimitCents} scopes={[{ provider }]} />
           <fieldset className="grid gap-2" data-section="worker-credential">
             <legend className={labelText}>Credential for this worker</legend>
             <label className="flex items-start gap-2 text-sm">

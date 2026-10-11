@@ -29,7 +29,7 @@ import { userClient } from "@/lib/supabase/server";
 import { LIMITS } from "@/lib/validate";
 import { SERVICE_CATALOG, isServiceId, serviceRefusal } from "@/lib/services/catalog";
 import { parseServiceRules } from "@/lib/services/rules";
-import { armServiceKill, observeServiceKill } from "@/lib/state/killswitch";
+import { observeServiceKill, setServiceKillDurably } from "@/lib/state/killswitch";
 import { logSecurityEvent } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
 
@@ -229,7 +229,7 @@ export async function setAgentServiceRules(
  * failed, which is "could not confirm", never "armed" or "clear".
  */
 export type ServiceKillObservation =
-  | { requested: boolean; armed: boolean | null; confirmed: boolean }
+  | { requested: boolean; armed: boolean | null; confirmed: boolean; durable?: boolean }
   | { error: string };
 
 // A stop must always be reachable, so this asks only that the operator is
@@ -250,8 +250,10 @@ export async function setServiceKill(service: string, on: boolean): Promise<Serv
   if (!userId) return { error: "Sign in again to change this." };
   const requested = on === true;
   let applied = false;
+  let durable: boolean | undefined;
   try {
-    await armServiceKill(userId, service, requested);
+    // Redis and the durable record (0083); `durable: false` is reported, not thrown.
+    ({ durable } = await setServiceKillDurably(userId, service, requested));
     applied = true;
   } catch {
     // Reported through the read-back: "could not confirm", not an exception.
@@ -263,7 +265,7 @@ export async function setServiceKill(service: string, on: boolean): Promise<Serv
   }
   const armed = await observeServiceKill(userId, service);
   revalidatePath("/dashboard/services");
-  return { requested, armed, confirmed: armed === requested };
+  return { requested, armed, confirmed: armed === requested, ...(durable === undefined ? {} : { durable }) };
 }
 
 /** Read-only re-check of one service's stop, behind "Refresh status". */

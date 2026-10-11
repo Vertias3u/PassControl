@@ -32,6 +32,10 @@ const CONFIG: Record<StatusType, { Icon: typeof CheckCircle2; tone: Tone }> = {
   suspended: { Icon: AlertCircle, tone: "warning" },
   blocked_budget: { Icon: AlertCircle, tone: "warning" },
   blocked_budget_period: { Icon: AlertCircle, tone: "warning" },
+  blocked_budget_subagent: { Icon: AlertCircle, tone: "warning" },
+  blocked_budget_delegation: { Icon: AlertCircle, tone: "warning" },
+  blocked_delegation_revoked: { Icon: AlertCircle, tone: "warning" },
+  blocked_delegation_unavailable: { Icon: AlertCircle, tone: "warning" },
   blocked_scope: { Icon: AlertCircle, tone: "warning" },
   // Distinct from a scope violation: the visa's scope allowed this call and a
   // policy rule on the agent refused it anyway.

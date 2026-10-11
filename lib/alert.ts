@@ -25,6 +25,8 @@ const SEVERITY: Record<string, Severity> = {
   "killswitch.master": "critical", // platform-wide kill toggled (see fields.on)
   "killswitch.service": "warning", // one service stopped or resumed for a workspace (see fields.service, fields.on)
   "agent.suspend": "warning", // an agent was suspended
+  "agent.session_stop": "warning", // one session of an agent was stopped or resumed (see fields.stopped)
+  "agent.delegation_revoke": "warning", // a worker's delegation was revoked (fields.jti), or all of them (fields.all)
   // Which key can speak for an agent changed. An operator who did NOT do this
   // needs to hear about it now — a rotation an attacker performs hands them the
   // agent and locks the owner out at the end of the grace window.

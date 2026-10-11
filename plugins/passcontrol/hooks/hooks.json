@@ -1,0 +1,17 @@
+{
+  "description": "Answers /passcontrol on this machine, without calling the model.",
+  "hooks": {
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/panel.mjs"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

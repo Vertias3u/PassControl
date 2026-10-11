@@ -1,0 +1,33 @@
+{
+  "_comment": "DOC-DERIVED, not captured. Shapes from platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages ('Define tools in a message (beta)', read 2026-10-09): a role 'system' message whose content holds tool_addition / tool_removal blocks. The definition is 'a tools entry, such as a custom tool or an Anthropic-defined client or server tool' or an mcp_toolset; by-reference blocks name a tool already in tools[] (tool_reference) or an MCP connector tool (mcp_tool_reference, mcp_toolset_reference). Header: inline-tools-2026-09-15 (by value and by reference); mid-conversation-tool-changes-2026-07-01 covers by-reference only. Claude Code 2.1.295 sends tool_addition for MCP tools that connect late (mcp_late_tool_additions, behind a feature gate); two local capture runs got none, the owner's live session on 2026-10-09 got Anthropic's 'tool_addition blocks require anthropic-beta: inline-tools-2026-09-15'.",
+  "by_value_custom": {
+    "role": "system",
+    "content": [
+      {
+        "type": "tool_addition",
+        "tool": {
+          "type": "tool_definition",
+          "definition": {
+            "name": "mcp__slow__slow_echo",
+            "description": "Echo text back.",
+            "input_schema": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }
+          }
+        }
+      }
+    ]
+  },
+  "by_reference": {
+    "role": "system",
+    "content": [{ "type": "tool_addition", "tool": { "type": "tool_reference", "name": "get_weather" } }]
+  },
+  "removal": {
+    "role": "system",
+    "content": [{ "type": "tool_removal", "tool": { "type": "tool_reference", "name": "get_weather" } }]
+  },
+  "mcp_toolset_definition": {
+    "role": "system",
+    "content": [
+      { "type": "tool_addition", "tool": { "type": "tool_definition", "definition": { "type": "mcp_toolset", "mcp_server_name": "calendar" } } }
+    ]
+  }
+}

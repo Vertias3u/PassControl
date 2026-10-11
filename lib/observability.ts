@@ -6,6 +6,8 @@ type SentryModule = typeof import("@sentry/nextjs");
 type SafeScalar = string | number | boolean;
 type FailOpenScope =
   | "kill_read"
+  // The kill switches' durable record (0083), read when a tenant's Redis copy is missing.
+  | "kill_record_read"
   | "suspend_read"
   | "ratelimit"
   | "lockout"

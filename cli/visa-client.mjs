@@ -53,7 +53,11 @@ export function createVisaClient({
     });
 
     if (!response.ok) {
-      throw new Error(formatChallengeError(response.status, await response.text()));
+      // The status travels with the error: the sidecar waits out a gateway that is
+      // not answering yet (5xx) and stops at once on one that refuses (4xx).
+      throw Object.assign(new Error(formatChallengeError(response.status, await response.text())), {
+        status: response.status,
+      });
     }
 
     const data = await response.json();

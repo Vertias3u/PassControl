@@ -33,8 +33,11 @@ import { AgentServiceAccess } from "@/components/AgentServiceAccess";
 import { ServiceLogo } from "@/components/ServiceLogo";
 import { readAgentServiceAccess } from "./service-access-data";
 import { AgentSectionNav, type AgentNavGroup } from "@/components/dashboard/AgentSectionNav";
+import { WorkersPanel } from "@/components/WorkersPanel";
+import { readAgentDelegations } from "./workers-data";
 import { SERVICE_CATALOG, ruleShapeFor } from "@/lib/services/catalog";
 import { DISPLAYED_SERVICES, SERVICE_DISPLAY } from "@/lib/services/display";
+import { HashLanding } from "@/components/HashLanding";
 
 export const dynamic = "force-dynamic";
 
@@ -236,6 +239,8 @@ export default async function AgentPassportPage({
   // The exported card carries real colour values, so the accent has to reach it as
   // data — it cannot read var(--pc-brand) through an image serialisation.
   const firstVisa = passport.visas[0];
+  // Bet D: only a passport can delegate, so a Direct-Key-only agent has no workers.
+  const delegations = passport.agent.passportId ? await readAgentDelegations(user.id, passport.agent.id) : null;
 
   // The section nav's three groups. Operate is the identity's live status, and
   // break glass is temporary access, so neither needs a group of its own.
@@ -248,6 +253,7 @@ export default async function AgentPassportPage({
         { href: "#agent-overview", label: "Overview" },
         { href: "#agent-identity", label: "Credentials" },
         ...(passport.directKeys.length > 0 ? [{ href: "#agent-setup" as const, label: "Setup" }] : []),
+        ...(passport.agent.passportId ? [{ href: "#agent-workers" as const, label: "Workers", ariaLabel: "Delegated workers" }] : []),
       ],
     },
     {
@@ -303,6 +309,7 @@ export default async function AgentPassportPage({
             Every section id is unchanged: refusal messages, the fleet table and
             the services page deep-link to them. */}
         <AgentSectionNav groups={navGroups} />
+        <HashLanding />
 
         <AgentOperatingHeader
           serviceAccess={serviceAccess.map(({ label, access }) => ({
@@ -377,6 +384,12 @@ export default async function AgentPassportPage({
           status={passport.agent.status}
           keys={passport.directKeys}
         />
+        {/* With identity: a worker acts under a narrower slice of this agent's passport. */}
+        {passport.agent.passportId ? (
+          <div id="agent-workers" className="scroll-mt-40">
+            <WorkersPanel agentId={passport.agent.id} delegations={delegations} />
+          </div>
+        ) : null}
         <div id="agent-policy" className="scroll-mt-40">
         <AgentPolicySummary policy={passport.policy} />
         </div>

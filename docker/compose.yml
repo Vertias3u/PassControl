@@ -8,7 +8,8 @@
 #
 # Bring up:   docker compose -f docker/compose.yml up -d
 # Spike:      node scripts/srh-spike.mjs
-# Tear down:  docker compose -f docker/compose.yml down -v
+# Stop:       docker compose -f docker/compose.yml down      (Redis data kept)
+# Tear down:  docker compose -f docker/compose.yml down -v   (also wipes Redis)
 #
 # NOTE: Supabase (Postgres + Vault + Auth) is NOT here — it's run via the Supabase
 # CLI (`supabase start`), the official Docker stack CI already uses. This file only
@@ -16,7 +17,18 @@
 services:
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Persistent: an append-only file, flushed every second, on a NAMED volume.
+    # Redis holds the gateway's running state (budget counters and holds, the
+    # kill switch, nonces). Memory-only, every Docker restart emptied it, and an
+    # agent with a dollar limit whose budget state is gone fails closed
+    # (`blocked_budget_state`) until rebuilt. Named, not anonymous, because
+    # `down` (passcontrol stop) keeps a named volume; `down -v` (passcontrol
+    # reset --local) removes it. A hard crash can lose about the last second.
+    # RDB snapshots stay off: the append-only file is the one copy.
+    # Pinned by tests/local-redis-persistence.test.ts.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", ""]
+    volumes:
+      - redis-data:/data
     restart: unless-stopped
 
   srh:
@@ -40,3 +52,6 @@ services:
       # (scripts/dev-stack.sh, and the CLI's `setup --port-offset`).
       - "127.0.0.1:${PASSCONTROL_SRH_PORT:-8079}:80"
     restart: unless-stopped
+
+volumes:
+  redis-data:

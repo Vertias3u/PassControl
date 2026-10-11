@@ -244,6 +244,10 @@ export function AgentSetupPanel({
               <code>402 blocked_budget_period</code> — this agent&apos;s daily or monthly limit is used up for the
               current UTC period. The <code>retry-after</code> header says how many seconds until it resets.
             </li>
+            <li data-failure="blocked_budget_subagent">
+              <code>402 blocked_budget_subagent</code> — a sub-agent used the per-session cap this agent&apos;s policy
+              sets for each sub-agent. The main agent and other sub-agents keep running; a new session starts at zero.
+            </li>
             <li data-failure="authentication_unavailable">
               <code>503 authentication_unavailable</code> or <code>authentication_rate_limit_unavailable</code> —
               PassControl could not check the key right now. Nothing was forwarded and no call record is written;

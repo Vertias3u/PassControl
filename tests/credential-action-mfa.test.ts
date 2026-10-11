@@ -145,7 +145,9 @@ describe("credential-minting Server Actions clear the strict MFA gate", () => {
     // ungated Suspend/kill switch stops a leaking Direct Agent Key immediately.
     const gateway = readFileSync(join(process.cwd(), "app/api/v1/[provider]/[...path]/route.ts"), "utf8");
     expect(gateway).toMatch(/readKillState\(userId\)/);
-    expect(gateway).toMatch(/isSuspended\(agentId\)/);
+    // `isSuspended(agentId, session)` since T8/F4: the agent's suspension is read
+    // first, and a declared session can only add a stop, never lift one.
+    expect(gateway).toMatch(/isSuspended\(agentId(\)|, lineage\?\.session \?\? null\))/);
     // Both of those stops are ungated Server Actions (asserted above), and they
     // reach the key because a Direct Agent Key is bound to exactly one agent row —
     // suspending that agent suspends every key issued against it.

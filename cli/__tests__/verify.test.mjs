@@ -151,9 +151,9 @@ describe("verifying a receipt from the CLI", () => {
     expect(result).toMatchObject({ ok: true });
   });
 
-  it("rejects a receipt newer than v2", async () => {
+  it("rejects a receipt newer than v3", async () => {
     const result = await verifyReceipt(
-      sign({ iss: ISSUER, jti: "future", ver: 3 }, RECEIPT_TYP),
+      sign({ iss: ISSUER, jti: "future", ver: 4 }, RECEIPT_TYP),
       { issuer: ISSUER, fetch: jwksFetch() }
     );
     expect(result).toMatchObject({ ok: false, reason: "unsupported_version" });

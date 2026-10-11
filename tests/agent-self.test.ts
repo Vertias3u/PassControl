@@ -235,4 +235,44 @@ describe("the same door as a model call", () => {
     });
     expect((await get({ "x-api-key": key })).status).toBe(403);
   });
+
+  // F3 (2026-10-10): `/passcontrol` in Claude Code asks /self whether calls are
+  // being refused. A session its owner stopped is refused at the proxy but used to
+  // read as healthy here, so the plugin would have shown a normal budget while every
+  // call failed. The caller names its session the way Claude Code does on every call.
+  describe("a stopped session", () => {
+    const session = "4345f899-3d2f-4f58-a021-2765be8b85c2";
+    const asSession = { authorization: "Bearer visa.token.value", "x-claude-code-session-id": session };
+
+    it("is refused with the proxy's own session message, for that session only", async () => {
+      h.isSuspended.mockImplementation(async (_agent: string, s?: string | null) => (s === session ? "session" : false));
+      const res = await get(asSession);
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toBe("blocked_suspended");
+      expect(body.message).toContain(`stopped this session (${session})`);
+      expect(h.isSuspended).toHaveBeenCalledWith(AGENT, session);
+      expect(h.readBudgetSnapshot).not.toHaveBeenCalled();
+      // The same agent without that session reads its budget as before.
+      expect((await get()).status).toBe(200);
+    });
+
+    it("is refused the first time after Redis lost it, from the durable record (0083)", async () => {
+      h.readKillState.mockResolvedValue({
+        platformKill: false, userKill: false, denylist: [],
+        recordedSessionStops: [{ agentId: AGENT, sessionId: session }],
+      });
+      const res = await get(asSession);
+      expect(res.status).toBe(403);
+      expect((await res.json()).message).toContain("stopped this session");
+    });
+
+    it("stays opaque when the whole agent is suspended or the tenant killed", async () => {
+      h.isSuspended.mockResolvedValue(true);
+      expect(await (await get(asSession)).json()).toEqual({ error: "blocked_suspended" });
+      h.isSuspended.mockResolvedValue("session");
+      h.readKillState.mockResolvedValue({ platformKill: false, userKill: true, denylist: [] });
+      expect(await (await get(asSession)).json()).toEqual({ error: "blocked_suspended" });
+    });
+  });
 });

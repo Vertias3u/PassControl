@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { retryOnDeadlock } from "./db-deadlock-retry";
 
 /**
  * 0077: once sign-up is open, most accounts never had a beta application, and
@@ -16,7 +17,7 @@ const MIGRATION = readFileSync(
   "utf8"
 );
 
-function tryPsql(sql: string): { ok: boolean; out: string } {
+function tryPsqlOnce(sql: string): { ok: boolean; out: string } {
   try {
     const out = execFileSync(
       "docker",
@@ -28,6 +29,9 @@ function tryPsql(sql: string): { ok: boolean; out: string } {
     const e = error as { stderr?: Buffer | string; stdout?: Buffer | string };
     return { ok: false, out: String(e.stderr ?? "") + String(e.stdout ?? "") };
   }
+}
+function tryPsql(sql: string): { ok: boolean; out: string } {
+  return retryOnDeadlock(() => tryPsqlOnce(sql));
 }
 
 const up = tryPsql("select 1 from public.beta_feedback limit 1;").ok;

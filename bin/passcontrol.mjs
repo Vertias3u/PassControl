@@ -90,13 +90,15 @@ import {
 import { isLocalGatewayOrigin, probeGatewayVersion, probeTimeoutMs } from "../cli/gateway-probe.mjs";
 import { dashboardOriginForOffset, portHolders, stackPortConflictMessage } from "../cli/local-stack.mjs";
 import { startSidecar } from "../cli/sidecar.mjs";
+import { listProfiles, profilePath, readProfile, TOOL_PROFILE_PORTS, writeProfile } from "../cli/profiles.mjs";
 import {
   claudeCodeEnv,
   claudeCodeSettingsPath,
   removeClaudeCodeSettings,
   writeClaudeCodeSettings,
 } from "../cli/claude-code.mjs";
-import { statuslineText } from "../cli/statusline.mjs";
+import { notInPathText, sidecarFromBaseUrl, statusPanelText, statuslineText } from "../cli/statusline.mjs";
+import { runWatch } from "../cli/watch.mjs";
 import { CODEX_PROFILE, codexProfilePath, codexProfileToml, codexStoresApiKey, removeCodexProfile, writeCodexProfile } from "../cli/codex.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
@@ -208,6 +210,8 @@ ${heading("Quick start")}
   ${cmd} mcp                      passport identity for Claude Desktop, Cursor, Claude Code
   ${cmd} sidecar [--port 8788] [--allow-connect host[,host]] [--ollama-port 11435] [--no-journal]
                                  passport identity for any tool that takes an api_key
+  ${cmd} sidecar --profile <name> | --profiles a,b
+                                 run a coding tool's own sidecar (or several, one process)
 
 ${heading("Operate")}
   ${cmd} status [--no-network] [--json]
@@ -223,6 +227,7 @@ ${heading("Operate")}
 
 ${heading("Manage")}
   ${cmd} agent list [--json]      list agents
+  ${cmd} profile list [--json]    show the profiles: one identity per coding tool
   ${cmd} agent create <name> [--write]
                                  create an agent passport (--write saves it here)
   ${cmd} agent rotate <id> [--grace <seconds>]
@@ -230,6 +235,10 @@ ${heading("Manage")}
   ${cmd} agent suspend <id>       suspend an agent
   ${cmd} agent resume <id>        resume an agent
   ${cmd} agent revoke <id>        permanently revoke an agent
+  ${cmd} agent delegations <id> [--json]
+                                 list the delegations its workers have used
+  ${cmd} agent revoke-delegation <id> <jti>|--all
+                                 permanently revoke one delegation, or all before now
   ${cmd} spend [--json]           show fleet and per-agent spend
   ${cmd} audit [--limit 20] [--json]
                                  show operator audit history
@@ -240,8 +249,10 @@ ${heading("Manage")}
   ${cmd} sessions [--agent ID] [--limit 20] [--json]
                                  list Claude Code / Codex sessions (declared by the client)
   ${cmd} seal <session> --agent ID [--out FILE]
-  ${cmd} statusline [--port 8788]   one line for Claude Code's status line (configure claude-code --statusline)
                                  sign one session; save the seal and its receipts
+  ${cmd} statusline [--port 8788]   one line for Claude Code's status line (configure claude-code --statusline)
+  ${cmd} statusline --panel [--session <id>]   the longer view the Claude Code plugin's /passcontrol shows
+  ${cmd} watch [--port 8788]      a live board of each call the sidecar relays (read-only)
   ${cmd} kill on|off              toggle the tenant kill switch
   ${cmd} export [--out FILE]      save a workspace configuration snapshot
   ${cmd} import <file> [--confirm IMPORT]
@@ -249,7 +260,7 @@ ${heading("Manage")}
 
 ${heading("Integrate")}
   ${cmd} env [integration]        print settings without writing anything
-  ${cmd} configure <integration> [--write] [--force]
+  ${cmd} configure <integration> [--write] [--force] [--dedicated]
                                  preview or write integration config
   integrations: ${integrationChoices()}
 
@@ -302,6 +313,8 @@ ${heading("Usage:")}
   ${cmd} agent suspend <id>
   ${cmd} agent resume <id>
   ${cmd} agent revoke <id>
+  ${cmd} agent delegations <id> [--json]
+  ${cmd} agent revoke-delegation <id> <jti>|--all
 
 ${heading("Examples")}
   ${cmd} agent create prod-summarizer --provider anthropic --scope 'claude-*'
@@ -373,6 +386,7 @@ async function printCockpit({ noNetwork = false, json = false } = {}) {
       app: { state: app },
       config: {
         source: configFile,
+        profile: config.profile,
         provider: config.provider,
         model: config.model,
         passport_configured: passportConfigured,
@@ -2273,9 +2287,66 @@ async function agentCommand(rest, opts) {
       step("passport instead, and leaves this one working everywhere it already runs.");
       break;
     }
+    // An agent's signed delegations to its workers (Bet D). A delegation is made
+    // offline, so the gateway knows a link only once a worker has exchanged it; the
+    // listing says so, and --all is the tool that reaches the ones never seen.
+    case "delegations": {
+      if (!args[0]) throw new Error("Usage: passcontrol agent delegations <agent-id> [--json]");
+      const rows = await api("GET", `/agents/${encodeURIComponent(args[0])}/delegations`);
+      if (opts.json) {
+        console.log(JSON.stringify(rows, null, 2));
+        break;
+      }
+      step("Only delegations a worker has used appear here. A delegation is signed offline, so the");
+      step("gateway learns of it at its first exchange; `revoke-delegation --all` also reaches unseen ones.");
+      if (!Array.isArray(rows) || rows.length === 0) {
+        step("No worker has used a delegation from this agent yet.");
+        break;
+      }
+      // Server text reaches a terminal: keep it to printable ASCII.
+      const printable = (v) => String(v ?? "").replace(/[^\x20-\x7e]/g, "?").slice(0, 64);
+      const now = Date.now();
+      console.table(
+        rows.map((d) => ({
+          jti: printable(d.jti),
+          depth: d.depth,
+          status: d.revoked ? "revoked" : Date.parse(d.expires_at) <= now ? "expired" : "active",
+          worker: `${printable(d.worker_key).slice(0, 12)}…`,
+          cap: usd(d.cap_microcents),
+          models: Array.isArray(d.scope)
+            ? d.scope.map((s) => `${printable(s?.provider)}:${(Array.isArray(s?.models) ? s.models : []).map(printable).join("|")}`).join(", ")
+            : "",
+          expires: printable(d.expires_at).slice(0, 19),
+          "first used": printable(d.first_exchanged_at).slice(0, 19),
+        }))
+      );
+      break;
+    }
+    case "revoke-delegation": {
+      const usage = "Usage: passcontrol agent revoke-delegation <agent-id> <jti>|--all";
+      const [agentId, jti] = args;
+      const all = opts.all === true;
+      if (!agentId || all === Boolean(jti)) throw new Error(usage);
+      const result = await api(
+        "POST",
+        `/agents/${encodeURIComponent(agentId)}/delegations/revoke`,
+        all ? { all: true } : { jti }
+      );
+      ok(
+        all
+          ? `revoked every delegation agent ${agentId} issued before now, seen or not`
+          : `revoked delegation ${jti} and every delegation under it`
+      );
+      step("This is permanent. To let a worker go on, the agent delegates to it again.");
+      if (result?.immediate === false) {
+        step("Recorded, but the gateway's fast copy could not be written: a worker holding a current");
+        step("visa can keep calling until that visa expires (5 minutes by default).");
+      }
+      break;
+    }
     default:
       throw new Error(
-        "Usage: passcontrol agent list|create <name>|suspend <id>|resume <id>|revoke <id>|rotate <id> [--grace <seconds>]"
+        "Usage: passcontrol agent list|create <name>|suspend <id>|resume <id>|revoke <id>|rotate <id> [--grace <seconds>]|delegations <id>|revoke-delegation <id> <jti>|--all"
       );
   }
 }
@@ -2368,6 +2439,31 @@ async function sidecarCommand(rest, opts) {
   // sidecar mints on demand for the lifetime of the process, so a bad
   // destination has to be refused at start, not at the first proxied request.
   const gateway = requirePassportGateway(config);
+  if (opts.profiles) {
+    // Several identities, one process: one listener per profile, each with its own
+    // passport, visa and journal (candidate 4). One terminal, one Ctrl-C.
+    const names = String(opts.profiles).split(",").map((n) => n.trim()).filter(Boolean);
+    for (const name of names) {
+      const values = readProfile(name);
+      if (!values?.PASSPORT_ID || !values?.PASSPORT_SECRET) {
+        throw new Error(`Profile ${name} has no passport. Create it with ${cliCommand(`configure ${name} --dedicated --write`)}.`);
+      }
+      step(`Profile ${name}:`);
+      startSidecar({
+        gateway,
+        passportId: values.PASSPORT_ID,
+        passportSecret: values.PASSPORT_SECRET,
+        keyStorage: null,
+        port: sidecarPort({ port: values.SIDECAR_PORT }),
+        host: String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1"),
+        allowNonLoopback: Boolean(opts.allowNonLoopback),
+        allowConnectHosts: [],
+        refreshSkewSeconds: Number(opts.refreshSkewSeconds ?? process.env.REFRESH_SKEW_SECONDS ?? 30),
+        noJournal: opts.journal === false || Boolean(opts.noJournal),
+      });
+    }
+    return;
+  }
   const { passportId, passportSecret, keyStorage } = requirePassport(config);
   startSidecar({
     gateway,
@@ -2427,6 +2523,17 @@ function sidecarPort(opts = {}) {
 async function statuslineCommand(opts) {
   try {
     const port = sidecarPort(opts);
+    // `--panel`: the several-line view `/passcontrol` shows in Claude Code (F3).
+    // Without --port, the sidecar Claude Code's own ANTHROPIC_BASE_URL names.
+    if (opts.panel) {
+      const route = opts.port === undefined ? sidecarFromBaseUrl(process.env.ANTHROPIC_BASE_URL) : null;
+      if (route?.remote) return notInPathText(route.remote);
+      return await statusPanelText({
+        port: route?.port ?? port,
+        gateway: config.gateway,
+        session: typeof opts.session === "string" ? opts.session : null,
+      });
+    }
     const cacheFile = path.join(path.dirname(globalConfigPath()), `statusline-${port}.json`);
     return await statuslineText({ port, cacheFile });
   } catch (error) {
@@ -2482,7 +2589,9 @@ function passControlMcpEntry() {
 }
 
 function printMcpPreset(integration, opts = {}) {
-  requireGlobalMcpPassport();
+  // Claude Code's lines only point it at the sidecar, which holds the passport (as in
+  // configureMcpClient); the MCP clients below launch `passcontrol mcp`, which needs it.
+  if (integration !== "claude-code") requireGlobalMcpPassport();
   if (integration === "claude-code") {
     const { baseUrl } = sidecarBaseUrl({ ...opts, provider: "anthropic" });
     console.log("# Route Claude Code's model calls through the sidecar (start it first):");
@@ -2709,6 +2818,68 @@ function printCodexPreset(opts = {}) {
  * Codex layers over its config when started with `--profile passcontrol`.
  * `--remove` deletes that file, and only when PassControl wrote it.
  */
+// ── One identity per coding tool (candidate 4, plans/one-identity-per-tool.md) ──
+//
+// `configure <tool> --dedicated` gives Claude Code or Codex its OWN agent: its own
+// passport, budget, scope and kill switch, served by its own sidecar port, kept in
+// a named profile (cli/profiles.mjs). Re-running reuses the profile; it never
+// creates a second agent.
+async function prepareDedicatedProfile(tool, opts) {
+  const port = TOOL_PROFILE_PORTS[tool];
+  opts.port = port;
+  const existing = readProfile(tool);
+  if (existing?.PASSPORT_ID && existing?.PASSPORT_SECRET) {
+    opts.port = Number(existing.SIDECAR_PORT || port);
+    step(`Using the ${tool} profile's own agent (passport …${existing.PASSPORT_ID.slice(-8)}), sidecar port ${opts.port}.`);
+    return;
+  }
+  const label = tool === "claude-code" ? "Claude Code" : "Codex";
+  const provider = tool === "claude-code" ? "anthropic" : "openai";
+  const name = `${label} @ ${os.hostname().split(".")[0] || "this machine"}`;
+  if (!opts.write) {
+    step(`With --write: creates the agent "${name}" with its own passport, saved in the ${tool} profile, served on sidecar port ${port}.`);
+    return;
+  }
+  requireControlApiKey(config);
+  // The keypair is made here and only the public half leaves, as in `agent create`.
+  // The profile is written FIRST, so a created agent never exists without its key on
+  // this machine; if creating it fails, the profile is removed again.
+  const priv = ed25519.utils.randomPrivateKey();
+  const passportId = b64url(ed25519.getPublicKey(priv));
+  writeProfile(tool, { PASSPORT_ID: passportId, PASSPORT_SECRET: b64url(priv), PASSPORT_KEY_STORAGE: "", SIDECAR_PORT: String(port) });
+  let created;
+  try {
+    created = await api("POST", "/agents", {
+      name,
+      passportPubkey: passportId,
+      scopes: [{ provider, models: [defaultAllowedModelForProvider(provider)] }],
+    });
+  } catch (error) {
+    fs.rmSync(profilePath(tool), { force: true });
+    throw error;
+  }
+  ok(`created agent ${created.id} (${created.name}); its passport is in the ${tool} profile and was not printed`);
+}
+
+function dedicatedSidecarHint(tool) {
+  step(`Run its own sidecar: ${cliCommand(`sidecar --profile ${tool}`)}`);
+  step(`Both coding tools at once, each as its own agent: ${cliCommand("sidecar --profiles claude-code,codex")}`);
+}
+
+function profileCommand(rest, opts) {
+  if (rest[0] !== "list") throw new Error("Usage: passcontrol profile list");
+  const rows = listProfiles().map((p) => ({ profile: p.name, passport: p.passportId ? `…${p.passportId.slice(-8)}` : "none", port: p.port || "-" }));
+  if (opts.json) {
+    console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (!rows.length) {
+    step(`No profiles yet. Give a coding tool its own agent: ${cliCommand("configure claude-code --dedicated --write")}`);
+    return;
+  }
+  for (const r of rows) console.log(`${r.profile.padEnd(20)} passport ${r.passport.padEnd(10)} port ${r.port}`);
+}
+
 function configureCodex(opts = {}) {
   const target = codexProfilePath();
   if (opts.remove) {
@@ -2739,11 +2910,13 @@ function configureCodex(opts = {}) {
 }
 
 function configureMcpClient(integration, opts = {}) {
-  requireGlobalMcpPassport();
+  // Claude Code's settings only point it at the sidecar, which holds the passport
+  // itself; requiring one here also stopped `--remove` once the config was gone.
   if (integration === "claude-code") {
     configureClaudeCode(opts);
     return;
   }
+  requireGlobalMcpPassport();
 
   const target = mcpClientConfigPath(integration);
   const entry = passControlMcpEntry();
@@ -2775,12 +2948,17 @@ async function configureCommand(rest, opts = {}) {
       `Unknown integration "${integration}". Use one of: ${integrationChoices()}.`
     );
   }
+  if (opts.dedicated && (integration === "claude-code" || integration === "codex")) {
+    await prepareDedicatedProfile(integration, opts);
+  }
   if (integration === "codex") {
     configureCodex(opts);
+    if (opts.dedicated) dedicatedSidecarHint(integration);
     return;
   }
   if (isMcpIntegration(integration)) {
     configureMcpClient(integration, opts);
+    if (opts.dedicated && integration === "claude-code") dedicatedSidecarHint(integration);
     return;
   }
   if (!supportsWrite(integration)) {
@@ -4198,6 +4376,12 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
     return;
   }
 
+  // Also before the update check: a full-screen board owns the terminal from its
+  // first frame, and the check's cache would be the one file `watch` ever wrote.
+  if (command === "watch" && !opts.help) {
+    process.exit(await runWatch({ port: sidecarPort(opts) }));
+  }
+
   // Started here and awaited at the very end, so the registry lookup overlaps
   // the command instead of being tacked onto the exit. On anything that touches
   // the network — which is most of this CLI — it costs nothing measurable, and
@@ -4299,6 +4483,9 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
           "  `passcontrol login` now does the same thing with YOUR agent rather than a\n" +
           "  shared demo one: a governed call and a signed receipt you can verify."
       );
+    case "profile":
+      profileCommand(commandRest, opts);
+      break;
     case "sidecar":
       await sidecarCommand(commandRest, opts);
       break;

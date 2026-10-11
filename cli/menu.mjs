@@ -144,6 +144,8 @@ export const GROUPS = [
       // sender proof in 0.9, so a workspace in required mode refuses this client
       // while the sidecar keeps working. Most people never run it by hand —
       // `configure <client> --write` wires it into the client's own config.
+      // A board that holds the terminal until q, so the same terms as the two servers.
+      command({ id: "watch", label: "Watch the sidecar's calls live", run: ["watch"], detail: "watch --port 8788", description: "Read-only board: each call, its sub-agent, model, outcome and time.", effect: "long_running", network: "gateway", keywords: ["board", "live", "subagent", "tail"], needsArgs: true, returnToMenu: true }),
       command({ id: "mcp", label: "Serve MCP to desktop agent clients", run: ["mcp"], detail: "mcp", description: "Stdio server for MCP clients. Its chat sends no sender proof in 0.9.", effect: "long_running", network: "provider", keywords: ["stdio", "claude", "cursor", "desktop"], needsArgs: true, returnToMenu: true }),
     ],
   },
@@ -157,6 +159,7 @@ export const GROUPS = [
       command({ id: "agent-suspend", label: "Suspend an agent", run: ["agent", "suspend"], detail: "agent suspend <id>", description: "Temporarily refuse every new call from one active agent.", effect: "tenant_write", network: "gateway", guide: "suspend", needsArgs: true }),
       command({ id: "agent-resume", label: "Resume an agent", run: ["agent", "resume"], detail: "agent resume <id>", description: "Allow a suspended agent to authenticate again.", effect: "tenant_write", network: "gateway", guide: "resume", needsArgs: true }),
       command({ id: "kill", label: "Tenant kill switch", run: ["kill"], detail: "kill on|off", description: "Arm or disarm the workspace-wide emergency stop.", effect: "tenant_write", network: "gateway", guide: "kill", needsArgs: true, current: currentFrom("kill") }),
+      command({ id: "profile-list", label: "List coding-tool profiles", run: ["profile", "list"], detail: "profile list", description: "Show each coding tool's own agent: its passport and sidecar port.", keywords: ["profile", "claude code", "codex", "identity"] }),
     ],
   },
   {
@@ -239,6 +242,7 @@ export const GROUPS = [
     hint: "revoke, rotate or destroy",
     items: [
       command({ id: "agent-rotate", label: "Rotate a passport key", run: ["agent", "rotate"], detail: "agent rotate <id>", description: "Replace an agent passport and reveal a new private key once.", effect: "irreversible", network: "gateway", needsArgs: true }),
+      command({ id: "agent-revoke-delegation", label: "Revoke a delegation", run: ["agent", "revoke-delegation"], detail: "agent revoke-delegation <id>", description: "Permanently stop one delegation, or every one an agent issued before now.", effect: "irreversible", network: "gateway", needsArgs: true }),
       command({ id: "agent-revoke", label: "Revoke an agent permanently", run: ["agent", "revoke"], detail: "agent revoke <id>", description: "Permanently prevent an agent from authenticating again.", effect: "irreversible", network: "gateway", needsArgs: true }),
       command({ id: "keygen-instance", label: "Create a receipt-signing key", run: ["keygen", "instance"], detail: "keygen instance", description: "Reveal a new instance signing seed; replacing a live key requires a rotation plan.", effect: "irreversible", needsArgs: true }),
       command({ id: "reset", label: "Destroy and recreate the local stack", run: ["reset"], detail: "reset --local --confirm RESET", description: "Delete and recreate local stack state after an explicit typed confirmation.", effect: "irreversible", needsArgs: true }),

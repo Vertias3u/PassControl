@@ -124,6 +124,47 @@ signs the receipt over the decision it recorded. It is evidence about the gatewa
 about the agent's passport, and the two must not be read as the same claim.
 
 
+## Delegating to a worker
+
+An agent that starts its own workers can hand each one a narrower slice of what it may do: a
+model scope inside its own, a spending cap, and an expiry of at most 24 hours. The worker
+generates its own key and sends the agent only the public half.
+
+```ts
+import { PassControl, generateWorkerKey } from "passcontrol/sdk";
+
+// In the worker: make a key, send workerKey.publicKey to the agent.
+const workerKey = generateWorkerKey();
+
+// In the agent: sign the delegation, offline.
+const { chain } = agent.delegate({
+  workerPublicKey: workerKey.publicKey,
+  scope: [{ provider: "anthropic", models: ["claude-haiku-4-5"] }],
+  capMicrocents: 50_000_000, // $0.50, for the life of the delegation
+  ttlSeconds: 3600,
+});
+
+// In the worker: use it like any client.
+const worker = PassControl.fromDelegation({ gateway, chain, workerPrivateKey: workerKey.privateKey });
+```
+
+- The worker cannot call outside the delegation's scope, spend past its cap, or outlive it.
+  The agent's own budget, kill switch and suspension still cover it.
+- A worker may delegate once more, narrower again (`worker.delegate(...)`), and no further. Pass
+  `allowFurtherDelegation: false` to forbid that.
+- A worker's call is always under a dollar limit (its cap), so a model PassControl cannot price
+  is refused for it with 402 `unpriced_model`.
+- `audience` defaults to the gateway origin. If you reach the gateway at an address other than
+  its issuer (receipts' `iss`), pass the issuer.
+- The worker's receipts name the worker's key and the delegation, never the agent's passport.
+  They are receipt version 3, so verifiers older than this release refuse them as too new.
+  `verifyReceiptDelegation(claims, chain)` checks that a receipt and a chain belong together.
+- Revoke one delegation, or every delegation the agent issued before now, with
+  `POST /api/control/v1/agents/{id}/delegations/revoke` (`{ "jti": "..." }` or `{ "all": true }`).
+  A revocation is permanent. `GET .../delegations` lists the ones the gateway has seen.
+- Like every SDK client, a worker sends **no sender proof**. If the agent's sender-proof mode is
+  `required`, its workers are refused.
+
 ## Compatibility and assurance
 
 `clientOptions` accepts `openai`, `anthropic`, `groq`, `mistral`, `together`, `deepseek`,

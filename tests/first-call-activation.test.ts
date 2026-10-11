@@ -236,7 +236,7 @@ describe("first-call failure language", () => {
     // The provider path authenticates a passport principal with verifyVisa, and
     // never re-checks the passport signature that minted it.
     expect(route).toContain('from "@/lib/gateway/authenticate"');
-    expect(route).toContain("await authenticateGatewayRequest(req, provider)");
+    expect(route).toContain("await authenticateGatewayRequest(req, provider, \"api.proxy\", { acceptDelegated: true })");
     expect(route).not.toMatch(/verifySignature\(/);
     expect(proxy).toContain("const claims = await verifyVisa(credential.token);");
     expect(proxy).not.toMatch(/verifySignature\(/);

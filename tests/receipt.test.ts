@@ -145,7 +145,7 @@ describe("receipt claims", () => {
       visaJti: undefined,
     }) as Record<string, any>;
 
-    expect(claims.ver).toBe(RECEIPT_VER);
+    expect(claims.ver).toBe(2);
     expect(claims.ver).toBe(2);
     expect(claims.sub).toBe(INPUT.agentId);
     expect(claims.vjti).toBeUndefined();
@@ -223,7 +223,8 @@ describe("receipt versioning", () => {
   // verifier. Additive-only, forward-compatible.
   it("declares a numeric version a verifier can range-check", () => {
     expect(typeof RECEIPT_VER).toBe("number");
-    expect(RECEIPT_VER).toBe(2);
+    // 3 since Bet D: a worker's receipt. Direct-key receipts stay at 2 (pinned above).
+    expect(RECEIPT_VER).toBe(3);
     expect((buildReceiptClaims(INPUT) as Record<string, unknown>).ver).toBe(1);
   });
 });

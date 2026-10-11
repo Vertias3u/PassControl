@@ -102,6 +102,42 @@ describe("the published document", () => {
   });
 });
 
+// P2.4: a worker's delegation, revoked by jti or by the agent's watermark.
+describe("delegations in the published document", () => {
+  const RAISE = {
+    action: "agent.delegation_revoke",
+    target_id: "a1",
+    created_at: "2026-10-10T00:00:00.000Z",
+    metadata: { all: true, valid_after: "2026-10-10T00:00:00.000Z", passports: ["key-one"] },
+  };
+
+  const SINGLE = {
+    action: "agent.delegation_revoke",
+    target_id: "a1",
+    created_at: "2026-10-10T12:00:00.000Z",
+    metadata: { all: false, jti: "jti-0000000000000001", passports: ["key-one"] },
+  };
+
+  it("signs revoked jtis and watermark raises beside the passport entries, each under its passport", async () => {
+    db({ data: [...REVOKED, RAISE, SINGLE], error: null }, { data: AGENTS, error: null });
+    const claims = await payloadOf(await GET(request()));
+    expect(claims?.entries).toEqual([{ id: "key-one", notValidAfter: "2026-03-01T00:00:00.000Z" }]);
+    expect(claims?.delegations).toEqual([{ id: "key-one", jti: "jti-0000000000000001", notValidAfter: "2026-10-10T12:00:00.000Z" }]);
+    expect(claims?.delegationWatermarks).toEqual([
+      { id: "key-one", issuedAtOrBefore: "2026-10-10T00:00:00.000Z", notValidAfter: "2026-10-10T00:00:00.000Z" },
+    ]);
+  });
+
+  it("reads delegation revocations from the audit trail only, by action, never from the revocations table", async () => {
+    await GET(request());
+    const rows = filters.filter((f) => f.eq.some(([c, v]) => c === "action" && v === "agent.delegation_revoke"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.table).toBe("admin_audit");
+    expect(rows[0]?.eq).toContainEqual(["target_type", "agent"]);
+    expect(filters.some((f) => f.table === "delegation_revocations")).toBe(false);
+  });
+});
+
 describe("what it does when it cannot answer", () => {
   // The whole point of the document is that it is signed. An unsigned one, or
   // one from an instance with no key, could be served by anyone with the entry
@@ -172,11 +208,14 @@ describe("cost of being asked", () => {
   it("asks the database only for the rows it can publish", async () => {
     await GET(request());
     const audit = filters.filter((f) => f.table === "admin_audit");
-    expect(audit).toHaveLength(2);
+    expect(audit).toHaveLength(3);
     expect(audit[0]?.eq).toContainEqual(["action", "agent.revoke"]);
     expect(audit[0]?.eq).toContainEqual(["target_type", "agent"]);
     expect(audit[1]?.eq).toContainEqual(["action", "agent.update"]);
     expect(audit[1]?.eq).toContainEqual(["metadata->>rotated", "true"]);
+    // P2.4: the delegation revocations, both kinds, and only those.
+    expect(audit[2]?.eq).toContainEqual(["action", "agent.delegation_revoke"]);
+    expect(audit[2]?.eq).toContainEqual(["target_type", "agent"]);
 
     // Only revoked agents can contribute a passport id, so the cross-tenant
     // read is bounded to them rather than to the whole fleet.

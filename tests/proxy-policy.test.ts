@@ -1154,6 +1154,30 @@ describe("periodic spend limit (K1)", () => {
     expect(args).not.toHaveProperty("periodLimit");
   });
 
+  // F1: under a periodic limit (the default every new dashboard agent gets) a
+  // model with no price row is refused, as under any dollar limit. The refusal
+  // now says why and where the limit is removed; a lifetime cap keeps the bare code.
+  it("names the periodic limit when it is what makes an unpriced model refusable", async () => {
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ ...DAILY, pdc: 2000 }));
+    const res = await call("gpt-no-price-row-9");
+    expect(res.status).toBe(402);
+    const body = await res.json();
+    expect(body.error).toBe("unpriced_model");
+    expect(body.message).toMatch(/\$20 a day/);
+    expect(body.message).toMatch(/agent's page/i);
+  });
+
+  it("keeps the bare unpriced_model code for a lifetime cap", async () => {
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(
+      cached({ bk: true, bt: null, bc: 500, pdk: true, pdp: null, pdc: null })
+    );
+    const res = await call("gpt-no-price-row-9");
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "unpriced_model" });
+  });
+
   it("refuses with 402 blocked_budget_period and a retry-after to the next UTC day", async () => {
     // beforeEach pins the clock at 2026-07-27T10:00:00Z: 14 hours to midnight.
     openHoldMock.mockResolvedValueOnce({ ok: false, reason: "period" });

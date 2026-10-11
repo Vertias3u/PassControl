@@ -229,7 +229,7 @@ describe("external JWKS fetching", () => {
 
   // Exact match, not startsWith. A prefix test would hand the widened policy to
   // /verify/receipt-anything, and one careless route later, to more than that.
-  it("applies to exactly the two public verifier routes", () => {
+  it("applies to exactly the three public verifier routes", () => {
     // BOTH public verifiers need this, and /verify/statement was missing for its
     // whole first release — the page fetched an external issuer's key set, CSP
     // refused, and it surfaced as "the issuer's key list could not be reached".
@@ -240,9 +240,12 @@ describe("external JWKS fetching", () => {
     // It is load-bearing rather than cosmetic. A deployment that does not
     // operate a chain can ONLY ever verify another issuer's statement, so
     // without this the page verifies nothing there, ever.
-    expect(EXTERNAL_JWKS_PATHS).toEqual(["/verify/receipt", "/verify/statement"]);
+    // /verify/session (sprint T9) checks a seal AND every receipt in its bundle in
+    // the browser against the issuer the seal names, so it needs the same entry.
+    expect(EXTERNAL_JWKS_PATHS).toEqual(["/verify/receipt", "/verify/statement", "/verify/session"]);
     expect(needsExternalJwks("/verify/receipt")).toBe(true);
     expect(needsExternalJwks("/verify/statement")).toBe(true);
+    expect(needsExternalJwks("/verify/session")).toBe(true);
   });
 
   it.each([
@@ -255,6 +258,9 @@ describe("external JWKS fetching", () => {
     "/verify/statement/extra",
     "/verify/statements",
     "/verify/statement-forged",
+    "/verify/session/extra",
+    "/verify/sessions",
+    "/verify/session-forged",
     "/login",
     "/dashboard",
     "/dashboard/agents/abc",

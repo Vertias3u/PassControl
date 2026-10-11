@@ -17,6 +17,8 @@ import {
   REVOCATION_LIST_FORMAT,
   REVOCATION_LIST_VERSION,
   REVOCATION_SOURCE_ACTIONS,
+  DELEGATION_REVOCATION_ACTION,
+  buildDelegationRevocations,
   buildRevocationEntries,
   buildRevocationListClaims,
 } from "@/lib/revocation-list";
@@ -183,7 +185,7 @@ describe("the document a verifier reads", () => {
   // payload rather than in documentation nobody fetches.
   it("names what it enumerates AND what it does not", () => {
     const c = claims();
-    expect(c.covers.includes).toEqual(["revoked", "rotated"]);
+    expect(c.covers.includes).toEqual(["revoked", "rotated", "delegation_revoked", "delegation_watermark"]);
     expect(c.covers.excludes).toContain("expired");
     expect(c.covers.excludes).toContain("suspended");
     expect(c.covers.excludes).toContain("kill_switch");
@@ -196,8 +198,8 @@ describe("the document a verifier reads", () => {
 // claiming the same three exclusions while quietly publishing it — or quietly
 // not. Same discipline as tests/audit.test.ts pinning the action set itself.
 describe("the boundary between the audit trail and what is published", () => {
-  it("derives entries from exactly two actions, and nothing else in the trail", () => {
-    expect([...REVOCATION_SOURCE_ACTIONS].sort()).toEqual(["agent.revoke", "agent.update"]);
+  it("derives entries from exactly three actions, and nothing else in the trail", () => {
+    expect([...REVOCATION_SOURCE_ACTIONS].sort()).toEqual(["agent.delegation_revoke", "agent.revoke", "agent.update"]);
     for (const action of REVOCATION_SOURCE_ACTIONS) {
       expect(AUDIT_ACTIONS).toContain(action);
     }
@@ -219,6 +221,144 @@ describe("the boundary between the audit trail and what is published", () => {
         metadata: { rotated: true, from: "key-old", previous_valid_until: "2026-04-01T00:00:00.000Z" },
       };
       expect(buildRevocationEntries([row], AGENTS)).toEqual([]);
+      // And the shape a watermark raise carries, on every other action.
+      if (action === DELEGATION_REVOCATION_ACTION) continue;
+      const watermark = { ...row, metadata: { all: true, valid_after: "2026-03-01T00:00:00.000Z", passports: ["key-one"] } };
+      expect(buildDelegationRevocations([watermark]).delegationWatermarks).toEqual([]);
+      const single = { ...row, metadata: { all: false, jti: "jti-0000000000000001", passports: ["key-one"] } };
+      expect(buildDelegationRevocations([single]).delegations).toEqual([]);
     }
+  });
+});
+
+// P2.4 (owner 2026-10-10: "start this"). A worker's receipt names its delegation and
+// lists every link's jti (`dc`), and its `sub` is the root passport. Two permanent deaths
+// reach a delegation, and both may only ever be added, so both belong here:
+//   * one jti revoked by its owner (delegation_revocations, append-only, 0081);
+//   * the agent's watermark: every delegation rooted in its passport and issued at or
+//     before T stops being valid at T. The column only moves forward, but publishing
+//     only its CURRENT value would erase the earlier raise, so each raise is its own
+//     entry, read from the append-only audit row written when it happened.
+describe("what a worker's delegation adds to the list", () => {
+  // Both kinds are read from the append-only audit row written when the owner acted,
+  // which records the root passport(s) the revocation covered AT THAT MOMENT.
+  const revoke = (jti: string, at: string, passports: unknown = ["key-one"], extra: Record<string, unknown> = {}) => ({
+    action: "agent.delegation_revoke",
+    target_id: "agent-1",
+    created_at: at,
+    metadata: { all: false, jti, passports, ...extra },
+  });
+  const raise = (at: string, passports: unknown, extra: Record<string, unknown> = {}) => ({
+    action: "agent.delegation_revoke",
+    target_id: "agent-1",
+    created_at: at,
+    metadata: { all: true, valid_after: at, passports, ...extra },
+  });
+
+  it("publishes a revoked jti under its root passport, dead from the moment its owner revoked it", () => {
+    const out = buildDelegationRevocations([revoke("jti-0000000000000001", "2026-10-10T12:00:00.000Z")]);
+    expect(out.delegations).toEqual([{ id: "key-one", jti: "jti-0000000000000001", notValidAfter: "2026-10-10T12:00:00.000Z" }]);
+  });
+
+  // THE SCOPING CASE (advisor, 2026-10-10). A delegator chooses its own jti, and the
+  // owner may revoke a jti never seen, so a jti alone names nobody: tenant A could
+  // revoke tenant B's jti, copied from a receipt, and the instance would sign "B's
+  // delegation is dead". Scoped to the passport, A's revocation says only that A's
+  // delegation with that jti is dead, which is true.
+  it("keeps two passports' revocations of the same jti apart", () => {
+    const out = buildDelegationRevocations([
+      revoke("jti-0000000000000001", "2026-10-10T12:00:00.000Z", ["key-a"]),
+      revoke("jti-0000000000000001", "2026-10-10T13:00:00.000Z", ["key-b"]),
+    ]);
+    expect(out.delegations).toEqual([
+      { id: "key-a", jti: "jti-0000000000000001", notValidAfter: "2026-10-10T12:00:00.000Z" },
+      { id: "key-b", jti: "jti-0000000000000001", notValidAfter: "2026-10-10T13:00:00.000Z" },
+    ]);
+  });
+
+  it("publishes a revocation under every passport it covered (a key still in its grace window)", () => {
+    const out = buildDelegationRevocations([revoke("jti-0000000000000001", "2026-10-10T12:00:00.000Z", ["key-now", "key-old"])]);
+    expect(out.delegations.map((d) => d.id)).toEqual(["key-now", "key-old"]);
+  });
+
+  it("orders the entries and keeps the earliest of two records for one passport and jti", () => {
+    const out = buildDelegationRevocations([
+      revoke("jti-0000000000000002", "2026-10-10T12:00:00.000Z"),
+      revoke("jti-0000000000000001", "2026-10-10T13:00:00.000Z"),
+      revoke("jti-0000000000000001", "2026-10-10T11:00:00.000Z"),
+    ]);
+    expect(out.delegations).toEqual([
+      { id: "key-one", jti: "jti-0000000000000001", notValidAfter: "2026-10-10T11:00:00.000Z" },
+      { id: "key-one", jti: "jti-0000000000000002", notValidAfter: "2026-10-10T12:00:00.000Z" },
+    ]);
+  });
+
+  it.each([
+    ["a jti of the wrong shape", revoke("short", "2026-10-10T12:00:00.000Z")],
+    ["a jti with a character no delegation uses", revoke("jti-000000000000000!", "2026-10-10T12:00:00.000Z")],
+    ["an unreadable time", revoke("jti-0000000000000001", "soon")],
+    ["no recorded passports (written before this format)", { ...revoke("jti-0000000000000001", "2026-10-10T12:00:00.000Z"), metadata: { all: false, jti: "jti-0000000000000001" } }],
+    ["passports that are not a list", revoke("jti-0000000000000001", "2026-10-10T12:00:00.000Z", "key-one")],
+  ])("drops %s rather than guessing", (_label, row) => {
+    expect(buildDelegationRevocations([row]).delegations).toEqual([]);
+  });
+
+  it("publishes a watermark raise under each passport it covered", () => {
+    const out = buildDelegationRevocations([raise("2026-10-10T12:00:00.000Z", ["key-now", "key-old"])]);
+    expect(out.delegationWatermarks).toEqual([
+      { id: "key-now", issuedAtOrBefore: "2026-10-10T12:00:00.000Z", notValidAfter: "2026-10-10T12:00:00.000Z" },
+      { id: "key-old", issuedAtOrBefore: "2026-10-10T12:00:00.000Z", notValidAfter: "2026-10-10T12:00:00.000Z" },
+    ]);
+    expect(out.delegations).toEqual([]);
+  });
+
+  // THE MONOTONICITY CASE. A receipt from between the two raises, for a delegation
+  // issued before the first, was already dead; only the first entry says so.
+  it("keeps every raise, not only the latest", () => {
+    const out = buildDelegationRevocations([raise("2026-10-12T00:00:00.000Z", ["key-now"]), raise("2026-10-10T00:00:00.000Z", ["key-now"])]);
+    expect(out.delegationWatermarks.map((w) => w.issuedAtOrBefore)).toEqual(["2026-10-10T00:00:00.000Z", "2026-10-12T00:00:00.000Z"]);
+  });
+
+  it("publishes one entry for a raise recorded twice", () => {
+    const r = raise("2026-10-10T00:00:00.000Z", ["key-now"]);
+    expect(buildDelegationRevocations([r, r]).delegationWatermarks).toHaveLength(1);
+  });
+
+  it.each([
+    ["a raise that recorded no passports (written before P2.4)", { ...raise("2026-10-10T00:00:00.000Z", ["x"]), metadata: { all: true } }],
+    ["a raise whose passports are not a list", raise("2026-10-10T00:00:00.000Z", "key-now")],
+    ["a raise with an unreadable time", raise("soon", ["key-now"])],
+    ["metadata that says all as a string", raise("2026-10-10T00:00:00.000Z", ["key-now"], { all: "true" })],
+  ])("publishes no watermark for %s", (_label, row) => {
+    expect(buildDelegationRevocations([row]).delegationWatermarks).toEqual([]);
+  });
+
+  it("skips a passport id that is not a string, keeping the others", () => {
+    const out = buildDelegationRevocations([
+      raise("2026-10-10T00:00:00.000Z", ["key-now", 7, "", null]),
+      revoke("jti-0000000000000001", "2026-10-10T12:00:00.000Z", ["key-now", 7, "", null]),
+    ]);
+    expect(out.delegationWatermarks.map((w) => w.id)).toEqual(["key-now"]);
+    expect(out.delegations.map((d) => d.id)).toEqual(["key-now"]);
+  });
+
+  it("puts both in the signed document, empty when there are none", () => {
+    const c = buildRevocationListClaims({ issuer: "https://gw.example", entries: [] });
+    expect(c.delegations).toEqual([]);
+    expect(c.delegationWatermarks).toEqual([]);
+    const d = buildRevocationListClaims({
+      issuer: "https://gw.example",
+      entries: [],
+      ...buildDelegationRevocations([revoke("jti-0000000000000001", "2026-10-10T12:00:00.000Z"), raise("2026-10-10T00:00:00.000Z", ["key-now"])]),
+    });
+    expect(d.delegations).toHaveLength(1);
+    expect(d.delegationWatermarks).toHaveLength(1);
+  });
+
+  // Additive: a verifier written for the passport list reads `entries` exactly as before.
+  it("leaves the passport entries and the version as they were", () => {
+    const c = buildRevocationListClaims({ issuer: "https://gw.example", entries: [{ id: "key-one", notValidAfter: "2026-03-01T00:00:00.000Z" }] });
+    expect(c.entries).toEqual([{ id: "key-one", notValidAfter: "2026-03-01T00:00:00.000Z" }]);
+    expect(c.v).toBe(1);
   });
 });

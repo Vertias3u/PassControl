@@ -423,6 +423,28 @@ const VERDICTS: Record<string, VerdictPresentation> = {
     detail: "The call would have taken the agent past the spending limit set for it.",
     tone: "held",
   },
+  blocked_budget_subagent: {
+    label: "Refused — a sub-agent over its session cap",
+    detail:
+      "The call came from a sub-agent that had used the spending cap its agent's owner set for one sub-agent in one session. The sub-agent and session were declared by the coding tool.",
+    tone: "held",
+  },
+  blocked_budget_delegation: {
+    label: "Refused — a worker over its delegation's cap",
+    detail:
+      "The call came from a worker acting under a signed delegation from this agent, and that delegation, or one above it, had used its spending cap.",
+    tone: "held",
+  },
+  blocked_delegation_revoked: {
+    label: "Refused — the delegation was revoked",
+    detail: "The call came from a worker whose delegation from this agent had been revoked by the owner.",
+    tone: "held",
+  },
+  blocked_delegation_unavailable: {
+    label: "Refused — the delegation could not be confirmed",
+    detail: "The gateway could not confirm that the worker's delegation was still valid, and refused rather than guess.",
+    tone: "held",
+  },
   blocked_budget_period: {
     label: "Refused — over its daily or monthly limit",
     detail:
@@ -676,11 +698,16 @@ export interface ReceiptAuthenticationPresentation {
   label:
     | "Passport verified"
     | "Passport proof verified per request"
-    | "Direct Agent Key accepted";
+    | "Direct Agent Key accepted"
+    | "Worker's delegation verified"
+    | "Worker's delegation and proof verified"
+    | "Authentication method not recognised";
   detail: string;
-  subjectLabel: "Agent passport" | "Agent identity";
+  subjectLabel: "Agent passport" | "Agent identity" | "Worker key" | "Subject";
   subject: string;
   keyId: string | null;
+  /** What `keyId` is, said on the page beside it. Null when there is no keyId. */
+  keyIdLabel: "Direct key" | "Delegation" | null;
 }
 
 /**
@@ -699,6 +726,21 @@ export function describeReceiptAuthentication(
       subjectLabel: "Agent passport",
       subject: claims.sub,
       keyId: null,
+      keyIdLabel: null,
+    };
+  }
+  if (claims.auth?.kind === "delegated") {
+    const auth = claims.auth;
+    return {
+      label: auth.prf ? "Worker's delegation and proof verified" : "Worker's delegation verified",
+      detail:
+        "A worker acting under a signed delegation from this agent made the call, not the agent itself. " +
+        "The gateway checked the delegation chain back to the agent's passport" +
+        (auth.prf ? ", and the worker's own key signed this exact request." : ". The worker presented a bearer visa minted from it."),
+      subjectLabel: "Worker key",
+      subject: auth.act,
+      keyId: auth.dlg,
+      keyIdLabel: "Delegation",
     };
   }
   if (claims.auth?.kind === "direct_key") {
@@ -709,6 +751,19 @@ export function describeReceiptAuthentication(
       subjectLabel: "Agent identity",
       subject: claims.agid || claims.sub,
       keyId: typeof claims.auth.kid === "string" && claims.auth.kid ? claims.auth.kid : null,
+      keyIdLabel: typeof claims.auth.kid === "string" && claims.auth.kid ? "Direct key" : null,
+    };
+  }
+  // A kind this build does not know must never fall through to "Passport verified":
+  // that is how a newer credential type would be shown as the agent's own signature.
+  if (claims.auth) {
+    return {
+      label: "Authentication method not recognised",
+      detail: "This receipt names a way of authenticating that this verifier does not know. Its signature is valid; update the verifier to read what it attests.",
+      subjectLabel: "Subject",
+      subject: claims.sub,
+      keyId: null,
+      keyIdLabel: null,
     };
   }
   return {
@@ -718,6 +773,7 @@ export function describeReceiptAuthentication(
     subjectLabel: "Agent passport",
     subject: claims.sub,
     keyId: null,
+    keyIdLabel: null,
   };
 }
 
@@ -835,6 +891,38 @@ export function describeOwner(own: ReceiptClaims["own"] | null): OwnerPresentati
     own.tier === "domain" ? "Verified by control of this domain" : "Verified by identity check";
   const when = own.vat ? ` · last confirmed ${DATE.format(new Date(own.vat))}` : "";
   return { subject: own.sub, note: `${how}${when}`, verified: true };
+}
+
+// ── The declared lineage (sprint T5) ─────────────────────────────────────────
+
+export interface LineagePresentation {
+  session: string;
+  who: string;
+  note: string;
+}
+
+/** Printable ASCII, capped: a signed value is still not the page's to render raw. */
+const shownValue = (v: unknown) => String(v).replace(/[^\x20-\x7e]/g, "?").slice(0, 128);
+
+/**
+ * A receipt's `ctx`, or a log row's `client_*` columns in the same shape, worded
+ * as `passcontrol verify receipt` words it. These values come from headers the
+ * coding tool sent, so the note always says "declared by the client, not
+ * verified", whatever `src` claims: they group calls, they never prove who made
+ * them (trust boundary 1). Null without a session, which is how a call with no
+ * lineage has always rendered.
+ */
+export function describeLineage(ctx: unknown): LineagePresentation | null {
+  if (typeof ctx !== "object" || ctx === null || Array.isArray(ctx)) return null;
+  const c = ctx as Record<string, unknown>;
+  if (typeof c.ses !== "string" || !c.ses) return null;
+  const agt = typeof c.agt === "string" && c.agt ? c.agt : null;
+  const par = typeof c.par === "string" && c.par ? c.par : null;
+  return {
+    session: shownValue(c.ses),
+    who: agt ? `sub-agent ${shownValue(agt)}${par ? `, spawned by ${shownValue(par)}` : ""}` : "main agent",
+    note: `declared by the client (${shownValue(typeof c.cli === "string" && c.cli ? c.cli : "unknown")}), not verified`,
+  };
 }
 
 // ── The inspection sequence's state, as a pure reduction ─────────────────────

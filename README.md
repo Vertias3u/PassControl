@@ -19,7 +19,8 @@ not passport-signed. Both go through gateway controls.
 
 Built by one developer under [Vertias](https://vertias.eu). Early software, **not
 independently audited**. Start with a non-critical provider key. Source-available under
-[BSL 1.1](./LICENSE).
+[BSL 1.1](./LICENSE), except the Claude Code plugin in
+[`plugins/passcontrol/`](./plugins/passcontrol), which is MIT.
 
 ## Cloud
 
@@ -129,6 +130,7 @@ its scope and suitable budgets. Choose by what your client supports:
 | Your JS/TS code | `PassControl` from `passcontrol/sdk`; [SDK guide](./docs/integrations/passport-sdk.md) |
 | Static-key client needing Passport | `passcontrol sidecar`, then `passcontrol env <integration>` |
 | MCP client | `passcontrol mcp`; configure as below |
+| Coding agent | [Claude Code](./docs/integrations/claude-code.md), [Codex](./docs/integrations/codex.md), [OpenRouter](./docs/integrations/openrouter.md), [Ollama](./docs/integrations/ollama.md) |
 
 Direct Agent Keys point the client at the PassControl gateway origin. Passport Sidecar clients
 point at loopback with a provider path (for example `http://127.0.0.1:8788/api/v1/anthropic`) and the sidecar forwards to the gateway.
@@ -160,6 +162,13 @@ The sidecar listens on loopback by default and substitutes a visa for the client
 API key. Treat access to that local listener as access to the configured agent. It is
 not a sandbox against other processes running as you. Its provider CONNECT requests are
 refused; use base URLs rather than TLS interception.
+
+To see each call as it happens, run `passcontrol watch` beside the agent (`--port` for a
+sidecar that is not on 8788). It is a read-only, full-screen board: one row per call the
+sidecar relays, with its time, declared session and sub-agent, model, BOARDED or DENIED
+(with the gateway's refusal code), and latency, under the agent's budget. It reads a feed
+on the sidecar's own loopback port, held in memory and never written to disk. A call that
+does not go through that sidecar is not on it, and the board cannot stop anything.
 
 Presets (from `cli/presets.mjs`): `generic`, `openhands`, `litellm`, `aider`, `hermes`, `cline`, `continue`, `chatbox`, `jan`, `msty`, `cherry-studio`, `open-webui`, `librechat`; service presets: `github`, `telegram`, `brave`, `notion`, `discord`; coding agent: `codex`; MCP presets: `claude-desktop`, `cursor`, `claude-code`. Compatibility still depends on the client using
 supported paths. [Hermes configuration](./docs/integrations/hermes.md).

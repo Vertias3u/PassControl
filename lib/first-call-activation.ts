@@ -7,6 +7,10 @@ export type FirstCallStatus =
   | "ok"
   | "blocked_budget"
   | "blocked_budget_period"
+  | "blocked_budget_subagent"
+  | "blocked_budget_delegation"
+  | "blocked_delegation_revoked"
+  | "blocked_delegation_unavailable"
   | "blocked_endpoint"
   | "blocked_killed"
   | "blocked_suspended"
@@ -70,6 +74,9 @@ export function authenticationProofLabel(authMethod: FirstCallRow["auth_method"]
     return "Passport proof verified per request";
   }
   if (authMethod === "direct_key") return "Direct Agent Key accepted";
+  // A WORKER under a delegation from the agent (Bet D): never the agent's own words.
+  if (authMethod === "delegated") return "Worker's delegation accepted";
+  if (authMethod === "delegated_proof_per_request") return "Worker's delegation and proof verified";
   return "Authentication method was not recorded on this older call";
 }
 
@@ -350,6 +357,30 @@ export function activationDiagnosis(row: FirstCallRow): ActivationDiagnosis {
         title: "The daily or monthly limit refused the call",
         detail: "The request stopped before provider dispatch because this agent has used its spend limit for the current UTC period. It clears at the next period boundary.",
         action: "fleet",
+      };
+    case "blocked_budget_subagent":
+      return {
+        title: "A sub-agent's session cap refused the call",
+        detail: "The request stopped before provider dispatch because a sub-agent used the per-session cap the agent's policy sets. The main agent and other sub-agents keep running.",
+        action: "policy",
+      };
+    case "blocked_budget_delegation":
+      return {
+        title: "A delegation's cap refused the call",
+        detail: "The request came from a worker acting under a delegation from this agent, and that delegation used its spending cap. The agent itself keeps running.",
+        action: "policy",
+      };
+    case "blocked_delegation_revoked":
+      return {
+        title: "The worker's delegation was revoked",
+        detail: "The request came from a worker whose delegation from this agent was revoked. Nothing was sent.",
+        action: "policy",
+      };
+    case "blocked_delegation_unavailable":
+      return {
+        title: "The worker's delegation could not be confirmed",
+        detail: "PassControl could not confirm the worker's delegation is still valid, so it refused rather than guess. Nothing was sent.",
+        action: "policy",
       };
     case "provider_exhausted":
       return {

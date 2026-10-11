@@ -22,7 +22,7 @@
 //    traffic, and that shadow mode ends when it does.
 import { useState, useTransition } from "react";
 
-import { POLICY_DAYS } from "@/lib/scope";
+import { POLICY_DAYS, POLICY_LIMITS } from "@/lib/scope";
 import type { ShadowState } from "@/lib/policy-shadow";
 import {
   promoteAgentPolicyShadow,
@@ -60,6 +60,13 @@ interface Draft {
    * control, so a cleared list can only ever mean "not restricted".
    */
   subagentNone: boolean;
+  /**
+   * `subagent_session_cap_cents` (C(b)), shown and typed in DOLLARS. A string so a
+   * half-typed amount is not lost; "" means no cap, never $0.
+   */
+  subagentCap: string;
+  /** `session_alert_cents` (candidate 3), in DOLLARS; "" means no alert. */
+  sessionAlert: string;
   /** `secret_guard.mode`, or "" for off. */
   secretGuard: "" | "block" | "redact";
 }
@@ -100,7 +107,14 @@ export function toDraft(policy: unknown): Draft {
   // Round-tripped for the same reason as the ceiling.
   const guardMode = isRecord(source.secret_guard) ? source.secret_guard.mode : undefined;
   const secretGuard = guardMode === "block" || guardMode === "redact" ? guardMode : "";
-  return { deny, windows, cap, ceiling, subagentRules, subagentNone, secretGuard };
+  // Round-tripped for the same reason as the ceiling.
+  const capCents = source.subagent_session_cap_cents;
+  const subagentCap =
+    typeof capCents === "number" && Number.isSafeInteger(capCents) && capCents >= 0 ? (capCents / 100).toFixed(2) : "";
+  const alertCents = source.session_alert_cents;
+  const sessionAlert =
+    typeof alertCents === "number" && Number.isSafeInteger(alertCents) && alertCents >= 1 ? (alertCents / 100).toFixed(2) : "";
+  return { deny, windows, cap, ceiling, subagentRules, subagentNone, subagentCap, sessionAlert, secretGuard };
 }
 
 /**
@@ -171,6 +185,25 @@ export function toPolicy(draft: Draft): unknown {
     if (subagent.length) policy.subagent_models = subagent;
   }
 
+  // Dollars with at most two decimals, stored as whole cents; anything else is
+  // dropped rather than guessed at. Zero is kept: sub-agents may spend nothing.
+  const capText = draft.subagentCap.trim().replace(/^\$/, "");
+  if (/^\d+(\.\d{1,2})?$/.test(capText)) {
+    const cents = Math.round(Number(capText) * 100);
+    if (Number.isSafeInteger(cents) && cents <= POLICY_LIMITS.subagentSessionCapCents) {
+      policy.subagent_session_cap_cents = cents;
+    }
+  }
+
+  // Same rules, but at least one cent: an alert at $0 would fire on every call.
+  const alertText = draft.sessionAlert.trim().replace(/^\$/, "");
+  if (/^\d+(\.\d{1,2})?$/.test(alertText)) {
+    const cents = Math.round(Number(alertText) * 100);
+    if (Number.isSafeInteger(cents) && cents >= 1 && cents <= POLICY_LIMITS.subagentSessionCapCents) {
+      policy.session_alert_cents = cents;
+    }
+  }
+
   if (draft.secretGuard) policy.secret_guard = { mode: draft.secretGuard };
 
   return Object.keys(policy).length === 0 ? null : policy;
@@ -229,6 +262,77 @@ export function SecretGuardField({
         </label>
       ))}
     </fieldset>
+  );
+}
+
+/** `session_alert_cents` (candidate 3, 2026-10-10): tell the workspace when a session passes $X. */
+export function SessionAlertField({
+  draft,
+  setDraft,
+  pending,
+}: {
+  draft: Draft;
+  setDraft: (update: (prev: Draft) => Draft) => void;
+  pending: boolean;
+}) {
+  return (
+    <div className="grid gap-1 border-t border-border pt-4" data-policy-field="session_alert_cents">
+      <label className="grid gap-1 text-sm">
+        <span className="text-sm font-semibold text-foreground">Alert when a session passes (dollars)</span>
+        <input
+          value={draft.sessionAlert}
+          onChange={(e) => setDraft((prev) => ({ ...prev, sessionAlert: e.target.value }))}
+          inputMode="decimal"
+          placeholder="Leave empty for no alert"
+          disabled={pending}
+          className="h-10 max-w-xs rounded-lg border border-border bg-background px-3 text-sm"
+        />
+      </label>
+      <p className="m-0 text-xs leading-5 text-muted-foreground">
+        When one Claude Code or Codex session of this agent has spent this much, your Slack, Discord or Telegram
+        destination (Settings, Alerts, with budget alerts on) gets one message. It does not pause or refuse anything;
+        to stop the session, use Stop on the Sessions view, which the message links to. Sessions are declared by the
+        client.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * `subagent_session_cap_cents` (C(b), 2026-10-10): what one declared sub-agent may
+ * spend in one declared session. Exported on its own so it can be rendered and
+ * tested without opening the whole form.
+ */
+export function SubagentCapField({
+  draft,
+  setDraft,
+  pending,
+}: {
+  draft: Draft;
+  setDraft: (update: (prev: Draft) => Draft) => void;
+  pending: boolean;
+}) {
+  return (
+    <div className="grid gap-1 border-t border-border pt-4" data-policy-field="subagent_session_cap_cents">
+      <label className="grid gap-1 text-sm">
+        <span className="text-sm font-semibold text-foreground">Sub-agent spending cap (dollars per session)</span>
+        <input
+          value={draft.subagentCap}
+          onChange={(e) => setDraft((prev) => ({ ...prev, subagentCap: e.target.value }))}
+          inputMode="decimal"
+          placeholder="Leave empty for no cap"
+          disabled={pending}
+          className="h-10 max-w-xs rounded-lg border border-border bg-background px-3 text-sm"
+        />
+      </label>
+      <p className="m-0 text-xs leading-5 text-muted-foreground">
+        What one sub-agent of Claude Code or Codex may spend in one session; the main agent is not under it, and
+        the agent&rsquo;s own limits still apply to everything. A sub-agent that reaches it is refused and told why.
+        A guard rail, not a security boundary: the session and sub-agent are declared by the client, so a new
+        session or a new sub-agent starts at zero. It is held atomically with each call, but the shadow measurement
+        cannot evaluate it, so its counts never show this cap refusing anything.
+      </p>
+    </div>
   );
 }
 
@@ -727,6 +831,10 @@ export function PolicyShadowPanel({
           </div>
 
           <SubagentModelsField draft={draft} setDraft={setDraft} pending={pending} />
+
+          <SubagentCapField draft={draft} setDraft={setDraft} pending={pending} />
+
+          <SessionAlertField draft={draft} setDraft={setDraft} pending={pending} />
 
           <SecretGuardField draft={draft} setDraft={setDraft} pending={pending} />
 

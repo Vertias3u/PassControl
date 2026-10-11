@@ -48,7 +48,7 @@ export function AgentOperatingHeader({
   budgets: {
     tokens: { spentTokens: number; capTokens: number | null };
     cost: { spentCents: number; capCents: number | null };
-    period?: { kind: PeriodKind; capCents: number; usage: PeriodUsageView | null } | null;
+    period?: { kind: PeriodKind; capCents: number; usage: PeriodUsageView | null; isDefault?: boolean } | null;
   };
   visaTtlSeconds: number;
   /**
@@ -132,6 +132,11 @@ export function AgentOperatingHeader({
                 >
                   {periodLimitSummary(budgets.period.kind, budgets.period.capCents, budgets.period.usage).text}
                 </span>
+                {budgets.period.isDefault ? (
+                  <span data-operate="period-default" className="text-muted-foreground">
+                    {" "}(default)
+                  </span>
+                ) : null}
               </>
             ) : null}
           </dd>

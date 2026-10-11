@@ -5,8 +5,9 @@ import { Readable } from "node:stream";
 import { bareGatewayOrigin, fail, ok, step, warn } from "./config.mjs";
 import { classifyConnect, classifyProxyRequest, isLoopbackBindHost } from "./proxy-policy.mjs";
 import { createVisaClient } from "./visa-client.mjs";
-import { declaredSession } from "./declared-session.mjs";
+import { declaredLineage, declaredSession } from "./declared-session.mjs";
 import { defaultJournalDir, openJournal } from "./journal.mjs";
+import { createWatchFeed, isBudgetRead, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
 
 // Hop-by-hop headers plus the ones the sidecar rebuilds itself. `proxy-connection`
 // and friends only appear once something is used as a FORWARD proxy, which is
@@ -115,6 +116,10 @@ export function createSidecar({
   runId = randomUUID(),
   // cli/journal.mjs, or null for `--no-journal`.
   journal = null,
+  // `passcontrol watch`'s feed (cli/watch-feed.mjs). Off when bound off loopback.
+  watchFeed = isLoopbackBindHost(host),
+  watchCapacity = 200,
+  watchMaxSubscribers = 8,
 }) {
   // The upstream URL below is built from this, not from the argument: the
   // sidecar forwards a bearer visa on every proxied request, so its destination
@@ -131,6 +136,13 @@ export function createSidecar({
 
   // Used only to print the governed base URL back in a refusal. Read from the
   // live listener when there is one so the advice names the port actually bound.
+  const feed = createWatchFeed({ runId, capacity: watchCapacity, maxSubscribers: watchMaxSubscribers, enabled: watchFeed });
+  const lineageOf = (headers) =>
+    declaredLineage((name) => {
+      const v = headers?.[name];
+      return Array.isArray(v) ? v[0] : v;
+    }, runId);
+
   const localBaseUrl = () => {
     const address = server?.listening ? server.address() : null;
     return `http://${host}:${address?.port ?? port}`;
@@ -165,7 +177,11 @@ export function createSidecar({
   // URL — codeload for an archive download — passes through untouched.
   const toLocal = (value) => value.split(`${origin}/api/v1/`).join(`${localBaseUrl()}/api/v1/`);
 
-  function writeResponse(res, upstream, reqHeaders) {
+  // `watch` is the board's handle on this call ({ call, startedAt }), or null for one
+  // the board does not show. Its outcome is read from the status and, for an error,
+  // from a capped peek at a CLONE of the body, so the client's bytes are untouched
+  // and nothing here waits on the peek.
+  function writeResponse(res, upstream, reqHeaders, watch = null) {
     // At the headers, not at the end of the body: a streamed call whose client
     // disconnects mid-stream still produced a receipt, and the user's record of
     // it must not depend on how long they kept reading. With the session the call
@@ -184,33 +200,84 @@ export function createSidecar({
       if (STRIP_RES.has(name)) return;
       outHeaders[k] = name === "link" || name === "location" ? toLocal(v) : v;
     });
+    let peek = null;
+    if (watch) {
+      const ttfb = Date.now() - watch.startedAt;
+      const status = upstream.status;
+      res.on("close", () => watch.call.finish());
+      if (status < 400) watch.call.settle({ outcome: "boarded", status, ttfb });
+      else if (!upstream.body) watch.call.settle({ outcome: "error", status, ttfb });
+      else {
+        try {
+          peek = upstream.clone().body;
+        } catch {
+          watch.call.settle({ outcome: "error", status, ttfb });
+        }
+        if (peek) {
+          peekText(peek).then((text) => {
+            const code = refusalCode(text);
+            watch.call.settle({ outcome: code ? "denied" : "error", code, status, ttfb });
+          });
+        }
+      }
+    }
     res.writeHead(upstream.status, outHeaders);
     if (upstream.body) Readable.fromWeb(upstream.body).pipe(res);
     else res.end();
   }
 
+  /** Begins the board's record of a forwarded call, unless it is the budget read. */
+  function watchCall(req, path, body, startedAt) {
+    if (isBudgetRead(path)) return null;
+    try {
+      return { startedAt, call: feed.begin({ startedAt, lineage: lineageOf(req.headers), model: requestModel(body), provider: providerOf(path) }) };
+    } catch {
+      return null;
+    }
+  }
+
+  /** A forwarded call that failed before the gateway answered: shown, then answered 502. */
+  function upstreamFailed(res, watch, req, path, e) {
+    if (!res.headersSent) {
+      if (watch) {
+        watch.call.settle({ outcome: "error", code: "sidecar_upstream_error", status: 502 });
+        watch.call.finish();
+      } else if (!isBudgetRead(path)) {
+        feed.record({ outcome: "error", code: "sidecar_upstream_error", status: 502, lineage: lineageOf(req.headers), provider: providerOf(path) });
+      }
+      res.writeHead(502, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "sidecar_upstream_error", message: e.message }));
+    } else {
+      res.end();
+    }
+  }
+
   const server = http.createServer(async (req, res) => {
+    // The sidecar's own paths: answered here, never forwarded with a visa.
+    if (String(req.url ?? "").startsWith(LOCAL_PREFIX)) {
+      feed.serve(req, res, { port: server.address()?.port });
+      return;
+    }
+    const startedAt = Date.now();
     // Judge the destination before reading the body: a refused host should not
     // get to make the sidecar buffer megabytes on its way to a 403.
     const verdict = classifyProxyRequest({ url: req.url, gatewayOrigin: origin, localBaseUrl: localBaseUrl() });
     if (!verdict.allow) {
       req.resume();
       onRefusal(verdict);
+      feed.record({ outcome: "denied", code: verdict.code, status: verdict.status, lineage: lineageOf(req.headers), startedAt });
       writeRefusal(res, verdict);
       return;
     }
 
+    let watch = null;
     try {
       const body = await readBody(req);
+      watch = watchCall(req, verdict.path, body, startedAt);
       const upstream = await visas.fetchWithVisa((visa) => fetchUpstream(req, verdict.path, body, visa));
-      writeResponse(res, upstream, req.headers);
+      writeResponse(res, upstream, req.headers, watch);
     } catch (e) {
-      if (!res.headersSent) {
-        res.writeHead(502, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "sidecar_upstream_error", message: e.message }));
-      } else {
-        res.end();
-      }
+      upstreamFailed(res, watch, req, verdict.path, e);
     }
   });
 
@@ -239,24 +306,24 @@ export function createSidecar({
     const probe = url.pathname === "/";
     const mapped = `/api/v1/local${probe ? "/api/version" : url.pathname}${probe ? "" : url.search}`;
     const method = probe ? "GET" : req.method;
+    const startedAt = Date.now();
+    let watch = null;
     try {
       const body = probe ? null : await readBody(req);
       if (probe) req.resume();
+      watch = watchCall(req, mapped, body, startedAt);
       const upstream = await visas.fetchWithVisa((visa) => fetchUpstream({ method, headers: req.headers }, mapped, body, visa));
       if (req.method === "HEAD") {
+        watch?.call.settle({ outcome: upstream.status < 400 ? "boarded" : "error", status: upstream.status, ttfb: Date.now() - startedAt });
+        watch?.call.finish();
         res.writeHead(upstream.status);
         res.end();
         await upstream.body?.cancel().catch(() => {});
         return;
       }
-      writeResponse(res, upstream, req.headers);
+      writeResponse(res, upstream, req.headers, watch);
     } catch (e) {
-      if (!res.headersSent) {
-        res.writeHead(502, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "sidecar_upstream_error", message: e.message }));
-      } else {
-        res.end();
-      }
+      upstreamFailed(res, watch, req, mapped, e);
     }
   });
 
@@ -275,6 +342,7 @@ export function createSidecar({
     });
     if (!verdict.allow) {
       onRefusal(verdict);
+      feed.record({ outcome: "denied", code: verdict.code, status: verdict.status, lineage: lineageOf(req.headers) });
       writeConnectRefusal(clientSocket, verdict);
       return;
     }
@@ -292,6 +360,7 @@ export function createSidecar({
         clientSocket.destroy();
         return;
       }
+      feed.record({ outcome: "error", code: "tunnel_unreachable", status: 502, lineage: lineageOf(req.headers) });
       writeConnectRefusal(clientSocket, {
         status: 502,
         code: "tunnel_unreachable",
@@ -302,7 +371,7 @@ export function createSidecar({
     clientSocket.on("close", () => upstream.destroy());
   });
 
-  return { server, ollamaServer, getVisa: visas.getVisa, runId };
+  return { server, ollamaServer, getVisa: visas.getVisa, runId, feed };
 }
 
 /**
@@ -335,7 +404,7 @@ export function startSidecar(opts) {
         onError: (e) =>
           warn(`journal: could not write ${journal.path} (${e.message}). Calls are unaffected; this run is no longer being recorded.`),
       });
-  const { server, ollamaServer, getVisa } = createSidecar({ ...opts, runId, journal });
+  const { server, ollamaServer, getVisa, feed } = createSidecar({ ...opts, runId, journal });
   if (ollamaPort != null) {
     ollamaServer.listen(ollamaPort, host, () => {
       step(`Ollama API (local models) on http://${host}:${ollamaPort}: set OLLAMA_HOST=${host}:${ollamaPort}`);
@@ -351,6 +420,11 @@ export function startSidecar(opts) {
         ? `Journal: ${journal.path} (receipt ids, times, statuses and declared sessions only; --no-journal turns it off)`
         : "Journal: off (--no-journal). Session seals cannot be checked against this run."
     );
+    step(
+      isLoopbackBindHost(host)
+        ? `Watch live: passcontrol watch --port ${port} (this machine only; held in memory, never written)`
+        : "Watch: off, because this sidecar is bound off loopback."
+    );
     // Said at startup rather than only in a refusal, because the whole point of
     // HTTPS_PROXY is that nobody reads the docs first.
     step("HTTPS_PROXY: CONNECT to a provider is refused, not tunnelled — PassControl cannot");
@@ -363,9 +437,72 @@ export function startSidecar(opts) {
         ? `CONNECT allowlist: ${allowConnectHosts.join(", ")} (provider hosts are never eligible).\n`
         : "CONNECT allowlist: none — only the gateway.\n"
     );
-    getVisa()
-      .then(() => ok("visa warmed"))
-      .catch((e) => fail(`could not mint initial visa: ${e.message}`));
+    warmVisa({
+      getVisa,
+      gateway,
+      // Closed rather than process.exit(): stderr to a pipe is written
+      // asynchronously, and exit() can drop the reason this just printed.
+      onRefused: () => {
+        process.exitCode = 1;
+        // A watching board holds its connection open, and close() waits for it.
+        feed.close();
+        server.close();
+        if (ollamaServer.listening) ollamaServer.close();
+        setTimeout(() => process.exit(1), 1000).unref();
+      },
+    });
   });
   return server;
+}
+
+/** Waits between attempts to mint the first visa: backoff, then every 30 seconds. */
+export const WARM_RETRY_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+
+/**
+ * A gateway that answered and refused the passport: any 4xx except 408 and 429,
+ * which mean "not now". No status (no connection) and 5xx mean "not up yet".
+ */
+export function isPassportRefusal(error) {
+  const status = error?.status;
+  return typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
+/**
+ * The first visa (sprint T2). A sidecar is often started before its gateway, by
+ * `passcontrol start` or a login script, so a gateway that is not answering is
+ * waited for, on screen; a refusal ends the process, because retrying it can only
+ * fail again and a sidecar that cannot mint must not look like it is running.
+ * Resolves true once warmed, false after a refusal (onRefused has run).
+ */
+export async function warmVisa({
+  getVisa,
+  gateway,
+  onRefused,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  log = { ok, warn, fail },
+  delays = WARM_RETRY_MS,
+}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await getVisa();
+      log.ok(attempt === 0 ? "visa warmed" : `visa warmed: ${gateway} is answering now`);
+      return true;
+    } catch (error) {
+      if (isPassportRefusal(error)) {
+        log.fail(`could not mint a visa: ${error.message}`);
+        onRefused(error);
+        return false;
+      }
+      const delay = delays[Math.min(attempt, delays.length - 1)];
+      if (attempt === 0) {
+        log.warn(
+          `${gateway} is not answering yet (${error.message}). Waiting for it, and retrying on its own; ` +
+            "calls made before it answers get a 502."
+        );
+      } else if (attempt % 10 === 0) {
+        log.warn(`still waiting for ${gateway} (${error.message})`);
+      }
+      await sleep(delay);
+    }
+  }
 }

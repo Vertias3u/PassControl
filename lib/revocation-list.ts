@@ -45,6 +45,34 @@
 // path that revokes anything, and it records WHEN THE OPERATOR ACTED — a
 // `revoked_at` column would only record when the row was last written. The
 // audit table is append-only, which is the property a monotonic list wants.
+//
+// ── Delegations (P2.4, 2026-10-10) ──────────────────────────────────────────
+//
+// A worker's receipt (Bet D) is signed under the root passport (`sub`) and lists
+// every delegation link it ran under (`dc[].dlg`). Two more permanent deaths reach it,
+// in their own arrays so a verifier written for `entries` reads it exactly as before.
+// BOTH ARE SCOPED TO A ROOT PASSPORT `id`, and a verifier matches the receipt's `sub`
+// as well as the jti: a delegator picks its own jti and an owner may revoke one never
+// seen, so a bare jti names nobody, and an unscoped entry would let one tenant get this
+// instance to sign "another tenant's delegation is dead".
+//
+//   delegations           one jti its owner revoked: calls under that link of a chain
+//                         rooted in passport `id`, or any link below it, are not valid
+//                         after `notValidAfter`.
+//   delegationWatermarks  "revoke everything before now": every delegation rooted in
+//                         passport `id` and issued at or before `issuedAtOrBefore`
+//                         stopped being valid at `notValidAfter` (the gateway compares
+//                         link iat <= watermark). The column only moves forward, but
+//                         its CURRENT value would erase an earlier raise, so each raise
+//                         is its own entry.
+//
+// Both come from the append-only audit row written when the owner acted
+// (`agent.delegation_revoke`), under the passport ids recorded in it then; reading the
+// agent's keys now would let a later rotation rewrite a published entry.
+//
+// A revocation the gateway could not copy to Redis at once lets a worker call for up
+// to a visa lifetime (5 minutes) after `notValidAfter`; such a receipt was issued after
+// its delegation was revoked, which is what this list then says.
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { rateLimit } from "@/lib/ratelimit";
@@ -63,7 +91,13 @@ export const REVOCATION_LIST_TYP = "passcontrol-crl+jws";
  * exclusions — silently publishing it, or silently not. The action decides,
  * never the metadata shape.
  */
-export const REVOCATION_SOURCE_ACTIONS = ["agent.revoke", "agent.update"] as const;
+export const REVOCATION_SOURCE_ACTIONS = ["agent.revoke", "agent.update", "agent.delegation_revoke"] as const;
+
+/** The audit action whose `all: true` rows are delegation watermark raises (P2.4). */
+export const DELEGATION_REVOCATION_ACTION = "agent.delegation_revoke";
+
+/** A delegation link's jti, as 0081's CHECK constraint holds it. */
+const DELEGATION_JTI = /^[A-Za-z0-9_-]{16,64}$/;
 
 /**
  * Unauthenticated, and on a self-hosted instance there is no CDN in front of it
@@ -91,9 +125,29 @@ export interface RevocationEntry {
  * means a verifier cannot receive the list without also receiving its limits.
  */
 export interface RevocationListCoverage {
-  includes: ["revoked", "rotated"];
+  includes: ["revoked", "rotated", "delegation_revoked", "delegation_watermark"];
   excludes: string[];
 }
+
+/** One delegation link its owner revoked, under one root passport (P2.4). */
+export interface DelegationRevocationEntry {
+  /** The root passport id: a worker receipt's `sub`. */
+  id: string;
+  jti: string;
+  /** ISO instant. Calls under this link, or any link below it, are not valid after it. */
+  notValidAfter: string;
+}
+
+/** One raise of an agent's delegation watermark, under one root passport (P2.4). */
+export interface DelegationWatermarkEntry {
+  /** The root passport id: a worker receipt's `sub`. */
+  id: string;
+  /** ISO instant. Delegations whose link `iat` is at or before this are dead... */
+  issuedAtOrBefore: string;
+  /** ...from this instant on. */
+  notValidAfter: string;
+}
+
 
 export interface RevocationListClaims {
   // Indexed so the claims satisfy signCompactJws's Record<string, unknown>
@@ -107,6 +161,8 @@ export interface RevocationListClaims {
   v: typeof REVOCATION_LIST_VERSION;
   covers: RevocationListCoverage;
   entries: RevocationEntry[];
+  delegations: DelegationRevocationEntry[];
+  delegationWatermarks: DelegationWatermarkEntry[];
 }
 
 /** The audit shape this module reads. Deliberately narrow. */
@@ -123,7 +179,12 @@ export interface RevocationAgentRow {
 }
 
 export type RevocationLoadResult =
-  | { ok: true; entries: RevocationEntry[] }
+  | {
+      ok: true;
+      entries: RevocationEntry[];
+      delegations: DelegationRevocationEntry[];
+      delegationWatermarks: DelegationWatermarkEntry[];
+    }
   | { ok: false; reason: "throttled" | "unavailable" };
 
 function instant(value: unknown): string | null {
@@ -159,6 +220,8 @@ export function buildRevocationEntries(
     // The ACTION decides, never the metadata shape — a rotation-shaped payload
     // written under some other action must not produce an entry.
     if (!(REVOCATION_SOURCE_ACTIONS as readonly string[]).includes(row.action)) continue;
+    // A delegation watermark kills delegations, never the passport: buildDelegationRevocations.
+    if (row.action === DELEGATION_REVOCATION_ACTION) continue;
     if (row.action === "agent.revoke") {
       // Revocation is immediate and fail-closed: lib/fleet.ts suspends and
       // purges before the terminal row write, so the key is dead from the
@@ -183,9 +246,59 @@ export function buildRevocationEntries(
     .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
 }
 
+const byString = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0);
+
+/** The passport ids an audit row recorded, keeping only well-formed strings. */
+function recordedPassports(meta: Record<string, unknown>): string[] | null {
+  if (!Array.isArray(meta.passports)) return null;
+  return meta.passports.filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+/**
+ * Fold `agent.delegation_revoke` audit rows into the list's two delegation arrays
+ * (P2.4). The same rule as buildRevocationEntries: every rejection is a DROP, never a
+ * guess, and a row that recorded no passports names nobody, so it is dropped.
+ */
+export function buildDelegationRevocations(
+  audit: RevocationAuditRow[]
+): { delegations: DelegationRevocationEntry[]; delegationWatermarks: DelegationWatermarkEntry[] } {
+  const jtis = new Map<string, DelegationRevocationEntry>();
+  const raises = new Map<string, DelegationWatermarkEntry>();
+  for (const row of audit) {
+    if (row.action !== DELEGATION_REVOCATION_ACTION) continue;
+    const meta = row.metadata;
+    if (!meta) continue;
+    const passports = recordedPassports(meta);
+    if (!passports) continue;
+    if (meta.all === true) {
+      // Every raise is kept: a later one does not stand in for an earlier one.
+      const at = instant(meta.valid_after);
+      if (!at) continue;
+      for (const id of passports) raises.set(`${id}\u0000${at}`, { id, issuedAtOrBefore: at, notValidAfter: at });
+    } else if (meta.all === false) {
+      const at = instant(row.created_at);
+      if (typeof meta.jti !== "string" || !DELEGATION_JTI.test(meta.jti) || !at) continue;
+      for (const id of passports) {
+        // Earliest record wins for one passport's jti, as for a passport.
+        const key = `${id}\u0000${meta.jti}`;
+        const known = jtis.get(key);
+        if (!known || at < known.notValidAfter) jtis.set(key, { id, jti: meta.jti, notValidAfter: at });
+      }
+    }
+  }
+  return {
+    delegations: [...jtis.values()].sort((l, r) => byString(l.id, r.id) || byString(l.jti, r.jti)),
+    delegationWatermarks: [...raises.values()].sort(
+      (l, r) => byString(l.id, r.id) || byString(l.issuedAtOrBefore, r.issuedAtOrBefore)
+    ),
+  };
+}
+
 export function buildRevocationListClaims(input: {
   issuer: string;
   entries: RevocationEntry[];
+  delegations?: DelegationRevocationEntry[];
+  delegationWatermarks?: DelegationWatermarkEntry[];
   generatedAt?: number;
 }): RevocationListClaims {
   return {
@@ -194,13 +307,15 @@ export function buildRevocationListClaims(input: {
     fmt: REVOCATION_LIST_FORMAT,
     v: REVOCATION_LIST_VERSION,
     covers: {
-      includes: ["revoked", "rotated"],
+      includes: ["revoked", "rotated", "delegation_revoked", "delegation_watermark"],
       // Named individually rather than as prose. `expired` is the one a verifier
       // most needs: expiry is not a revocation, so an expired passport is absent
       // from this list and was not valid — check it on /verify.
       excludes: ["expired", "suspended", "kill_switch"],
     },
     entries: input.entries,
+    delegations: input.delegations ?? [],
+    delegationWatermarks: input.delegationWatermarks ?? [],
   };
 }
 
@@ -237,7 +352,7 @@ export async function loadRevocationEntries(
   if (!limit.success) return { ok: false, reason: "throttled" };
 
   const columns = "action, target_id, created_at, metadata";
-  const [revocations, rotations, agents] = await Promise.all([
+  const [revocations, rotations, agents, delegationRevokes] = await Promise.all([
     db
       .from("admin_audit")
       .select(columns)
@@ -258,16 +373,25 @@ export async function loadRevocationEntries(
       .select("id, passport_pubkey")
       .eq("status", "revoked")
       .not("passport_pubkey", "is", null),
+    // P2.4: both kinds of delegation revocation, each with the passports it covered.
+    // It grows with revocations only, like the agent.revoke read above.
+    db
+      .from("admin_audit")
+      .select(columns)
+      .eq("action", DELEGATION_REVOCATION_ACTION)
+      .eq("target_type", "agent")
+      .order("created_at", { ascending: true }),
   ]);
 
   // A partial list is worse than no list: a verifier cannot tell a short answer
   // from a complete one, and would read a missing entry as "still valid".
-  if (revocations.error || rotations.error || agents.error) {
+  if (revocations.error || rotations.error || agents.error || delegationRevokes.error) {
     return { ok: false, reason: "unavailable" };
   }
 
   return {
     ok: true,
+    ...buildDelegationRevocations((delegationRevokes.data ?? []) as RevocationAuditRow[]),
     entries: buildRevocationEntries(
       [
         ...((revocations.data ?? []) as RevocationAuditRow[]),

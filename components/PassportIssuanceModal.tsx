@@ -16,14 +16,21 @@ import { Dialog } from "@/components/ui/dialog";
 import { PassportStoreAndConnect } from "@/components/PassportStoreAndConnect";
 import { Plus, KeyRound, Check, ShieldCheck } from "lucide-react";
 import { serviceNames } from "@/lib/services/display";
+import { NewAgentSpendLimitField, useNewAgentSpendLimit } from "@/components/NewAgentSpendLimitField";
+import { DEFAULT_DAILY_LIMIT_CENTS } from "@/lib/new-agent-spend-limit";
 
 export function PassportIssuanceModal({
   userId,
   integrations,
   onRevealChange,
+  defaultDailyLimitCents = DEFAULT_DAILY_LIMIT_CENTS,
 }: {
   userId: string;
   integrations: readonly string[];
+  /** This deployment's daily limit for a new agent, in cents (null: switched
+   *  off). Resolved on the server, so the form shows what the server applies. */
+  defaultDailyLimitCents?: number | null;
+
   /** Fired while the one-time private key is on screen. A parent that renders
    *  this inside a conditional branch must hold that branch open until it clears. */
   onRevealChange?: (revealing: boolean) => void;
@@ -44,6 +51,7 @@ export function PassportIssuanceModal({
   const [runtime, setRuntime] = useState<"sdk" | "sidecar" | "mcp">("sdk");
   const [tokenBudget, setTokenBudget] = useState("");
   const [costBudgetUsd, setCostBudgetUsd] = useState("");
+  const spendLimit = useNewAgentSpendLimit(defaultDailyLimitCents);
   const [secret, setSecret] = useState<string | null>(null);
   const [pubkey, setPubkey] = useState<string | null>(null);
   const [agentId, setAgentId] = useState<string | null>(null);
@@ -71,6 +79,7 @@ export function PassportIssuanceModal({
     setRuntime("sdk");
     setTokenBudget("");
     setCostBudgetUsd("");
+    spendLimit.reset();
     setSecret(null);
     setPubkey(null);
     setAgentId(null);
@@ -91,14 +100,17 @@ export function PassportIssuanceModal({
       if (!servicesOnly && (!clientModelIsUsable(concreteModel) || !scopeAllows([{ provider, models: allowedModels }], provider, concreteModel))) {
         throw new Error("Model to call must be a concrete provider model id covered by the allowed patterns.");
       }
+      const scopes = servicesOnly ? [] : [{ provider, models: allowedModels }];
+      const limit = spendLimit.choice(scopes);
       const pub = ed25519.getPublicKey(priv);
       const passportId = bytesToBase64url(pub);
       const created = await createAgent({
         name,
         passportPubkey: passportId,
-        scopes: servicesOnly ? [] : [{ provider, models: allowedModels }],
+        scopes,
         budget_tokens: servicesOnly ? null : budget_tokens,
         budget_cents: servicesOnly ? null : budget_cents,
+        ...limit,
       });
       setPubkey(passportId);
       setAgentId(created.agentId);
@@ -265,10 +277,15 @@ export function PassportIssuanceModal({
                   inputMode="decimal"
                   placeholder="Unlimited"
                 />
-                <span className="text-xs text-muted-foreground">Example: 5.00. Blank means unlimited.</span>
+                <span className="text-xs text-muted-foreground">Example: 5.00. Lifetime; blank means no lifetime cap.</span>
               </label>
             </div>
             ) : null}
+            <NewAgentSpendLimitField
+              state={spendLimit}
+              defaultCents={defaultDailyLimitCents}
+              scopes={servicesOnly ? [] : [{ provider }]}
+            />
             {error ? <p role="alert" className="pc-inline-error">{error}</p> : null}
             <div className="flex justify-end gap-3">
               <button

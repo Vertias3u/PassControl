@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { retryOnDeadlock } from "./db-deadlock-retry";
 
 /**
  * 0078: workspace alert destinations. The webhook URL is a credential (anyone
@@ -15,7 +16,7 @@ const CONTAINER = process.env.LIMITS_DB_CONTAINER ?? "supabase_db_PassControl";
 const MIGRATION_PATH = new URL("../db/migrations/0078_workspace_alerts.sql", import.meta.url);
 const MIGRATION = existsSync(MIGRATION_PATH) ? readFileSync(MIGRATION_PATH, "utf8") : "select 'migration 0078 missing'::int;";
 
-function tryPsql(sql: string): { ok: boolean; out: string } {
+function tryPsqlOnce(sql: string): { ok: boolean; out: string } {
   try {
     const out = execFileSync(
       "docker",
@@ -27,6 +28,9 @@ function tryPsql(sql: string): { ok: boolean; out: string } {
     const e = error as { stderr?: Buffer | string; stdout?: Buffer | string };
     return { ok: false, out: String(e.stderr ?? "") + String(e.stdout ?? "") };
   }
+}
+function tryPsql(sql: string): { ok: boolean; out: string } {
+  return retryOnDeadlock(() => tryPsqlOnce(sql));
 }
 
 const up = tryPsql("select 1 from public.users limit 1;").ok;

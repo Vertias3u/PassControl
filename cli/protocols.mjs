@@ -3,7 +3,9 @@
 // runtime source; its declaration lets Edge TypeScript import the same values.
 export const CONTROL_API_PROTOCOL = { minimum: 1, maximum: 1 };
 export const GATEWAY_API_PROTOCOL = { minimum: 1, maximum: 1 };
-export const RECEIPT_PROTOCOL = { minimum: 1, maximum: 2 };
+// 3 (Bet D, 2026-10-10): a WORKER's receipt, auth.kind "delegated". Moved so a verifier
+// that predates delegation refuses it as too new instead of rendering it as passport-signed.
+export const RECEIPT_PROTOCOL = { minimum: 1, maximum: 3 };
 export const AGENT_TOKEN_PROTOCOL = { minimum: 1, maximum: 1 };
 export const WORKSPACE_EXPORT_PROTOCOL = { minimum: 1, maximum: 1 };
 

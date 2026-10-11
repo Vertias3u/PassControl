@@ -244,6 +244,7 @@ describe("the public verification route", () => {
   it("is shareable but not indexable", () => {
     expect(robots).toMatch(/"\/verify\/"/);
     const page = readFileSync(join(repo, "app/verify/[passportId]/page.tsx"), "utf8");
-    expect(page).toMatch(/robots:\s*\{\s*index:\s*false/);
+    let source = page;
+    expect(source).toMatch(/robots:\s*\{\s*index:\s*false/);
   });
 });

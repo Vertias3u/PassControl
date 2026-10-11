@@ -58,6 +58,11 @@ const allowed = new Set([
   // after installation.
   "cli/protocols.mjs",
   "cli/protocols.d.mts",
+  // Signed delegation (Bet D): the compiled SDK imports it for delegate(),
+  // fromDelegation() and verifyReceiptDelegation(), so a missing file breaks the
+  // SDK only after installation, exactly as protocols.mjs would.
+  "cli/delegation.mjs",
+  "cli/delegation.d.mts",
   "cli/verify.mjs",
   // `passcontrol login` — the first command a Cloud user runs. bin/passcontrol.mjs
   // imports it unconditionally, so a missing file is not a degraded login, it is
@@ -65,6 +70,9 @@ const allowed = new Set([
   // clipboard is a `spawn` of pbcopy/clip/wl-copy, deliberately not a package.
   "cli/login.mjs",
   "cli/logout.mjs",
+  // One identity per coding tool (candidate 4): bin/passcontrol.mjs imports it
+  // unconditionally, and cli/config.mjs reads `--profile` through it at load.
+  "cli/profiles.mjs",
   // The terminal browser and its dependency-free session/status helpers are in
   // the executable's unconditional import graph.
   "cli/menu.mjs",
@@ -105,6 +113,11 @@ const allowed = new Set([
   "cli/update-check.mjs",
   "cli/update.mjs",
   "cli/visa-client.mjs",
+  // `passcontrol watch` (F6). bin/passcontrol.mjs imports watch.mjs at the top and
+  // the sidecar imports watch-feed.mjs, so leaving either out is an install that
+  // cannot start, not a missing board.
+  "cli/watch-feed.mjs",
+  "cli/watch.mjs",
   "sdk/README.md",
   "sdk/control.d.ts",
   "sdk/control.js",

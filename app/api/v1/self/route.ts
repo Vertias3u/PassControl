@@ -10,6 +10,11 @@
 // own (`self:<agent>`), so a status line polling it cannot use up the allowance the
 // agent's model calls share (`proxy:<agent>`).
 //
+// A caller that names its session the way Claude Code does on every call
+// (`x-claude-code-session-id`) is told when THAT session was stopped, with the
+// proxy's own message: the `/passcontrol` plugin asks here, and without it a
+// stopped session read as healthy while every call was refused.
+//
 // Deliberately absent from the answer: the policy and its shadow (deny rules are
 // the owner's), fallbacks, endpoints, key ids and anything about the owner.
 export const runtime = "edge";
@@ -21,10 +26,11 @@ import {
   enforceSenderConstraint,
   principalSuspended,
 } from "@/lib/gateway/authenticate";
-import { err } from "@/lib/gateway/responses";
+import { readClientLineage, sessionStoppedMessage } from "@/lib/client-lineage";
+import { err, errMessage } from "@/lib/gateway/responses";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { rateLimit } from "@/lib/ratelimit";
-import { readKillState } from "@/lib/state/killswitch";
+import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { isSuspended, readBudgetSnapshot } from "@/lib/state/redis";
 
@@ -48,17 +54,23 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   // ── 2. Kill and suspend, evaluated exactly as for a model call, with the same
-  // opaque answer: a caller cannot probe which control it tripped.
-  const [kill, redisSuspended] = await Promise.all([readKillState(userId), isSuspended(agentId)]);
+  // opaque answer: a caller cannot probe which control it tripped. A stopped
+  // session is the one the proxy names, so this names it too.
+  const session = readClientLineage(req.headers)?.session ?? null;
+  const [kill, suspendRead] = await Promise.all([readKillState(userId), isSuspended(agentId, session)]);
+  const redisSuspended = withRecordedSessionStop(suspendRead, kill, agentId, session);
   const revocation = evaluateGate({
     agentId,
     killState: kill,
-    suspended: redisSuspended || principalSuspended(principal),
+    suspended: Boolean(redisSuspended) || principalSuspended(principal),
     provider: "self",
     method: "GET",
     path: ["self"],
     model: "",
   });
+  if (revocation.deniedBy === "suspend" && redisSuspended === "session" && session && !principalSuspended(principal)) {
+    return errMessage(403, "blocked_suspended", sessionStoppedMessage(session));
+  }
   if (revocation.deniedBy === "kill" || revocation.deniedBy === "suspend") return err(403, "blocked_suspended");
 
   // ── 3. Its own rate limit, after revocation as on the proxy.

@@ -14,6 +14,7 @@ import {
   setServiceKill,
   type ServiceKillObservation,
 } from "@/app/dashboard/service-actions";
+import { notDurableMessage, notDurableRetryLabel } from "@/lib/kill-durability";
 
 export type ServiceStopPhase = "running" | "stopped" | "stopping" | "resuming" | "checking" | "unknown" | "unconfirmed";
 
@@ -50,6 +51,8 @@ export function ServiceStopControl({
   const [unconfirmed, setUnconfirmed] = useState<{ requested: boolean } | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The last change applied but did not reach the durable record (0083).
+  const [notDurable, setNotDurable] = useState<boolean | null>(null);
   const phase = serviceStopPhase({ busy, stopped, unconfirmed: unconfirmed !== null });
 
   const settle = (result: ServiceKillObservation) => {
@@ -59,6 +62,7 @@ export function ServiceStopControl({
     }
     setError(null);
     setStopped(result.armed);
+    if (result.durable !== undefined) setNotDurable(result.durable ? null : result.requested);
     setUnconfirmed(result.confirmed ? null : { requested: result.requested });
   };
 
@@ -125,6 +129,16 @@ export function ServiceStopControl({
           <div className="pc-kill-switch__description" role="status">
             {view.desc}.
           </div>
+          {notDurable !== null && !unconfirmed ? (
+            <p className="pc-inline-notice is-warning" role="status" data-service-stop-durable="false">
+              <span>
+                {notDurableMessage(notDurable)}{" "}
+                <button type="button" className="ghost" disabled={pending} onClick={() => void apply(notDurable)} data-action="retry-service-save">
+                  {notDurableRetryLabel(notDurable)}
+                </button>
+              </span>
+            </p>
+          ) : null}
           {error ? (
             <p className="pc-inline-notice is-danger" role="alert">
               {error}

@@ -96,6 +96,11 @@ vi.mock("@/lib/state/redis", () => ({
  * The three settle entry points funnel into one spy carrying an `outcome` tag,
  * because the choice between them IS the behaviour under test.
  */
+// Candidate 3's alert hook: what the route hands it after a settle (its own tests:
+// tests/session-spend-alert*.test.ts).
+const { noteSessionSpendMock } = vi.hoisted(() => ({ noteSessionSpendMock: vi.fn(async (_input: Record<string, unknown>) => false) }));
+vi.mock("@/lib/alerts/session-spend", () => ({ noteSessionSpend: (input: Record<string, unknown>) => noteSessionSpendMock(input) }));
+
 vi.mock("@/lib/state/holds", () => {
   const settle = async (outcome: string, p: Record<string, unknown>) => {
     const r = await settleHoldMock({ ...p, outcome });
@@ -659,7 +664,7 @@ describe("custom provider endpoints", () => {
     );
 
     expect(res.status).toBe(402);
-    expect(await res.json()).toEqual({ error: "unpriced_endpoint" });
+    expect(await res.json()).toEqual({ error: "unpriced_endpoint", message: expect.stringMatching(/spending limit of \$5 a day.*agent's page/) });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -1430,7 +1435,7 @@ describe("an unpriced model under a dollar limit", () => {
       { params: Promise.resolve({ provider: "openai", path: ["v1", "chat", "completions"] }) }
     );
     expect(res.status).toBe(402);
-    expect(await res.json()).toEqual({ error: "unpriced_model" });
+    expect(await res.json()).toEqual({ error: "unpriced_model", message: expect.stringMatching(/spending limit of \$5 a day.*agent's page/) });
     expect(rateLimitMock.mock.calls.some((c) => String(c[0]).startsWith("policy-hour:"))).toBe(false);
     expect(openHoldMock).not.toHaveBeenCalled();
   });
@@ -1520,6 +1525,314 @@ describe("Anthropic beta header", () => {
   it("never forwards an anthropic-beta header to another provider", async () => {
     const { headers } = await send("openai", { "anthropic-beta": "claude-code-20250219" });
     expect(headers.has("anthropic-beta")).toBe(false);
+  });
+});
+
+// Stop one session, not the whole agent (sprint T8, D9). isSuspended reads the
+// agent flag and, when the call declares a session, that session's stop in one
+// round-trip (tests/session-stop-state.test.ts). Same place in the check order
+// as suspend; refused as blocked_suspended, with a readable reason only when the
+// session stop alone fired, so the agent-level refusal stays opaque.
+describe("a stopped session at the route", () => {
+  const params = { params: Promise.resolve({ provider: "anthropic", path: ["v1", "messages"] }) };
+  const SESSION = "04542892-548f-412a-8343-13f6bfd271b1";
+  function call(headers: Record<string, string> = {}) {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+    return POST(
+      new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", ...headers },
+        body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      }),
+      params
+    );
+  }
+
+  it("asks about the declared session in the same read as the agent", async () => {
+    await call({ "x-claude-code-session-id": SESSION });
+    expect(isSuspendedMock).toHaveBeenCalledWith(expect.any(String), SESSION);
+  });
+
+  it("refuses a stopped session's call with a reason Claude Code can show, before any hold or upstream call", async () => {
+    isSuspendedMock.mockResolvedValue("session");
+    const res = await call({ "x-claude-code-session-id": SESSION });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe("blocked_suspended");
+    expect(body.message).toContain("session");
+    expect(body.message).toContain(SESSION);
+    expect(body.message).toMatch(/new session/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+    expect(writeLogMock.mock.calls.at(-1)![0].status).toBe("blocked_suspended");
+  });
+
+  it("lets a call from another session of the same agent through", async () => {
+    isSuspendedMock.mockImplementation(async (_agent: string, session?: string | null) => (session === SESSION ? "session" : false));
+    const res = await call({ "x-claude-code-session-id": "another-session-1" });
+    expect(res.status).toBe(200);
+  });
+
+  it("keeps an agent-level suspension opaque, session or not", async () => {
+    isSuspendedMock.mockResolvedValue(true);
+    const body = await (await call({ "x-claude-code-session-id": SESSION })).json();
+    expect(body).toEqual({ error: "blocked_suspended" });
+  });
+
+  it("asks with no session when the call declares none", async () => {
+    await call();
+    const args = isSuspendedMock.mock.calls.at(-1)!;
+    expect(args[1] ?? null).toBeNull();
+  });
+});
+
+// Candidate 3 at the route (owner, 2026-10-10): after a settled charge of a call that
+// declares a session, the session alert hears the APPLIED amount, only when the agent's
+// policy sets `session_alert_cents`.
+describe("the session spend alert at the route", () => {
+  const params = { params: Promise.resolve({ provider: "anthropic", path: ["v1", "messages"] }) };
+  function call(headers: Record<string, string>, policy: Record<string, unknown> | null) {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: policy, s: null }));
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ usage: { input_tokens: 100, output_tokens: 10 } }), { status: 200, headers: { "content-type": "application/json" } })
+    );
+    return POST(
+      new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", ...headers },
+        body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      }),
+      params
+    );
+  }
+
+  it("hands the alert the session, the applied charge and the threshold", async () => {
+    noteSessionSpendMock.mockClear();
+    settleHoldMock.mockResolvedValue({ applied: true, appliedTokens: 110, appliedMicrocents: 15_000 });
+    const res = await call({ "x-claude-code-session-id": "sess-alert-1" }, { session_alert_cents: 500 });
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(noteSessionSpendMock).toHaveBeenCalled());
+    expect(noteSessionSpendMock.mock.calls[0]![0]).toMatchObject({
+      agentId: baseClaims.agid,
+      session: "sess-alert-1",
+      deltaMicrocents: 15_000,
+      thresholdMicrocents: 500 * 1_000_000,
+    });
+  });
+
+  it.each([
+    ["no declared session", {}, { session_alert_cents: 500 }],
+    ["no threshold in the policy", { "x-claude-code-session-id": "s" }, null],
+  ])("stays quiet with %s", async (_label, headers, policy) => {
+    noteSessionSpendMock.mockClear();
+    settleHoldMock.mockResolvedValue({ applied: true, appliedTokens: 110, appliedMicrocents: 15_000 });
+    await call(headers as Record<string, string>, policy as Record<string, unknown> | null);
+    await vi.waitFor(() => expect(settleHoldMock).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(noteSessionSpendMock).not.toHaveBeenCalled();
+  });
+
+  it("does not count a settle replay twice", async () => {
+    noteSessionSpendMock.mockClear();
+    settleHoldMock.mockResolvedValue({ applied: false, appliedTokens: 110, appliedMicrocents: 15_000 });
+    await call({ "x-claude-code-session-id": "s" }, { session_alert_cents: 500 });
+    await vi.waitFor(() => expect(settleHoldMock).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(noteSessionSpendMock).not.toHaveBeenCalled();
+  });
+});
+
+// C(b) at the route (owner, 2026-10-10). The policy's `subagent_session_cap_cents`
+// reaches the hold only for a call that DECLARES a sub-agent, as the session and
+// sub-agent ids the hold keys its ledger on. The money itself is
+// tests/holds-subagent.redis.test.ts; here: what is passed, and what is answered.
+describe("a sub-agent's session cap at the route", () => {
+  const params = { params: Promise.resolve({ provider: "anthropic", path: ["v1", "messages"] }) };
+  const SESSION = "sess-cb-1";
+  const SUB = "a0000000000000001";
+  function call(headers: Record<string, string>, model = "claude-haiku-4-5") {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { subagent_session_cap_cents: 200 }, s: null }));
+    return POST(
+      new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", ...headers },
+        body: JSON.stringify({ model, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      }),
+      params
+    );
+  }
+  const subHeaders = { "x-claude-code-session-id": SESSION, "x-claude-code-agent-id": SUB };
+
+  it("hands the hold the declared session, sub-agent and the cap in micro-cents", async () => {
+    await call(subHeaders);
+    expect(openHoldMock.mock.calls[0]![0]).toMatchObject({ subLedger: { session: SESSION, agent: SUB, capMicrocents: 200 * 1_000_000 } });
+  });
+
+  it("passes no ledger for the main agent", async () => {
+    await call({ "x-claude-code-session-id": SESSION });
+    expect(openHoldMock.mock.calls[0]![0].subLedger).toBeUndefined();
+  });
+
+  // F4: a client that is neither CLI can declare its sub-agent beside the sidecar's
+  // run id. The sub-agent's limits must then hold for it exactly as for Claude
+  // Code's: declaring a sub-agent only ever adds the sub-agent's limits.
+  it("holds a sub-agent declared beside the sidecar's run id to the same cap", async () => {
+    await call({ "x-passcontrol-run": "run-1", "x-passcontrol-agent": SUB });
+    expect(openHoldMock.mock.calls[0]![0]).toMatchObject({ subLedger: { session: "run-1", agent: SUB, capMicrocents: 200 * 1_000_000 } });
+  });
+
+  it("holds a sub-agent declared beside the sidecar's run id to the sub-agent model list", async () => {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { subagent_models: [{ provider: "anthropic", models: ["claude-opus-*"] }] }, s: null }));
+    const res = await POST(
+      new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages", {
+        method: "POST",
+        headers: { authorization: "Bearer visa", "content-type": "application/json", "x-passcontrol-run": "run-1", "x-passcontrol-agent": SUB },
+        body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      }),
+      params
+    );
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+
+  it("answers a spent sub-agent with 402 and a reason Claude Code can show, sending nothing", async () => {
+    openHoldMock.mockResolvedValue({ ok: false, reason: "subagent" });
+    const res = await call(subHeaders);
+    expect(res.status).toBe(402);
+    const body = await res.json();
+    expect(body.error).toBe("blocked_budget_subagent");
+    expect(body.message).toContain(SUB);
+    expect(body.message).toContain("$2.00");
+    // The hold is what did not fit, not spend (live 2026-10-10: refused at $0.0036 of $0.03).
+    expect(body.message).not.toMatch(/has used/i);
+    expect(body.message).toMatch(/could cost/i);
+    expect(body.message).toMatch(/already spent/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+    expect(writeLogMock.mock.calls.at(-1)![0]).toMatchObject({ status: "blocked_budget_subagent" });
+  });
+
+  it("says so when too many new sub-agents opened this hour", async () => {
+    openHoldMock.mockResolvedValue({ ok: false, reason: "subagent_ledgers" });
+    const res = await call(subHeaders);
+    expect(res.status).toBe(402);
+    const body = await res.json();
+    expect(body.error).toBe("blocked_budget_subagent");
+    expect(body.message).toMatch(/new sub-agents/i);
+  });
+
+  it("makes a capped sub-agent's call dollar-limited: an unpriced model is refused before any hold", async () => {
+    const res = await call(subHeaders, "claude-unlisted-9");
+    expect(res.status).toBe(402);
+    expect((await res.json()).error).toBe("unpriced_model");
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves the main agent's call to an unpriced model alone when only sub-agents are capped", async () => {
+    const res = await call({ "x-claude-code-session-id": SESSION }, "claude-unlisted-9");
+    expect(res.status).not.toBe(402);
+  });
+});
+
+// Claude Code 2.1.295's per-message betas (sprint T3, D8; tests/anthropic-message-controls.test.ts).
+// Each is forwarded only when the body's use of it is one the gateway understands.
+describe("Claude Code's per-message betas at the route", () => {
+  const BETAS = "claude-code-20250219,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15";
+  const params = { params: Promise.resolve({ provider: "anthropic", path: ["v1", "messages"] }) };
+  async function send(messages: unknown[], bc?: number) {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }], ...(bc ? { bc } : {}) });
+    const req = new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages&beta=true", {
+      method: "POST",
+      headers: { authorization: "Bearer visa", "content-type": "application/json", "anthropic-beta": BETAS },
+      body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages }),
+    });
+    const calls = fetchMock.mock.calls.length;
+    const res = await POST(req, params);
+    const sent = fetchMock.mock.calls.length > calls ? (fetchMock.mock.calls.at(-1) as [string, RequestInit]) : null;
+    return {
+      res,
+      sent,
+      beta: sent ? (new Headers(sent[1].headers).get("anthropic-beta") ?? "").split(",") : [],
+      body: sent ? JSON.parse(String(sent[1].body)) : null,
+    };
+  }
+  const user = { role: "user", content: "hi" };
+
+  it("forwards per-turn control for an effort-only system message", async () => {
+    const { res, beta, body } = await send([user, { role: "system", content: [{ type: "text", text: "env" }], output_config: { effort: "medium" } }]);
+    expect(res.status).toBe(200);
+    expect(beta).toContain("per-turn-control-2026-07-01");
+    expect(body.messages[1].output_config).toEqual({ effort: "medium" });
+  });
+
+  it("keeps per-turn control dropped when a message's output_config carries more than effort", async () => {
+    const { beta } = await send([user, { role: "system", content: [], output_config: { effort: "low", speed: "fast" } }]);
+    expect(beta).not.toContain("per-turn-control-2026-07-01");
+  });
+
+  // Auto mode's server-side checks (P7; tests/anthropic-safeguards.test.ts).
+  async function sendSafeguards(safeguards: unknown) {
+    verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["*"] }] });
+    const req = new Request("https://gateway.test/api/v1/anthropic/v1/messages?provider=anthropic&path=v1&path=messages&beta=true", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer visa",
+        "content-type": "application/json",
+        "anthropic-beta": "claude-code-20250219,dangerous-tool-use-2026-09-03,afk-mode-2026-01-31",
+      },
+      body: JSON.stringify({ model: "claude-haiku-4-5", max_tokens: 10, messages: [user], safeguards }),
+    });
+    const calls = fetchMock.mock.calls.length;
+    const res = await POST(req, params);
+    const sent = fetchMock.mock.calls.length > calls ? (fetchMock.mock.calls.at(-1) as [string, RequestInit]) : null;
+    return {
+      res,
+      beta: sent ? (new Headers(sent[1].headers).get("anthropic-beta") ?? "").split(",") : [],
+      body: sent ? JSON.parse(String(sent[1].body)) : null,
+    };
+  }
+
+  it("forwards auto mode's checks: the beta travels and safeguards arrive unchanged", async () => {
+    const safeguards = [{ type: "dangerous_tool_use", classifier_context: { v: 1, permission_mode: "auto" } }];
+    const { res, beta, body } = await sendSafeguards(safeguards);
+    expect(res.status).toBe(200);
+    expect(beta).toContain("dangerous-tool-use-2026-09-03");
+    expect(beta).not.toContain("afk-mode-2026-01-31");
+    expect(body.safeguards).toEqual(safeguards);
+  });
+
+  it("keeps the beta dropped for a safeguards entry it does not understand", async () => {
+    const { beta } = await sendSafeguards([{ type: "dangerous_tool_use", model: "claude-opus-5-5" }]);
+    expect(beta).not.toContain("dangerous-tool-use-2026-09-03");
+  });
+
+  it("forwards a late custom tool defined inline, unchanged, with its betas", async () => {
+    const addition = { type: "tool_addition", tool: { type: "tool_definition", definition: { name: "mcp__slow__slow_echo", input_schema: { type: "object" } } } };
+    const { res, beta, body } = await send([user, { role: "system", content: [addition] }], 500);
+    expect(res.status).toBe(200);
+    expect(beta).toEqual(expect.arrayContaining(["inline-tools-2026-09-15", "mid-conversation-tool-changes-2026-07-01"]));
+    expect(body.messages[1].content[0]).toEqual(addition);
+  });
+
+  it("refuses an uncapped hosted search defined inline before any hold or upstream call", async () => {
+    const addition = { type: "tool_addition", tool: { type: "tool_definition", definition: { type: "web_search_20260209", name: "web_search" } } };
+    const { res, sent } = await send([user, { role: "system", content: [addition] }], 500);
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("server_side_tools_unsupported");
+    expect(sent).toBeNull();
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses an advisor defined inline, so it cannot skip the advisor's model gate", async () => {
+    const addition = { type: "tool_addition", tool: { type: "tool_definition", definition: { type: "advisor_20260301", name: "advisor", model: "claude-opus-5-5" } } };
+    const { res, sent } = await send([user, { role: "system", content: [addition] }]);
+    expect(res.status).toBe(400);
+    expect(sent).toBeNull();
   });
 });
 
@@ -1647,6 +1960,20 @@ describe("Anthropic hosted tools at the route", () => {
       expect(openHoldMock).not.toHaveBeenCalled();
       await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
       expect(writeLogMock.mock.calls.at(-1)![0]).toMatchObject({ status: "blocked_scope" });
+    });
+
+    // P6.3 (2026-10-10): the gate checked only the FIRST advisor in tools[], so an allowed
+    // one in front put a forbidden one through. Every advisor is checked now.
+    it("refuses a forbidden advisor hidden behind an allowed one", async () => {
+      verifyVisaMock.mockResolvedValue({ ...baseClaims, scope: [{ provider: "anthropic", models: ["claude-haiku-*"] }] });
+      const cheap = { ...ADVISOR, model: "claude-haiku-5-5" };
+      const res = await POST(advisorReq({ tools: [cheap, ADVISOR] }), params);
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toBe("blocked_scope");
+      expect(body.message).toContain("claude-opus-5-5");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(openHoldMock).not.toHaveBeenCalled();
     });
 
     it("refuses an advisor model the live policy denies", async () => {

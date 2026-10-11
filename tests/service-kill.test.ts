@@ -14,6 +14,7 @@ const { store, redisMock, failing } = vi.hoisted(() => {
   const guard = <T>(fn: () => T) => (failing.on ? Promise.reject(new Error("redis down")) : Promise.resolve(fn()));
   const redisMock = {
     get: vi.fn((k: string) => guard(() => store.get(k) ?? null)),
+    mget: vi.fn((...ks: string[]) => guard(() => ks.map((k) => store.get(k) ?? null))),
     set: vi.fn((k: string, v: unknown, opts?: unknown) => guard(() => { store.set(k, v); return opts === undefined ? "OK" : "OK"; })),
     del: vi.fn((k: string) => guard(() => (store.delete(k) ? 1 : 0))),
     smembers: vi.fn(() => guard(() => [] as string[])),
@@ -22,6 +23,13 @@ const { store, redisMock, failing } = vi.hoisted(() => {
 });
 vi.mock("../lib/state/redis", () => ({ redis: () => redisMock }));
 vi.mock("../lib/observability", () => ({ logFailOpen: vi.fn() }));
+// The durable record (0083) is out of scope here: nothing recorded, and every
+// tenant reads as loaded once it has been asked (tests/kill-record-rebuild.test.ts).
+vi.mock("../lib/state/kill-record", () => ({
+  loadKillRecords: async () => [],
+  saveKillRecord: async () => true,
+  deleteKillRecord: async () => true,
+}));
 
 import {
   armServiceKill,
@@ -45,7 +53,9 @@ describe("the per-service kill switch", () => {
     // The model route names no service, so it never sees this flag.
     const llm = await readKillState("userA");
     expect(llm.serviceKill ?? false).toBe(false);
-    expect(redisMock.get).not.toHaveBeenCalledWith("killswitch:tenant:userA:svc:github", expect.anything());
+    // One MGET per read; the model route's never names the service key.
+    const lastRead = redisMock.mget.mock.calls.at(-1) ?? [];
+    expect(lastRead).not.toContain("killswitch:tenant:userA:svc:github");
   });
 
   it("stops that service for that tenant only", async () => {

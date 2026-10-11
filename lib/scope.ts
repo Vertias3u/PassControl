@@ -15,7 +15,7 @@ const MAX_PROVIDER_LEN = 50;
 // sides: a scope entry that never matches denies, and a deny rule that trips
 // this makes the whole document malformed, which also denies.
 const MAX_WILDCARDS = 4;
-const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens", "subagent_models", "secret_guard"]);
+const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens", "subagent_models", "subagent_session_cap_cents", "session_alert_cents", "secret_guard"]);
 // Exported for the policy editor, which must offer exactly the days the parser
 // accepts. Retyping them there is how the form ends up letting an operator save
 // a window the gateway reads as malformed — the failure mode validateFallbacks
@@ -206,6 +206,17 @@ interface AgentPolicy {
    */
   subagentModels: ScopeEntry[] | null;
   /**
+   * `subagent_session_cap_cents` (C(b), 2026-10-10): what ONE declared sub-agent may
+   * spend in ONE declared session, in cents. null = absent, no cap; 0 = sub-agents may
+   * spend nothing. Enforced atomically in the hold (lib/state/holds.ts sub-ledger).
+   */
+  subagentSessionCapCents: number | null;
+  /**
+   * `session_alert_cents` (1.4.0 candidate 3, 2026-10-10): alert the workspace once
+   * when a declared session's settled spend passes this many cents. Alerts only.
+   */
+  sessionAlertCents: number | null;
+  /**
    * `secret_guard: { mode }` (2026-10-08): what the proxy does with a key found in a
    * request (lib/secret-guard.ts). null = absent, the guard is off.
    */
@@ -222,6 +233,8 @@ export interface AgentPolicyView {
   maxRequestsPerHour: number | null;
   maxOutputTokens: number | null;
   subagentModels: ScopeEntry[] | null;
+  subagentSessionCapCents: number | null;
+  sessionAlertCents: number | null;
   secretGuard: SecretGuardMode | null;
 }
 
@@ -286,6 +299,8 @@ export const POLICY_LIMITS = {
    */
   denyPatterns: 100,
   windows: 25,
+  /** $100,000 in cents: a per-session cap above that is a typo, not a limit. */
+  subagentSessionCapCents: 10_000_000,
   /** There are seven days. Longer means duplicates, and duplicates are a payload. */
   daysPerWindow: POLICY_DAYS.length,
   /** Both sides of a match. Part of the product the bound test asserts, so it
@@ -304,7 +319,7 @@ export const POLICY_LIMITS = {
 function parsePolicy(value: unknown): AgentPolicy | null {
   // Existing rows and pre-policy visas must preserve the legacy path exactly.
   if (value === null) {
-    return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null, subagentModels: null, secretGuard: null };
+    return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null, subagentModels: null, subagentSessionCapCents: null, sessionAlertCents: null, secretGuard: null };
   }
   if (!isRecord(value)) return null;
   if (Object.keys(value).some((key) => !POLICY_KEYS.has(key))) return null;
@@ -427,6 +442,26 @@ function parsePolicy(value: unknown): AgentPolicy | null {
     }
   }
 
+  // Whole cents, 0 to $100,000. Zero is meaningful: sub-agents may spend nothing.
+  let subagentSessionCapCents: number | null = null;
+  if ("subagent_session_cap_cents" in value) {
+    const cents = value.subagent_session_cap_cents;
+    if (typeof cents !== "number" || !Number.isSafeInteger(cents) || cents < 0 || cents > POLICY_LIMITS.subagentSessionCapCents) {
+      return null;
+    }
+    subagentSessionCapCents = cents;
+  }
+
+  // At least one cent: an alert at $0 would fire on every session's first call.
+  let sessionAlertCents: number | null = null;
+  if ("session_alert_cents" in value) {
+    const cents = value.session_alert_cents;
+    if (typeof cents !== "number" || !Number.isSafeInteger(cents) || cents < 1 || cents > POLICY_LIMITS.subagentSessionCapCents) {
+      return null;
+    }
+    sessionAlertCents = cents;
+  }
+
   // An object with exactly one key, so v2 can add fields without a format change.
   let secretGuard: SecretGuardMode | null = null;
   if ("secret_guard" in value) {
@@ -437,7 +472,7 @@ function parsePolicy(value: unknown): AgentPolicy | null {
     secretGuard = guard.mode;
   }
 
-  return { deny, windows, maxRequestsPerHour, maxOutputTokens, subagentModels, secretGuard };
+  return { deny, windows, maxRequestsPerHour, maxOutputTokens, subagentModels, subagentSessionCapCents, sessionAlertCents, secretGuard };
 }
 
 /**
@@ -461,6 +496,16 @@ export function secretGuardMode(value: unknown): SecretGuardMode | null {
  */
 export function subagentAllowlist(value: unknown): ScopeEntry[] | null {
   return parsePolicy(value)?.subagentModels ?? null;
+}
+
+/** The "session passed $X" alert threshold in cents (candidate 3), or null. */
+export function sessionAlertCents(value: unknown): number | null {
+  return parsePolicy(value)?.sessionAlertCents ?? null;
+}
+
+/** The per-sub-agent, per-session cap in cents (C(b)), or null when absent or the policy is malformed. */
+export function subagentSessionCapCents(value: unknown): number | null {
+  return parsePolicy(value)?.subagentSessionCapCents ?? null;
 }
 
 /**
@@ -493,6 +538,8 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
       maxRequestsPerHour: null,
       maxOutputTokens: null,
       subagentModels: null,
+      subagentSessionCapCents: null,
+      sessionAlertCents: null,
       secretGuard: null,
     };
   }
@@ -504,6 +551,8 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
     maxRequestsPerHour: policy.maxRequestsPerHour,
     maxOutputTokens: policy.maxOutputTokens,
     subagentModels: policy.subagentModels?.map((entry) => ({ ...entry, models: [...entry.models] })) ?? null,
+    subagentSessionCapCents: policy.subagentSessionCapCents,
+    sessionAlertCents: policy.sessionAlertCents,
     secretGuard: policy.secretGuard,
   };
 }

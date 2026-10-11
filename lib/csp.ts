@@ -86,7 +86,9 @@ function connectSources(
  * Matched EXACTLY (see needsExternalJwks). A prefix test would hand the same
  * relaxation to /verify/receipt-anything.
  */
-export const EXTERNAL_JWKS_PATHS: readonly string[] = ["/verify/receipt", "/verify/statement"];
+// /verify/session (sprint T9): a seal and every receipt in its bundle, checked in
+// the browser against the issuer the seal names. Same reasoning, same exact match.
+export const EXTERNAL_JWKS_PATHS: readonly string[] = ["/verify/receipt", "/verify/statement", "/verify/session"];
 
 export function needsExternalJwks(pathname: string): boolean {
   return EXTERNAL_JWKS_PATHS.includes(pathname);

@@ -42,6 +42,14 @@ import type { ClientLineage } from "./client-lineage";
  * additive range rule is deliberately broader.
  */
 export const RECEIPT_VER = RECEIPT_PROTOCOL.maximum;
+/**
+ * Pinned, not the maximum. Version 2 said "a Direct Agent Key authenticated this";
+ * when the maximum moved to 3 for delegated receipts (Bet D), direct-key receipts
+ * had to stay exactly as every verifier already in the field reads them.
+ */
+export const DIRECT_KEY_RECEIPT_VER = 2;
+/** A worker's receipt (Bet D). See RECEIPT_PROTOCOL for why it is its own version. */
+export const DELEGATED_RECEIPT_VER = 3;
 
 export interface OwnerClaim {
   kind: string;
@@ -143,6 +151,17 @@ type PassportReceiptIdentity = {
   credentialUseId?: never;
 };
 
+/** A worker acting under a signed delegation from the agent (Bet D). */
+type DelegatedReceiptIdentity = {
+  authMethod: "delegated" | "delegated_proof_per_request";
+  /** The ROOT passport: the agent the worker acts for. */
+  passportId: string;
+  visaJti: string;
+  delegation: { actor: string; jti: string; depth: number; chainHash: string };
+  agentAccessKeyId?: never;
+  credentialUseId?: never;
+};
+
 type DirectKeyReceiptIdentity = {
   authMethod: "direct_key";
   passportId?: never;
@@ -152,7 +171,7 @@ type DirectKeyReceiptIdentity = {
 };
 
 export type ReceiptInput = ReceiptInputBase &
-  (PassportReceiptIdentity | DirectKeyReceiptIdentity);
+  (PassportReceiptIdentity | DelegatedReceiptIdentity | DirectKeyReceiptIdentity);
 
 export interface RequestDigest {
   alg: "sha-256";
@@ -207,9 +226,26 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
     // Passport receipts remain version 1 and retain their exact identity
     // claims. Version 2 exists specifically to say that a bearer Direct Agent
     // Key — not a passport signature — authenticated this call.
-    ver: input.authMethod === "direct_key" ? RECEIPT_VER : 1,
+    ver:
+      input.authMethod === "direct_key"
+        ? DIRECT_KEY_RECEIPT_VER
+        : input.authMethod === "delegated" || input.authMethod === "delegated_proof_per_request"
+          ? DELEGATED_RECEIPT_VER
+          : 1,
   };
-  if (input.authMethod === "direct_key") {
+  if (input.authMethod === "delegated" || input.authMethod === "delegated_proof_per_request") {
+    // `sub` stays the root passport; who actually acted is the worker in `act`. A
+    // stranger holding the chain checks it against `ch` (sdk/verify.ts).
+    claims.vjti = input.visaJti;
+    claims.auth = {
+      kind: "delegated",
+      act: input.delegation.actor,
+      dlg: input.delegation.jti,
+      dep: input.delegation.depth,
+      ch: input.delegation.chainHash,
+      ...(input.authMethod === "delegated_proof_per_request" ? { prf: true } : {}),
+    };
+  } else if (input.authMethod === "direct_key") {
     claims.auth = {
       kind: "direct_key",
       kid: input.agentAccessKeyId,

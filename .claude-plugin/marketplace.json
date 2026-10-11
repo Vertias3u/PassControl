@@ -1,0 +1,13 @@
+{
+  "name": "passcontrol",
+  "owner": { "name": "Vertias", "url": "https://passcontrol.vertias.eu" },
+  "description": "PassControl's plugin for Claude Code.",
+  "plugins": [
+    {
+      "name": "passcontrol",
+      "source": "./plugins/passcontrol",
+      "description": "/passcontrol: this agent's PassControl budget and status, and why its calls are refused.",
+      "license": "MIT"
+    }
+  ]
+}

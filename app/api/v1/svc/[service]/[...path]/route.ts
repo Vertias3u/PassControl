@@ -38,7 +38,7 @@ import {
 } from "@/lib/gateway/authenticate";
 import { err, errMessage } from "@/lib/gateway/responses";
 import { PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S } from "@/lib/gateway/limits";
-import { readKillState } from "@/lib/state/killswitch";
+import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
 import { isSuspended } from "@/lib/state/redis";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { evaluateGate } from "@/lib/gate";
@@ -263,14 +263,19 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   // ── 2. Kill switch and suspension: the same evaluation as an LLM call ──────
   // The tenant's per-service kill rides in the same read ("stop all GitHub, keep
   // Claude"), so it shares the kill switch's fail posture exactly.
-  const [kill, redisSuspended] = await Promise.all([
+  // The declared session rides in the same read (sprint T8): a stopped session
+  // reaches no service either.
+  const [kill, suspendRead] = await Promise.all([
     readKillState(userId, { service }),
-    isSuspended(agentId),
+    isSuspended(agentId, lineage?.session ?? null),
   ]);
+  // A session stop just reloaded from the record overrules the parallel read of
+  // an empty Redis (see the LLM route).
+  const redisSuspended = withRecordedSessionStop(suspendRead, kill, agentId, lineage?.session ?? null);
   const revocation = evaluateGate({
     agentId,
     killState: kill,
-    suspended: redisSuspended || principalSuspended(principal),
+    suspended: redisSuspended !== false || principalSuspended(principal),
     provider,
     method,
     path: segments,

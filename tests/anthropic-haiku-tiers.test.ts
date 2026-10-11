@@ -14,8 +14,8 @@
 //     the held rate;
 //   * Anthropic reports no service tier the way OpenAI does, so settlement must not
 //     wait for one.
-// The hold stays at the long tier, as every tiered row's does: a hold cannot know
-// how much of the prompt the provider will serve from cache.
+// The hold is at the long tier unless the prompt is well under the line
+// (tests/tiered-hold.test.ts, 2026-10-10); settlement is what this file pins.
 import { describe, expect, it } from "vitest";
 import { costMicrocents, costMicrocentsForUsage, hasListedPrice } from "../lib/pricing";
 

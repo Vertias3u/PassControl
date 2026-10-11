@@ -44,9 +44,10 @@ describe("holdMicrocents", () => {
     );
   });
 
-  it("uses Haiku 5.5's long-tier write rate, the tier it is held at", () => {
+  it("uses Haiku 5.5's long-tier write rate when it is held at the long tier", () => {
+    // Above half its 100K line; below that it is held short (tests/tiered-hold.test.ts).
     const body = { messages: msg({ cache_control: { type: "ephemeral" } }) };
-    expect(holdMicrocents("claude-haiku-5-5", { inputTokens: 1_000, outputTokens: 0 }, "anthropic", body)).toBe(1_000 * Math.ceil(50 * 1.25));
+    expect(holdMicrocents("claude-haiku-5-5", { inputTokens: 60_000, outputTokens: 0 }, "anthropic", body)).toBe(60_000 * Math.ceil(50 * 1.25));
   });
 
   it("changes nothing for another provider", () => {

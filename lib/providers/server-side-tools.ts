@@ -27,6 +27,7 @@ import {
   OPENAI_PRICED_TOOLS,
   XAI_PRICED_TOOLS,
 } from "@/lib/providers/hosted-tools";
+import { ANTHROPIC_CLIENT_TOOL, inlineToolRefusal, inlineToolType } from "@/lib/providers/anthropic-message-controls";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -55,15 +56,12 @@ const OPENAI_CLIENT_TOOLS: Record<string, ToolCheck> = {
     tool.tools.every((inner) => isRecord(inner) && (inner.type === "function" || inner.type === "custom")),
 };
 
-/**
- * Anthropic tools the client executes, from the installed SDK's `BetaToolUnion`
- * (@anthropic-ai/sdk 0.112.4, resources/beta/messages/messages.d.ts): bash,
- * computer, text editor and memory, each versioned by a date suffix. Matched by
- * family so a newer version of a client tool passes; everything else in that
- * union (web search, web fetch, code execution, the advisor, tool search, an MCP
- * toolset) runs on Anthropic's side and is refused, as is any type added later.
- */
-const ANTHROPIC_CLIENT_TOOL = /^(?:bash|computer|text_editor|memory)_\d{8}$/u;
+// Anthropic tools the client executes (ANTHROPIC_CLIENT_TOOL, from the installed
+// SDK's `BetaToolUnion`): bash, computer, text editor and memory, each versioned by
+// a date suffix. Matched by family so a newer version of a client tool passes;
+// everything else in that union (web search, web fetch, code execution, the
+// advisor, tool search, an MCP toolset) runs on Anthropic's side and is refused
+// unless priced, as is any type added later.
 
 interface ProviderRule {
   clientTools: Record<string, ToolCheck>;
@@ -81,6 +79,12 @@ interface ProviderRule {
    * held for before the call and charged at settlement. Exact versions only.
    */
   pricedTools?: Readonly<Record<string, unknown>>;
+  /**
+   * Tools can also be defined inside `messages` (Anthropic's `tool_addition`
+   * blocks, sprint T3): only client tools are accepted there
+   * (lib/providers/anthropic-message-controls.ts).
+   */
+  inlineTools?: boolean;
 }
 
 /** xAI documents only functions as client tools ("only functions and web search"). */
@@ -128,6 +132,7 @@ const RULES: Readonly<Record<string, ProviderRule>> = {
     // Remote MCP servers Anthropic connects to. (`container` reuses a priced
     // code execution container across turns, so it passes.)
     refusedFields: ["mcp_servers"],
+    inlineTools: true,
   },
   // Web search, X search, code execution and collections search are accepted and
   // priced (DECISIONS 2026-10-07); remote MCP and image generation stay refused.
@@ -164,6 +169,10 @@ export function serverSideToolUse(provider: string, body: unknown): string | nul
   if (!rule || !isRecord(body)) return null;
   for (const field of rule.refusedFields) {
     if (field in body && body[field] !== undefined && body[field] !== null) return field;
+  }
+  if (rule.inlineTools) {
+    const inline = inlineToolRefusal(body);
+    if (inline !== null) return inline;
   }
   if (!("tools" in body) || body.tools === undefined || body.tools === null) return null;
   const tools = body.tools;
@@ -205,6 +214,12 @@ export function isServerSideSearchModel(provider: string, model: string): boolea
  * field such as `mcp_servers`). Capped, since it echoes the caller's own input.
  */
 export function serverToolLabel(body: unknown, why: string): string {
+  // A tool defined inside `messages`: named by its type and where it sits.
+  if (why.startsWith("messages[")) {
+    const type = inlineToolType(body, why);
+    const at = /^messages\[\d+\]/.exec(why)![0];
+    return type ? `${type} in ${at}` : why.slice(0, 64);
+  }
   const index = /^tools\[(\d+)\]/.exec(why);
   if (index && isRecord(body) && Array.isArray(body.tools)) {
     const tool = body.tools[Number(index[1])];
@@ -219,6 +234,12 @@ export function serverToolLabel(body: unknown, why: string): string {
  * (code.claude.com/docs/en/settings-reference, `advisorModel`, read 2026-10-08).
  */
 export function serverToolRefusalMessage(tool: string): string {
+  if (/ in messages\[\d+\]$|^messages\[/.test(tool)) {
+    return (
+      `The request defines a hosted tool inside its messages (${tool}). PassControl accepts only the agent's own tools there, ` +
+      "so it was refused before anything was sent. Declare that tool in `tools` instead."
+    );
+  }
   if (tool.startsWith("advisor_")) {
     return (
       `PassControl cannot price this advisor call (${tool}), so the request was refused before anything was sent. ` +
