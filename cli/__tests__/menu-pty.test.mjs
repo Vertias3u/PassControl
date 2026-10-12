@@ -179,10 +179,14 @@ describe.skipIf(process.platform === "win32" || !fs.existsSync(SCRIPT))("real PT
     await pty.waitFor("Show cockpit status");
     pty.child.stdin.write("\r");
     await pty.waitFor("Press Enter to return to Settings, or q to quit:");
+    const back = pty.output().length;
     pty.child.stdin.write("\r");
-    await pty.waitFor("Recent");
+    // "Recent" is the redrawn menu's FIRST group and CONTROL a later one, and a
+    // frame can reach this side in more than one chunk: wait for both, in order.
+    await pty.waitFor("Recent", { from: back });
+    await pty.waitFor("CONTROL", { from: pty.output().indexOf("Recent", back) });
     pty.child.stdin.write("q");
-    expect(pty.output().match(/CONTROL/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(pty.output().match(/CONTROL/g)?.length, pty.output()).toBeGreaterThanOrEqual(2);
   }, 25_000);
   it("hides the local-stack commands on an install with no checkout", async () => {
     // PASSCONTROL_FORCE_INSTALLED=1 is the CLI's own switch for "behave as if
