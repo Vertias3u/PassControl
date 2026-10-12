@@ -6,7 +6,8 @@ import { scanKeys } from "@/lib/reconcile";
 // 3: the operator profile (0033). Bumped rather than added silently, because a
 // consumer that parsed version 2 has no idea `profile` exists and the whole
 // point of the number is that it can tell.
-export const ACCOUNT_EXPORT_SCHEMA_VERSION = 3;
+// 4: `data.reportedCalls`, the calls a client reported (0084, subscription mode).
+export const ACCOUNT_EXPORT_SCHEMA_VERSION = 4;
 const PAGE_SIZE = 1_000;
 
 export const ACCOUNT_EXPORT_TABLES = [
@@ -15,13 +16,15 @@ export const ACCOUNT_EXPORT_TABLES = [
     table: "agents",
     // `budget_period` + `budget_period_cents` (0073): the agent's daily or
     // monthly spending limit. `service_rules` (0074): its access to non-LLM
-    // APIs, no secret.
-    columns: "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label,budget_period,budget_period_cents,service_rules",
+    // APIs, no secret. `tool_rules` (0085): which Claude Code tools it may run on a
+    // Pro/Max login, no secret.
+    columns: "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label,budget_period,budget_period_cents,service_rules,tool_rules",
     // A database missing a migration refuses the select (42703) and has nothing
     // in that column to export, so it steps down ONE migration at a time, the
     // workspace export's ladder: a database with 0073 but not 0074 keeps the
     // periodic limit.
     fallbackColumns: [
+      "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label,budget_period,budget_period_cents,service_rules",
       "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label,budget_period,budget_period_cents",
       "id,user_id,name,passport_pubkey,status,budget_tokens,budget_cents,spent_tokens,spent_microcents,allowed_scopes,created_at,last_seen_at,policy,fallbacks,policy_shadow,expires_at,previous_passport_pubkey,previous_valid_until,published,public_label",
     ],
@@ -103,6 +106,33 @@ async function readAllRows(
   }
 }
 
+// Calls a client reported (0084): kept apart from `agent_logs`, and with
+// `received_at` where every table above has `created_at`, so read on their own. A
+// database before 0084 has no such table and nothing to export; any other failure
+// refuses the export, as above, rather than hand over a silent gap.
+const REPORTED_CALL_COLUMNS =
+  "id,agent_id,user_id,event_key,source,kind,auth_method,client_session,client_agent,model,occurred_at,received_at,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,reported_cost_usd_micros,duration_ms,status_code,tool_name,decision,rule_index";
+
+async function loadReportedCalls(db: SupabaseClient, userId: string): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  for (let start = 0; ; start += PAGE_SIZE) {
+    const { data, error } = (await db
+      .from("client_reported_calls")
+      .select(REPORTED_CALL_COLUMNS)
+      .eq("user_id", userId)
+      .order("received_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(start, start + PAGE_SIZE - 1)) as unknown as { data: unknown[] | null; error: { code?: string } | null };
+    if (error) {
+      if (["42P01", "PGRST205"].includes(error.code ?? "")) return [];
+      throw new Error("account_export_reportedCalls_unavailable");
+    }
+    const page = data ?? [];
+    rows.push(...page);
+    if (page.length < PAGE_SIZE) return rows;
+  }
+}
+
 async function loadBetaExport(admin: SupabaseClient | undefined, userId: string) {
   if (!admin) return { application: null, invitations: [], feedback: null };
   const { data: application, error: applicationError } = await admin
@@ -149,9 +179,10 @@ export async function loadAccountExport(db: SupabaseClient, user: User, admin: S
     ]);
   if (profileError || mfaError) throw new Error("account_export_profile_unavailable");
 
-  const [entries, beta] = await Promise.all([
+  const [entries, beta, reportedCalls] = await Promise.all([
     Promise.all(ACCOUNT_EXPORT_TABLES.map(async (spec) => [spec.key, await readAllRows(db, user, spec)] as const)),
     loadBetaExport(admin, user.id),
+    loadReportedCalls(db, user.id),
   ]);
   const data = Object.fromEntries(entries) as ExportRows;
   return {
@@ -180,7 +211,7 @@ export async function loadAccountExport(db: SupabaseClient, user: User, admin: S
       avatar: profile?.avatar_path ? "stored" : null,
       updatedAt: profile?.updated_at ?? null,
     },
-    data: { ...data, beta },
+    data: { ...data, reportedCalls, beta },
     exclusions: [
       "Provider credential plaintext and Vault references",
       "Direct Agent Key and control API key hashes",

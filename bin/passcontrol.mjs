@@ -95,9 +95,20 @@ import {
   claudeCodeEnv,
   claudeCodeSettingsPath,
   removeClaudeCodeSettings,
+  removeClaudeCodeSubscription,
+  subscriptionEnv,
+  subscriptionHooks,
   writeClaudeCodeSettings,
+  writeClaudeCodeSubscription,
 } from "../cli/claude-code.mjs";
-import { notInPathText, sidecarFromBaseUrl, statusPanelText, statuslineText } from "../cli/statusline.mjs";
+import {
+  notInPathText,
+  readStatusInput,
+  sidecarFromBaseUrl,
+  statusPanelText,
+  statuslineText,
+  statuslineWithWindow,
+} from "../cli/statusline.mjs";
 import { runWatch } from "../cli/watch.mjs";
 import { CODEX_PROFILE, codexProfilePath, codexProfileToml, codexStoresApiKey, removeCodexProfile, writeCodexProfile } from "../cli/codex.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
@@ -208,7 +219,7 @@ ${heading("Quick start")}
   ${cmd} login [--project]        sign in through your browser and set this machine up
   ${cmd} call "hi"                mint a visa and make a governed model call
   ${cmd} mcp                      passport identity for Claude Desktop, Cursor, Claude Code
-  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]] [--ollama-port 11435] [--no-journal]
+  ${cmd} sidecar [--port 8788] [--allow-connect host[,host]] [--ollama-port 11435] [--no-journal] [--no-report-calls]
                                  passport identity for any tool that takes an api_key
   ${cmd} sidecar --profile <name> | --profiles a,b
                                  run a coding tool's own sidecar (or several, one process)
@@ -262,6 +273,8 @@ ${heading("Integrate")}
   ${cmd} env [integration]        print settings without writing anything
   ${cmd} configure <integration> [--write] [--force] [--dedicated]
                                  preview or write integration config
+  ${cmd} configure claude-code --subscription [--write|--remove]
+                                 a Pro/Max login: stops, calls, usage window
   integrations: ${integrationChoices()}
 
 ${heading("Trust")}
@@ -2460,6 +2473,7 @@ async function sidecarCommand(rest, opts) {
         allowConnectHosts: [],
         refreshSkewSeconds: Number(opts.refreshSkewSeconds ?? process.env.REFRESH_SKEW_SECONDS ?? 30),
         noJournal: opts.journal === false || Boolean(opts.noJournal),
+        reportCalls: !(opts.reportCalls === false || Boolean(opts.noReportCalls)),
       });
     }
     return;
@@ -2493,6 +2507,9 @@ async function sidecarCommand(rest, opts) {
     // A flag only, like --allow-non-loopback: whether this machine keeps a record
     // is the operator's to state, not a config file's.
     noJournal: opts.journal === false || Boolean(opts.noJournal),
+    // Subscription mode: the calls Claude Code reports go to the agent's page. On
+    // unless the flag says off, like the journal.
+    reportCalls: !(opts.reportCalls === false || Boolean(opts.noReportCalls)),
   });
 
   if (opts.for) {
@@ -2528,14 +2545,21 @@ async function statuslineCommand(opts) {
     if (opts.panel) {
       const route = opts.port === undefined ? sidecarFromBaseUrl(process.env.ANTHROPIC_BASE_URL) : null;
       if (route?.remote) return notInPathText(route.remote);
+      // Subscription mode (cli/subscription-gate.mjs): no ANTHROPIC_BASE_URL, since
+      // the calls go to Anthropic directly; `configure claude-code --subscription`
+      // names the sidecar the hooks and telemetry use instead.
+      const reported = !route && opts.port === undefined ? sidecarFromBaseUrl(process.env.PASSCONTROL_SIDECAR_URL) : null;
       return await statusPanelText({
-        port: route?.port ?? port,
+        port: route?.port ?? reported?.port ?? port,
         gateway: config.gateway,
         session: typeof opts.session === "string" ? opts.session : null,
+        subscription: Boolean(reported?.port),
       });
     }
     const cacheFile = path.join(path.dirname(globalConfigPath()), `statusline-${port}.json`);
-    return await statuslineText({ port, cacheFile });
+    // On a Pro/Max login Claude Code adds the usage window to its input (cli/usage-window.mjs).
+    const input = await readStatusInput();
+    return await statuslineWithWindow({ input, port, budgetLine: () => statuslineText({ port, cacheFile }) });
   } catch (error) {
     return `PassControl · ${error instanceof Error && /--port/.test(error.message) ? "bad --port" : "unavailable"}`;
   }
@@ -2751,6 +2775,7 @@ function aiderConfig(opts = {}) {
  * Claude Code owns.
  */
 function configureClaudeCode(opts = {}) {
+  if (opts.subscription) return configureClaudeCodeSubscription(opts);
   const scope = opts.global ? "user" : "project";
   const target = claudeCodeSettingsPath({ scope });
   if (opts.remove) {
@@ -2791,6 +2816,52 @@ function configureClaudeCode(opts = {}) {
   step("The agent's Anthropic scope must allow the models Claude Code uses (its main model, and Haiku for small tasks).");
   step(`Optional, the chat tool as well: ${CLAUDE_CODE_ADD_COMMAND}`);
   step(`To undo: ${cliCommand(`configure claude-code --remove${scope === "user" ? " --global" : ""}`)}`);
+}
+
+/**
+ * Subscription mode (cli/claude-code.mjs): a Claude
+ * Pro/Max login keeps talking to Anthropic directly. PassControl is told about each
+ * call, asked before each prompt and tool, and shown the usage window. Always the
+ * user settings: Claude Code ignores telemetry settings in a project's file.
+ */
+function configureClaudeCodeSubscription(opts = {}) {
+  const target = claudeCodeSettingsPath({ scope: "user" });
+  const port = sidecarPort(opts);
+  if (opts.remove) {
+    const result = removeClaudeCodeSubscription({ target });
+    if (result.changed) ok(`removed PassControl's subscription mode from ${target}`);
+    else step(`${target} has no PassControl subscription settings; nothing to remove.`);
+    return;
+  }
+  const preview = { env: subscriptionEnv(port), hooks: subscriptionHooks(port), statusLine: { type: "command", command: statusLineSettingsCommand(port) } };
+  console.log(`Preview: ${target}\n\n${JSON.stringify(preview, null, 2)}`);
+  if (!opts.write) {
+    step("Dry run only. Re-run with `--write` to merge these into your Claude Code user settings (anything of yours is kept).");
+  } else {
+    const result = writeClaudeCodeSubscription({ target, port, statusLineCommand: statusLineSettingsCommand(port), force: Boolean(opts.force) });
+    if (!result.changed) ok(`${target} already has PassControl's subscription mode`);
+    else {
+      if (result.backupPath) step(`backed up ${result.backupPath}`);
+      ok(`wrote ${target}`);
+    }
+    if (result.statusLine?.existing) {
+      warn(`${target} already has a status line (${result.statusLine.existing}); it was left as it is, so the usage window is not shown. To show it, have yours pipe its input to \`${statusLineSettingsCommand(port)}\`.`);
+    }
+    if (result.hookUrlsBlocked) {
+      warn(`${target} sets allowedHttpHookUrls, which does not include http://127.0.0.1:${port}/_passcontrol/hook and its tool hook (…/_passcontrol/hook?t=600): Claude Code will not run them until you add both, for example http://127.0.0.1:${port}/_passcontrol/hook*.`);
+    }
+    if (result.routed) {
+      warn(`${target} also routes Claude Code through the sidecar with PassControl's API key (ANTHROPIC_BASE_URL). Those sessions do not use your subscription. To use the subscription, run ${cliCommand("configure claude-code --remove --global")}.`);
+    }
+  }
+  step(`Start the sidecar before Claude Code: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
+  step("Your Pro/Max login stays between Claude Code and Anthropic. PassControl never sees it or sits in the path.");
+  step("If the sidecar is not running, Claude Code still works: stops are not checked and calls are not shown until it is.");
+  step(`Watch the calls: ${cliCommand("watch")}`);
+  step(
+    `The sidecar also uploads each reported call (model, session, tokens, time, API-equivalent cost; never your email or account ids) to the agent's dashboard page, marked as reported, not proxied. To keep them on this machine only: ${cliCommand("sidecar --no-report-calls")}`
+  );
+  step(`To undo: ${cliCommand("configure claude-code --subscription --remove")}`);
 }
 
 /**

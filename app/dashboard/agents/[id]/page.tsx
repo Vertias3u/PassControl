@@ -38,6 +38,10 @@ import { readAgentDelegations } from "./workers-data";
 import { SERVICE_CATALOG, ruleShapeFor } from "@/lib/services/catalog";
 import { DISPLAYED_SERVICES, SERVICE_DISPLAY } from "@/lib/services/display";
 import { HashLanding } from "@/components/HashLanding";
+import { ReportedCallsPanel, ToolDecisionsPanel } from "@/components/ReportedCallsPanel";
+import { readReportedCalls, readToolDecisions } from "./reported-data";
+import { AgentToolRules } from "@/components/AgentToolRules";
+import { readToolRules } from "@/lib/tool-rules";
 
 export const dynamic = "force-dynamic";
 
@@ -241,6 +245,15 @@ export default async function AgentPassportPage({
   const firstVisa = passport.visas[0];
   // Bet D: only a passport can delegate, so a Direct-Key-only agent has no workers.
   const delegations = passport.agent.passportId ? await readAgentDelegations(user.id, passport.agent.id) : null;
+  // Subscription mode (0084): calls Claude Code reported, read through RLS.
+  const [reported, toolDecisions, toolRules] = await Promise.all([
+    readReportedCalls(db, passport.agent.id),
+    readToolDecisions(db, passport.agent.id),
+    // Subscription mode, Phase 2 (0085): read through RLS like the rest of the page.
+    readToolRules(db, passport.agent.id, user.id),
+  ]);
+  const hasReported = reported.state === "ok" && reported.rows.length > 0;
+  const hasToolDecisions = toolDecisions.state === "ok" && toolDecisions.rows.length > 0;
 
   // The section nav's three groups. Operate is the identity's live status, and
   // break glass is temporary access, so neither needs a group of its own.
@@ -266,6 +279,7 @@ export default async function AgentPassportPage({
           label,
           ariaLabel: `${label} access`,
         })),
+        { href: "#agent-tool-rules", label: "Tool rules", ariaLabel: "Claude Code tool rules" },
         { href: "#agent-policy-lab", label: "Lab", ariaLabel: "Policy lab" },
         { href: "#agent-emergency", label: "Break glass", ariaLabel: "Temporary access (break glass)" },
       ],
@@ -275,6 +289,10 @@ export default async function AgentPassportPage({
       label: "Record",
       links: [
         { href: "#agent-activity", label: "Activity" },
+        ...(hasReported ? [{ href: "#agent-reported" as const, label: "Reported", ariaLabel: "Calls reported by Claude Code" }] : []),
+        ...(hasToolDecisions
+          ? [{ href: "#agent-tool-decisions" as const, label: "Tool log", ariaLabel: "What the tool rules decided" }]
+          : []),
         { href: "#agent-trace", label: "Trace", ariaLabel: "Decision trace" },
       ],
     },
@@ -418,6 +436,18 @@ export default async function AgentPassportPage({
             </div>
           </section>
         ))}
+        {/* Not part of the policy either: what the sidecar lets Claude Code's tools do
+            on a Pro/Max login, where the gateway never sees them (0085). */}
+        <section id="agent-tool-rules" className="pc-section scroll-mt-40">
+          <SectionHeader
+            eyebrow="Subscription mode"
+            title="Claude Code tool rules"
+            description="Which tools this agent may run on your machine when Claude Code is signed in with a Claude Pro or Max plan."
+          />
+          <div className="pc-section__body">
+            <AgentToolRules agentId={passport.agent.id} read={toolRules} alertDestination={alertDestination} />
+          </div>
+        </section>
         {/* Directly below the live policy, because the pair is the point: what
             decides now, and what would decide if you promoted the draft. */}
         <div id="agent-policy-lab" className="scroll-mt-40">
@@ -448,6 +478,10 @@ export default async function AgentPassportPage({
           visaTtlSeconds={visaTtlSeconds()}
         />
         </div>
+        {/* What Claude Code reported from a Pro/Max login: beside the record, never
+            part of it (no receipt, not proxied, cost API-equivalent). */}
+        <ReportedCallsPanel read={reported} />
+        <ToolDecisionsPanel read={toolDecisions} />
         <div id="agent-trace" className="scroll-mt-40">
         <DecisionTracePanel
           agentId={passport.agent.id}

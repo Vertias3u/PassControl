@@ -126,3 +126,56 @@ describe("env claude-code needs no global passport", () => {
     expect(r.err).toMatch(/requires a passport in the global PassControl config/);
   });
 });
+
+// Subscription mode: a Pro/Max login keeps talking to
+// Anthropic directly; PassControl is told about each call and asked before each
+// prompt and tool. It writes the USER settings (Claude Code ignores telemetry in a
+// project's file), never ANTHROPIC_BASE_URL, and needs no passport to write or undo.
+describe("configure claude-code --subscription", () => {
+  const userSettings = (home: string) => join(home, ".claude", "settings.json");
+
+  it("previews without writing anything", async () => {
+    const home = freshHome();
+    const r = await run(["configure", "claude-code", "--subscription"], home);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("/_passcontrol/hook");
+    expect(r.out).toContain("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
+    expect(existsSync(userSettings(home))).toBe(false);
+  });
+
+  it("says before writing that the reported calls also go to the agent's page, and how to keep them local", async () => {
+    // Phase 1b: a new data flow from a personal subscription to the gateway. The
+    // person setting it up reads that here, not first on the dashboard.
+    const r = await run(["configure", "claude-code", "--subscription"], freshHome());
+    expect(r.out).toMatch(/agent's (dashboard )?page/);
+    expect(r.out).toContain("--no-report-calls");
+  });
+
+  it("writes the user settings with no base URL, and removes them again", async () => {
+    const home = freshHome();
+    const w = await run(["configure", "claude-code", "--subscription", "--write"], home);
+    expect(w.code).toBe(0);
+    const s = read(userSettings(home));
+    expect(s.env.PASSCONTROL_SIDECAR_URL).toBe("http://127.0.0.1:8788");
+    expect(s.env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(s.hooks.PreToolUse[0].hooks[0]).toMatchObject({ url: "http://127.0.0.1:8788/_passcontrol/hook?t=600", timeout: 600 });
+    expect(s.hooks.UserPromptSubmit[0].hooks[0]).toMatchObject({ url: "http://127.0.0.1:8788/_passcontrol/hook", timeout: 5 });
+    expect(s.statusLine.command).toMatch(/statusline --port 8788$/);
+    expect(existsSync(projectSettings(home))).toBe(false);
+
+    const r = await run(["configure", "claude-code", "--subscription", "--remove"], home);
+    expect(r.code).toBe(0);
+    expect(read(userSettings(home))).toEqual({});
+  });
+
+  it("refuses to take over the user's own log export, writing nothing", async () => {
+    const home = freshHome();
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const mine = { env: { OTEL_LOGS_EXPORTER: "otlp", OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "https://otel.example.com/v1/logs" } };
+    writeFileSync(userSettings(home), JSON.stringify(mine));
+    const r = await run(["configure", "claude-code", "--subscription", "--write"], home);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toMatch(/--force/);
+    expect(read(userSettings(home))).toEqual(mine);
+  });
+});

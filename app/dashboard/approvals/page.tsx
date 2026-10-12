@@ -41,12 +41,19 @@ export default async function ApprovalsPage() {
       id: p.id,
       agentId: p.agentId,
       agentName: names.get(p.agentId) ?? "An agent",
-      serviceLabel: isServiceId(p.service) ? SERVICE_CATALOG[p.service].label : p.service,
+      // A Claude Code tool on a Pro/Max login (subscription mode, Phase 2) is asked
+      // about through the same store, under `claude-code`.
+      serviceLabel: isServiceId(p.service)
+        ? SERVICE_CATALOG[p.service].label
+        : p.service === "claude-code"
+          ? "a Claude Code tool"
+          : p.service,
       method: p.method,
       path: p.path,
       preview: p.preview,
       createdAt: p.createdAt,
       onTelegram: p.telegram !== null,
+      tool: p.service === "claude-code",
     }));
   } catch {
     items = null;

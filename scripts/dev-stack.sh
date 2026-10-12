@@ -21,6 +21,15 @@ OFFSET="${PASSCONTROL_PORT_OFFSET:-0}"
 if ! [[ "$OFFSET" =~ ^[0-9]+$ ]] || (( OFFSET > 10000 )); then
   echo "✗ PASSCONTROL_PORT_OFFSET must be an integer from 0 to 10000." >&2; exit 1
 fi
+# The dashboard's port: a PORT given on purpose, else 3000 + offset, which is the
+# only port `setup --port-offset N` serves on. `passcontrol update` runs this with
+# no PORT, and falling back to a flat 3000 rewrote an offset install's receipt
+# issuer and Supabase site URL to the wrong dashboard. Not read back from
+# .env.docker: an install that an older update broke would keep its wrong 3000.
+DASHBOARD_PORT="${PORT:-$((3000 + OFFSET))}"
+if ! [[ "$DASHBOARD_PORT" =~ ^[0-9]+$ ]] || (( DASHBOARD_PORT < 1 || DASHBOARD_PORT > 65535 )); then
+  echo "✗ The dashboard port must be a number from 1 to 65535 (got: $DASHBOARD_PORT)." >&2; exit 1
+fi
 PROJECT_ID="$(basename "$SRC")"
 [[ "$OFFSET" == "0" ]] || PROJECT_ID+="-$OFFSET"
 API_PORT=$((54321 + OFFSET))
@@ -29,7 +38,7 @@ COMPOSE_PROJECT_NAME="passcontrol_${PROJECT_ID//[^A-Za-z0-9]/_}"
 COMPOSE_PROJECT_NAME="$(printf '%s' "$COMPOSE_PROJECT_NAME" | tr '[:upper:]' '[:lower:]')"
 # The generated local stack uses a shared invite code. Do not pass the optional
 # database-invite hook flag here: it would reject every signup from the local UI.
-node "$SRC/scripts/write-local-supabase-config.mjs" "$SRC" "$PROJECT_ID" "$OFFSET" "${PORT:-3000}"
+node "$SRC/scripts/write-local-supabase-config.mjs" "$SRC" "$PROJECT_ID" "$OFFSET" "${DASHBOARD_PORT}"
 
 # ── 1. Prereqs ────────────────────────────────────────────────────────────────
 command -v docker >/dev/null || { echo "✗ docker not found — install Docker Desktop." >&2; exit 1; }
@@ -121,7 +130,7 @@ CRON_SECRET=$CRON_SECRET
 INSTANCE_SIGNING_KEY=$INSTANCE_SIGNING_KEY
 INSTANCE_SIGNING_KEY_PREV=$INSTANCE_SIGNING_KEY_PREV
 INSTANCE_SIGNING_KEY_HISTORY=$INSTANCE_SIGNING_KEY_HISTORY
-PASSCONTROL_ISSUER=http://localhost:${PORT:-3000}
+PASSCONTROL_ISSUER=http://localhost:${DASHBOARD_PORT}
 INVITE_CODE=local-dev
 # One developer per install, and setup seeds your account, so sign-up is off.
 # Set to invite (uses INVITE_CODE) or open to add more local accounts.
@@ -137,7 +146,7 @@ EOF
 # where the issuer above and Supabase's site URL say it is. Only for an offset:
 # scripts/dev-docker.mjs lets the file win over the environment, and a default
 # install must keep honouring a PORT someone sets on purpose.
-[[ "$OFFSET" == "0" ]] || echo "PORT=${PORT:-3000}" >> "$ENVF"
+[[ "$OFFSET" == "0" ]] || echo "PORT=${DASHBOARD_PORT}" >> "$ENVF"
 say "→ Wrote .env.docker"
 
 # ── 5. Migrations — run INSIDE the Supabase DB container (no host psql needed) ─
@@ -306,7 +315,7 @@ cat <<DONE
 ✅ Local stack is up.
    Supabase API    : ${API_URL}   (Studio UI is excluded — use the PassControl dashboard)
    Start the app   : npm run dev:docker
-                     → http://localhost:${PORT:-3000}  (log in with the account you just created)
+                     → http://localhost:${DASHBOARD_PORT}  (log in with the account you just created)
    Sign-up         : ${SIGNUP_LINE}
 
    Then: add a provider key + issue a passport in the dashboard, and run:

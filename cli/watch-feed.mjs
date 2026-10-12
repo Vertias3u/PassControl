@@ -82,9 +82,12 @@ export function providerOf(path) {
   return match ? held(PROVIDER, match[1]) : null;
 }
 
-/** The gateway's budget read, which the board and the status line poll: not a call. */
-export function isBudgetRead(path) {
-  return /^\/api\/v1\/self(\?|$)/.test(String(path ?? ""));
+/**
+ * Gateway paths that are not model calls: the budget read the board and the status
+ * line poll, and the upload of calls a client reported (cli/client-events-upload.mjs).
+ */
+export function isNotACall(path) {
+  return /^\/api\/v1\/(self|client-events)(\?|$)/.test(String(path ?? ""));
 }
 
 /** Reads at most `limit` bytes of a (cloned) body, then cancels it. Never throws. */
@@ -117,7 +120,18 @@ function hostIsThisListener(hostHeader, port) {
   return Boolean(match && LOOPBACK_NAMES.has(match[1]) && Number(match[2]) === port);
 }
 
-function answer(res, status, error, message) {
+/**
+ * The checks every one of the sidecar's own endpoints makes before answering: a
+ * loopback peer, no Origin (a browser's cross-origin request carries one), and a Host
+ * naming this loopback listener and port exactly (DNS rebinding). The watch feed and
+ * subscription mode's hook endpoint share them.
+ */
+export function isLocalCaller(req, port) {
+  const loopbackPeer = LOOPBACK_PEER.test(String(req.socket?.remoteAddress ?? ""));
+  return loopbackPeer && req.headers.origin === undefined && hostIsThisListener(req.headers.host, port);
+}
+
+export function answer(res, status, error, message) {
   const body = JSON.stringify({ error, message });
   res.writeHead(status, {
     "content-type": "application/json",
@@ -136,6 +150,8 @@ export function createWatchFeed({ runId, capacity = 200, maxSubscribers = 8, ena
   const ring = [];
   const subscribers = new Set();
   let seq = 0;
+  // Subscription mode's usage window (cli/usage-window.mjs): only the latest matters.
+  let usageWindow = null;
 
   function send(res, line) {
     try {
@@ -194,6 +210,7 @@ export function createWatchFeed({ runId, capacity = 200, maxSubscribers = 8, ena
       status: null,
       ttfb: null,
       ms: null,
+      cost: null,
     };
     let announced = false;
     return {
@@ -223,6 +240,49 @@ export function createWatchFeed({ runId, capacity = 200, maxSubscribers = 8, ena
     };
   }
 
+  /**
+   * A call the CLIENT reported (subscription mode: Claude Code's own telemetry,
+   * cli/otlp-logs.mjs). It never passed this sidecar, so it is SEEN, not boarded, and
+   * its cost is the client's API-equivalent estimate in USD millionths. Never throws.
+   */
+  function report({ at = now(), lineage = null, model = null, provider = null, outcome = "seen", status = null, ms = null, cost = null }) {
+    try {
+      const record = {
+        type: "call",
+        seq: ++seq,
+        at: Number.isFinite(at) ? at : now(),
+        ses: held(DECLARED, lineage?.session),
+        agent: held(DECLARED, lineage?.agent),
+        parent: held(DECLARED, lineage?.parent),
+        model: held(MODEL, model),
+        provider: held(PROVIDER, provider),
+        outcome: outcome === "seen" ? "seen" : "error",
+        code: null,
+        status: Number.isInteger(status) ? status : null,
+        ttfb: null,
+        ms: Number.isInteger(ms) && ms >= 0 ? ms : null,
+        cost: Number.isInteger(cost) && cost >= 0 ? cost : null,
+      };
+      remember(record);
+      broadcast(record);
+    } catch {
+      // The feed is never the reason anything fails.
+    }
+  }
+
+  /**
+   * The latest usage window, already held to its shape by the caller. Replaces the
+   * last one and tells every board. Never throws.
+   */
+  function setWindow(window) {
+    try {
+      usageWindow = { type: "window", fiveHour: window.fiveHour, sevenDay: window.sevenDay, at: now() };
+      broadcast(usageWindow);
+    } catch {
+      // As above.
+    }
+  }
+
   /** A call whose outcome and end are known at once (refusals, upstream failures). */
   function record({ outcome, code = null, status, lineage = null, model = null, provider = null, startedAt = now() }) {
     const call = begin({ startedAt, lineage, model, provider });
@@ -234,6 +294,7 @@ export function createWatchFeed({ runId, capacity = 200, maxSubscribers = 8, ena
   function attach(res) {
     subscribers.add(res);
     send(res, `${JSON.stringify({ type: "hello", feed: "passcontrol-watch", v: 1, run: runId })}\n`);
+    if (usageWindow && subscribers.has(res)) send(res, `${JSON.stringify(usageWindow)}\n`);
     for (const r of ring) if (subscribers.has(res)) send(res, `${JSON.stringify(r)}\n`);
     try {
       res.on("close", () => subscribers.delete(res));
@@ -251,8 +312,7 @@ export function createWatchFeed({ runId, capacity = 200, maxSubscribers = 8, ena
       return answer(res, 404, "watch_off", "This sidecar is bound off loopback, so it serves no watch feed.");
     }
     if (req.method !== "GET") return answer(res, 405, "method_not_allowed", "The watch feed answers GET only.");
-    const loopbackPeer = LOOPBACK_PEER.test(String(req.socket?.remoteAddress ?? ""));
-    if (!loopbackPeer || req.headers.origin !== undefined || !hostIsThisListener(req.headers.host, port)) {
+    if (!isLocalCaller(req, port)) {
       return answer(res, 403, "watch_refused", "The watch feed is for `passcontrol watch` on this machine only.");
     }
     if (subscribers.size >= maxSubscribers) {
@@ -271,5 +331,15 @@ export function createWatchFeed({ runId, capacity = 200, maxSubscribers = 8, ena
     for (const res of [...subscribers]) drop(res);
   }
 
-  return { begin, record, serve, attach, close, subscriberCount: () => subscribers.size };
+  return {
+    begin,
+    record,
+    report,
+    setWindow,
+    window: () => usageWindow,
+    serve,
+    attach,
+    close,
+    subscriberCount: () => subscribers.size,
+  };
 }

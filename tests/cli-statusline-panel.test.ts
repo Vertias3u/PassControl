@@ -34,7 +34,10 @@ const OK = self({ tokens: null, cost: null, period: day(42_000_000, 1_000_000_00
 let server: Server;
 let port = 0;
 let seen: IncomingHttpHeaders[] = [];
+let urls: string[] = [];
 let answer: (res: ServerResponse) => void;
+// The sidecar's own usage-window endpoint (subscription mode); unknown by default.
+let windowAnswer: (res: ServerResponse) => void;
 const json = (status: number, body: unknown) => (res: ServerResponse) => {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
@@ -43,8 +46,12 @@ const json = (status: number, body: unknown) => (res: ServerResponse) => {
 
 beforeEach(async () => {
   seen = [];
+  urls = [];
   answer = json(200, OK);
+  windowAnswer = json(404, { error: "window_unknown" });
   server = createServer((req, res) => {
+    urls.push(`${req.method} ${req.url}`);
+    if (req.url === "/_passcontrol/window") return windowAnswer(res);
     seen.push(req.headers);
     answer(res);
   });
@@ -177,6 +184,48 @@ describe("passcontrol statusline --panel", () => {
     expect(r.out.split("\n")[0]).toBe("PassControl · not in the path of this session");
     expect(r.out).toContain("api.anthropic.com");
     expect(r.out).toContain("passcontrol configure claude-code");
+  });
+
+  // Subscription mode: Claude Code signs in with the
+  // person's Pro/Max account and talks to Anthropic directly, so ANTHROPIC_BASE_URL is
+  // not set. `configure claude-code --subscription` sets PASSCONTROL_SIDECAR_URL
+  // instead, naming the sidecar its hooks and telemetry go to.
+  describe("in subscription mode", () => {
+    const sub = () => ({ PASSCONTROL_SIDECAR_URL: `http://127.0.0.1:${port}` });
+
+    it("asks the sidecar PASSCONTROL_SIDECAR_URL names, and says calls are reported, not proxied", async () => {
+      const r = await run(["statusline", "--panel"], undefined, sub());
+      expect(r.code).toBe(0);
+      expect(seen).toHaveLength(1);
+      expect(r.out).toMatch(/^ {2}Calls {7}reported by Claude Code \(subscription\), not proxied$/m);
+      expect(r.out).not.toContain("through the sidecar");
+    });
+
+    it("shows the usage window the status line last reported", async () => {
+      windowAnswer = json(200, { fiveHour: { usedPct: 23.5, resetsAt: null }, sevenDay: { usedPct: 41.2, resetsAt: null }, at: 1 });
+      const r = await run(["statusline", "--panel"], undefined, sub());
+      expect(urls).toContain("GET /_passcontrol/window");
+      expect(r.out).toMatch(/^ {2}Window {6}5h 24% · 7d 41%$/m);
+    });
+
+    it("leaves the window out when none has been reported, or the answer does not hold up", async () => {
+      expect((await run(["statusline", "--panel"], undefined, sub())).out).not.toMatch(/Window/);
+      windowAnswer = json(200, { fiveHour: { usedPct: "\u001b[2J" } });
+      expect((await run(["statusline", "--panel"], undefined, sub())).out).not.toMatch(/Window/);
+    });
+
+    it("says calls still go ahead when the sidecar is not running", async () => {
+      const r = await run(["statusline", "--panel"], undefined, { PASSCONTROL_SIDECAR_URL: "http://127.0.0.1:1" });
+      expect(r.out.split("\n")[0]).toBe("PassControl · sidecar not running on port 1");
+      expect(r.out).toContain("go ahead");
+      expect(r.out).not.toContain("they fail");
+    });
+
+    it("lets a routed ANTHROPIC_BASE_URL win: that session is proxied, not reported", async () => {
+      const r = await run(["statusline", "--panel"], undefined, { ...sub(), ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}/api/v1/anthropic` });
+      expect(r.out).toMatch(new RegExp(`through the sidecar on :${port}$`, "m"));
+      expect(urls).not.toContain("GET /_passcontrol/window");
+    });
   });
 
   it("leaves the one-line status line exactly as it was", async () => {

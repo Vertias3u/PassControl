@@ -67,6 +67,12 @@ export interface ApprovalPromptInfo {
   path: string;
   preview: string;
   dashboardUrl: string;
+  /**
+   * How long the caller holds what it asks about, when that is not the store's 15
+   * minutes: a Claude Code tool is refused at its agent's own wait (Phase 2). Written
+   * by the gateway, never from agent text.
+   */
+  waitNote?: string;
 }
 
 /** A path as a path: anything else shows as `?`, so it cannot start a link or a mention. */
@@ -111,7 +117,7 @@ export function formatApprovalPrompt(kind: AlertDestinationKind, info: ApprovalP
   const name = inertName(info.agentName);
   const method = info.method.replace(/[^A-Z]/gu, "").slice(0, 10) || "?";
   const path = inertPath(info.path);
-  const wait = `The call is held until you answer, for up to ${MINUTES} minutes.`;
+  const wait = info.waitNote ?? `The call is held until you answer, for up to ${MINUTES} minutes.`;
 
   if (kind === "telegram") {
     // A plain @name pings on Telegram. The full-width ＠ looks the same and

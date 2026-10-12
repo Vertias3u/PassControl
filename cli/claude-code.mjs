@@ -158,3 +158,182 @@ export function removeClaudeCodeStatusLine({ target }) {
   save(target, rest, true);
   return { changed: true };
 }
+
+// ── Subscription mode ─────────────────────────────────────────────────────────
+//
+// A Pro/Max login talks to Anthropic directly, and Anthropic's terms forbid
+// intermediating it, so nothing here touches ANTHROPIC_BASE_URL. Instead Claude
+// Code is told to report to the sidecar and to ask it before acting:
+//   * its OpenTelemetry LOG export (http/json) goes to the sidecar's receiver
+//     (cli/otlp-logs.mjs). Only the logs-specific variables are written, so a
+//     metrics or traces export the user runs is left alone;
+//   * three http hooks go to the sidecar's stop gate (cli/subscription-gate.mjs),
+//     each with a 5 s timeout: a hook that cannot connect or times out lets the
+//     action go ahead, which is the fail-open the owner chose;
+//   * the status line carries the usage window (cli/usage-window.mjs);
+//   * PASSCONTROL_SIDECAR_URL tells `/passcontrol` which sidecar to ask.
+// Only the user settings: Claude Code ignores telemetry settings in a project's file.
+
+const LOOPBACK_BASE = "http://127.0.0.1:";
+const OUR_LOGS_ENDPOINT = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/otlp\/v1\/logs$/;
+const OUR_HOOK_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook(\?t=\d{1,4})?$/;
+const OUR_SIDECAR_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}$/;
+const GATED_EVENTS = ["UserPromptSubmit", "PreToolUse", "PostToolBatch"];
+// The log-export settings this mode owns, with the value it writes.
+const LOGS_ENV = {
+  OTEL_LOGS_EXPORTER: "otlp",
+  OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json",
+  // The 5 s default would make the board's rows lag the session.
+  OTEL_LOGS_EXPORT_INTERVAL: "1000",
+};
+
+export function subscriptionEnv(port) {
+  return {
+    CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+    ...LOGS_ENV,
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${LOOPBACK_BASE}${port}/_passcontrol/otlp/v1/logs`,
+    PASSCONTROL_SIDECAR_URL: `${LOOPBACK_BASE}${port}`,
+  };
+}
+
+function gateHook(port) {
+  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook`, timeout: 5 };
+}
+
+// PreToolUse may hold a tool while the owner is asked (Phase 2), and Claude Code lets
+// a tool RUN when its http hook times out. So this one gets Claude Code's own 600 s
+// default, and says so in its URL: the sidecar always answers inside the time it is
+// told, and a Phase 1 hook (no `t`, 5 s) refuses a tool that would need the owner
+// instead of letting it through on the timeout.
+export const TOOL_HOOK_TIMEOUT_S = 600;
+function toolHook(port) {
+  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?t=${TOOL_HOOK_TIMEOUT_S}`, timeout: TOOL_HOOK_TIMEOUT_S };
+}
+
+export function subscriptionHooks(port) {
+  const hook = gateHook(port);
+  return {
+    UserPromptSubmit: [{ hooks: [hook] }],
+    PreToolUse: [{ matcher: "*", hooks: [toolHook(port)] }],
+    PostToolBatch: [{ hooks: [hook] }],
+  };
+}
+
+const isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+const isOurHook = (h) => isObject(h) && h.type === "http" && typeof h.url === "string" && OUR_HOOK_URL.test(h.url);
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/** `hooks` with every hook this mode wrote taken out, and groups left empty dropped. */
+function withoutOurHooks(hooks) {
+  if (!isObject(hooks)) return hooks;
+  const next = {};
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) {
+      next[event] = groups;
+      continue;
+    }
+    const kept = [];
+    for (const group of groups) {
+      if (!isObject(group) || !Array.isArray(group.hooks) || !group.hooks.some(isOurHook)) {
+        kept.push(group);
+        continue;
+      }
+      const rest = group.hooks.filter((h) => !isOurHook(h));
+      if (rest.length) kept.push({ ...group, hooks: rest });
+    }
+    if (kept.length) next[event] = kept;
+  }
+  return next;
+}
+
+/** `hooks` with exactly this port's gate hooks, leaving them where they are when already right. */
+function withOurHooks(hooks, port) {
+  const ours = subscriptionHooks(port);
+  const base = isObject(hooks) ? hooks : {};
+  const next = withoutOurHooks(base);
+  for (const event of GATED_EVENTS) {
+    const current = Array.isArray(base[event]) ? base[event] : [];
+    const already = current.filter((g) => isObject(g) && Array.isArray(g.hooks) && g.hooks.some(isOurHook));
+    if (already.length === 1 && same(already[0], ours[event][0])) next[event] = current;
+    else next[event] = [...(next[event] ?? []), ...ours[event]];
+  }
+  return next;
+}
+
+// `allowedHttpHookUrls`, when set at any level, runs only the http hooks it matches.
+function urlAllowed(patterns, url) {
+  return patterns.some((p) => {
+    if (typeof p !== "string") return false;
+    const re = new RegExp(`^${p.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
+    return re.test(url);
+  });
+}
+
+/**
+ * Subscription mode's settings, in one save. Throws, writing nothing, when the
+ * user already exports Claude Code's logs somewhere else and `force` is not set.
+ */
+export function writeClaudeCodeSubscription({ target, port, statusLineCommand, force = false }) {
+  const { exists, value } = readSettings(target);
+  const env = isObject(value.env) ? value.env : {};
+  const endpoint = env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+  const ourEndpoint = typeof endpoint === "string" && OUR_LOGS_ENDPOINT.test(endpoint);
+  const theirs = [];
+  if (endpoint !== undefined && !ourEndpoint) theirs.push("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
+  if (env.OTEL_LOGS_EXPORTER !== undefined && !ourEndpoint) theirs.push("OTEL_LOGS_EXPORTER");
+  if (theirs.length && !force) {
+    throw new Error(
+      `${target} already exports Claude Code's logs (${theirs.join(", ")}). Subscription mode would send them to the sidecar instead. Re-run with --force to do that; nothing was written.`
+    );
+  }
+  let next = { ...value, env: { ...env, ...subscriptionEnv(port) }, hooks: withOurHooks(value.hooks, port) };
+  let statusLine;
+  if (statusLineCommand) {
+    const line = withStatusLine(next, statusLineCommand);
+    next = line.value;
+    statusLine = line.existing !== undefined ? { changed: false, existing: line.existing } : { changed: line.changed };
+  }
+  const changed = !same(next, value);
+  const backupPath = changed ? save(target, next, exists) : null;
+  const allowlist = Array.isArray(value.allowedHttpHookUrls) ? value.allowedHttpHookUrls : null;
+  return {
+    changed,
+    backupPath,
+    ...(statusLine ? { statusLine } : {}),
+    hookUrlsBlocked: Boolean(allowlist && [gateHook(port), toolHook(port)].some((h) => !urlAllowed(allowlist, h.url))),
+    routed: env.ANTHROPIC_AUTH_TOKEN === CLAUDE_CODE_AUTH_PLACEHOLDER && typeof env.ANTHROPIC_BASE_URL === "string",
+  };
+}
+
+/**
+ * Takes out what `writeClaudeCodeSubscription` wrote: its hooks, its status line, its
+ * sidecar address, and the logs export only when it points at a sidecar. The
+ * telemetry switch stays while any other OTEL_ setting still needs it.
+ */
+export function removeClaudeCodeSubscription({ target }) {
+  if (!fs.existsSync(target)) return { changed: false };
+  const { value } = readSettings(target);
+  let next = { ...value };
+  if (isObject(value.env)) {
+    const env = { ...value.env };
+    if (typeof env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT === "string" && OUR_LOGS_ENDPOINT.test(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)) {
+      delete env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+      for (const [key, ours] of Object.entries(LOGS_ENV)) if (env[key] === ours) delete env[key];
+      if (env.CLAUDE_CODE_ENABLE_TELEMETRY === "1" && !Object.keys(env).some((k) => k.startsWith("OTEL_"))) {
+        delete env.CLAUDE_CODE_ENABLE_TELEMETRY;
+      }
+    }
+    if (typeof env.PASSCONTROL_SIDECAR_URL === "string" && OUR_SIDECAR_URL.test(env.PASSCONTROL_SIDECAR_URL)) delete env.PASSCONTROL_SIDECAR_URL;
+    if (Object.keys(env).length) next.env = env;
+    else delete next.env;
+  }
+  if (isObject(value.hooks)) {
+    const hooks = withoutOurHooks(value.hooks);
+    if (Object.keys(hooks).length) next.hooks = hooks;
+    else delete next.hooks;
+  }
+  if (isOurStatusLine(next.statusLine)) delete next.statusLine;
+  if (same(next, value)) return { changed: false };
+  save(target, next, true);
+  return { changed: true };
+}

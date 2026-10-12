@@ -45,9 +45,9 @@ describe("workspace export and the periodic limit", () => {
     const { client, agentSelects } = fakeDb({ has0073: false });
     const out = await loadWorkspaceExport(client, "u1");
     expect(out.workspace.agents).toHaveLength(1);
-    // A database without 0073 has no 0074 either: the fallback steps down one
-    // migration at a time (without service_rules, then without the pair).
-    expect(agentSelects).toHaveLength(3);
+    // A database without 0073 has no 0074 or 0085 either: the fallback steps down
+    // one migration at a time (without tool_rules, service_rules, then the pair).
+    expect(agentSelects).toHaveLength(4);
     expect(agentSelects.at(-1)).not.toContain("budget_period");
     expect(agentSelects.at(-1)).not.toContain("service_rules");
   });

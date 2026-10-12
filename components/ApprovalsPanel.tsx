@@ -8,7 +8,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Check, RefreshCw, X } from "lucide-react";
 
-import { decideApprovalAction } from "@/app/dashboard/approvals/actions";
+import { decideApprovalAction, type DecideResult } from "@/app/dashboard/approvals/actions";
 
 export interface PendingApprovalView {
   id: string;
@@ -20,9 +20,25 @@ export interface PendingApprovalView {
   preview: string;
   createdAt: number;
   onTelegram: boolean;
+  /** A Claude Code tool (subscription mode), held by the sidecar rather than the gateway. */
+  tool?: boolean;
 }
 
 type Outcome = { ok: boolean; text: string };
+
+/**
+ * What the page says once the owner has answered. A service call waits in the gateway
+ * and goes on the agent's next try; a Claude Code tool waits in the sidecar, which runs
+ * it on seeing the yes, but only while Claude Code is still waiting for it.
+ */
+export function approvalOutcome(result: DecideResult, tool: boolean): Outcome {
+  if ("error" in result) return { ok: false, text: result.error };
+  if (result.state === "approved") {
+    return { ok: true, text: tool ? "Approved. If Claude Code is still waiting, the tool runs now, once." : "Approved. The agent's next try sends it, once." };
+  }
+  if (result.state === "denied") return { ok: true, text: tool ? "Denied. The tool is refused." : "Denied. The agent's retries are refused." };
+  return { ok: false, text: "Already answered somewhere else, or expired." };
+}
 
 function ago(createdAt: number, now: number): string {
   const minutes = Math.max(0, Math.round((now - createdAt) / 60_000));
@@ -44,17 +60,9 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
     );
   }
 
-  const answer = (id: string, decision: "approved" | "denied") =>
+  const answer = (id: string, decision: "approved" | "denied", tool: boolean) =>
     start(async () => {
-      const result = await decideApprovalAction(id, decision);
-      const outcome: Outcome =
-        "error" in result
-          ? { ok: false, text: result.error }
-          : result.state === "approved"
-            ? { ok: true, text: "Approved. The agent's next try sends it, once." }
-            : result.state === "denied"
-              ? { ok: true, text: "Denied. The agent's retries are refused." }
-              : { ok: false, text: "Already answered somewhere else, or expired." };
+      const outcome = approvalOutcome(await decideApprovalAction(id, decision), tool);
       setOutcomes((current) => ({ ...current, [id]: outcome }));
     });
 
@@ -122,7 +130,7 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
                       type="button"
                       className="inline-flex items-center gap-2"
                       disabled={pending}
-                      onClick={() => answer(item.id, "approved")}
+                      onClick={() => answer(item.id, "approved", item.tool === true)}
                       data-action="approve"
                     >
                       <Check aria-hidden="true" className="size-4" /> Approve
@@ -131,7 +139,7 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
                       type="button"
                       className="ghost inline-flex items-center gap-2"
                       disabled={pending}
-                      onClick={() => answer(item.id, "denied")}
+                      onClick={() => answer(item.id, "denied", item.tool === true)}
                       data-action="deny"
                     >
                       <X aria-hidden="true" className="size-4" /> Deny

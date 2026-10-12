@@ -175,6 +175,7 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "agent.direct_key.revoke",
         "agent.update",
         "agent.service_rules",
+        "agent.tool_rules",
         "approval.decide",
         "agent.suspend",
         // One declared session stopped or resumed (sprint T8).

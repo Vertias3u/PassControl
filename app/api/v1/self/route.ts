@@ -17,6 +17,13 @@
 //
 // Deliberately absent from the answer: the policy and its shadow (deny rules are
 // the owner's), fallbacks, endpoints, key ids and anything about the owner.
+//
+// One exception, on request only: `?include=tool_rules` adds the agent's TOOL rules
+// (0085, subscription mode). The sidecar decides Claude Code's PreToolUse hook from
+// them, locally and in milliseconds, so it has to hold them, and it reads them on the
+// agent-wide /self ask it already makes (no extra call per session). The governed
+// agent can therefore read its own tool rules: they are guard rails, not a secret
+// (a deliberate choice, recorded 2026-10-12). Never the policy, never the service rules.
 export const runtime = "edge";
 
 import { budgetView, readPeriodCounted, type PeriodInput } from "@/lib/budget-view";
@@ -33,6 +40,7 @@ import { rateLimit } from "@/lib/ratelimit";
 import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { isSuspended, readBudgetSnapshot } from "@/lib/state/redis";
+import { readToolRules } from "@/lib/tool-rules";
 
 const SELF_RATE_LIMIT = Number(process.env.SELF_RATE_LIMIT ?? "60");
 const SELF_RATE_WINDOW_S = 60;
@@ -108,6 +116,9 @@ export async function GET(req: Request): Promise<Response> {
     })(),
   ]);
 
+  const wantsToolRules = new URL(req.url).searchParams.get("include") === "tool_rules";
+  const toolRules = wantsToolRules ? await readToolRules(db, agentId, userId) : undefined;
+
   return new Response(
     JSON.stringify({
       agent_id: agentId,
@@ -116,6 +127,7 @@ export async function GET(req: Request): Promise<Response> {
       scope: principal.scopes,
       budget: budgetView({ capTokens, capMicrocents, snapshot, mirror, period, nowMs }),
       as_of: new Date(nowMs).toISOString(),
+      ...(toolRules ? { tool_rules: toolRules } : {}),
     }),
     { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } }
   );

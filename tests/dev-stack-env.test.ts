@@ -126,7 +126,12 @@ describe("the local stack's issuer", () => {
     const written = heredoc.match(/^PASSCONTROL_ISSUER=(.+)$/m)?.[1] ?? "";
     expect(written).toBeTruthy();
 
-    const resolved = written.replace(/\$\{PORT:-(\d+)\}/, "$1").replace(/\$PORT\b/, "3000");
+    // The port itself is derived above the heredoc (PORT, the install's own, or
+    // 3000 + offset); tests/dev-stack-port-offset.test.ts runs that for real.
+    const resolved = written
+      .replace(/\$\{DASHBOARD_PORT\}/, "3000")
+      .replace(/\$\{PORT:-(\d+)\}/, "$1")
+      .replace(/\$PORT\b/, "3000");
     expect(resolved).not.toContain("$");
 
     process.env.PASSCONTROL_ISSUER = resolved;

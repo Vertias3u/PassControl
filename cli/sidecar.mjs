@@ -7,7 +7,12 @@ import { classifyConnect, classifyProxyRequest, isLoopbackBindHost } from "./pro
 import { createVisaClient } from "./visa-client.mjs";
 import { declaredLineage, declaredSession } from "./declared-session.mjs";
 import { defaultJournalDir, openJournal } from "./journal.mjs";
-import { createWatchFeed, isBudgetRead, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
+import { answer, createWatchFeed, isNotACall, isLocalCaller, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
+import { createStopGate, HOOK_PATH, selfAnswerState } from "./subscription-gate.mjs";
+import { createToolGate } from "./tool-gate.mjs";
+import { OTLP_LOGS_PATH, readClaudeCodeEvents } from "./otlp-logs.mjs";
+import { CLIENT_EVENTS_PATH, CLIENT_EVENTS_SOURCE, createCallUploader } from "./client-events-upload.mjs";
+import { heldUsageWindow, WINDOW_PATH } from "./usage-window.mjs";
 
 // Hop-by-hop headers plus the ones the sidecar rebuilds itself. `proxy-connection`
 // and friends only appear once something is used as a FORWARD proxy, which is
@@ -46,6 +51,24 @@ function isStripped(name) {
 const STRIP_RES = new Set(["content-encoding", "content-length", "transfer-encoding", "connection"]);
 
 const STATUS_TEXT = { 400: "Bad Request", 403: "Forbidden", 502: "Bad Gateway" };
+// An OTLP log export batches every event of a few seconds; Claude Code's run ~30 KB.
+const OTLP_BODY_LIMIT = 4 * 1024 * 1024;
+// Sessions whose calls this sidecar relays, remembered so their telemetry is not
+// counted a second time. Bounded: the oldest is forgotten first.
+const RELAYED_SESSIONS_MAX = 1000;
+
+// Claude Code's hook input carries the tool's input (a whole file for Write), so it
+// is not small; past this it is refused rather than buffered.
+const HOOK_BODY_LIMIT = 1024 * 1024;
+
+// How long Claude Code waits for the hook, as configure wrote it into the URL
+// (`?t=600`); null for a hook that does not say (a Phase 1 install).
+function hookTimeoutS(url) {
+  const t = new URL(url ?? "/", "http://127.0.0.1").searchParams.get("t");
+  return t !== null && /^\d{1,4}$/.test(t) && Number(t) > 0 ? Number(t) : null;
+}
+// A usage window is two numbers and two times.
+const WINDOW_BODY_LIMIT = 4 * 1024;
 
 /**
  * A header value is a single line of printable ASCII, always.
@@ -120,6 +143,9 @@ export function createSidecar({
   watchFeed = isLoopbackBindHost(host),
   watchCapacity = 200,
   watchMaxSubscribers = 8,
+  // Subscription mode, Phase 1b: upload the calls Claude Code reports to the
+  // gateway's agent page (cli/client-events-upload.mjs). `--no-report-calls` turns it off.
+  reportCalls = true,
 }) {
   // The upstream URL below is built from this, not from the argument: the
   // sidecar forwards a bearer visa on every proxied request, so its destination
@@ -142,6 +168,257 @@ export function createSidecar({
       const v = headers?.[name];
       return Array.isArray(v) ? v[0] : v;
     }, runId);
+
+  // Subscription mode's Stop (cli/subscription-gate.mjs): Claude Code's hooks ask
+  // here, and the answer comes from the gateway's /api/v1/self, read with this
+  // sidecar's visa and the session the hook names.
+  const SELF_TIMEOUT_MS = 2_000;
+  async function readSelf(session) {
+    try {
+      const response = await visas.fetchWithVisa((visa) => {
+        // The tool rules ride on every gate read (Phase 2): no call of their own.
+        const path = "/api/v1/self?include=tool_rules";
+        const headers = {
+          accept: "application/json",
+          authorization: `Bearer ${visa}`,
+          "x-passcontrol-run": runId,
+          "x-passcontrol-proof": visas.createProof(visa, "GET", new URL(path, origin)),
+          "accept-encoding": "identity",
+        };
+        if (session) headers["x-claude-code-session-id"] = session;
+        return fetch(`${origin}${path}`, { headers, signal: AbortSignal.timeout(SELF_TIMEOUT_MS) });
+      });
+      return await selfAnswerState(response);
+    } catch (error) {
+      return { state: "unknown", reason: error?.name === "TimeoutError" ? "the gateway did not answer in time" : (error?.message ?? "error") };
+    }
+  }
+  const stopGate = createStopGate({ readSelf, dashboardUrl: `${origin}/dashboard` });
+
+  // Phase 2's `ask_owner` tool rules: the gateway asks the owner (their alert
+  // destination is in its Vault) and holds each request a few seconds; this asks
+  // again until the owner answers or the tool gate's wait runs out.
+  const TOOL_APPROVALS_PATH = "/api/v1/tool-approvals";
+  const APPROVAL_REQUEST_TIMEOUT_MS = 25_000;
+  const APPROVAL_RETRY_MS = 1_000;
+  async function askOwner(input, { session, waitMs }) {
+    const deadline = Date.now() + waitMs;
+    const body = JSON.stringify({ session: session ?? undefined, tool_name: input.tool_name, tool_input: input.tool_input, cwd: input.cwd });
+    while (Date.now() < deadline - 500) {
+      let response;
+      try {
+        response = await visas.fetchWithVisa((visa) => {
+          const headers = {
+            "content-type": "application/json",
+            authorization: `Bearer ${visa}`,
+            "x-passcontrol-run": runId,
+            "x-passcontrol-proof": visas.createProof(visa, "POST", new URL(TOOL_APPROVALS_PATH, origin)),
+            "accept-encoding": "identity",
+          };
+          if (session) headers["x-claude-code-session-id"] = session;
+          return fetch(`${origin}${TOOL_APPROVALS_PATH}`, {
+            method: "POST",
+            headers,
+            body,
+            signal: AbortSignal.timeout(Math.min(APPROVAL_REQUEST_TIMEOUT_MS, Math.max(1_000, deadline - Date.now()))),
+          });
+        });
+      } catch {
+        // The gateway did not answer this round: ask again while there is time.
+        await new Promise((resolve) => setTimeout(resolve, Math.min(APPROVAL_RETRY_MS, Math.max(0, deadline - Date.now()))));
+        continue;
+      }
+      const answered = await response.json().catch(() => ({}));
+      if (response.status === 409) return { state: "refused" };
+      if (response.status === 413) return { state: "too_large" };
+      if (response.status !== 200) return { state: "unavailable" };
+      if (["approved", "denied", "full"].includes(answered?.state)) return { state: answered.state };
+      if (answered?.state !== "pending") return { state: "unavailable" };
+    }
+    return { state: "timeout" };
+  }
+
+  // The reported calls go to the gateway as this agent, straight from here: never
+  // through this sidecar's own listener, so they are never a call on the board.
+  const UPLOAD_TIMEOUT_MS = 10_000;
+  async function sendReportedCalls(events) {
+    const response = await visas.fetchWithVisa((visa) =>
+      fetch(`${origin}${CLIENT_EVENTS_PATH}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${visa}`,
+          "x-passcontrol-run": runId,
+          "x-passcontrol-proof": visas.createProof(visa, "POST", new URL(CLIENT_EVENTS_PATH, origin)),
+          "accept-encoding": "identity",
+        },
+        body: JSON.stringify({ source: CLIENT_EVENTS_SOURCE, events }),
+        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+      })
+    );
+    const body = await response.json().catch(() => ({}));
+    return { status: response.status, error: body?.error, retryAfterS: Number(response.headers.get("retry-after")) };
+  }
+  const uploader = reportCalls ? createCallUploader({ send: sendReportedCalls }) : null;
+  // Its decisions reach the agent's page with the reported calls (same opt-out).
+  const toolGate = createToolGate({
+    askOwner,
+    dashboardUrl: `${origin}/dashboard`,
+    onDecision: (record) => uploader?.add({ kind: "tool_decision", at: Date.now(), ...record }),
+  });
+
+  const relayedSessions = new Set();
+  function rememberRelayed(headers) {
+    const session = lineageOf(headers)?.session;
+    if (!session || relayedSessions.has(session)) return;
+    relayedSessions.add(session);
+    if (relayedSessions.size > RELAYED_SESSIONS_MAX) relayedSessions.delete(relayedSessions.values().next().value);
+  }
+
+  /** Reads a local caller's body up to `limit`; resolves null when it is over. */
+  function readLocalBody(req, limit) {
+    return new Promise((resolve) => {
+      const chunks = [];
+      let size = 0;
+      let over = false;
+      req.on("data", (c) => {
+        size += c.length;
+        if (size > limit) over = true;
+        else chunks.push(c);
+      });
+      req.on("end", () => resolve(over ? null : Buffer.concat(chunks)));
+      req.on("error", () => resolve(null));
+    });
+  }
+
+  // Subscription mode's telemetry (cli/otlp-logs.mjs): Claude Code's log exporter
+  // posts here. Answered as an OTLP collector does, `{}` on success.
+  async function serveOtlpLogs(req, res) {
+    const port = server.address()?.port;
+    if (req.method !== "POST") {
+      req.resume();
+      return answer(res, 405, "method_not_allowed", "The telemetry endpoint answers POST only.");
+    }
+    if (!isLocalCaller(req, port)) {
+      req.resume();
+      return answer(res, 403, "telemetry_refused", "The telemetry endpoint is for Claude Code on this machine only.");
+    }
+    if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+      req.resume();
+      return answer(res, 415, "telemetry_protocol", "Send OTLP as JSON: set OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json.");
+    }
+    const raw = await readLocalBody(req, OTLP_BODY_LIMIT);
+    if (raw === null) return answer(res, 413, "telemetry_too_large", "Log export over 4 MB.");
+    let body;
+    try {
+      body = JSON.parse(raw.toString("utf8"));
+    } catch {
+      return answer(res, 400, "telemetry_not_json", "The log export is not JSON.");
+    }
+    for (const event of readClaudeCodeEvents(body)) {
+      if (event.session && relayedSessions.has(event.session)) continue;
+      feed.report({
+        at: event.at ?? Date.now(),
+        lineage: { session: event.session, agent: event.agent },
+        model: event.model,
+        provider: "anthropic",
+        outcome: event.kind === "api_request" ? "seen" : "error",
+        status: event.status,
+        ms: event.durationMs,
+        cost: event.costMicros,
+      });
+      uploader?.add(event);
+    }
+    res.writeHead(200, { "content-type": "application/json", "content-length": 2, "cache-control": "no-store" });
+    res.end("{}");
+  }
+
+  // Subscription mode's usage window (cli/usage-window.mjs): the status line posts
+  // what Claude Code told it; `watch` gets it on the feed, `/passcontrol` asks for it.
+  async function serveWindow(req, res) {
+    const port = server.address()?.port;
+    if (req.method !== "GET" && req.method !== "POST") {
+      req.resume();
+      return answer(res, 405, "method_not_allowed", "The usage-window endpoint answers GET and POST only.");
+    }
+    if (!isLocalCaller(req, port)) {
+      req.resume();
+      return answer(res, 403, "window_refused", "The usage-window endpoint is for this machine only.");
+    }
+    if (req.method === "GET") {
+      req.resume();
+      const current = feed.window();
+      if (!current) return answer(res, 404, "window_unknown", "No usage window reported yet.");
+      const body = JSON.stringify({ fiveHour: current.fiveHour, sevenDay: current.sevenDay, at: current.at });
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+      return res.end(body);
+    }
+    const raw = await readLocalBody(req, WINDOW_BODY_LIMIT);
+    let window = null;
+    try {
+      window = raw === null ? null : heldUsageWindow(JSON.parse(raw.toString("utf8")));
+    } catch {
+      window = null;
+    }
+    if (!window) return answer(res, 400, "window_invalid", "Expected a usage window: { fiveHour, sevenDay }.");
+    feed.setWindow(window);
+    res.writeHead(204, { "cache-control": "no-store" });
+    res.end();
+  }
+
+  function serveHook(req, res) {
+    const port = server.address()?.port;
+    if (req.method !== "POST") {
+      req.resume();
+      return answer(res, 405, "method_not_allowed", "The hook endpoint answers POST only.");
+    }
+    if (!isLocalCaller(req, port)) {
+      req.resume();
+      return answer(res, 403, "hook_refused", "The hook endpoint is for Claude Code on this machine only.");
+    }
+    const chunks = [];
+    let size = 0;
+    let tooBig = false;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > HOOK_BODY_LIMIT) tooBig = true;
+      else chunks.push(c);
+    });
+    req.on("end", async () => {
+      if (tooBig) return answer(res, 413, "hook_too_large", "Hook input over 1 MB.");
+      let input;
+      try {
+        input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        input = null;
+      }
+      if (!input || typeof input !== "object" || Array.isArray(input)) {
+        return answer(res, 400, "hook_not_json", "Expected Claude Code's hook input, a JSON object.");
+      }
+      let out;
+      try {
+        out = await stopGate.decide(input);
+      } catch {
+        out = {};
+      }
+      // A stop ends the turn whatever the tool rules say; otherwise a PreToolUse is
+      // the tool gate's, which needs to know how long Claude Code waits for this hook.
+      if (out.continue !== false && input.hook_event_name === "PreToolUse") {
+        let tool;
+        try {
+          tool = await toolGate.decide(input, stopGate.toolRules(), hookTimeoutS(req.url));
+        } catch {
+          tool = {};
+        }
+        const messages = [out.systemMessage, tool.systemMessage].filter(Boolean);
+        out = { ...tool, ...(messages.length ? { systemMessage: messages.join("\n") } : {}) };
+      }
+      const body = JSON.stringify(out);
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+      res.end(body);
+    });
+    req.on("error", () => res.destroy());
+  }
 
   const localBaseUrl = () => {
     const address = server?.listening ? server.address() : null;
@@ -226,9 +503,10 @@ export function createSidecar({
     else res.end();
   }
 
-  /** Begins the board's record of a forwarded call, unless it is the budget read. */
+  /** Begins the board's record of a forwarded call, unless it is not a call (the budget read, an upload). */
   function watchCall(req, path, body, startedAt) {
-    if (isBudgetRead(path)) return null;
+    if (isNotACall(path)) return null;
+    rememberRelayed(req.headers);
     try {
       return { startedAt, call: feed.begin({ startedAt, lineage: lineageOf(req.headers), model: requestModel(body), provider: providerOf(path) }) };
     } catch {
@@ -242,7 +520,7 @@ export function createSidecar({
       if (watch) {
         watch.call.settle({ outcome: "error", code: "sidecar_upstream_error", status: 502 });
         watch.call.finish();
-      } else if (!isBudgetRead(path)) {
+      } else if (!isNotACall(path)) {
         feed.record({ outcome: "error", code: "sidecar_upstream_error", status: 502, lineage: lineageOf(req.headers), provider: providerOf(path) });
       }
       res.writeHead(502, { "content-type": "application/json" });
@@ -255,6 +533,10 @@ export function createSidecar({
   const server = http.createServer(async (req, res) => {
     // The sidecar's own paths: answered here, never forwarded with a visa.
     if (String(req.url ?? "").startsWith(LOCAL_PREFIX)) {
+      const localPath = String(req.url).split("?")[0];
+      if (localPath === HOOK_PATH) return serveHook(req, res);
+      if (localPath === OTLP_LOGS_PATH) return serveOtlpLogs(req, res);
+      if (localPath === WINDOW_PATH) return serveWindow(req, res);
       feed.serve(req, res, { port: server.address()?.port });
       return;
     }
@@ -371,7 +653,8 @@ export function createSidecar({
     clientSocket.on("close", () => upstream.destroy());
   });
 
-  return { server, ollamaServer, getVisa: visas.getVisa, runId, feed };
+  server.on("close", () => uploader?.close());
+  return { server, ollamaServer, getVisa: visas.getVisa, runId, feed, uploader };
 }
 
 /**

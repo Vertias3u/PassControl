@@ -18,12 +18,14 @@
 import http from "node:http";
 import { formatUsd, limitReached, panelRows } from "./budget-format.mjs";
 import { WATCH_PATH } from "./watch-feed.mjs";
+import { heldUsageWindow, resetTime, usageWindowText } from "./usage-window.mjs";
 
 const DECLARED = /^[A-Za-z0-9._:-]{1,128}$/;
 const MODEL = /^[A-Za-z0-9._:/@-]{1,100}$/;
 const CODE = /^[a-z][a-z0-9_]{1,47}$/;
 const PROVIDER = /^[a-z0-9-]{1,32}$/;
-const OUTCOMES = new Set(["boarded", "denied", "error"]);
+// "seen" is a call the client reported (subscription mode), not one the sidecar relayed.
+const OUTCOMES = new Set(["boarded", "denied", "error", "seen"]);
 const MAX_ROWS = 500;
 const MAX_LINE = 64 * 1024;
 export const BUDGET_EVERY_MS = 20_000;
@@ -122,7 +124,7 @@ export function openFeed({ port, host = "127.0.0.1", onEvent, onError = () => {}
 // ── State ────────────────────────────────────────────────────────────────────
 
 export function createBoardState() {
-  return { run: null, rows: [], feed: { state: "connecting" }, budget: null };
+  return { run: null, rows: [], feed: { state: "connecting" }, budget: null, window: null };
 }
 
 const held = (pattern, value) => (typeof value === "string" && pattern.test(value) ? value : null);
@@ -154,11 +156,17 @@ export function applyEvent(state, event) {
       status: Number.isInteger(event.status) ? event.status : null,
       ttfb: count(event.ttfb),
       ms: count(event.ms),
+      cost: count(event.cost),
     };
     const existing = state.rows.findIndex((r) => r.seq === row.seq);
     if (existing === -1) state.rows.push(row);
     else state.rows[existing] = { ...row, ms: row.ms ?? state.rows[existing].ms };
     if (state.rows.length > MAX_ROWS) state.rows.splice(0, state.rows.length - MAX_ROWS);
+    return state;
+  }
+  if (event.type === "window") {
+    const window = heldUsageWindow(event);
+    if (window) state.window = window;
     return state;
   }
   if (event.type === "end") {
@@ -217,8 +225,17 @@ export function formatMs(ms) {
 
 const localTime = (at) => new Date(at).toTimeString().slice(0, 8);
 
+/** USD millionths, as one call's cost: four decimals under a dollar. */
+export function formatMicroUsd(micros) {
+  if (micros === null || micros === undefined) return "";
+  const dollars = micros / 1_000_000;
+  return `$${dollars < 1 ? dollars.toFixed(4) : dollars.toFixed(2)}`;
+}
+
 function statusText(row) {
   if (row.outcome === "boarded") return "BOARDED";
+  // Reported by Claude Code, never relayed: its cost is API-equivalent, not charged.
+  if (row.outcome === "seen") return row.cost !== null ? `SEEN ${formatMicroUsd(row.cost)}` : "SEEN";
   if (row.outcome === "denied") return row.code ? `DENIED ${row.code}` : "DENIED";
   return `ERROR ${row.code ?? row.status ?? ""}`.trimEnd();
 }
@@ -241,8 +258,9 @@ function agentText(row, width) {
 
 /** Column widths for a terminal `width` wide; the session column goes first when narrow. */
 function columns(width) {
-  // Below 80 columns the model and the refusal's reason need the room more.
-  const withSession = width >= 80;
+  // Below an 80-column window the model and the refusal's reason need the room more.
+  // 79, not 80: screenFrame draws one column narrower than the window.
+  const withSession = width >= 79;
   const fixed = 8 + (withSession ? 8 : 0) + 12 + 7;
   const gaps = (withSession ? 5 : 4) * 2;
   const rest = Math.max(10, width - fixed - gaps);
@@ -261,7 +279,8 @@ function rowLine(row, cols, { run, now, formatTime, color }) {
   if (cols.withSession) cells.push(fit(sessionText(row, run), cols.session));
   cells.push(agentText(row, cols.agent));
   cells.push(fit(row.model ?? "—", cols.model));
-  cells.push(paint(color, BAR_STYLE[row.outcome], fit(statusText(row), cols.status)));
+  const status = fit(statusText(row), cols.status);
+  cells.push(BAR_STYLE[row.outcome] ? paint(color, BAR_STYLE[row.outcome], status) : status);
   cells.push(fitRight(latencyText(row, now), cols.latency));
   return cells.join("  ");
 }
@@ -299,6 +318,13 @@ function budgetLine(budget, width, { color, formatTime }) {
   // When it was asked is the first thing to go when the line is too long.
   const checked = budget.checkedAt ? ` · checked ${formatTime(budget.checkedAt)}` : "";
   return visibleLength(line + checked) <= width ? line + checked : line;
+}
+
+// Subscription mode: how much of Anthropic's 5-hour and 7-day allowance is used, as
+// Claude Code last told the status line (cli/usage-window.mjs). Shown, never enforced.
+function windowLine(window, now) {
+  const text = usageWindowText(window, { formatTime: (s) => resetTime(s, now) });
+  return text ? `${"Window".padEnd(9)} ${text}` : "";
 }
 
 function feedText(feed, port) {
@@ -342,6 +368,18 @@ function clip(line, width) {
  * The whole board as `height` lines, none wider than `width`. Pure: the same state,
  * size and clock give the same lines.
  */
+/**
+ * The full-screen frame draw() writes: home, each board line, clear the rest.
+ *
+ * One column narrower than the window. A line that fills the last column leaves the
+ * cursor ON that column (the terminal's pending-wrap state), and the ESC[K after it
+ * erases from the cursor, so the line's last character vanished ("LATENC").
+ */
+export function screenFrame(state, { columns, rows, port, color = false, now, formatTime }) {
+  const lines = renderBoard(state, { width: Math.max(1, columns - 1), height: rows, port, color, now, formatTime });
+  return `\x1b[H${lines.map((l) => `${l}\x1b[K`).join("\r\n")}\x1b[J`;
+}
+
 export function renderBoard(state, { width, height, port, now = Date.now(), formatTime = localTime, color = false }) {
   const w = Math.max(1, Math.floor(width));
   const h = Math.max(1, Math.floor(height));
@@ -352,17 +390,19 @@ export function renderBoard(state, { width, height, port, now = Date.now(), form
   }
   const cols = columns(w);
   const rows = state.rows;
-  const tally = { boarded: 0, denied: 0, error: 0 };
+  const tally = { boarded: 0, denied: 0, error: 0, seen: 0 };
   for (const r of rows) tally[r.outcome] += 1;
   const counts = rows.length
-    ? `${rows.length} call${rows.length === 1 ? "" : "s"}: ${tally.boarded} boarded, ${tally.denied} denied${tally.error ? `, ${tally.error} error` : ""}`
+    ? `${rows.length} call${rows.length === 1 ? "" : "s"}: ${tally.seen ? `${tally.seen} seen, ` : ""}${tally.boarded} boarded, ${tally.denied} denied${tally.error ? `, ${tally.error} error` : ""}`
     : "no calls yet";
   const lines = [
     `${paint(color, "bold", "PassControl watch")} · sidecar :${port} · ${feedText(state.feed, port)} · ${counts}`,
     budgetLine(state.budget, w, { color, formatTime }),
     // Why the board is not live, on a line of its own so it is never cut off the end
     // of the header. Older rows stay below it: they happened.
-    state.feed?.state === "down" ? paint(color, "yellow", clean(state.feed.message ?? `waiting for the sidecar on :${port}`)) : "",
+    state.feed?.state === "down"
+      ? paint(color, "yellow", clean(state.feed.message ?? `waiting for the sidecar on :${port}`))
+      : windowLine(state.window, now),
   ];
   const header = ["TIME".padEnd(cols.time)];
   if (cols.withSession) header.push("SESSION".padEnd(cols.session));
@@ -478,8 +518,7 @@ export function runWatch({
     drawTimer = null;
     if (finished) return;
     if (tty) {
-      const lines = renderBoard(state, { width: out.columns || 80, height: out.rows || 24, port, color });
-      out.write(`\x1b[H${lines.map((l) => `${l}\x1b[K`).join("\r\n")}\x1b[J`);
+      out.write(screenFrame(state, { columns: out.columns || 80, rows: out.rows || 24, port, color }));
       return;
     }
     const feedLine = state.feed?.state === "down" ? clean(state.feed.message ?? "") : state.feed?.state === "live" ? "connected" : null;

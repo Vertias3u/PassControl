@@ -123,6 +123,17 @@ describe("the approval prompt", () => {
     expect(body.text.length).toBeLessThan(4096);
   });
 
+  // A Claude Code tool (subscription mode, Phase 2) is refused at the agent's own
+  // wait, not held 15 minutes: the prompt says how long the tool actually waits.
+  it("says the caller's own wait when it has one, on every destination", () => {
+    const tool = { ...info, waitNote: "The tool waits up to 120 seconds for your answer, then is refused." };
+    expect(formatApprovalPrompt("telegram", tool, "555").text).toContain("up to 120 seconds");
+    expect(formatApprovalPrompt("telegram", tool, "555").text).not.toMatch(/15 minutes/);
+    expect(formatApprovalPrompt("slack", tool).text).toContain("up to 120 seconds");
+    expect(formatApprovalPrompt("discord", tool).content).toContain("up to 120 seconds");
+    expect(formatApprovalPrompt("telegram", info, "555").text).toMatch(/15 minutes/);
+  });
+
   it("on Discord and Slack, a cut preview says so", () => {
     const long = { ...info, preview: "y".repeat(5000) };
     expect(formatApprovalPrompt("discord", long).content).toMatch(/more characters/);

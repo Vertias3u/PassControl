@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { limitReached, panelRows, statusLine } from "./budget-format.mjs";
+import { heldUsageWindow, readUsageWindow, usageWindowText, WINDOW_PATH } from "./usage-window.mjs";
 
 export const STATUSLINE_TTL_MS = 20_000;
 const TIMEOUT_MS = 1_500;
@@ -88,6 +89,82 @@ export async function statuslineText({
   }
 }
 
+// Claude Code writes one JSON object to the command's stdin. It may not close the
+// stream promptly, so the object is taken as soon as it parses, and after this long
+// the line is printed without it.
+const STDIN_WAIT_MS = 300;
+const STDIN_LIMIT = 256 * 1024;
+
+/** Claude Code's status-line input, or null. Never throws, never waits past `waitMs`. */
+export function readStatusInput(stream = process.stdin, waitMs = STDIN_WAIT_MS) {
+  if (!stream || stream.isTTY) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let text = "";
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      stream.removeAllListeners?.("data");
+      // An open stdin would keep the process alive after the line is printed.
+      stream.destroy?.();
+      resolve(value);
+    };
+    const parse = () => {
+      try {
+        const parsed = JSON.parse(text);
+        return parsed && typeof parsed === "object" ? parsed : null;
+      } catch {
+        return undefined;
+      }
+    };
+    const timer = setTimeout(() => finish(parse() ?? null), waitMs);
+    try {
+      stream.setEncoding?.("utf8");
+      stream.on("data", (chunk) => {
+        text += chunk;
+        if (text.length > STDIN_LIMIT) return finish(null);
+        const parsed = parse();
+        if (parsed !== undefined) finish(parsed);
+      });
+      stream.on("end", () => finish(parse() ?? null));
+      stream.on("error", () => finish(null));
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+/**
+ * Hands the usage window to the sidecar, for `watch` and `/passcontrol`. Best effort:
+ * a sidecar that is not running only means the boards do not show it.
+ */
+export async function postUsageWindow({ port, host = "127.0.0.1", window, fetch: fetchImpl = globalThis.fetch, timeoutMs = 500 }) {
+  if (!window) return;
+  try {
+    const response = await fetchImpl(`http://${host}:${port}${WINDOW_PATH}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(window),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    await response.body?.cancel().catch(() => {});
+  } catch {
+    // Nothing to tell anyone: the status line still shows the window.
+  }
+}
+
+/**
+ * The status line with the usage window, when Claude Code sent one: the budget line
+ * may come from the cache, the window is always this run's. Never throws.
+ */
+export async function statuslineWithWindow({ input, port, host = "127.0.0.1", fetch: fetchImpl = globalThis.fetch, budgetLine }) {
+  const window = readUsageWindow(input);
+  const [line] = await Promise.all([budgetLine(), postUsageWindow({ port, host, window, fetch: fetchImpl })]);
+  const text = usageWindowText(window, { short: true });
+  return text ? `${line} · ${text}` : line;
+}
+
 // The session id Claude Code declares on every call, held to what the gateway
 // accepts as declared (lib/client-lineage.ts), so nothing else is ever sent on.
 const DECLARED_SESSION = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -128,6 +205,20 @@ export function notInPathText(remoteHost) {
 
 const row = ([label, value]) => `  ${label.padEnd(11)} ${value}`;
 
+/** The usage window the sidecar holds, as short text, or "". Never throws. */
+async function readSidecarWindow({ host, port, fetch: fetchImpl, signal }) {
+  try {
+    const response = await fetchImpl(`http://${host}:${port}${WINDOW_PATH}`, { headers: { accept: "application/json" }, signal });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return "";
+    }
+    return usageWindowText(heldUsageWindow(await response.json()), { short: true });
+  } catch {
+    return "";
+  }
+}
+
 /**
  * `passcontrol statusline --panel`: what `/passcontrol` shows in Claude Code (F3).
  * The plugin's hook prints it without calling the model, so it answers while the
@@ -139,6 +230,7 @@ export async function statusPanelText({
   host = "127.0.0.1",
   gateway,
   session = null,
+  subscription = false,
   fetch: fetchImpl = globalThis.fetch,
   timeoutMs = TIMEOUT_MS,
 }) {
@@ -154,12 +246,16 @@ export async function statusPanelText({
       response = await fetchImpl(`http://${host}:${port}/api/v1/self`, { headers, signal: controller.signal });
     } catch {
       if (controller.signal.aborted) return "PassControl · no answer from the sidecar\n\n  It did not answer in time. Try again in a moment.";
-      return [
-        `PassControl · sidecar not running on port ${port}`,
-        "",
-        "  If Claude Code is set to send its calls through PassControl, they fail",
-        "  until it runs. Start it with:  passcontrol sidecar",
-      ].join("\n");
+      // On a subscription the calls never pass the sidecar, so they go ahead without
+      // it: what stops is PassControl checking the stops and showing the calls.
+      const consequence = subscription
+        ? [
+            "  This session's calls still go ahead, but PassControl does not check",
+            "  the agent's stops or show its calls until it runs. Start it with:",
+            "  passcontrol sidecar",
+          ]
+        : ["  If Claude Code is set to send its calls through PassControl, they fail", "  until it runs. Start it with:  passcontrol sidecar"];
+      return [`PassControl · sidecar not running on port ${port}`, "", ...consequence].join("\n");
     }
     if (response.status === 403) {
       const body = await response.json().catch(() => ({}));
@@ -197,11 +293,13 @@ export async function statusPanelText({
     if (typeof self?.budget !== "object" || self.budget === null) return "PassControl · unreadable answer";
     const agentId = typeof self.agent_id === "string" && UUID.test(self.agent_id) ? self.agent_id : null;
     const title = `PassControl${agentId ? ` · agent ${agentId.slice(0, 8)}` : ""}${limitReached(self) ? " · LIMIT REACHED" : ""}`;
+    const window = subscription ? await readSidecarWindow({ host, port, fetch: fetchImpl, signal: controller.signal }) : "";
     return [
       title,
       "",
       ...panelRows(self).map(row),
-      row(["Calls", `through the sidecar on :${port}`]),
+      ...(window ? [row(["Window", window])] : []),
+      row(["Calls", subscription ? "reported by Claude Code (subscription), not proxied" : `through the sidecar on :${port}`]),
       "",
       row(["Agent page", agentId ? `${dashboard}/agents/${agentId}` : dashboard]),
     ].join("\n");

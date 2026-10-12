@@ -69,6 +69,9 @@ export const AUDIT_ACTIONS = [
   // Which non-LLM API calls an agent may make with the tenant's token (0074).
   // It widens or narrows what a credential can reach, like a scope edit.
   "agent.service_rules",
+  // Which Claude Code tools an agent may run on a Pro/Max login (0085). Counts by
+  // effect only: the patterns can name private hosts and files.
+  "agent.tool_rules",
   // The owner's yes or no to one service call under an "Ask me first" rule,
   // given in the dashboard. (A Telegram tap leaves the call's own audit row.)
   "approval.decide",

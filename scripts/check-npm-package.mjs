@@ -118,6 +118,18 @@ const allowed = new Set([
   // cannot start, not a missing board.
   "cli/watch-feed.mjs",
   "cli/watch.mjs",
+  // Subscription mode: the sidecar imports the stop
+  // gate and the telemetry receiver at load, and the sidecar, the board and the
+  // status line all import the usage window. Leaving one out is a CLI that cannot start.
+  "cli/subscription-gate.mjs",
+  "cli/otlp-logs.mjs",
+  "cli/usage-window.mjs",
+  "cli/client-events-upload.mjs",
+  // Phase 2: the sidecar imports the tool gate, which imports the rule language.
+  "cli/tool-gate.mjs",
+  "cli/tool-rules.mjs",
+  // Its types, for the gateway's TypeScript (the `cli/protocols.d.mts` pattern).
+  "cli/tool-rules.d.mts",
   "sdk/README.md",
   "sdk/control.d.ts",
   "sdk/control.js",

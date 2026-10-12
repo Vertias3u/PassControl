@@ -35,8 +35,9 @@ export const WORKSPACE_CONFIG_TABLES = [
     // operator's machine and never reaches the server.
     // `service_rules` (0074) is an agent's access to non-LLM APIs such as
     // GitHub: methods and paths, no secret. The token it uses is not here.
+    // `tool_rules` (0085): which Claude Code tools it may run on a Pro/Max login.
     columns:
-      "id,name,status,budget_tokens,budget_cents,budget_period,budget_period_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at,service_rules",
+      "id,name,status,budget_tokens,budget_cents,budget_period,budget_period_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at,service_rules,tool_rules",
     // A database missing a migration refuses the whole select (42703), so each
     // fallback drops one migration's columns, newest first. Without 0074 an
     // agent HAS no service rules, and without 0073 no periodic limit, so the
@@ -44,6 +45,7 @@ export const WORKSPACE_CONFIG_TABLES = [
     // the operator nothing. One step at a time: a database with 0073 but not
     // 0074 must keep its periodic limits.
     fallbackColumns: [
+      "id,name,status,budget_tokens,budget_cents,budget_period,budget_period_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at,service_rules",
       "id,name,status,budget_tokens,budget_cents,budget_period,budget_period_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at",
       "id,name,status,budget_tokens,budget_cents,allowed_scopes,policy,policy_shadow,fallbacks,expires_at,published,public_label,passport_pubkey,created_at",
     ],

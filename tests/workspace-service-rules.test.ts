@@ -70,7 +70,8 @@ describe("exporting an agent's service access", () => {
     const out = await loadWorkspaceExport(client, "u1");
     expect(out.workspace.agents[0]).toMatchObject({ budget_period: "day", budget_period_cents: 2500 });
     expect(out.workspace.agents[0]).not.toHaveProperty("service_rules");
-    expect(agentSelects).toHaveLength(2);
+    // A database without 0074 has no 0085 either: tool_rules goes first, then this.
+    expect(agentSelects).toHaveLength(3);
   });
 
   it("still exports on a database with neither", async () => {
@@ -181,9 +182,10 @@ describe("the account export", () => {
     const { loadAccountExport } = await import("@/lib/account-lifecycle");
     const { client, selects } = accountDb(["service_rules"]);
     await loadAccountExport(client, user, client);
-    expect(selects.agents).toHaveLength(2);
-    expect(selects.agents![1]).toMatch(/\bbudget_period_cents\b/);
-    expect(selects.agents![1]).not.toMatch(/service_rules/);
+    // Without 0074 there is no 0085 either: tool_rules goes first, then service_rules.
+    expect(selects.agents).toHaveLength(3);
+    expect(selects.agents![2]).toMatch(/\bbudget_period_cents\b/);
+    expect(selects.agents![2]).not.toMatch(/service_rules/);
   });
 
   it("still exports on a database with neither 0073 nor 0074", async () => {

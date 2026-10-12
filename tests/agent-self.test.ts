@@ -24,6 +24,7 @@ const h = vi.hoisted(() => ({
   rateLimitFailClosed: vi.fn(),
   captureSecurityEvent: vi.fn(),
   agentsFilters: [] as [string, unknown][],
+  toolRules: vi.fn(),
 }));
 
 vi.mock("server-only", () => ({}));
@@ -58,13 +59,14 @@ vi.mock("@/lib/supabase", () => ({
   serviceClient: () => ({
     rpc: vi.fn(),
     from: (table: string) => {
+      let columns = "";
       const chain = {
-        select: () => chain,
+        select: (cols: string) => ((columns = cols), chain),
         eq: (column: string, value: unknown) => {
           if (table === "agents") h.agentsFilters.push([column, value]);
           return chain;
         },
-        maybeSingle: () => h.mirror(table),
+        maybeSingle: () => (columns === "tool_rules" ? h.toolRules() : h.mirror(table)),
       };
       return chain;
     },
@@ -114,6 +116,7 @@ beforeEach(() => {
   h.mirror.mockResolvedValue({ data: { spent_tokens: 70, spent_microcents: 7_000 }, error: null });
   h.rateLimit.mockResolvedValue({ success: true, remaining: 10 });
   h.rateLimitFailClosed.mockResolvedValue({ success: true, remaining: 10 });
+  h.toolRules.mockResolvedValue({ data: { tool_rules: null }, error: null });
 });
 
 describe("GET /api/v1/self", () => {
@@ -276,3 +279,56 @@ describe("the same door as a model call", () => {
     });
   });
 });
+
+// Subscription mode, Phase 2: the sidecar decides PreToolUse from the agent's tool
+// rules (0085), and reads them on the agent-wide /self ask it already makes, so no
+// session costs an extra call. Opt-in: the status line, `watch` and the panel poll
+// /self too and never need them. The governed agent can read its own TOOL rules (they
+// are guard rails); never the policy or the service rules.
+describe("tool rules on request", () => {
+  const RULES = { rules: [{ tool: "Bash", command: "git push*", effect: "ask_owner" }], approval_wait_s: 90 };
+  const withRules = () => get(undefined, "?include=tool_rules");
+
+  it("are absent unless asked for, and not read", async () => {
+    const body = await (await get()).json();
+    expect(body).not.toHaveProperty("tool_rules");
+    expect(h.toolRules).not.toHaveBeenCalled();
+  });
+
+  it("are the stored document when it is valid", async () => {
+    h.toolRules.mockResolvedValue({ data: { tool_rules: RULES }, error: null });
+    const body = await (await withRules()).json();
+    expect(body.tool_rules).toEqual({ state: "ok", document: RULES });
+    expect(h.agentsFilters).toEqual(expect.arrayContaining([["id", AGENT], ["user_id", TENANT]]));
+  });
+
+  it("say none when the agent has none, or the database predates 0085", async () => {
+    expect((await (await withRules()).json()).tool_rules).toEqual({ state: "none" });
+    h.toolRules.mockResolvedValue({ data: null, error: { code: "42703" } });
+    expect((await (await withRules()).json()).tool_rules).toEqual({ state: "none" });
+  });
+
+  it("say invalid, never the document, when this build cannot read them", async () => {
+    h.toolRules.mockResolvedValue({ data: { tool_rules: { rules: [{ tool: "Bash", effect: "allow" }] } }, error: null });
+    const body = await (await withRules()).json();
+    expect(body.tool_rules).toEqual({ state: "invalid" });
+  });
+
+  it("say unknown when they cannot be read, and the rest of the answer stands", async () => {
+    h.toolRules.mockResolvedValue({ data: null, error: { code: "57014" } });
+    const res = await withRules();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.tool_rules).toEqual({ state: "unknown" });
+    expect(body.budget).toBeTruthy();
+    h.toolRules.mockRejectedValue(new Error("network"));
+    expect((await (await withRules()).json()).tool_rules).toEqual({ state: "unknown" });
+  });
+
+  it("still never show the policy or the service rules", async () => {
+    h.toolRules.mockResolvedValue({ data: { tool_rules: RULES }, error: null });
+    const text = await (await withRules()).text();
+    for (const word of ["openai", "shadow", "service_rules", "visa.token", TENANT]) expect(text).not.toContain(word);
+  });
+});
+

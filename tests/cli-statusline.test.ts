@@ -32,16 +32,28 @@ const SELF = {
 let server: Server;
 let port = 0;
 let hits: string[] = [];
+let bodies: string[] = [];
 let answer: (res: import("node:http").ServerResponse) => void;
 
 beforeEach(async () => {
   hits = [];
+  bodies = [];
   answer = (res) => {
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify(SELF));
   };
   server = createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
+    if (req.url === "/_passcontrol/window") {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        bodies.push(body);
+        res.statusCode = 204;
+        res.end();
+      });
+      return;
+    }
     answer(res);
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -51,7 +63,9 @@ beforeEach(async () => {
 
 afterEach(() => new Promise<void>((r) => server.close(() => r())));
 
-function run(args: string[], home = mkdtempSync(join(tmpdir(), "pc-statusline-")), closeStdin = true) {
+const STATUS_INPUT = { session_id: "s1", model: { display_name: "Opus" } };
+
+function run(args: string[], home = mkdtempSync(join(tmpdir(), "pc-statusline-")), closeStdin = true, input: unknown = STATUS_INPUT) {
   return new Promise<{ code: number; out: string; err: string; home: string; ms: number }>((resolve) => {
     const started = Date.now();
     const child = spawn(process.execPath, [CLI, ...args], {
@@ -63,7 +77,7 @@ function run(args: string[], home = mkdtempSync(join(tmpdir(), "pc-statusline-")
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
     // What Claude Code sends; the command must not depend on it, or hang without it.
-    child.stdin.write(JSON.stringify({ session_id: "s1", model: { display_name: "Opus" } }));
+    child.stdin.write(JSON.stringify(input));
     if (closeStdin) child.stdin.end();
     child.on("close", (code) => resolve({ code: code ?? -1, out, err, home, ms: Date.now() - started }));
   });
@@ -133,6 +147,54 @@ describe("passcontrol statusline", () => {
     const r = await run(["statusline", "--port", String(port)], undefined, false);
     expect(r.code).toBe(0);
     expect(r.out).toBe("PassControl · $0.42 of $2.00 today\n");
+  });
+
+  // Subscription mode: on a Pro/Max login Claude Code
+  // adds `rate_limits` to the status line's input, after the session's first response.
+  // A flat fee does not run out in dollars; that window does.
+  describe("on a subscription", () => {
+    const WINDOWED = {
+      ...STATUS_INPUT,
+      rate_limits: {
+        five_hour: { used_percentage: 23.5, resets_at: 1738425600 },
+        seven_day: { used_percentage: 41.2, resets_at: 1738857600 },
+      },
+    };
+
+    it("adds how much of the usage window is used, and hands it to the sidecar", async () => {
+      const r = await run(["statusline", "--port", String(port)], undefined, true, WINDOWED);
+      expect(r.code).toBe(0);
+      expect(r.out).toBe("PassControl · $0.42 of $2.00 today · 5h 24% · 7d 41%\n");
+      expect(hits).toContain("POST /_passcontrol/window");
+      expect(JSON.parse(bodies[0]!)).toEqual({
+        fiveHour: { usedPct: 23.5, resetsAt: 1738425600 },
+        sevenDay: { usedPct: 41.2, resetsAt: 1738857600 },
+      });
+    });
+
+    it("shows the fresh window even when the budget comes from the cache", async () => {
+      const first = await run(["statusline", "--port", String(port)], undefined, true, WINDOWED);
+      const later = { ...WINDOWED, rate_limits: { ...WINDOWED.rate_limits, five_hour: { used_percentage: 30, resets_at: 1738425600 } } };
+      const second = await run(["statusline", "--port", String(port)], first.home, true, later);
+      expect(second.out).toBe("PassControl · $0.42 of $2.00 today · 5h 30% · 7d 41%\n");
+      expect(hits.filter((h) => h === "GET /api/v1/self")).toHaveLength(1);
+    });
+
+    it("still shows the window when the sidecar is not running", async () => {
+      const r = await run(["statusline", "--port", "1"], undefined, true, WINDOWED);
+      expect(r.code).toBe(0);
+      expect(r.out).toBe("PassControl · sidecar not running on port 1 · 5h 24% · 7d 41%\n");
+    });
+
+    it("sends nothing to the sidecar without a window", async () => {
+      await run(["statusline", "--port", String(port)]);
+      expect(hits).toEqual(["GET /api/v1/self"]);
+    });
+
+    it("reads the window without waiting for stdin to close", async () => {
+      const r = await run(["statusline", "--port", String(port)], undefined, false, WINDOWED);
+      expect(r.out).toBe("PassControl · $0.42 of $2.00 today · 5h 24% · 7d 41%\n");
+    });
   });
 
   it("writes no file when it cannot reach anything", async () => {

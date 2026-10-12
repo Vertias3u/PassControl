@@ -13,6 +13,7 @@ import { validateAgentInput, validateFallbacks, validatePeriodBudget } from "@/l
 import { policyIsWellFormed } from "@/lib/scope";
 import { isServiceId } from "@/lib/services/catalog";
 import { parseServiceRules } from "@/lib/services/rules";
+import { parseToolRules } from "@/cli/tool-rules.mjs";
 
 // `agents.status` is an enum in 0001_init.sql:12. An unknown value must not
 // fall through to the column default, which is 'active'.
@@ -214,6 +215,16 @@ export function planAgentImports(agents: unknown, existingPubkeys: Iterable<stri
       serviceRules = raw;
     }
 
+    // Its Claude Code tool rules (0085), the same way: checked by the sidecar's own
+    // parser, and refused rather than dropped. Rules the sidecar cannot read would
+    // refuse every tool of the restored agent.
+    let toolRules: Record<string, unknown> | null = null;
+    if (Object.hasOwn(entry, "tool_rules") && entry.tool_rules !== null) {
+      const raw = entry.tool_rules;
+      if (!isRecord(raw) || !parseToolRules(raw).ok) return { action: "reject", name, reason: "tool_rules_malformed" };
+      toolRules = raw;
+    }
+
     let expiresAt: string | null;
     if (entry.expires_at !== null) {
       if (typeof entry.expires_at !== "string" || Number.isNaN(Date.parse(entry.expires_at))) {
@@ -246,6 +257,8 @@ export function planAgentImports(agents: unknown, existingPubkeys: Iterable<stri
       ...(period.budget_period !== null ? period : {}),
       // Written only when set, for a database without 0074 (same reason).
       ...(serviceRules !== null ? { service_rules: serviceRules } : {}),
+      // Written only when set, for a database without 0085.
+      ...(toolRules !== null ? { tool_rules: toolRules } : {}),
       // All config fields are emitted explicitly. A database default is not a
       // restore value, even where today's default happens to agree with null.
       policy: entry.policy,
