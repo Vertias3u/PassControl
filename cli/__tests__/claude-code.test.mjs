@@ -356,3 +356,54 @@ describe("subscription mode", () => {
     });
   });
 });
+
+// 1.6.0: the agent's opt-in note (cli/agent-note.mjs) is a URL on the prompt hook:
+// `?note=1` on subscription mode's own, and in API mode a hook of its own,
+// `?note=only`, which never blocks. Each setup owns only its own hooks.
+describe("the agent's note", () => {
+  const target = () => path.join(dir, "settings.json");
+  const NOTE_ONLY = { type: "http", url: "http://127.0.0.1:8788/_passcontrol/hook?note=only", timeout: 5 };
+
+  it("subscription mode: --agent-note puts ?note=1 on the prompt hook only, and a re-run without it takes it off", () => {
+    writeClaudeCodeSubscription({ target: target(), port: 8788, statusLineCommand: null, note: true });
+    let s = read(target());
+    expect(s.hooks.UserPromptSubmit).toEqual([{ hooks: [{ type: "http", url: "http://127.0.0.1:8788/_passcontrol/hook?note=1", timeout: 5 }] }]);
+    expect(s.hooks.PostToolBatch).toEqual(subscriptionHooks(8788).PostToolBatch);
+    expect(subscriptionHooks(8788, { note: true }).UserPromptSubmit).toEqual(s.hooks.UserPromptSubmit);
+    writeClaudeCodeSubscription({ target: target(), port: 8788, statusLineCommand: null });
+    s = read(target());
+    expect(s.hooks).toEqual(subscriptionHooks(8788));
+    removeClaudeCodeSubscription({ target: target() });
+    expect(read(target()).hooks).toBeUndefined();
+  });
+
+  it("API mode: --agent-note adds one note-only prompt hook beside the env keys", () => {
+    const out = writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788 });
+    expect(out.changed).toBe(true);
+    const s = read(target());
+    expect(s.hooks).toEqual({ UserPromptSubmit: [{ hooks: [NOTE_ONLY] }] });
+    expect(writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788 }).changed).toBe(false);
+  });
+
+  it("API mode: a re-run without it, or --remove, takes only that hook out", () => {
+    const mine = { type: "command", command: "echo hi" };
+    fs.writeFileSync(target(), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [mine] }] } }));
+    writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788 });
+    expect(read(target()).hooks.UserPromptSubmit).toEqual([{ hooks: [mine] }, { hooks: [NOTE_ONLY] }]);
+    writeClaudeCodeSettings({ target: target(), baseUrl: BASE });
+    expect(read(target()).hooks.UserPromptSubmit).toEqual([{ hooks: [mine] }]);
+    writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788 });
+    removeClaudeCodeSettings({ target: target() });
+    expect(read(target()).hooks).toEqual({ UserPromptSubmit: [{ hooks: [mine] }] });
+  });
+
+  it("neither setup removes the other's hooks", () => {
+    writeClaudeCodeSubscription({ target: target(), port: 8788, statusLineCommand: null });
+    writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788, force: true });
+    writeClaudeCodeSettings({ target: target(), baseUrl: BASE, force: true });
+    expect(read(target()).hooks).toEqual(subscriptionHooks(8788));
+    writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788, force: true });
+    removeClaudeCodeSubscription({ target: target() });
+    expect(read(target()).hooks).toEqual({ UserPromptSubmit: [{ hooks: [NOTE_ONLY] }] });
+  });
+});

@@ -59,6 +59,7 @@ export const CALL_OUTCOME: Record<LogEntry["status"], { category: OutcomeCategor
   blocked_policy: { category: "refused_policy", label: "Blocked by a policy rule" },
   blocked_budget: { category: "refused_budget", label: "Blocked by a budget cap" },
   blocked_budget_period: { category: "refused_budget", label: "Blocked by the daily/monthly limit" },
+  blocked_budget_pause: { category: "refused_budget", label: "Paused at its pause line" },
   blocked_budget_subagent: { category: "refused_budget", label: "Blocked by a sub-agent session cap" },
   blocked_budget_delegation: { category: "refused_budget", label: "Blocked by a delegation cap" },
   blocked_delegation_revoked: { category: "stopped", label: "Stopped: delegation revoked" },

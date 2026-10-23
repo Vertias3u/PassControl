@@ -53,6 +53,11 @@ function verdict(permissionDecision, reason) {
 export function createToolGate({ askOwner, onDecision = () => {}, now = () => Date.now(), dashboardUrl = "" }) {
   let warnedAt = null;
   const where = dashboardUrl ? ` on ${dashboardUrl}` : " on the agent's dashboard page";
+  // Said with every rule's refusal: told only "the tool rules refuse this", Claude
+  // Code went looking for the rule in the local PassControl config, which has none.
+  const rulesLive = dashboardUrl
+    ? `Tool rules are set on the agent's page at ${dashboardUrl}, not on this machine.`
+    : "Tool rules are set on the agent's dashboard page, not on this machine.";
 
   function record(input, decision, ruleIndex, waitMs) {
     try {
@@ -99,11 +104,11 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
     const rule = `rule ${hit.ruleIndex + 1}`;
     if (hit.effect === "deny") {
       record(input, "deny", hit.ruleIndex, 0);
-      return verdict("deny", `PassControl: the agent's tool rules refuse this (${rule}: ${short(hit.subject)}).`);
+      return verdict("deny", `PassControl: the agent's tool rules refuse this (${rule}: ${short(hit.subject)}). ${rulesLive}`);
     }
     if (hit.effect === "ask") {
       record(input, "ask", hit.ruleIndex, 0);
-      return verdict("ask", `PassControl: the agent's tool rules ask you to confirm this (${rule}: ${short(hit.subject)}).`);
+      return verdict("ask", `PassControl: the agent's tool rules ask you to confirm this (${rule}: ${short(hit.subject)}). ${rulesLive}`);
     }
 
     // ask_owner
@@ -129,7 +134,7 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
         return {};
       case "denied":
         record(input, "owner_denied", hit.ruleIndex, waited);
-        return verdict("deny", `PassControl: the agent's owner said no to this (${rule}).`);
+        return verdict("deny", `PassControl: the agent's owner said no to this (${rule}). ${rulesLive}`);
       case "timeout":
         record(input, "owner_timeout", hit.ruleIndex, waited);
         return verdict("deny", `PassControl: the agent's owner did not answer within ${waitS} s, so this was not run (${rule}).`);

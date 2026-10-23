@@ -95,6 +95,13 @@ const allowed = new Set([
   // How an agent's limits read to a person. cli/mcp/server.mjs imports it at load,
   // so a missing file is an MCP server that cannot start.
   "cli/budget-format.mjs",
+  // The agent's opt-in note (1.6.0). cli/subscription-gate.mjs imports it at load,
+  // so a missing file is a sidecar that cannot start.
+  "cli/agent-note.mjs",
+  // Subscription mode for Codex (1.6.0): `configure codex --subscription` and the
+  // `codex-hook` relay. bin/passcontrol.mjs imports it at load, so a missing file is
+  // a CLI that cannot start.
+  "cli/codex-hooks.mjs",
   // `passcontrol statusline`. bin/passcontrol.mjs imports it at load, so a missing
   // file is a CLI that cannot start.
   "cli/statusline.mjs",

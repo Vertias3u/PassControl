@@ -33,8 +33,9 @@ export function DashboardBrand({
       <>
         {mark}
         {wordmark}
-        {/* One text child, not two: React's SSR separates adjacent text nodes. */}
-        {productLine ? <span>{`/ ${productLine}`}</span> : null}
+        {/* One text child, not two: React's SSR separates adjacent text nodes. A view
+            name follows a slash; the maker's line reads on its own. */}
+        {productLine ? <span>{detail ? `/ ${productLine}` : productLine}</span> : null}
       </>
     );
   }

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PassControl Control-Plane API
-  version: "1.5.1"
+  version: "1.6.0"
   description: >
     Developer API for managing a PassControl agent fleet. Authenticated with a
     `pc_` API key (Authorization: Bearer). All access is tenant-isolated to the
@@ -409,6 +409,37 @@ components:
           minimum: 0
           maximum: 2147483647
           description: Most this agent may spend per budget_period, in cents. Send together with budget_period.
+        pause_percent:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 99
+          description: >-
+            Soft pause line (migration 0087): once the agent has used this share of
+            any of its limits, the gateway refuses its calls with 402
+            blocked_budget_pause until the owner lets it go on for an hour from the
+            dashboard. null removes the line. The limits themselves still apply.
+        pause_switch:
+          type: [object, "null"]
+          description: >-
+            What happens at the pause line (migration 0088). null pauses, as above.
+            An object sends the agent's calls to that provider to one cheaper model
+            instead, for the rest of the period or until the owner lets it go on.
+            The model must already be in the agent's scope (422 otherwise), and the
+            agent needs a pause line. Calls to any other provider past the line
+            pause. The scope, policy and limits apply to the model sent. A switched
+            call's response carries `x-passcontrol-model-switched: <asked> -> <sent>`
+            and never fails over. The cheaper model can refuse a request the usual
+            one accepts (a longer context, a beta feature); the agent gets that
+            provider's error, and the call is not retried on the usual model.
+          required: [provider, model]
+          properties:
+            provider:
+              type: string
+            model:
+              type: string
+              maxLength: 200
+              description: One exact model id, not a pattern.
+            Write-only here, like budget_period.
     GateStep:
       type: object
       required: [name, status, reason]

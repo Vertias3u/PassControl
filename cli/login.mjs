@@ -281,7 +281,14 @@ async function control(origin, apiKey, method, path, body, fetchImpl = fetch) {
   });
   const parsed = await res.json().catch(() => null);
   if (!res.ok) {
-    throw new Error(`Control plane refused ${method} ${path} (${res.status}).`);
+    // The control API answers { error: { code, message } }, and the message is
+    // what tells someone at a limit whether to revoke an agent or wait. Printed
+    // on one line and clipped, because it is the gateway's text, not ours.
+    const code = typeof parsed?.error?.code === "string" ? parsed.error.code.replace(/[^a-z0-9_]/gu, "").slice(0, 64) : "";
+    const message = typeof parsed?.error?.message === "string" ? parsed.error.message.replace(/\s+/gu, " ").trim().slice(0, 240) : "";
+    throw new Error(
+      `Control plane refused ${method} ${path} (${res.status}${code ? ` ${code}` : ""})${message ? `: ${message}` : "."}`
+    );
   }
   // Every control route answers `{ data: ... }` (lib/control/respond.ts), and
   // bin/passcontrol.mjs's own `api()` has always unwrapped it. This helper did
@@ -549,7 +556,15 @@ export async function loginCommand(opts = {}, deps = {}) {
   warnIfShadowed(target);
 
   step("");
+  // An agent this command created has the demo scope (above). A reused one has
+  // whatever its owner gave it; when its listed scopes leave out `demo`, the
+  // demo call would be refused and recorded, so the proof stops at the visa.
+  // Not in the list (or no scopes field) means unknown, and the call is tried.
+  const reused = Array.isArray(agents) ? agents.find((agent) => agent?.id === agentId) : undefined;
+  const demoCall = !(reused && Array.isArray(reused.allowed_scopes))
+    || reused.allowed_scopes.some((scope) => scope?.provider === "demo");
   const proof = await proveItWorks({
+    demoCall,
     origin,
     passportId,
     passportSecret,

@@ -7,8 +7,10 @@
 //   1. the status filter (alertForGatewayStatus), before this is even called;
 //   2. one Redis SET NX per user, type and agent: at most one alert per 10 min;
 //   3. only then the settings row, the Vault read, the agent's name, the send.
+import type { HeadsUpAlert } from "@/lib/budget-headsup";
 import { serviceClient } from "@/lib/supabase";
 import { claimAlertSlot } from "@/lib/state/redis";
+import { sendHeadsUpPrompt, sendPausePrompt } from "@/lib/alerts/approvals";
 import {
   formatWorkspaceAlert,
   parseAlertDestination,
@@ -25,6 +27,7 @@ const GATEWAY_ALERTS: Partial<Record<string, "refused" | "budget">> = {
   blocked_policy: "refused",
   blocked_budget: "budget",
   blocked_budget_period: "budget",
+  blocked_budget_pause: "budget",
   blocked_budget_subagent: "budget",
   blocked_budget_delegation: "budget",
 };
@@ -39,7 +42,7 @@ export function alertForGatewayStatus(status: string): "refused" | "budget" | nu
   return Object.hasOwn(GATEWAY_ALERTS, status) ? (GATEWAY_ALERTS[status] ?? null) : null;
 }
 
-const KIND: Record<Exclude<WorkspaceAlertType, "test">, AlertKind> = {
+const KIND: Record<Exclude<WorkspaceAlertType, "test" | "recap">, AlertKind> = {
   refused: "refused",
   budget: "budget",
   passport_rotated: "security",
@@ -89,7 +92,8 @@ export function agentDashboardUrl(origin: string, agentId: string): string {
 export async function notifyWorkspace(input: {
   userId: string;
   agentId: string;
-  type: Exclude<WorkspaceAlertType, "test">;
+  // Workspace recaps use alerts/recap's weekly claim, not this agent throttle.
+  type: Exclude<WorkspaceAlertType, "test" | "recap">;
   status?: string;
   model?: string;
   /** session_spend: which session, its total and the threshold it passed. */
@@ -98,11 +102,22 @@ export async function notifyWorkspace(input: {
   thresholdMicrocents?: number;
   /** This deployment's own origin, e.g. new URL(req.url).origin. */
   origin: string;
+  /** blocked_budget_pause: on Telegram the alert carries a "Let it go on" button (1.6.0, L4b). */
+  pause?: { reached: string; percent: number };
+  /** budget_headsup (1.6.0, L8): what is reached when. */
+  headsUp?: HeadsUpAlert;
 }): Promise<void> {
   try {
     // A session alert is throttled per SESSION, so two sessions crossing within
     // ten minutes both arrive. Every other type keeps one slot per agent.
-    const slot = input.type === "session_spend" && input.session ? `session_spend:${input.session}` : input.type;
+    // The heads-up has its own slot: its period key is spent before the send, so a
+    // budget alert ten minutes earlier must not swallow the period's only one.
+    const slot =
+      input.type === "session_spend" && input.session
+        ? `session_spend:${input.session}`
+        : input.status === "budget_headsup"
+          ? "budget_headsup"
+          : input.type;
     if (!(await claimAlertSlot(input.userId, slot, input.agentId))) return;
 
     const db = serviceClient();
@@ -127,7 +142,21 @@ export async function notifyWorkspace(input: {
       .eq("user_id", input.userId) // tenant boundary: service_role bypasses RLS
       .maybeSingle();
 
-    await postWorkspaceAlert(url, {
+    if (
+      input.status === "blocked_budget_pause" &&
+      input.pause &&
+      settings.destination === "telegram" &&
+      (await sendPausePrompt(input.userId, {
+        agentId: input.agentId,
+        agentName: typeof agent?.name === "string" ? agent.name : "an agent",
+        reached: input.pause.reached,
+        percent: input.pause.percent,
+        dashboardUrl: agentDashboardUrl(input.origin, input.agentId) + "#agent-pause",
+      }))
+    ) {
+      return;
+    }
+    const alert = {
       type: input.type,
       agentName: typeof agent?.name === "string" ? agent.name : "an agent",
       status: input.status,
@@ -138,7 +167,18 @@ export async function notifyWorkspace(input: {
       ...(input.type === "session_spend"
         ? { session: input.session, spentMicrocents: input.spentMicrocents, thresholdMicrocents: input.thresholdMicrocents }
         : {}),
-    });
+      ...(input.headsUp ? { headsUp: input.headsUp } : {}),
+    };
+    // The heads-up on Telegram carries "Suspend it now" (L8b); anywhere else, or if
+    // that send fails, the ordinary alert.
+    if (
+      input.status === "budget_headsup" &&
+      settings.destination === "telegram" &&
+      (await sendHeadsUpPrompt(input.userId, { agentId: input.agentId, alert }))
+    ) {
+      return;
+    }
+    await postWorkspaceAlert(url, alert);
   } catch {
     // Best-effort by contract: the audit row is the durable record.
   }

@@ -323,3 +323,60 @@ describe("validatePeriodBudget", () => {
     expect(() => validateAgentUpdate({ budget_period_cents: 900 })).toThrow(/together/);
   });
 });
+
+// L4 (1.6.0): the soft pause line, a whole percentage of the agent's limits.
+describe("validateAgentUpdate pause_percent", () => {
+  it("takes a whole 1–99, or null for no pause line", () => {
+    expect(validateAgentUpdate({ pause_percent: 80 })).toEqual({ pause_percent: 80 });
+    expect(validateAgentUpdate({ pause_percent: 1 })).toEqual({ pause_percent: 1 });
+    expect(validateAgentUpdate({ pause_percent: 99 })).toEqual({ pause_percent: 99 });
+    // No line, no switch (0088): clearing the line clears the switch with it.
+    expect(validateAgentUpdate({ pause_percent: null })).toEqual({
+      pause_percent: null,
+      pause_action: "pause",
+      pause_switch_provider: null,
+      pause_switch_model: null,
+    });
+  });
+
+  it.each([0, 100, 80.5, -5, "80", Number.NaN])("refuses %s", (value) => {
+    expect(() => validateAgentUpdate({ pause_percent: value })).toThrow(/pause_percent/);
+  });
+});
+
+// L7 (1.6.0, 0088): what happens at the pause line. `pause_switch: null` is a
+// value (pause, as before); an object switches to that model.
+describe("validateAgentUpdate pause_switch", () => {
+  it("writes the three columns as one change", () => {
+    expect(validateAgentUpdate({ pause_switch: { provider: "anthropic", model: "claude-haiku-4-5" } })).toEqual({
+      pause_action: "switch",
+      pause_switch_provider: "anthropic",
+      pause_switch_model: "claude-haiku-4-5",
+    });
+    expect(validateAgentUpdate({ pause_switch: null })).toEqual({
+      pause_action: "pause",
+      pause_switch_provider: null,
+      pause_switch_model: null,
+    });
+  });
+
+  it("refuses an unknown provider, a missing or unusable model, and a pattern", () => {
+    for (const bad of [
+      { provider: "evil", model: "x" },
+      { provider: "anthropic", model: "" },
+      { provider: "anthropic" },
+      { provider: "anthropic", model: "claude-*" },
+      { provider: "anthropic", model: "x".repeat(300) },
+      "claude-haiku-4-5",
+    ]) {
+      expect(() => validateAgentUpdate({ pause_switch: bad }), JSON.stringify(bad)).toThrow(/pause_switch/);
+    }
+  });
+
+  it("refuses a switch in the same change that removes the pause line", () => {
+    expect(() =>
+      validateAgentUpdate({ pause_percent: null, pause_switch: { provider: "openai", model: "gpt-5-mini" } })
+    ).toThrow(/pause line/);
+  });
+});
+

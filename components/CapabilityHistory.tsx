@@ -63,8 +63,8 @@ export function CapabilityHistory({ history }: { history: readonly CapabilityCha
               ambiguous; this is not.
 
               The two gaps are NOT the same fact and must not read the same. A
-              row that predates the record never had a previous value written
-              down. A row whose stored value cannot be read did have one, and it
+              row without a snapshot has no previous value to show; its age is
+              not evidence of why. A row whose stored value cannot be read did have one, and it
               is gone — that is a loss in an append-only trail, and it is worth
               investigating rather than shrugging at. Rendering both with the
               "predates the record" sentence is how truncated snapshots passed
@@ -77,8 +77,8 @@ export function CapabilityHistory({ history }: { history: readonly CapabilityCha
             </p>
           ) : (
             <p className="m-0 text-xs leading-5 text-muted-foreground">
-              This change predates the record of previous values, so what it changed from is not
-              known. It is shown rather than hidden.
+              The earlier value was not recorded, so what it changed from is not known.
+              It is shown rather than hidden.
             </p>
           )}
 

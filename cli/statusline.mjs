@@ -14,7 +14,7 @@
 // older budget that might read as current.
 import fs from "node:fs";
 import path from "node:path";
-import { limitReached, panelRows, statusLine } from "./budget-format.mjs";
+import { limitReached, panelRows, paused, statusLine } from "./budget-format.mjs";
 import { heldUsageWindow, readUsageWindow, usageWindowText, WINDOW_PATH } from "./usage-window.mjs";
 
 export const STATUSLINE_TTL_MS = 20_000;
@@ -292,7 +292,7 @@ export async function statusPanelText({
     }
     if (typeof self?.budget !== "object" || self.budget === null) return "PassControl · unreadable answer";
     const agentId = typeof self.agent_id === "string" && UUID.test(self.agent_id) ? self.agent_id : null;
-    const title = `PassControl${agentId ? ` · agent ${agentId.slice(0, 8)}` : ""}${limitReached(self) ? " · LIMIT REACHED" : ""}`;
+    const title = `PassControl${agentId ? ` · agent ${agentId.slice(0, 8)}` : ""}${limitReached(self) ? " · LIMIT REACHED" : paused(self) ? " · PAUSED" : ""}`;
     const window = subscription ? await readSidecarWindow({ host, port, fetch: fetchImpl, signal: controller.signal }) : "";
     return [
       title,

@@ -111,7 +111,9 @@ export function AgentToolRules({
         checks each tool call against these rules before it runs: the strictest matching rule wins, and a tool
         no rule names is left to Claude Code&apos;s own permissions. They work inside Claude Code, through its
         hooks: a guard rail for your own sessions, not a wall against a client that skips them. Set up with{" "}
-        <code>passcontrol configure claude-code --subscription --write</code>.
+        <code>passcontrol configure claude-code --subscription --write</code>. Codex on a ChatGPT plan gets
+        the command (Bash) and MCP tool rules only, set up with{" "}
+        <code>passcontrol configure codex --subscription --write</code>.
       </p>
 
       <ul className="pc-credential-list" aria-label="Tool rules">

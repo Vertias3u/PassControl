@@ -33,6 +33,8 @@ import {
 } from "@/lib/state/holds";
 import { readDelegationRevocation } from "@/lib/state/delegation";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
+import { pauseLine, pauseMessage, pauseReached, readPauseView, type PauseLine } from "@/lib/budget-pause";
+import { claimStopPoll, pausePromptOpen, readPauseLift, stopPromptOpen } from "@/lib/state/pause";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
 import {
@@ -103,6 +105,9 @@ import {
   type FallbackEntry,
 } from "@/lib/providers/fallbacks";
 import { readCurrentAgentFallbacks } from "@/lib/state/fallbacks";
+import { budgetNoticeSent, claimBudgetNotice, markBudgetNotice } from "@/lib/state/budget-notice";
+import { noteHeadsUp } from "@/lib/budget-headsup";
+import { readPeriodCounted } from "@/lib/budget-view";
 import type { SenderProofObservation } from "@/lib/sender-constraint";
 import {
   endpointPolicy,
@@ -116,6 +121,7 @@ import { rateLimit } from "@/lib/ratelimit";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 import { alertForGatewayStatus, notifyWorkspace } from "@/lib/alerts/workspace";
+import { pollTelegramDecisions } from "@/lib/alerts/approvals";
 import { noteSessionSpend } from "@/lib/alerts/session-spend";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 import {
@@ -985,11 +991,18 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // one of them. Stays undefined when the agent has no shadow policy, and the
   // key is then omitted from the insert entirely (see lib/log.ts).
   let shadowWould: string | undefined;
+  // Set at the pause step (4d) when the call goes on with the owner's cheaper
+  // model (1.6.0, L7): the model the agent asked for. Declared here, before the
+  // log helpers that read it, for the reason `shadowWould` is.
+  let switchedFrom: string | null = null;
+  let switchedTo: string | null = null;
 
   const logBlocked = (
     status: Parameters<typeof writeLog>[0]["status"],
     model?: string,
-    httpStatus = 403
+    httpStatus = 403,
+    /** blocked_budget_pause: what was reached, for the Telegram button prompt (L4b). */
+    pause?: { reached: string; percent: number }
   ) => {
     // Workspace alerts (plans/workspace-alerts.md): after the refusal is
     // decided and answered, inside waitUntil, never awaited by the response.
@@ -998,8 +1011,13 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const alert = alertForGatewayStatus(status);
     if (alert) {
       waitUntil(
-        notifyWorkspace({ userId, agentId, type: alert, status, model, origin: new URL(req.url).origin })
+        notifyWorkspace({ userId, agentId, type: alert, status, model, origin: new URL(req.url).origin, ...(pause ? { pause } : {}) })
       );
+    }
+    // The refusal says what a heads-up (L8) would have: this period's is spent.
+    if ((status === "blocked_budget_pause" || status === "blocked_budget_period") && livePeriod.mode === "set") {
+      const kind = livePeriod.kind;
+      waitUntil(markBudgetNotice(agentId, "headsup", kind, Date.now()).catch(() => undefined));
     }
     waitUntil(
       (async () =>
@@ -1033,6 +1051,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           latencyMs: Date.now() - started,
           ...(shadowWould ? { policyShadowWould: shadowWould } : {}),
           ...(senderProofWould ? { senderProofWould } : {}),
+          // A switched call refused later (a hard limit, a 503): the row says what it asked for.
+          ...(switchedFrom && model && model !== switchedFrom ? { requestedModel: switchedFrom } : {}),
         }))()
     );
   };
@@ -1406,6 +1426,133 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   }
   const secretsHeader = (): Record<string, string> =>
     secretsRedacted > 0 ? { "x-passcontrol-secrets-redacted": String(secretsRedacted) } : {};
+
+  // ── 4d. The soft pause (1.6.0, L4, lib/budget-pause.ts) ─────────────────────
+  // Off unless the live row sets `pause_percent` (0087) and there is a limit to
+  // draw it on. ONCE, here, before the attempt loop, so a fallback cannot skip it
+  // and a paused call reserves nothing. A SOFT limit: it reads the counters
+  // `/self` shows, not the hold, so two racing calls can both pass the line; the
+  // hard budget's atomic reserve below still decides the money either way, and a
+  // lift skips only this check, never that one.
+  //
+  // Two unknowns with opposite answers, on purpose. A usage that cannot be read
+  // never pauses: the hard budget decides, and it fails closed on its own state.
+  // A lift that cannot be read, past the line, stays paused: the owner chose the
+  // pause, and only the owner lets it go. Neither touches the kill switch.
+  // L8b: while the heads-up's "Suspend it now" is out on Telegram, the agent's
+  // calls read the owner's taps, entirely off the request path: Telegram never holds
+  // a call up, and a tap read during a call suspends the agent from the call after
+  // it. Only for an agent with a daily or monthly limit (the heads-up's only kind),
+  // and one read per agent every ten seconds.
+  if (livePeriod.mode === "set") {
+    waitUntil(
+      (async () => {
+        try {
+          if ((await stopPromptOpen(agentId)) && (await claimStopPoll(agentId))) await pollTelegramDecisions(userId, 0, 1500);
+        } catch {
+          // Unread taps are read on a later call, or by the next poll of any kind.
+        }
+      })()
+    );
+  }
+
+  // 402 like the period refusal, never 429. `retry-after` only where waiting
+  // alone can clear it: a periodic limit's next reset. A lifetime cap's pause
+  // clears only when the owner says so.
+  const pauseRefusal = (line: PauseLine, nowMs: number, message: string): Response =>
+    new Response(JSON.stringify({ error: "blocked_budget_pause", message }), {
+      status: 402,
+      headers: {
+        "content-type": "application/json",
+        "x-passcontrol-receipt-id": receiptId,
+        ...(line.period ? { "retry-after": String(secondsUntilPeriodEnd(line.period, nowMs)) } : {}),
+      },
+    });
+  const pauseAt = currentPolicySnapshot.pause?.known ? currentPolicySnapshot.pause.percent : null;
+  if (pauseAt != null && (capTokens != null || capMicrocents != null || livePeriod.mode === "set")) {
+    const pauseNowMs = Date.now();
+    const pauseView = await readPauseView(
+      agentId,
+      {
+        capTokens,
+        capMicrocents,
+        period: livePeriod.mode === "set" ? { kind: livePeriod.kind, capMicrocents: livePeriod.capMicrocents } : null,
+      },
+      pauseNowMs
+    ).catch(() => null);
+    const line = pauseView ? pauseLine(pauseView, pauseAt) : null;
+    const lifted = async () => readPauseLift(agentId).catch(() => false);
+    // L4b: the owner may have tapped "Let it go on" in Telegram, and nothing else
+    // waits on that tap (Ask-me-first's own waits do). While a button is out, read
+    // the taps once, without waiting and for at most 1.5 s, then the lift again.
+    // Only a paused call pays this; any failure leaves the agent paused.
+    const drained = async () =>
+      (await pausePromptOpen(agentId).catch(() => false)) &&
+      (await pollTelegramDecisions(userId, 0, 1500).then(() => true, () => false)) &&
+      (await lifted());
+    // L7 (0088): the owner may have chosen a cheaper model over a pause. Only for
+    // that provider, only for a call that names a model, and never for embeddings
+    // (a different model writes vectors into a different space, with a 200).
+    const switchTo = currentPolicySnapshot.pause?.known ? (currentPolicySnapshot.pause.switchTo ?? null) : null;
+    const switchable = switchTo !== null && switchTo.provider === provider && model !== "" && !embeddings;
+    // A call already on the cheaper model goes on as it is, and reads no lift.
+    const alreadySwitched = switchable && model === switchTo.model;
+    const paused = line !== null && !alreadySwitched && !(await lifted()) && !(await drained());
+    if (line && paused && switchable) {
+      // The switch never widens what the agent may call. The cheaper model meets
+      // the gate the agent's own model met: the scope this call carries (narrowed
+      // after the switch was saved, it refuses here), the endpoint and pricing
+      // rules, the live policy and the sub-agent list. PURE: the policy's hourly
+      // counter was taken once for this call at step 4, and is threaded, as
+      // failover's `qualifies` threads it.
+      const switchGate = evaluateGate({
+        ...gateBase,
+        model: switchTo.model,
+        policy: currentPolicyGate.policy,
+        policyFailClosed,
+        ...(currentPolicyGate.policyRateLimit ? { policyRateLimit: currentPolicyGate.policyRateLimit } : {}),
+      });
+      if (!switchGate.deniedBy) {
+        switchedFrom = model;
+        switchedTo = switchTo.model;
+        // The owner hears of it once a period, not on every switched call, and the
+        // period's heads-up (L8) is spent: it would only say what this says.
+        const switchedModel = switchTo.model;
+        waitUntil(
+          (async () => {
+            try {
+              if (!(await claimBudgetNotice(agentId, "switched", line.period ?? null, pauseNowMs))) return;
+              await markBudgetNotice(agentId, "headsup", line.period ?? null, pauseNowMs);
+              await notifyWorkspace({
+                userId,
+                agentId,
+                type: "budget",
+                status: "budget_pause_switched",
+                model: switchedModel,
+                origin: new URL(req.url).origin,
+              });
+            } catch {
+              // Best-effort: the row's requested_model is the record.
+            }
+          })()
+        );
+      } else {
+        const why =
+          switchGate.deniedBy === "scope"
+            ? `its switch to ${switchTo.model} is outside the models this agent may use`
+            : switchGate.deniedBy === "policy"
+              ? `this agent's policy does not allow its switch to ${switchTo.model}`
+              : `its switch to ${switchTo.model} cannot be used for this call`;
+        logBlocked("blocked_budget_pause", model, 402, { reached: pauseReached(line), percent: line.percent });
+        captureBlocked("blocked_budget_pause", 402);
+        return pauseRefusal(line, pauseNowMs, `${pauseMessage(line)} It was not switched: ${why}, so the call was not sent.`);
+      }
+    } else if (line && paused) {
+      logBlocked("blocked_budget_pause", model, 402, { reached: pauseReached(line), percent: line.percent });
+      captureBlocked("blocked_budget_pause", 402);
+      return pauseRefusal(line, pauseNowMs, pauseMessage(line));
+    }
+  }
 
   // ── 5–9, once per attempt ───────────────────────────────────────────────────
   //
@@ -2104,6 +2251,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
             ...logIdentity,
             provider: attemptProvider,
             model: attemptModel,
+            // A switched call's row says what the agent asked for (L7, 0088).
+            ...(primary && switchedFrom !== null ? { requestedModel: switchedFrom } : {}),
             // The FOLDED total — see the receipt comment above for why this is
             // not the provider's `input_tokens`. No migration is involved, which
             // is the point: naming a cache column that a deployment has not
@@ -2188,6 +2337,28 @@ async function handle(req: Request, params: { provider: string; path: string[] }
               deltaMicrocents: applied.appliedMicrocents,
               thresholdMicrocents: sessionAlertThreshold,
               origin: new URL(req.url).origin,
+            })
+          );
+        }
+        // L8: the heads-up a few hours before a daily or monthly limit (or the pause
+        // line on it). After the charge, off the request path; once a period, and
+        // its cheap Redis read comes before the usage read that can reach Postgres.
+        if (applied?.applied && applied.appliedMicrocents > 0 && livePeriod.mode === "set") {
+          const p = currentPolicySnapshot.pause?.known ? currentPolicySnapshot.pause : null;
+          tasks.push(
+            noteHeadsUp({
+              userId,
+              agentId,
+              kind: livePeriod.kind,
+              capMicrocents: livePeriod.capMicrocents,
+              pausePercent: p?.percent ?? null,
+              switchModel: p?.switchTo && p.switchTo.provider === provider ? p.switchTo.model : null,
+              origin: new URL(req.url).origin,
+              nowMs: Date.now(),
+              sent: budgetNoticeSent,
+              claim: claimBudgetNotice,
+              readCounted: readPeriodCounted,
+              notify: notifyWorkspace,
             })
           );
         }
@@ -3078,11 +3249,30 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     };
   };
 
+  // The response says it was switched (L7): `x-passcontrol-model-switched:
+  // <asked> -> <sent>`. ASCII, not the plan's arrow: a header value outside
+  // Latin-1 throws, and here that would be after the hold opened. A response
+  // whose headers are fixed is rebuilt around the same body, never re-read.
+  const markSwitched = (response: Response): Response => {
+    if (switchedFrom === null || switchedTo === null) return response;
+    const value = `${switchedFrom} -> ${switchedTo}`;
+    if (!/^[\x20-\x7e]+$/u.test(value)) return response;
+    try {
+      response.headers.set("x-passcontrol-model-switched", value);
+      return response;
+    } catch {
+      const headers = new Headers(response.headers);
+      headers.set("x-passcontrol-model-switched", value);
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+    }
+  };
+
   // ── The attempt loop ────────────────────────────────────────────────────────
   const primaryOutcome = await runAttempt(
     {
       provider,
-      model,
+      // The owner's cheaper model past the pause line (4d), or the agent's own.
+      model: switchedTo ?? model,
       upstreamPath,
       receiptId,
       prev: null,
@@ -3093,7 +3283,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   );
   if (primaryOutcome.kind !== "retryable") {
     // `skipped` is only ever returned for a non-primary attempt.
-    return (primaryOutcome as { kind: "response"; response: Response }).response;
+    return markSwitched((primaryOutcome as { kind: "response"; response: Response }).response);
   }
 
   let held = primaryOutcome;
@@ -3120,7 +3310,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     waitUntil(held.settle.done);
   };
 
-  const fallbacks = await readCurrentAgentFallbacks(db, userId, agentId);
+  // A switched call never fails over (L7): a fallback runs its own model, which is
+  // not the one the owner picked for past the pause line, and `qualifies` does not
+  // know the line exists. The cheaper model's own error is the answer.
+  const fallbacks = switchedTo !== null ? [] : await readCurrentAgentFallbacks(db, userId, agentId);
   let attemptsUsed = 1;
   for (const fallback of fallbacks) {
     if (attemptsUsed >= MAX_ATTEMPTS) break;
@@ -3152,7 +3345,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   }
 
   await settleHeld();
-  return held.response;
+  return markSwitched(held.response);
 }
 
 // ── Keyless demo provider ─────────────────────────────────────────────────────

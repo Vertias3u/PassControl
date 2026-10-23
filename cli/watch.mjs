@@ -16,7 +16,7 @@
 // fields are held to the feed's own patterns on arrival, and every cell is stripped
 // of control characters again before it is drawn.
 import http from "node:http";
-import { formatUsd, limitReached, panelRows } from "./budget-format.mjs";
+import { formatUsd, limitReached, panelRows, paused } from "./budget-format.mjs";
 import { WATCH_PATH } from "./watch-feed.mjs";
 import { heldUsageWindow, resetTime, usageWindowText } from "./usage-window.mjs";
 
@@ -313,7 +313,12 @@ function budgetLine(budget, width, { color, formatTime }) {
     const style = fraction >= 1 ? "red" : fraction >= 0.8 ? "yellow" : "green";
     bar = `[${paint(color, style, "█".repeat(filled))}${"░".repeat(barWidth - filled)}] `;
   }
-  const reached = limitReached(budget.self) ? ` · ${paint(color, "red", "LIMIT REACHED")}` : "";
+  // A pause is the owner's line doing its job, so not the red of a spent limit.
+  const reached = limitReached(budget.self)
+    ? ` · ${paint(color, "red", "LIMIT REACHED")}`
+    : paused(budget.self)
+      ? ` · ${paint(color, "yellow", "PAUSED")}`
+      : "";
   const line = `${clean(label).padEnd(9)} ${bar}${clean(value)}${reached}`;
   // When it was asked is the first thing to go when the line is too long.
   const checked = budget.checkedAt ? ` · checked ${formatTime(budget.checkedAt)}` : "";

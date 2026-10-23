@@ -703,10 +703,14 @@ async function updateAgentBudgetsBody(
     /** The periodic limit (K1). Omitted leaves it as it is. */
     budget_period?: "day" | "month" | null;
     budget_period_cents?: number | null;
+    /** The soft pause line (1.6.0, 0087). Omitted leaves it as it is. */
+    pause_percent?: number | null;
+    /** What happens at that line (1.6.0, L7, 0088): null pauses, or one cheaper model. Omitted leaves it. */
+    pause_switch?: { provider: string; model: string } | null;
   }
 ) {
   const { db, user } = await requireUser();
-  const r = await fleet.updateAgent(db, user.id, agentId, input);
+  const r = await fleet.updateAgent(db, user.id, agentId, input, { auditBudgetChange: true });
   if (!r.ok) {
     console.error("[dashboard:updateAgentBudgets]", r.code, r.message ?? "");
     throw new ActionError(r.message ?? "Something went wrong. Please try again.");
@@ -723,10 +727,9 @@ async function updateAgentBudgetsBody(
     // worth having in the audit trail when someone asks why a lowered budget
     // took a minute to bite.
     metadata: {
-      fields:
-        input.budget_period !== undefined
-          ? "budget_tokens,budget_cents,budget_period,budget_period_cents"
-          : "budget_tokens,budget_cents",
+      fields: Object.keys(r.value.budgetChange?.to ?? {}).join(","),
+      ...(r.value.budgetChange?.from ? { from: JSON.stringify(r.value.budgetChange.from) } : {}),
+      ...(r.value.budgetChange ? { to: JSON.stringify(r.value.budgetChange.to) } : {}),
       budgets_live: r.value.budgetsLive ?? null,
     },
   });

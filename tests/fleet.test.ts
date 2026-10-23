@@ -197,6 +197,119 @@ describe("updateAgent", () => {
     expect(calls.update).toEqual({ budget_period: "day", budget_period_cents: 2500 });
   });
 
+  // L4 (1.6.0): the pause line rides the same cache entry, so an edit to it must
+  // reach the live gate the same way.
+  it("purges the live policy entry for a pause-line edit", async () => {
+    const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
+    const r = await updateAgent(db, "u1", "a1", { pause_percent: 80 });
+    expect(r).toEqual({ ok: true, value: { id: "a1", budgetsLive: true } });
+    expect(purgeAgentPolicy).toHaveBeenCalledWith("u1", "a1");
+    expect(calls.update).toEqual({ pause_percent: 80 });
+  });
+
+  // L7 (1.6.0, 0088): the cheaper model must already be in the agent's scope, and
+  // a switch means nothing without a pause line. Checked against the agent's own
+  // row before the write; the gateway checks the scope again on every call.
+  describe("the switch at the pause line", () => {
+    // Clearing the line alone (an older client, a direct API call) must clear the
+    // switch too: the database's shape check refuses a switch with no line, and
+    // that refusal would surface as a 500, not as a saved change.
+    it("clearing the pause line clears the switch with it", async () => {
+      const { db, calls } = makeDb({ data: { id: "a1" }, error: null });
+      const r = await updateAgent(db, "u1", "a1", { pause_percent: null });
+      expect(r).toMatchObject({ ok: true });
+      expect(calls.update).toEqual({ pause_percent: null, pause_action: "pause", pause_switch_provider: null, pause_switch_model: null });
+    });
+
+    it("on a database without 0088, a cleared line or switch is saved without the switch columns", async () => {
+      const updates: Record<string, unknown>[] = [];
+      const results = [
+        { data: null, error: { code: "PGRST204", message: "Could not find the 'pause_action' column of 'agents' in the schema cache" } },
+        { data: { id: "a1" }, error: null },
+      ];
+      const b: any = {
+        update: (p: Record<string, unknown>) => (updates.push(p), b),
+        select: () => b,
+        eq: () => b,
+        maybeSingle: async () => results.shift(),
+      };
+      const r = await updateAgent({ from: () => b } as any, "u1", "a1", { pause_percent: null, pause_switch: null });
+      expect(r).toMatchObject({ ok: true });
+      expect(updates).toEqual([
+        { pause_percent: null, pause_action: "pause", pause_switch_provider: null, pause_switch_model: null },
+        { pause_percent: null },
+      ]);
+    });
+
+    it("never retries a switch itself without its columns: that would save a pause the owner did not choose", async () => {
+      const updates: Record<string, unknown>[] = [];
+      const reads = [{ data: { allowed_scopes: [{ provider: "anthropic", models: ["claude-*"] }], pause_percent: 80 }, error: null }];
+      const writes = [{ data: null, error: { code: "PGRST204", message: "no column" } }];
+      let mutation = false;
+      const b: any = {
+        update: (p: Record<string, unknown>) => ((mutation = true), updates.push(p), b),
+        select: () => b,
+        eq: () => b,
+        maybeSingle: async () => (mutation ? writes.shift() : reads.shift()),
+      };
+      const r = await updateAgent({ from: () => b } as any, "u1", "a1", { pause_switch: { provider: "anthropic", model: "claude-haiku-4-5" } });
+      expect(r).toMatchObject({ ok: false, status: 500 });
+      expect(updates).toHaveLength(1);
+    });
+
+    const row = (over: Record<string, unknown> = {}) => ({
+      data: { allowed_scopes: [{ provider: "anthropic", models: ["claude-*"] }], pause_percent: 80, ...over },
+      error: null,
+    });
+
+    it("saves a switch to a model in scope, and purges the live policy entry", async () => {
+      const { db, calls } = makeDb({ data: { id: "a1" }, error: null }, row());
+      const r = await updateAgent(db, "u1", "a1", { pause_switch: { provider: "anthropic", model: "claude-haiku-4-5" } });
+      expect(r).toEqual({ ok: true, value: { id: "a1", budgetsLive: true } });
+      expect(calls.update).toEqual({ pause_action: "switch", pause_switch_provider: "anthropic", pause_switch_model: "claude-haiku-4-5" });
+      expect(calls.eq).toContainEqual(["user_id", "u1"]);
+      expect(purgeAgentPolicy).toHaveBeenCalledWith("u1", "a1");
+    });
+
+    it("refuses a model outside the agent's scope, and writes nothing", async () => {
+      const { db, calls } = makeDb({ data: { id: "a1" }, error: null }, row());
+      const r = await updateAgent(db, "u1", "a1", { pause_switch: { provider: "openai", model: "gpt-5-mini" } });
+      expect(r).toMatchObject({ ok: false, status: 422, message: expect.stringMatching(/not in this agent's scope/) });
+      expect(calls.update).toBeNull();
+    });
+
+    it("refuses a switch for an agent with no pause line", async () => {
+      const { db, calls } = makeDb({ data: { id: "a1" }, error: null }, row({ pause_percent: null }));
+      const r = await updateAgent(db, "u1", "a1", { pause_switch: { provider: "anthropic", model: "claude-haiku-4-5" } });
+      expect(r).toMatchObject({ ok: false, status: 422, message: expect.stringMatching(/pause line/) });
+      expect(calls.update).toBeNull();
+    });
+
+    it("accepts a switch saved together with a new pause line", async () => {
+      const { db, calls } = makeDb({ data: { id: "a1" }, error: null }, row({ pause_percent: null }));
+      const r = await updateAgent(db, "u1", "a1", { pause_percent: 70, pause_switch: { provider: "anthropic", model: "claude-haiku-4-5" } });
+      expect(r).toMatchObject({ ok: true });
+      expect(calls.update).toMatchObject({ pause_percent: 70, pause_action: "switch" });
+    });
+
+    it("checks the scope in the same change when the scope changes too", async () => {
+      const { db, calls } = makeDb({ data: { id: "a1" }, error: null }, row());
+      const r = await updateAgent(db, "u1", "a1", {
+        scopes: [{ provider: "anthropic", models: ["claude-sonnet-*"] }],
+        pause_switch: { provider: "anthropic", model: "claude-haiku-4-5" },
+      });
+      expect(r).toMatchObject({ ok: false, status: 422 });
+      expect(calls.update).toBeNull();
+    });
+
+    it("goes back to pausing without reading the row", async () => {
+      const { db, calls } = makeDb({ data: { id: "a1" }, error: null }, { data: null, error: { message: "should not be read" } });
+      const r = await updateAgent(db, "u1", "a1", { pause_switch: null });
+      expect(r).toMatchObject({ ok: true });
+      expect(calls.update).toEqual({ pause_action: "pause", pause_switch_provider: null, pause_switch_model: null });
+    });
+  });
+
   it("refuses half a periodic limit before the database does", async () => {
     const { db } = makeDb({ data: { id: "a1" }, error: null });
     const r = await updateAgent(db, "u1", "a1", { budget_period: "day" });

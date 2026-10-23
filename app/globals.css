@@ -49,6 +49,9 @@
   /* semantic status (first-class) */
   --success: #10b981;
   --warning: #f59e0b;
+  /* Policy refusals: inherited by both dashboard accent themes and Core. */
+  --pc-calm: #8b93d9;
+  --pc-calm-rgb: 139, 147, 217;
   --danger: #ef4444;
   --info: #06b6d4;
   --surface-elevated: #242424;
@@ -1909,11 +1912,14 @@ a.pc-metric-card:hover {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--pc-signal);
   transition: width 260ms ease;
 }
-.pc-budget-meter[data-tone="warning"] .pc-budget-meter__track > span { background: var(--warning); }
-.pc-budget-meter[data-tone="danger"] .pc-budget-meter__track > span { background: var(--danger); }
+.pc-budget-meter__track > span,
+.pc-operations-meter > span { background: var(--pc-quiet); }
+.pc-budget-meter[data-tone="warning"] .pc-budget-meter__track > span,
+.pc-operations-meter[data-tone="warning"] > span { background: var(--warning); }
+.pc-budget-meter[data-tone="calm"] .pc-budget-meter__track > span,
+.pc-operations-meter[data-tone="calm"] > span { background: var(--pc-calm); }
 .pc-last-seen { color: var(--pc-quiet) !important; font-size: 0.63rem !important; white-space: nowrap; }
 
 .pc-fleet-actions { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
@@ -3922,7 +3928,7 @@ code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .pc-operations-subhead h3 { margin: 0; color: var(--pc-paper); font-size: 0.86rem; }
 .pc-operations-card__content > p:not(.pc-kicker) { margin: 0.38rem 0 0; color: var(--pc-quiet); font-size: 0.65rem; line-height: 1.55; }
 .pc-operations-meter { height: 0.38rem; margin-top: 0.85rem; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.06); }
-.pc-operations-meter span { display: block; height: 100%; border-radius: inherit; background: var(--pc-signal); transition: width 180ms ease; }
+.pc-operations-meter span { display: block; height: 100%; border-radius: inherit; transition: width 180ms ease; }
 .pc-operations-quota dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0.8rem; margin: 0.9rem 0 0; }
 .pc-operations-quota dt { color: var(--pc-quiet); font-family: var(--font-pc-mono), monospace; font-size: 0.49rem; letter-spacing: .07em; text-transform: uppercase; }
 .pc-operations-quota dd { margin: .24rem 0 0; color: var(--pc-copy); font-size: .62rem; }

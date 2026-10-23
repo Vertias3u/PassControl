@@ -21,6 +21,7 @@ import { suspendAgent, unsuspendAgent, purgeAgentCaches, stopSession, resumeSess
 // is checked (lib/break-glass.ts), so LIMITS is no longer read directly here.
 import { validateAgentInput, validateAgentProfileInput, validateAgentUpdate, validateScopes } from "@/lib/validate";
 import { PROVIDERS } from "@/lib/providers";
+import { switchModelProblem } from "@/lib/cheaper-model";
 import { passportIdToPublicKey } from "@/lib/crypto/ed25519";
 import {
   DEFAULT_PASSPORT_LIFETIME_DAYS,
@@ -319,12 +320,27 @@ export async function attachAgentPassport(
 }
 
 /** Update an agent's name / scopes / budgets (partial; tenant-scoped). */
+/**
+ * A write naming a column this database does not have: PostgREST refuses an
+ * unknown column in an update body as PGRST204 (its schema cache), and Postgres
+ * itself as 42703.
+ */
+function isMissingColumn(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "PGRST204" || code === "42703";
+}
+
 export async function updateAgent(
   db: SupabaseClient,
   userId: string,
   agentId: string,
-  patch: unknown
-): Promise<FleetResult<{ id: string; budgetsLive?: boolean }>> {
+  patch: unknown,
+  options: { auditBudgetChange?: boolean } = {}
+): Promise<FleetResult<{
+  id: string;
+  budgetsLive?: boolean;
+  budgetChange?: { from?: Record<string, unknown>; to: Record<string, unknown> };
+}>> {
   let clean;
   try {
     clean = validateAgentUpdate(patch as any);
@@ -334,13 +350,60 @@ export async function updateAgent(
   if (Object.keys(clean).length === 0) {
     return { ok: false, status: 400, code: "empty_update", message: "No updatable fields provided." };
   }
-  const { data, error } = await db
-    .from("agents")
-    .update(clean)
-    .eq("user_id", userId)
-    .eq("id", agentId)
-    .select("id")
-    .maybeSingle();
+  // A cheaper model at the pause line (L7, 0088) must already be in the agent's
+  // scope, the one it will have after this change, and needs a pause line to
+  // apply at. The gateway checks the scope again on every switched call.
+  if (clean.pause_action === "switch" && clean.pause_switch_provider && clean.pause_switch_model) {
+    const { data: row, error: rowError } = await db
+      .from("agents")
+      .select("allowed_scopes, pause_percent")
+      .eq("user_id", userId)
+      .eq("id", agentId)
+      .maybeSingle();
+    if (rowError) return { ok: false, status: 500, code: "query_failed" };
+    if (!row) return { ok: false, status: 404, code: "not_found" };
+    const current = row as { allowed_scopes?: unknown; pause_percent?: unknown };
+    const percent = "pause_percent" in clean ? clean.pause_percent : current.pause_percent;
+    if (percent == null) {
+      return { ok: false, status: 422, code: "invalid_request", message: "A cheaper model at the pause line needs a pause line. Set one, or choose to pause." };
+    }
+    const scopes = clean.allowed_scopes ?? (Array.isArray(current.allowed_scopes) ? (current.allowed_scopes as ScopeEntry[]) : []);
+    const problem = switchModelProblem(scopes, { provider: clean.pause_switch_provider, model: clean.pause_switch_model });
+    if (problem) return { ok: false, status: 422, code: "invalid_request", message: problem };
+  }
+  // Optional history evidence for the dashboard budget editor. A failed read
+  // leaves an admitted gap; it must not change whether the existing save works.
+  // Capture only budget fields, never the agent's credentials or scopes.
+  const auditFields = options.auditBudgetChange
+    ? Object.keys(clean).filter((key) => key.startsWith("budget_") || key.startsWith("pause_"))
+    : [];
+  let before: Record<string, unknown> | undefined;
+  if (auditFields.length > 0) {
+    try {
+      const { data: row, error: readError } = await db.from("agents")
+        .select(auditFields.join(",")).eq("user_id", userId).eq("id", agentId).maybeSingle();
+      const snapshot = row && typeof row === "object" && !Array.isArray(row)
+        ? row as unknown as Record<string, unknown> : undefined;
+      if (!readError && snapshot && auditFields.every((key) => Object.hasOwn(snapshot, key))) {
+        before = Object.fromEntries(auditFields.map((key) => [key, snapshot[key]]));
+      }
+    } catch { /* Save normally; do not invent an earlier value. */ }
+  }
+  let written = clean;
+  const write = (patch: typeof clean) =>
+    db.from("agents").update(patch).eq("user_id", userId).eq("id", agentId).select("id").maybeSingle();
+  let { data, error } = await write(clean);
+  // A database without 0088 has no switch columns. A patch that only CLEARS them
+  // (no line, or "pause") means the same thing there without them, so it is saved
+  // without them. A patch that sets a switch is never retried: dropping its columns
+  // would save a pause the owner did not choose.
+  if (error && isMissingColumn(error) && clean.pause_action === "pause" && clean.pause_switch_model === null) {
+    const { pause_action: _a, pause_switch_provider: _p, pause_switch_model: _m, ...without } = clean;
+    if (Object.keys(without).length > 0) {
+      written = without;
+      ({ data, error } = await write(without));
+    }
+  }
   if (error) return { ok: false, status: 500, code: "query_failed" };
   if (!data) return { ok: false, status: 404, code: "not_found" };
 
@@ -353,10 +416,20 @@ export async function updateAgent(
   // are not, and purging on every update would throw away a hot entry for a
   // change it does not carry.
   const touchesBudget =
-    "budget_tokens" in clean || "budget_cents" in clean || "budget_period" in clean;
+    "budget_tokens" in clean ||
+    "budget_cents" in clean ||
+    "budget_period" in clean ||
+    "pause_percent" in clean ||
+    "pause_action" in clean;
   if (!touchesBudget) return { ok: true, value: { id: agentId } };
   const budgetsLive = await purgeAgentPolicy(userId, agentId).catch(() => false);
-  return { ok: true, value: { id: agentId, budgetsLive } };
+  const budgetChange = auditFields.length > 0 ? {
+    ...(before ? { from: before } : {}),
+    // The normalized patch that actually succeeded, including implicit switch
+    // clears. A pre-0088 retry must not claim its absent columns were written.
+    to: Object.fromEntries(Object.entries(written).filter(([key]) => auditFields.includes(key))),
+  } : undefined;
+  return { ok: true, value: { id: agentId, budgetsLive, ...(budgetChange ? { budgetChange } : {}) } };
 }
 
 /** Suspend or resume an agent. Only active agents can be suspended, and only

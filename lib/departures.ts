@@ -80,6 +80,7 @@ export const DEPARTURE_VERDICT: Record<
   dispatch_unavailable: { word: "NOT CLEARED", tone: "held" },
   blocked_budget: { word: "NO FUNDS", tone: "held" },
   blocked_budget_period: { word: "LIMIT REACHED", tone: "held" },
+  blocked_budget_pause: { word: "PAUSED", tone: "held" },
   blocked_budget_subagent: { word: "SUB-AGENT CAP", tone: "held" },
   blocked_budget_delegation: { word: "WORKER CAP", tone: "held" },
   blocked_delegation_revoked: { word: "WORKER REVOKED", tone: "held" },

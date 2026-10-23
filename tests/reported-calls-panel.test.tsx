@@ -6,11 +6,13 @@
 // an unknown cost reading as $0.00. And a database before 0084 must not break the
 // agent page.
 import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 
 vi.mock("server-only", () => ({}));
 
-const { ReportedCallsPanel, ToolDecisionsPanel, formatApiEquivalent } = await import("@/components/ReportedCallsPanel");
+const { ReportedCallsPanel, ToolDecisionsPanel, formatApiEquivalent, retentionSentence } = await import("@/components/ReportedCallsPanel");
 const { readReportedCalls, readToolDecisions } = await import("@/app/dashboard/agents/[id]/reported-data");
 
 const AGENT = "11111111-1111-4111-8111-111111111111";
@@ -87,6 +89,34 @@ describe("ReportedCallsPanel", () => {
     expect(html).toMatch(/Direct Agent Key/);
   });
 
+  it("shows prompt-cache tokens, which most of a Claude Code call's cost comes from", () => {
+    // Seen on Cloud 2026-10-12: "2 / 52" tokens beside $0.1702, because the cost
+    // counts the cache write of Claude Code's system prompt and the row did not.
+    const html = renderToStaticMarkup(
+      <ReportedCallsPanel
+        read={{ state: "ok", rows: [row({ input_tokens: 2, output_tokens: 52, cache_creation_tokens: 21_406, cache_read_tokens: 13_240 })] }}
+      />
+    );
+    expect(html).toContain("2 / 52");
+    expect(html).toContain("cache: 21,406 written, 13,240 read");
+  });
+
+  it("says nothing about the cache when a row reports none", () => {
+    const none = renderToStaticMarkup(<ReportedCallsPanel read={{ state: "ok", rows: [row({ cache_creation_tokens: 0, cache_read_tokens: null })] }} />);
+    expect(none).not.toContain("cache:");
+  });
+
+  it("says how old rows are removed, not a flat 90 days a self-hosted install cannot promise", () => {
+    // Cloud sweeps every agent daily; a self-hosted install prunes an agent's rows
+    // when that agent next reports, so a quiet agent keeps older ones. The
+    // self-hosted sentence replaces this one in the public copy.
+    const html = renderToStaticMarkup(<ReportedCallsPanel read={{ state: "ok", rows: [row()] }} />);
+    expect(html).not.toContain("Kept for 90 days.");
+    expect(retentionSentence()).toMatch(/^Rows older than 90 days are removed /u);
+    expect(html).toContain(retentionSentence());
+  });
+
+
   it("renders nothing when there is nothing reported, or the records are not available", () => {
     expect(renderToStaticMarkup(<ReportedCallsPanel read={{ state: "ok", rows: [] }} />)).toBe("");
     expect(renderToStaticMarkup(<ReportedCallsPanel read={{ state: "unavailable" }} />)).toBe("");
@@ -115,6 +145,9 @@ describe("readReportedCalls", () => {
     // Only the calls: the tool rules' decisions have their own section.
     expect(d.filters).toEqual([["agent_id", AGENT], ["kind", ["model_call", "model_error"]]]);
     expect(d.calls).toContain("order:received_at");
+    const select = d.calls.find((c: string) => c.startsWith("select:")) ?? "";
+    expect(select).toContain("cache_read_tokens");
+    expect(select).toContain("cache_creation_tokens");
   });
 
   it("reads this agent's newest tool decisions apart from its calls", async () => {

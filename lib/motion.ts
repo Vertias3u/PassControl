@@ -24,3 +24,38 @@ export function motionAllowed(element?: Element | null): boolean {
 export function motionCookieValue(off: boolean): string {
   return `${MOTION_COOKIE}=${off ? "off" : "on"}; path=/; max-age=31536000; samesite=lax`;
 }
+
+export const NUMBER_ROLL_DURATION_MS = 400;
+
+/** Interpolate a changed number; either motion preference can stop it mid-flight. */
+export function animateNumber(
+  from: number,
+  to: number,
+  write: (value: number) => void,
+  element?: Element | null
+): () => void {
+  if (from === to || !Number.isFinite(from) || !Number.isFinite(to) || !motionAllowed(element)) {
+    write(to);
+    return () => {};
+  }
+  const started = window.performance.now();
+  let frame: number | undefined;
+  let cancelled = false;
+  const tick = (now: number) => {
+    if (cancelled) return;
+    if (!motionAllowed(element)) {
+      write(to);
+      frame = undefined;
+      return;
+    }
+    const progress = Math.max(0, Math.min(1, (now - started) / NUMBER_ROLL_DURATION_MS));
+    const eased = 1 - (1 - progress) ** 3;
+    write(progress === 1 ? to : from + (to - from) * eased);
+    frame = progress < 1 ? window.requestAnimationFrame(tick) : undefined;
+  };
+  frame = window.requestAnimationFrame(tick);
+  return () => {
+    cancelled = true;
+    if (frame !== undefined) window.cancelAnimationFrame(frame);
+  };
+}

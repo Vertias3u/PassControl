@@ -7,6 +7,9 @@ import { ShieldCheck } from "lucide-react";
 // The eyebrow rendered beside the mark on the verifier, profile and 404 chromes.
 export const SITE_BRAND_LABEL = "PassControl";
 
+// The small line under the wordmark where a chrome stacks the two (the sign-in page).
+export const SITE_BRAND_SUBLINE = "PassControl";
+
 
 // The Core mark: the product's own shield, the same one the self-host landing page
 // leads with. No company mark, because a self-hosted instance belongs to whoever runs it.

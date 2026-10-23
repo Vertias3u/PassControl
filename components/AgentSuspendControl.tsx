@@ -139,21 +139,38 @@ export function AgentSuspendControl({
 }) {
   const router = useRouter();
   const [result, setResult] = useState<ControlResult | null>(null);
+  const [observedStatus, setObservedStatus] = useState<string | null>(null);
+  // An observation only outranks the prop it was made against. Once the server
+  // sends a different status (the refresh landed, or another tab reactivated),
+  // that newer read wins; otherwise a stale "suspended" would hide an active agent.
+  const [observedAgainst, setObservedAgainst] = useState(status);
+  const stale = observedAgainst !== status;
+  if (stale) {
+    setObservedAgainst(status);
+    setObservedStatus(null);
+  }
   const busy = result?.phase === "pending";
   // The newest OBSERVED status wins over the server prop, which lags until the
   // route refresh lands; otherwise a confirmed suspend would still offer
-  // "Suspend agent" for a moment. An unreadable observation defers to the prop.
-  const observedStatus = result?.phase === "observed" ? result.observation.database : null;
-  const effectiveStatus = observedStatus ?? status;
+  // "Suspend agent" for a moment. Keep that observation through pending/lost
+  // responses; a lost reply does not undo an observed stop. Revocation wins.
+  const effectiveStatus = status === "revoked" || stale ? status : observedStatus ?? status;
   const intent = intentFor(effectiveStatus);
+
+  const acceptResult = (next: ControlResult) => {
+    if (next.phase === "observed" && next.observation.database !== null) {
+      setObservedStatus(next.observation.database);
+    }
+    setResult(next);
+  };
 
   const run = async (next: ControlIntent) => {
     setResult({ phase: "pending", intent: next });
-    setResult(await applyIntent(agentId, next));
+    acceptResult(await applyIntent(agentId, next));
     router.refresh();
   };
   const refresh = async (about: ControlIntent) => {
-    setResult(await refreshIntent(agentId, about));
+    acceptResult(await refreshIntent(agentId, about));
     router.refresh();
   };
 
@@ -173,11 +190,12 @@ export function AgentSuspendControl({
         type="button"
         className={intent === "suspended" ? "danger inline-flex items-center gap-2" : "inline-flex items-center gap-2"}
         disabled={busy}
+        aria-busy={busy}
         onClick={() => void run(intent)}
         data-control={intent === "suspended" ? "suspend" : "reactivate"}
       >
         {intent === "suspended" ? <PauseCircle aria-hidden="true" className="h-4 w-4" /> : <PlayCircle aria-hidden="true" className="h-4 w-4" />}
-        {intent === "suspended" ? "Suspend agent" : "Reactivate agent"}
+        {busy ? (result.intent === "suspended" ? "Suspending…" : "Reactivating…") : intent === "suspended" ? "Suspend agent" : "Reactivate agent"}
       </button>
       <AgentControlResult
         result={result}

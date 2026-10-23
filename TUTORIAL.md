@@ -111,17 +111,19 @@ npm run cli -- setup   # run the CLI from the checkout
 ```
 
 The seed step asks you to choose an account email and password — that account guards your
-local Vault, so pick a real one. Open **http://localhost:3000** and log in with it.
+local Vault, so pick a real one. With default ports, open **http://localhost:3000** and log
+in with it.
 
 > No shared default credentials ship. Non-interactive runs get a generated password,
 > printed once by the seed step.
 
 > Use `passcontrol setup --no-open` to suppress browser launch. If another local
 > Supabase/Redis project owns the default service ports, use `passcontrol setup --no-open
-> --port-offset 100`. This offsets those local service ports together; the dashboard keeps its
-> canonical port 3000. The offset never moves the dashboard.
+> --port-offset 100`. The offset moves the whole local stack, including the dashboard to port
+> `3000 + offset`: `--port-offset 100` puts it at `http://localhost:3100`.
 >
-> Setup verifies `http://localhost:3000/api/version` before making that origin the active global
+> Setup verifies `/api/version` at the selected dashboard origin (for example,
+> `http://localhost:3100/api/version` with offset 100) before making that origin the active global
 > gateway. Existing explicit loopback ports remain valid for advanced local use; a portless
 > loopback URL is rejected rather than interpreted as port 80. `passcontrol status` reports the
 > active API gateway and the CLI-managed local dashboard separately, while `passcontrol open`

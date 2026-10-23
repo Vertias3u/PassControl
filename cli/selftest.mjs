@@ -99,6 +99,9 @@ export async function proveItWorks({
   apiKey,
   fetchImpl,
   wait = sleep,
+  // False for an agent whose scopes are known to exclude `demo`: the call could
+  // only be refused, and a refusal is recorded on the agent's page.
+  demoCall = true,
 }) {
   const proof = { visa: false, call: false, receipt: null };
   try {
@@ -112,6 +115,13 @@ export async function proveItWorks({
     const visa = await visas.getVisa();
     proof.visa = true;
     ok("minted a visa with this passport");
+
+    if (!demoCall) {
+      proof.reason = "no_demo_scope";
+      step("This agent has no access to the keyless demo model, so no test call was made: it could only be");
+      step('refused. Its model access is set on its page in the dashboard; then:  passcontrol call "hi"');
+      return proof;
+    }
 
     const res = await fetchImpl(`${origin}/api/v1/demo/chat/completions`, {
       method: "POST",

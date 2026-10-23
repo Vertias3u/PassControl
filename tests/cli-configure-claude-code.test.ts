@@ -179,3 +179,33 @@ describe("configure claude-code --subscription", () => {
     expect(read(userSettings(home))).toEqual(mine);
   });
 });
+
+// 1.6.0: `--agent-note`, the agent's own budget note, opt-in and off by default.
+describe("configure claude-code --agent-note", () => {
+  const userSettings = (home: string) => join(home, ".claude", "settings.json");
+
+  it("API mode: adds the note-only prompt hook, and says what the note is", async () => {
+    const home = freshHome();
+    const r = await run(["configure", "claude-code", "--write", "--agent-note"], home);
+    expect(r.code).toBe(0);
+    expect(read(projectSettings(home)).hooks.UserPromptSubmit[0].hooks[0]).toMatchObject({
+      url: "http://127.0.0.1:8788/_passcontrol/hook?note=only",
+    });
+    expect(r.out).toMatch(/only when it changes/);
+  });
+
+  it("API mode: off by default, and offered", async () => {
+    const home = freshHome();
+    const r = await run(["configure", "claude-code", "--write"], home);
+    expect(read(projectSettings(home)).hooks).toBeUndefined();
+    expect(r.out).toContain("--agent-note");
+  });
+
+  it("subscription mode: puts the opt-in on the prompt hook", async () => {
+    const home = freshHome();
+    const r = await run(["configure", "claude-code", "--subscription", "--write", "--agent-note"], home);
+    expect(r.code).toBe(0);
+    expect(read(userSettings(home)).hooks.UserPromptSubmit[0].hooks[0].url).toBe("http://127.0.0.1:8788/_passcontrol/hook?note=1");
+    expect(r.out).toMatch(/tool rules/);
+  });
+});

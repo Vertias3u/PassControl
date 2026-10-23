@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { ArrowLeft, KeyRound, Route } from "lucide-react";
-import { SiteLogo, SiteWordmark } from "@/components/SiteBrand";
+import { SITE_BRAND_SUBLINE, SiteLogo, SiteWordmark } from "@/components/SiteBrand";
 import { instanceLabel } from "@/lib/instance-label";
 
 function accountTermsNotice(): ReactNode {
@@ -37,7 +37,7 @@ export function AuthShell({
           <SiteLogo size={27} />
           <span>
             <SiteWordmark size={17} />
-            <small>PassControl</small>
+            <small>{SITE_BRAND_SUBLINE}</small>
           </span>
         </Link>
 

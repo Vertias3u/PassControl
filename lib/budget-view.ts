@@ -108,3 +108,24 @@ export async function readPeriodCounted(agentId: string, kind: PeriodKind, nowMs
     return null;
   }
 }
+
+/**
+ * What the ledger says this agent spent in the 24 hours before `nowMs`: the rate a
+ * limit with no period is projected from (lib/budget-pace.ts). Null when it cannot
+ * be read, so the reader shows no pace rather than "not on its way".
+ */
+export async function readRecentSpend(agentId: string, nowMs: number): Promise<{ tokens: number; microcents: number } | null> {
+  try {
+    const { data, error } = await serviceClient().rpc("agent_period_spend", {
+      p_agent_id: agentId,
+      p_since: new Date(nowMs - 86_400_000).toISOString(),
+    });
+    if (error) return null;
+    const row = (Array.isArray(data) ? data[0] : data) as { spent_tokens?: unknown; spent_microcents?: unknown } | undefined;
+    const tokens = Number(row?.spent_tokens);
+    const microcents = Number(row?.spent_microcents);
+    return Number.isFinite(tokens) && Number.isFinite(microcents) ? { tokens, microcents } : null;
+  } catch {
+    return null;
+  }
+}

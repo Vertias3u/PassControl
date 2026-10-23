@@ -111,6 +111,15 @@ import {
 } from "../cli/statusline.mjs";
 import { runWatch } from "../cli/watch.mjs";
 import { CODEX_PROFILE, codexProfilePath, codexProfileToml, codexStoresApiKey, removeCodexProfile, writeCodexProfile } from "../cli/codex.mjs";
+import {
+  codexHookCommand,
+  codexHookEntries,
+  codexHooksPath,
+  probeCodexHookCommand,
+  removeCodexHooks,
+  runCodexHook,
+  writeCodexHooks,
+} from "../cli/codex-hooks.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
 import { logoutCommand } from "../cli/logout.mjs";
@@ -275,6 +284,10 @@ ${heading("Integrate")}
                                  preview or write integration config
   ${cmd} configure claude-code --subscription [--write|--remove]
                                  a Pro/Max login: stops, calls, usage window
+  ${cmd} configure codex --subscription [--write|--remove]
+                                 a ChatGPT plan in Codex: stops and tool rules
+  ${cmd} configure claude-code --write --agent-note
+                                 tell the agent its own limits, only when they change
   integrations: ${integrationChoices()}
 
 ${heading("Trust")}
@@ -2785,7 +2798,10 @@ function configureClaudeCode(opts = {}) {
     return;
   }
   const { baseUrl, port } = sidecarBaseUrl({ ...opts, provider: "anthropic" });
-  console.log(`Preview: ${target}\n\n${JSON.stringify({ env: claudeCodeEnv(baseUrl) }, null, 2)}`);
+  const note = Boolean(opts.agentNote);
+  const preview = { env: claudeCodeEnv(baseUrl) };
+  if (note) preview.hooks = { UserPromptSubmit: [{ hooks: [{ type: "http", url: `http://127.0.0.1:${port}/_passcontrol/hook?note=only`, timeout: 5 }] }] };
+  console.log(`Preview: ${target}\n\n${JSON.stringify(preview, null, 2)}`);
   if (!opts.write) {
     step(`Dry run only. Re-run with \`--write\` to merge these two keys${scope === "project" ? " (or --write --global for every session)" : ""}.`);
   } else {
@@ -2794,6 +2810,7 @@ function configureClaudeCode(opts = {}) {
       baseUrl,
       force: Boolean(opts.force),
       statusLineCommand: opts.statusline ? statusLineSettingsCommand(port) : null,
+      noteHookPort: note ? port : null,
     });
     if (!result.changed) ok(`${target} already routes Claude Code through PassControl`);
     else {
@@ -2811,6 +2828,11 @@ function configureClaudeCode(opts = {}) {
     step(`With --write, the status line would run: ${statusLineSettingsCommand(port)}`);
   } else if (!opts.statusline) {
     step(`Optional, the agent's budget in Claude Code's status line: ${cliCommand(`configure claude-code --write --statusline${scope === "user" ? " --global" : ""}`)}`);
+  }
+  if (note) {
+    step("The agent's note: on a prompt, Claude Code is told how much of its budget is left and when it runs out at this rate. It is sent only when it changes (a quarter of the budget used, the reset close, the rate turning), so it costs almost no context.");
+  } else {
+    step(`Optional, tell the agent its own budget, only when it changes: ${cliCommand(`configure claude-code --write --agent-note${scope === "user" ? " --global" : ""}`)}`);
   }
   step(`Start the sidecar before Claude Code: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
   step("The agent's Anthropic scope must allow the models Claude Code uses (its main model, and Haiku for small tasks).");
@@ -2833,12 +2855,13 @@ function configureClaudeCodeSubscription(opts = {}) {
     else step(`${target} has no PassControl subscription settings; nothing to remove.`);
     return;
   }
-  const preview = { env: subscriptionEnv(port), hooks: subscriptionHooks(port), statusLine: { type: "command", command: statusLineSettingsCommand(port) } };
+  const note = Boolean(opts.agentNote);
+  const preview = { env: subscriptionEnv(port), hooks: subscriptionHooks(port, { note }), statusLine: { type: "command", command: statusLineSettingsCommand(port) } };
   console.log(`Preview: ${target}\n\n${JSON.stringify(preview, null, 2)}`);
   if (!opts.write) {
     step("Dry run only. Re-run with `--write` to merge these into your Claude Code user settings (anything of yours is kept).");
   } else {
-    const result = writeClaudeCodeSubscription({ target, port, statusLineCommand: statusLineSettingsCommand(port), force: Boolean(opts.force) });
+    const result = writeClaudeCodeSubscription({ target, port, statusLineCommand: statusLineSettingsCommand(port), force: Boolean(opts.force), note });
     if (!result.changed) ok(`${target} already has PassControl's subscription mode`);
     else {
       if (result.backupPath) step(`backed up ${result.backupPath}`);
@@ -2856,6 +2879,11 @@ function configureClaudeCodeSubscription(opts = {}) {
   }
   step(`Start the sidecar before Claude Code: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
   step("Your Pro/Max login stays between Claude Code and Anthropic. PassControl never sees it or sits in the path.");
+  if (note) {
+    step("The agent's note: on a prompt, Claude Code is told this agent's tool rules (and any PassControl budget, which this plan's own calls do not count against). It is sent only when it changes.");
+  } else {
+    step(`Optional, tell the agent its tool rules, only when they change: ${cliCommand("configure claude-code --subscription --write --agent-note")}`);
+  }
   step("If the sidecar is not running, Claude Code still works: stops are not checked and calls are not shown until it is.");
   step(`Watch the calls: ${cliCommand("watch")}`);
   step(
@@ -2951,7 +2979,51 @@ function profileCommand(rest, opts) {
   for (const r of rows) console.log(`${r.profile.padEnd(20)} passport ${r.passport.padEnd(10)} port ${r.port}`);
 }
 
+/**
+ * Subscription mode for Codex (cli/codex-hooks.mjs): a ChatGPT login keeps talking
+ * to OpenAI directly; PassControl's stops and tool rules reach the session through
+ * two hooks in $CODEX_HOME/hooks.json, next to anyone else's.
+ */
+function configureCodexSubscription(opts = {}) {
+  const target = codexHooksPath();
+  const port = sidecarPort(opts);
+  if (opts.remove) {
+    const result = removeCodexHooks({ target });
+    if (result.changed) ok(`removed PassControl's hooks from ${target}`);
+    else step(`${target} has no PassControl hooks; nothing to remove.`);
+    return;
+  }
+  // node and this file by absolute path (cli/codex-hooks.mjs): PATH must not decide
+  // whether a stop reaches Codex. The same string on every run, so trust holds.
+  const command = codexHookCommand({ port, entry: fs.realpathSync(CLI_ENTRY) });
+  console.log(`Preview: added to ${target} (anything already there is kept)\n\n${JSON.stringify(codexHookEntries(command), null, 2)}`);
+  if (!opts.write) {
+    step("Dry run only. Re-run with `--write` to add these two hooks.");
+  } else {
+    const result = writeCodexHooks({ target, command });
+    if (!result.changed) ok(`${target} already has PassControl's hooks`);
+    else {
+      if (result.backupPath) step(`backed up ${result.backupPath}`);
+      ok(`wrote ${target}`);
+      warn("Not on yet: Codex runs a hook only after you trust it. Open Codex, type /hooks, and trust PassControl's two hooks. Until then they are skipped without a word.");
+    }
+    const probe = probeCodexHookCommand(command);
+    if (probe.ok) ok("the hook command runs on its own, without your shell's PATH");
+    else warn(`The hook command did not run cleanly on its own (${probe.why}). Codex would treat that as a failed hook and go ahead. If you move Node or this CLI, run this again.`);
+  }
+  step(`Start the sidecar before Codex: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
+  step("Your ChatGPT login stays between Codex and OpenAI. PassControl never sees it or sits in the path.");
+  step("What it does: a suspended agent, or the kill switch, blocks the next prompt and refuses tools. The agent's tool rules refuse what they deny; an \"ask the owner\" rule waits for the owner's answer.");
+  step("What it cannot do, plainly:");
+  step("  Codex has no strict hook mode. If the sidecar is not running, or a hook fails, Codex goes ahead (with a warning when the sidecar is down).");
+  step("  Tool rules on paths (Read, Write, Edit) and web domains (WebFetch) name Claude Code's tools, which Codex does not have, so they do not apply here. Command rules (Bash) and MCP tool rules do.");
+  step("  An \"ask\" rule cannot ask in Codex, so it refuses instead.");
+  step("  Codex's calls are not shown on the agent's page, and a single Codex session cannot be stopped from the dashboard: suspend the agent instead.");
+  step(`To undo: ${cliCommand("configure codex --subscription --remove")}`);
+}
+
 function configureCodex(opts = {}) {
+  if (opts.subscription) return configureCodexSubscription(opts);
   const target = codexProfilePath();
   if (opts.remove) {
     const result = removeCodexProfile({ target });
@@ -4444,6 +4516,22 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
   // after every assistant message, and cancels a run that is still going.
   if (command === "statusline") {
     console.log(await statuslineCommand(opts));
+    return;
+  }
+
+  // Codex's hook relay (cli/codex-hooks.mjs), before the update check for the same
+  // reason: on a prompt, everything it prints becomes context for the model. It
+  // prints its answer or nothing, and exits 0 whatever happens.
+  if (command === "codex-hook") {
+    let input = "";
+    try {
+      for await (const chunk of process.stdin) input += chunk;
+      const port = sidecarPort(opts);
+      const out = await runCodexHook({ input, port });
+      if (out) process.stdout.write(`${out}\n`);
+    } catch {
+      // Nothing: a hook that cannot run lets Codex go ahead, as a failed hook would.
+    }
     return;
   }
 

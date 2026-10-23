@@ -34,14 +34,29 @@
 // A refusal carries no rules, so a PreToolUse refreshes them with the agent-wide ask
 // once they are `freshMs` old.
 //
+// The agent's own note (1.6.0, cli/agent-note.mjs) rides on the prompt hook when its
+// URL opts in: `?note=1` in this mode, `?note=only` when Claude Code goes through the
+// sidecar with an API key, where the gateway already enforces and the hook only ever
+// adds the note. It is built from the latest answer and sent per session only when
+// its signature changes; a stop always wins over it.
+//
 // Honest limit: hooks run inside Claude Code, so this is a guard rail for the user's
 // own sessions, not a boundary against a client that skips them.
+
+import { agentNote } from "./agent-note.mjs";
 
 export const HOOK_PATH = "/_passcontrol/hook";
 
 const GATED = new Set(["UserPromptSubmit", "PreToolUse", "PostToolBatch"]);
 // What the gateway accepts as a declared session (lib/client-lineage.ts).
 const DECLARED_SESSION = /^[A-Za-z0-9._:-]{1,128}$/;
+
+// Claude Code's timeout on the prompt and next-model-call hooks (cli/claude-code.mjs).
+// Past it the action goes ahead with no warning at all, so the sidecar's read of
+// /api/v1/self ends a second earlier and says why. 2 s was too short: a Cloud answer
+// on a cold start took longer, and a stop was missed with "did not answer in time".
+export const GATE_HOOK_TIMEOUT_S = 5;
+export const SELF_READ_TIMEOUT_MS = (GATE_HOOK_TIMEOUT_S - 1) * 1000;
 
 export const GATE_FRESH_MS = 5_000;
 export const GATE_SESSION_FRESH_MS = 15_000;
@@ -94,6 +109,9 @@ export function createStopGate({
   let agent = null;
   // The agent's tool rules as the last answer that carried them gave them.
   let rules = null;
+  // The limits from the latest open answer, for the note; and each session's last note.
+  let latest = null;
+  const noted = new Map();
   const sessions = new Map();
   const inflight = new Map();
   const warnedAt = new Map();
@@ -124,6 +142,7 @@ export function createStopGate({
         answer = { state: "unknown", reason: error?.message ?? "error" };
       }
       answer ??= { state: "unknown", reason: "no answer" };
+      if (answer.state === "open" && answer.self) latest = { self: answer.self, at: now() };
       if (answer.state === "open") {
         rules = { read: answer.toolRules && typeof answer.toolRules === "object" ? answer.toolRules : { state: "none" }, at: now() };
       }
@@ -151,8 +170,40 @@ export function createStopGate({
 
   const age = (entry) => (entry ? now() - entry.at : Infinity);
 
-  async function decide(input) {
+  /** The note for this session's prompt, when it opted in and something changed since the last. */
+  function noteFor(sessionKey, mode) {
+    if (!latest || age(latest) > maxStaleMs) return null;
+    const freshRules = rules && age(rules) <= maxStaleMs ? rules.read : null;
+    const n = agentNote({ self: latest.self, rules: freshRules, mode, nowMs: now() });
+    if (!n || noted.get(sessionKey) === n.signature) return null;
+    remember(noted, sessionKey, n.signature);
+    return { hookEventName: "UserPromptSubmit", additionalContext: n.text };
+  }
+
+  /**
+   * @param {object} input Claude Code's hook input.
+   * @param {{ note?: "api" | "subscription" | null }} [options] the prompt hook's opt-in.
+   */
+  async function decide(input, { note = null } = {}) {
     const event = input?.hook_event_name;
+    if (note === "api") {
+      // Only the note, never a stop or a warning: the gateway refuses these calls itself.
+      if (event !== "UserPromptSubmit") return {};
+      if (age(latest) >= freshMs) await ask(null);
+      const session = typeof input.session_id === "string" && DECLARED_SESSION.test(input.session_id) ? input.session_id : "";
+      const out = noteFor(session, "api");
+      return out ? { hookSpecificOutput: out } : {};
+    }
+    const out = await gateDecision(input, event);
+    if (note === "subscription" && event === "UserPromptSubmit" && out.continue !== false) {
+      const session = typeof input.session_id === "string" && DECLARED_SESSION.test(input.session_id) ? input.session_id : "";
+      const extra = noteFor(session, "subscription");
+      if (extra) return { ...out, hookSpecificOutput: extra };
+    }
+    return out;
+  }
+
+  async function gateDecision(input, event) {
     if (!GATED.has(event)) return {};
     const session = typeof input.session_id === "string" && DECLARED_SESSION.test(input.session_id) ? input.session_id : null;
 
@@ -201,7 +252,13 @@ export async function selfAnswerState(response) {
   if (response.ok) {
     const body = await response.json().catch(() => null);
     const toolRules = body && typeof body === "object" ? body.tool_rules : undefined;
-    return toolRules && typeof toolRules === "object" ? { state: "open", toolRules } : { state: "open" };
+    const answer = toolRules && typeof toolRules === "object" ? { state: "open", toolRules } : { state: "open" };
+    // The limits and the soft pause, for the agent's note; nothing else from the answer is kept.
+    if (body && typeof body === "object" && body.budget && typeof body.budget === "object") {
+      const kept = (v) => (v && typeof v === "object" ? v : null);
+      answer.self = { budget: body.budget, pace: kept(body.pace), pause: kept(body.pause) };
+    }
+    return answer;
   }
   if (response.status === 403) {
     const body = await response.json().catch(() => ({}));

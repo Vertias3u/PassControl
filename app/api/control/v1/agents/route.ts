@@ -37,7 +37,7 @@ const postHandler = control("write", async ({ req, userId, db, keyId, requestId 
   if (!parsed.ok) return errorResponse(parsed.status, parsed.code, requestId);
 
   const r = await createAgent(db, userId, parsed.body);
-  if (!r.ok) return errorResponse(r.status, r.code, requestId);
+  if (!r.ok) return errorResponse(r.status, r.code, requestId, {}, r.message);
 
   await recordAdminAction({
     userId,

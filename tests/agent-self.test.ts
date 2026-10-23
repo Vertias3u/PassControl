@@ -7,7 +7,7 @@
 //   verify → sender proof (passport) → kill / suspend → its own rate limit → read
 // and it writes nothing: no log row, no receipt, no hold. Reading your budget must
 // never spend it, and polling it must never use up the rate limit model calls share.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   verifyVisa: vi.fn(),
@@ -25,6 +25,8 @@ const h = vi.hoisted(() => ({
   captureSecurityEvent: vi.fn(),
   agentsFilters: [] as [string, unknown][],
   toolRules: vi.fn(),
+  readRecentSpend: vi.fn(),
+  readPauseLiftEnd: vi.fn(),
 }));
 
 vi.mock("server-only", () => ({}));
@@ -48,12 +50,16 @@ vi.mock("@/lib/state/redis", () => ({
   claimNonce: vi.fn(async () => true),
   flagPassportSecretExposed: vi.fn(async () => undefined),
 }));
+vi.mock("@/lib/state/pause", () => ({
+  readPauseLiftEnd: (...a: unknown[]) => h.readPauseLiftEnd(...a),
+}));
 vi.mock("@/lib/state/policy", () => ({
   readCurrentAgentPolicyAndShadow: (...a: unknown[]) => h.readPolicy(...a),
 }));
 vi.mock("@/lib/budget-view", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/budget-view")>()),
   readPeriodCounted: (...a: unknown[]) => h.readPeriodCounted(...a),
+  readRecentSpend: (...a: unknown[]) => h.readRecentSpend(...a),
 }));
 vi.mock("@/lib/supabase", () => ({
   serviceClient: () => ({
@@ -117,6 +123,8 @@ beforeEach(() => {
   h.rateLimit.mockResolvedValue({ success: true, remaining: 10 });
   h.rateLimitFailClosed.mockResolvedValue({ success: true, remaining: 10 });
   h.toolRules.mockResolvedValue({ data: { tool_rules: null }, error: null });
+  h.readRecentSpend.mockResolvedValue({ tokens: 0, microcents: 0 });
+  h.readPauseLiftEnd.mockResolvedValue(null);
 });
 
 describe("GET /api/v1/self", () => {
@@ -125,7 +133,7 @@ describe("GET /api/v1/self", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     const body = await res.json();
-    expect(Object.keys(body).sort()).toEqual(["agent_id", "as_of", "auth", "budget", "scope"]);
+    expect(Object.keys(body).sort()).toEqual(["agent_id", "as_of", "auth", "budget", "pace", "pause", "scope"]);
     expect(body).toMatchObject({
       agent_id: AGENT,
       auth: "passport",
@@ -332,3 +340,167 @@ describe("tool rules on request", () => {
   });
 });
 
+// 1.6.0: when the agent reaches its budget at its current rate, computed here once so
+// the note, the status line and the alerts quote the same time (lib/budget-pace.ts).
+describe("pace", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("projects the daily limit from this period's count", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 9, 22, 12)); // half the day gone
+    h.readPeriodCounted.mockResolvedValue(150_000_000); // $1.50 of $2: 4 hours to go
+    h.readPolicy.mockResolvedValue({
+      policy: null, shadow: null, senderConstraintMode: "off",
+      budget: { known: true, tokens: null, cents: null },
+      period: { known: true, kind: "day", cents: 200 },
+    });
+    const body = await (await get()).json();
+    expect(body.pace).toEqual({
+      reaches_limit_at: new Date(Date.UTC(2026, 9, 22, 16)).toISOString(),
+      limit: "period",
+      basis: "this_period",
+    });
+  });
+
+  it("reads the last day's spend only when there is a limit with no period", async () => {
+    h.readPolicy.mockResolvedValue({
+      policy: null, shadow: null, senderConstraintMode: "off",
+      budget: { known: true, tokens: null, cents: null },
+      period: { known: true, kind: "day", cents: 200 },
+    });
+    await get();
+    expect(h.readRecentSpend).not.toHaveBeenCalled();
+    h.readPolicy.mockResolvedValue({
+      policy: null, shadow: null, senderConstraintMode: "off",
+      budget: { known: true, tokens: null, cents: 500 },
+      period: { known: true, kind: null, cents: null },
+    });
+    await get();
+    expect(h.readRecentSpend).toHaveBeenCalledWith(AGENT, expect.any(Number));
+  });
+
+  it("an unreadable last day is no pace, and still not an error", async () => {
+    h.readRecentSpend.mockResolvedValue(null);
+    h.readPolicy.mockResolvedValue({
+      policy: null, shadow: null, senderConstraintMode: "off",
+      budget: { known: true, tokens: null, cents: 500 },
+      period: { known: true, kind: null, cents: null },
+    });
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect((await res.json()).pace).toBeNull();
+  });
+});
+
+// The soft pause (1.6.0, L4c). Before this, /self could say "runs out at 16:00" while
+// every call got a 402: the pause line was the one limit it did not show. It is read
+// from the same counters the proxy pauses on, and a lift is read the way the proxy
+// reads it: one that cannot be read leaves the agent paused.
+describe("the soft pause", () => {
+  // $0.42 of today's $2.00 is 21 %.
+  const withPause = (pause: unknown) =>
+    h.readPolicy.mockResolvedValue({
+      policy: null, shadow: null, senderConstraintMode: "off",
+      budget: { known: true, tokens: null, cents: null },
+      period: { known: true, kind: "day", cents: 200 },
+      pause,
+    });
+
+  it("is null with no pause line, or a database that predates 0087, and no lift is read", async () => {
+    withPause(undefined);
+    expect((await (await get()).json()).pause).toBeNull();
+    withPause({ known: false });
+    expect((await (await get()).json()).pause).toBeNull();
+    withPause({ known: true, percent: null });
+    expect((await (await get()).json()).pause).toBeNull();
+    expect(h.readPauseLiftEnd).not.toHaveBeenCalled();
+  });
+
+  it("below the line, names the line and says it is not paused", async () => {
+    withPause({ known: true, percent: 80 });
+    expect((await (await get()).json()).pause).toEqual({ percent: 80, paused: false, limit: null, lifted_until: null });
+    expect(h.readPauseLiftEnd).not.toHaveBeenCalled();
+  });
+
+  it("past the line, says the agent is paused and which limit put it there", async () => {
+    withPause({ known: true, percent: 20 });
+    expect((await (await get()).json()).pause).toEqual({ percent: 20, paused: true, limit: "period", lifted_until: null });
+    expect(h.readPauseLiftEnd).toHaveBeenCalledWith(AGENT, expect.any(Number));
+  });
+
+  it("past the line with a lift, says until when the agent goes on", async () => {
+    withPause({ known: true, percent: 20 });
+    const end = Date.UTC(2026, 9, 22, 15, 40);
+    h.readPauseLiftEnd.mockResolvedValue(end);
+    expect((await (await get()).json()).pause).toEqual({
+      percent: 20,
+      paused: false,
+      limit: "period",
+      lifted_until: new Date(end).toISOString(),
+    });
+  });
+
+  it("a lift that cannot be read leaves it paused, as on the proxy, and is not an error", async () => {
+    withPause({ known: true, percent: 20 });
+    h.readPauseLiftEnd.mockRejectedValue(new Error("redis down"));
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect((await res.json()).pause).toMatchObject({ paused: true, lifted_until: null });
+  });
+
+  it("a usage that cannot be read never pauses, whatever the database mirror says", async () => {
+    withPause({ known: true, percent: 1 });
+    h.readBudgetSnapshot.mockRejectedValue(new Error("redis down"));
+    h.readPeriodCounted.mockResolvedValue(null);
+    h.mirror.mockResolvedValue({ data: { spent_tokens: 999_999, spent_microcents: 999_999_999 }, error: null });
+    h.readPolicy.mockResolvedValue({
+      policy: null, shadow: null, senderConstraintMode: "off",
+      budget: { known: true, tokens: 1_000, cents: 2 },
+      period: { known: true, kind: "day", cents: 200 },
+      pause: { known: true, percent: 1 },
+    });
+    expect((await (await get()).json()).pause).toEqual({ percent: 1, paused: false, limit: null, lifted_until: null });
+  });
+  // L7 (0088): an agent set to switch is not paused past its line: its calls to
+  // that provider go on with the cheaper model, and /self says which.
+  describe("with a cheaper model at the line", () => {
+    const sw = { provider: "anthropic", model: "claude-haiku-4-5" };
+
+    it("below the line, names the switch and says it is not on yet", async () => {
+      withPause({ known: true, percent: 80, switchTo: sw });
+      expect((await (await get()).json()).pause).toEqual({
+        percent: 80, paused: false, limit: null, lifted_until: null,
+        switch_to: { ...sw, active: false },
+      });
+    });
+
+    it("past the line, says the calls go to the cheaper model, not that it is paused", async () => {
+      withPause({ known: true, percent: 20, switchTo: sw });
+      expect((await (await get()).json()).pause).toEqual({
+        percent: 20, paused: false, limit: "period", lifted_until: null,
+        switch_to: { ...sw, active: true },
+      });
+    });
+
+    it("past the line with a lift, the agent is back on its usual model", async () => {
+      withPause({ known: true, percent: 20, switchTo: sw });
+      h.readPauseLiftEnd.mockResolvedValue(Date.UTC(2026, 9, 22, 15, 40));
+      expect((await (await get()).json()).pause).toMatchObject({ paused: false, switch_to: { ...sw, active: false } });
+    });
+
+    // The gateway judges the cheaper model against the scope the call carries, and
+    // refuses a switch that fails it. /self must not then say "on the cheaper model".
+    it("a switch the agent's scope no longer allows is said as a pause, not as a switch", async () => {
+      withPause({ known: true, percent: 20, switchTo: { provider: "openai", model: "gpt-5-mini" } });
+      expect((await (await get()).json()).pause).toMatchObject({
+        paused: true,
+        switch_to: { provider: "openai", model: "gpt-5-mini", active: false },
+      });
+    });
+
+    it("a switch that is not set adds nothing", async () => {
+      withPause({ known: true, percent: 20, switchTo: null });
+      expect((await (await get()).json()).pause).not.toHaveProperty("switch_to");
+    });
+  });
+});

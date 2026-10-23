@@ -214,8 +214,9 @@ export function validatePeriodBudget(
 
 /** Validate a partial agent-update payload → a DB column patch with only the
  *  provided fields. Throws on invalid input. Allows name / scopes / budgets /
- *  fallbacks — the four the `authenticated` role may UPDATE (migrations 0011
- *  and 0018). A column absent from that grant must not appear here. */
+ *  fallbacks / the pause line — the columns the `authenticated` role may UPDATE
+ *  (migrations 0011, 0018, 0073 and 0087). A column absent from that grant must
+ *  not appear here. */
 export function validateAgentUpdate(input: {
   name?: unknown;
   scopes?: unknown;
@@ -223,6 +224,8 @@ export function validateAgentUpdate(input: {
   budget_cents?: unknown;
   budget_period?: unknown;
   budget_period_cents?: unknown;
+  pause_percent?: unknown;
+  pause_switch?: unknown;
   fallbacks?: unknown;
 }): {
   name?: string;
@@ -231,6 +234,10 @@ export function validateAgentUpdate(input: {
   budget_cents?: number | null;
   budget_period?: "day" | "month" | null;
   budget_period_cents?: number | null;
+  pause_percent?: number | null;
+  pause_action?: "pause" | "switch";
+  pause_switch_provider?: string | null;
+  pause_switch_model?: string | null;
   fallbacks?: FallbackEntry[];
 } {
   const patch: {
@@ -240,6 +247,10 @@ export function validateAgentUpdate(input: {
     budget_cents?: number | null;
     budget_period?: "day" | "month" | null;
     budget_period_cents?: number | null;
+    pause_percent?: number | null;
+    pause_action?: "pause" | "switch";
+    pause_switch_provider?: string | null;
+    pause_switch_model?: string | null;
     fallbacks?: FallbackEntry[];
   } = {};
   if (input.name !== undefined) {
@@ -259,6 +270,41 @@ export function validateAgentUpdate(input: {
       throw new Error("budget_period and budget_period_cents must be set together.");
     }
     Object.assign(patch, validatePeriodBudget(input.budget_period, input.budget_period_cents));
+  }
+  // The soft pause line (1.6.0, 0087): a whole share of the agent's limits, below
+  // the limit itself. The database's check says the same thing.
+  if (input.pause_percent !== undefined) {
+    const v = input.pause_percent;
+    if (v !== null && !(typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 99)) {
+      throw new Error("pause_percent must be a whole number from 1 to 99, or null for no pause line.");
+    }
+    patch.pause_percent = v;
+  }
+  // What happens at that line (1.6.0, L7, 0088): pause (null), or go on with one
+  // exact, cheaper model. The three columns move together, as the database's own
+  // check requires. Whether the model is in the agent's scope is the fleet's
+  // check (lib/fleet.ts), which can read the agent's row; the gateway checks it
+  // again on every switched call.
+  if (input.pause_switch !== undefined) {
+    const v = input.pause_switch;
+    if (v === null) {
+      Object.assign(patch, { pause_action: "pause", pause_switch_provider: null, pause_switch_model: null });
+    } else {
+      const entry = (typeof v === "object" ? v : {}) as { provider?: unknown; model?: unknown };
+      const provider = str(entry.provider).trim();
+      const model = str(entry.model).trim();
+      if (typeof v !== "object" || !isProvider(provider) || !model || model.length > MAX_FALLBACK_MODEL_LEN || model.includes("*")) {
+        throw new Error("pause_switch must be null, or a known provider and one exact model to switch to.");
+      }
+      if (patch.pause_percent === null) {
+        throw new Error("A cheaper model at the pause line needs a pause line. Set one, or choose to pause.");
+      }
+      Object.assign(patch, { pause_action: "switch", pause_switch_provider: provider, pause_switch_model: model });
+    }
+  } else if (patch.pause_percent === null) {
+    // No line, no switch: the database's shape check refuses a switch without a
+    // line, so clearing the line alone clears the switch with it.
+    Object.assign(patch, { pause_action: "pause", pause_switch_provider: null, pause_switch_model: null });
   }
   // `[]` is a value, not an absence: it is how failover is switched off. Only an
   // undefined field leaves the column untouched.

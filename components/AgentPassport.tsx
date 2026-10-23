@@ -4,13 +4,15 @@ import { useMemo, useRef, useState } from "react";
 import type { AgentPassportView } from "@/app/dashboard/agents/[id]/passport-data";
 import type { AuthMethod, LogEntry } from "@/lib/log";
 import { createPassportSigil, passportIdForDisplay } from "@/lib/passport-art";
+import { budgetMeterView } from "@/lib/budget-meter";
 import { ScopeEditor } from "./ScopeEditor";
 import { FallbackEditor } from "./FallbackEditor";
 import { CapabilityHistory } from "./CapabilityHistory";
 import { DirectAgentIdentity } from "./DirectAgentIdentity";
+import { StatusPill, type StatusType } from "./StatusPill";
 import styles from "./AgentPassport.module.css";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
-import { CALL_OUTCOME, callOutcome, isDeliberateRefusal } from "@/lib/call-outcome";
+import { CALL_OUTCOME, callOutcome } from "@/lib/call-outcome";
 
 const SVG_SIZE = 960;
 const EXPORT_SCALE = 2;
@@ -54,6 +56,28 @@ const PETALS = {
 export type PassportAccent = keyof typeof NEUTRALS;
 
 const DEFAULT_ACCENT: PassportAccent = "sky";
+
+// The mark in the passport's header, centred on the backlight at (62, 54).
+// A statement-level helper so the two trees can differ by whole return statements.
+function PassportMark({ petals }: { petals: (typeof PETALS)[PassportAccent] }) {
+  // The mirror keeps the passport it always had: the three-petal mark.
+  return (
+    <g transform="translate(44.6 36) scale(0.6)">
+      <path
+        d="M29 57C25 47 12 36 10 20 8 9 14 3 19 6c6 4 7 20 9 33 1 8 1 13 1 18Z"
+        fill={petals.dark}
+      />
+      <path
+        d="M29 57c-2-12-5-29-3-43 1-8 4-13 7-12 4 1 5 8 3 19-2 13-5 26-7 36Z"
+        fill={petals.light}
+      />
+      <path
+        d="M29 57c4-10 14-21 19-37 3-10-2-17-7-14-6 4-8 20-10 33-1 8-2 13-2 18Z"
+        fill={petals.mid}
+      />
+    </g>
+  );
+}
 
 /** Semantic states never follow the accent — a warning is amber in every theme. */
 function paletteFor(accent: PassportAccent = DEFAULT_ACCENT) {
@@ -118,14 +142,6 @@ function lifecycleClasses(status: string): string {
   return "border-danger/40 bg-danger/10 text-danger";
 }
 
-function verdictClasses(status: string): string {
-  const { category } = callOutcome(status);
-  if (category === "forwarded") return "border-success/30 bg-success/10 text-success";
-  if (isDeliberateRefusal(category)) return "border-danger/30 bg-danger/10 text-danger";
-  if (category === "provider_failure" || category === "usage_unconfirmed") return "border-warning/30 bg-warning/10 text-warning";
-  return "border-border bg-secondary text-muted-foreground";
-}
-
 // The words come from lib/call-outcome.ts — a Record over LogEntry["status"],
 // so a new audit status fails to compile there — shared with the board, the
 // drawer and the status pill. This file used to carry its own copy, which is
@@ -178,6 +194,9 @@ function BudgetGauge({
   const PALETTE = paletteFor(accent);
   const width = 370;
   const fill = Math.max(0, Math.min(100, percent));
+  const { tone } = budgetMeterView(percent, unlimited ? null : 100);
+  // Literal counterpart of --pc-calm: standalone SVG/PNG exports cannot read CSS tokens.
+  const meterColor = tone === "calm" ? "#8b93d9" : tone === "warning" ? PALETTE.warning : PALETTE.muted;
   return (
     <g>
       <text
@@ -210,13 +229,13 @@ function BudgetGauge({
             width={(width * fill) / 100}
             height="10"
             rx="5"
-            fill={fill >= 100 ? PALETTE.danger : PALETTE.signal}
+            fill={meterColor}
           />
           <text
             x={x + width}
             y={y + 29}
             textAnchor="end"
-            fill={fill >= 100 ? PALETTE.danger : PALETTE.muted}
+            fill={meterColor}
             fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
             fontSize="15"
             fontWeight="700"
@@ -292,20 +311,7 @@ function PassportSvg({
       />
       <path d="M36 96H924" stroke={PALETTE.line} strokeWidth="2" />
       <circle cx="62" cy="54" r="18" fill={PALETTE.petals.light} opacity="0.14" />
-      <g transform="translate(44.6 36) scale(0.6)">
-        <path
-          d="M29 57C25 47 12 36 10 20 8 9 14 3 19 6c6 4 7 20 9 33 1 8 1 13 1 18Z"
-          fill={PALETTE.petals.dark}
-        />
-        <path
-          d="M29 57c-2-12-5-29-3-43 1-8 4-13 7-12 4 1 5 8 3 19-2 13-5 26-7 36Z"
-          fill={PALETTE.petals.light}
-        />
-        <path
-          d="M29 57c4-10 14-21 19-37 3-10-2-17-7-14-6 4-8 20-10 33-1 8-2 13-2 18Z"
-          fill={PALETTE.petals.mid}
-        />
-      </g>
+      <PassportMark petals={PALETTE.petals} />
       <text
         x="92"
         y="50"
@@ -1378,13 +1384,9 @@ export function AgentPassport({
                     {entry.authMethod ? ` · ${recordedAuthenticationLabel(entry.authMethod)}` : ""}
                   </p>
                 </div>
-                <span
-                  className={`w-fit rounded-full border px-2.5 py-1 text-xs font-bold ${verdictClasses(
-                    entry.status
-                  )}`}
-                >
-                  {verdictLabel(entry.status)}
-                </span>
+                <div className="w-fit">
+                  <StatusPill status={entry.status as StatusType} label={verdictLabel(entry.status)} />
+                </div>
               </li>
             ))}
           </ol>

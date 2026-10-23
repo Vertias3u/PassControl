@@ -8,7 +8,7 @@ import { createVisaClient } from "./visa-client.mjs";
 import { declaredLineage, declaredSession } from "./declared-session.mjs";
 import { defaultJournalDir, openJournal } from "./journal.mjs";
 import { answer, createWatchFeed, isNotACall, isLocalCaller, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
-import { createStopGate, HOOK_PATH, selfAnswerState } from "./subscription-gate.mjs";
+import { createStopGate, HOOK_PATH, SELF_READ_TIMEOUT_MS, selfAnswerState } from "./subscription-gate.mjs";
 import { createToolGate } from "./tool-gate.mjs";
 import { OTLP_LOGS_PATH, readClaudeCodeEvents } from "./otlp-logs.mjs";
 import { CLIENT_EVENTS_PATH, CLIENT_EVENTS_SOURCE, createCallUploader } from "./client-events-upload.mjs";
@@ -66,6 +66,12 @@ const HOOK_BODY_LIMIT = 1024 * 1024;
 function hookTimeoutS(url) {
   const t = new URL(url ?? "/", "http://127.0.0.1").searchParams.get("t");
   return t !== null && /^\d{1,4}$/.test(t) && Number(t) > 0 ? Number(t) : null;
+}
+// The agent's opt-in note (1.6.0): `?note=1` on subscription mode's prompt hook,
+// `?note=only` on API mode's, which only ever adds the note.
+function hookNote(url) {
+  const note = new URL(url ?? "/", "http://127.0.0.1").searchParams.get("note");
+  return note === "1" ? "subscription" : note === "only" ? "api" : null;
 }
 // A usage window is two numbers and two times.
 const WINDOW_BODY_LIMIT = 4 * 1024;
@@ -172,10 +178,17 @@ export function createSidecar({
   // Subscription mode's Stop (cli/subscription-gate.mjs): Claude Code's hooks ask
   // here, and the answer comes from the gateway's /api/v1/self, read with this
   // sidecar's visa and the session the hook names.
-  const SELF_TIMEOUT_MS = 2_000;
   async function readSelf(session) {
+    // One deadline over the whole read, a visa mint included: past the hook's own
+    // timeout the action goes ahead with no warning. A mint cut short here is not
+    // aborted (the proxy shares it); it finishes and is cached for the next read.
+    const signal = AbortSignal.timeout(SELF_READ_TIMEOUT_MS);
+    const deadline = new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    deadline.catch(() => {});
     try {
-      const response = await visas.fetchWithVisa((visa) => {
+      const response = await Promise.race([deadline, visas.fetchWithVisa((visa) => {
         // The tool rules ride on every gate read (Phase 2): no call of their own.
         const path = "/api/v1/self?include=tool_rules";
         const headers = {
@@ -186,9 +199,9 @@ export function createSidecar({
           "accept-encoding": "identity",
         };
         if (session) headers["x-claude-code-session-id"] = session;
-        return fetch(`${origin}${path}`, { headers, signal: AbortSignal.timeout(SELF_TIMEOUT_MS) });
-      });
-      return await selfAnswerState(response);
+        return fetch(`${origin}${path}`, { headers, signal });
+      })]);
+      return await Promise.race([deadline, selfAnswerState(response)]);
     } catch (error) {
       return { state: "unknown", reason: error?.name === "TimeoutError" ? "the gateway did not answer in time" : (error?.message ?? "error") };
     }
@@ -397,7 +410,7 @@ export function createSidecar({
       }
       let out;
       try {
-        out = await stopGate.decide(input);
+        out = await stopGate.decide(input, { note: hookNote(req.url) });
       } catch {
         out = {};
       }

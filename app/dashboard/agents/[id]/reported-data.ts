@@ -3,7 +3,7 @@ import type { ReportedCallRow, ReportedCallsRead, ToolDecisionRow, ToolDecisions
 
 const SHOWN = 50;
 const COLUMNS =
-  "event_key, kind, auth_method, client_session, client_agent, model, occurred_at, received_at, input_tokens, output_tokens, reported_cost_usd_micros, duration_ms, status_code";
+  "event_key, kind, auth_method, client_session, client_agent, model, occurred_at, received_at, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, reported_cost_usd_micros, duration_ms, status_code";
 const DECISION_COLUMNS =
   "event_key, auth_method, client_session, client_agent, occurred_at, received_at, tool_name, decision, rule_index, duration_ms";
 

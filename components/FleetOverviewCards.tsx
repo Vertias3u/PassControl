@@ -1,3 +1,4 @@
+import { RollingNumber } from "./dashboard/RollingNumber";
 import { MetricCard } from "./MetricCard";
 import { Users, DollarSign, ShieldAlert, Activity } from "lucide-react";
 import type { FleetAttentionSummary } from "@/lib/dashboard-attention";
@@ -59,7 +60,7 @@ export function FleetOverviewCards(props: {
     <div className="pc-metric-grid pc-overview-status-rail" aria-label="Fleet operational summary">
       <MetricCard
         label="Active agents"
-        value={agents ? props.activeAgents : "—"}
+        value={agents ? <RollingNumber value={props.activeAgents} /> : "—"}
         unit={agents ? `of ${props.totalAgents}` : undefined}
         state={agents ? undefined : "unavailable"}
         icon={<Users className="h-5 w-5" />}
@@ -78,7 +79,7 @@ export function FleetOverviewCards(props: {
         // nothing, but rows charged before then still count. Labelling it
         // "Tracked spend" made this card contradict a signed receipt.
         label="Settled budget charges"
-        value={agents ? `$${(props.spentMicrocents / 1e8).toFixed(2)}` : "—"}
+        value={agents ? <RollingNumber value={props.spentMicrocents / 1e8} format="dollars" /> : "—"}
         state={agents ? undefined : "unavailable"}
         icon={<DollarSign className="h-5 w-5" />}
         note={agents ? "Counted against cumulative agent caps · all time" : "Agent counters unavailable"}
@@ -89,7 +90,7 @@ export function FleetOverviewCards(props: {
         // An em dash, not a zero. The count is unknown, and the two are not the
         // same statement — the operator most likely to read this card is the
         // one investigating the incident that broke the read.
-        value={props.logsAvailable ? props.blockedCalls : "—"}
+        value={props.logsAvailable ? <RollingNumber value={props.blockedCalls} /> : "—"}
         state={props.logsAvailable ? undefined : "unavailable"}
         icon={<ShieldAlert className="h-5 w-5" />}
         note={scanNote}
@@ -98,7 +99,7 @@ export function FleetOverviewCards(props: {
       />
       <MetricCard
         label="Needs attention"
-        value={agents ? props.attention.count : "—"}
+        value={agents ? <RollingNumber value={props.attention.count} /> : "—"}
         state={agents && props.logsAvailable ? undefined : "unavailable"}
         icon={<Activity className="h-5 w-5" />}
         note={attentionNote}

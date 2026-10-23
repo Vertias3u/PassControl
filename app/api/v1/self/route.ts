@@ -15,6 +15,14 @@
 // proxy's own message: the `/passcontrol` plugin asks here, and without it a
 // stopped session read as healthy while every call was refused.
 //
+// `pace` says when the first limit is reached at the agent's current rate, or null
+// when there is nothing honest to say (lib/budget-pace.ts).
+//
+// `pause` is the owner's soft pause line (0087), or null with none: whether the
+// proxy would refuse the next call for it, and until when the owner let it go on
+// (lib/budget-pause.ts). Without it, the status line said "runs out at 16:00" while
+// every call got a 402.
+//
 // Deliberately absent from the answer: the policy and its shadow (deny rules are
 // the owner's), fallbacks, endpoints, key ids and anything about the owner.
 //
@@ -26,7 +34,10 @@
 // (a deliberate choice, recorded 2026-10-12). Never the policy, never the service rules.
 export const runtime = "edge";
 
-import { budgetView, readPeriodCounted, type PeriodInput } from "@/lib/budget-view";
+import { budgetPace } from "@/lib/budget-pace";
+import { pauseStatus } from "@/lib/budget-pause";
+import { switchModelProblem } from "@/lib/cheaper-model";
+import { budgetView, readPeriodCounted, readRecentSpend, type PeriodInput } from "@/lib/budget-view";
 import { evaluateGate } from "@/lib/gate";
 import {
   authenticateGatewayRequest,
@@ -38,6 +49,7 @@ import { err, errMessage } from "@/lib/gateway/responses";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { rateLimit } from "@/lib/ratelimit";
 import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
+import { readPauseLiftEnd } from "@/lib/state/pause";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { isSuspended, readBudgetSnapshot } from "@/lib/state/redis";
 import { readToolRules } from "@/lib/tool-rules";
@@ -116,6 +128,21 @@ export async function GET(req: Request): Promise<Response> {
     })(),
   ]);
 
+  // ── 5. Pace: when the first limit is reached at the current rate (1.6.0). A
+  // limit with no period is projected from the ledger's last day, read only when
+  // there is such a limit, so an agent with a daily limit alone costs no query.
+  const budget = budgetView({ capTokens, capMicrocents, snapshot, mirror, period, nowMs });
+  const recent = budget.cost || budget.tokens ? await readRecentSpend(agentId, nowMs) : null;
+  const pace = budgetPace(budget, recent, nowMs);
+  // The same counters the proxy pauses on: `used` is never taken from the mirror.
+  const pauseAt = policy.pause?.known ? policy.pause.percent : null;
+  const switchTo = policy.pause?.known ? (policy.pause.switchTo ?? null) : null;
+  // The gateway judges the switch against the scope the call carries; one this
+  // credential's scope no longer allows is refused there, so it is a pause here.
+  const switchUsable = switchTo !== null && switchModelProblem(principal.scopes, switchTo) === null;
+  const pause =
+    pauseAt == null ? null : await pauseStatus(budget, pauseAt, () => readPauseLiftEnd(agentId, nowMs), switchTo, switchUsable);
+
   const wantsToolRules = new URL(req.url).searchParams.get("include") === "tool_rules";
   const toolRules = wantsToolRules ? await readToolRules(db, agentId, userId) : undefined;
 
@@ -125,7 +152,9 @@ export async function GET(req: Request): Promise<Response> {
       // The credential class, as receipts name it: a Direct Agent Key is never a passport.
       auth: principal.kind === "passport" ? "passport" : "direct_key",
       scope: principal.scopes,
-      budget: budgetView({ capTokens, capMicrocents, snapshot, mirror, period, nowMs }),
+      budget,
+      pace,
+      pause,
       as_of: new Date(nowMs).toISOString(),
       ...(toolRules ? { tool_rules: toolRules } : {}),
     }),

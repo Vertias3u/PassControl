@@ -116,6 +116,19 @@ vi.mock("@/lib/state/holds", () => {
     establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
   };
 });
+// The soft pause (1.6.0, L4): its readers mocked, the line itself real.
+const { readPauseViewMock, readPauseLiftMock } = vi.hoisted(() => ({
+  readPauseViewMock: vi.fn(),
+  readPauseLiftMock: vi.fn(async (..._a: unknown[]) => false),
+}));
+vi.mock("@/lib/budget-pause", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/budget-pause")>()),
+  readPauseView: (...args: unknown[]) => readPauseViewMock(...args),
+}));
+vi.mock("@/lib/state/pause", () => ({
+  readPauseLift: (...args: unknown[]) => readPauseLiftMock(...args),
+  pausePromptOpen: async () => false,
+}));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
@@ -616,5 +629,30 @@ describe("declared lineage on the Direct Agent Key door", () => {
   it("is null without lineage headers", async () => {
     await call();
     expect(writeLogMock.mock.calls[0]?.[0]?.lineage ?? null).toBeNull();
+  });
+});
+
+// The soft pause sits after the passport and Direct Agent Key paths join, so a
+// direct key meets the same line (1.6.0, L4).
+describe("the soft pause on a Direct Agent Key", () => {
+  it("pauses a direct key's agent at its line, before any hold", async () => {
+    getCachedAgentPolicyMock.mockResolvedValueOnce(
+      JSON.stringify({ p: {}, s: null, r: "off", be: "epoch-1", bs: true, bk: true, bt: null, bc: 1000, pdk: true, pdp: null, pdc: null, ppk: true, ppc: 50 })
+    );
+    readPauseViewMock.mockResolvedValueOnce({
+      tokens: null,
+      cost: { limit_microcents: 10 * 100_000_000, used_microcents: 6 * 100_000_000, remaining_microcents: 4 * 100_000_000 },
+      period: null,
+    });
+    const res = await call();
+    expect(res.status).toBe(402);
+    const body = await res.json();
+    expect(body.error).toBe("blocked_budget_pause");
+    expect(body.message).toMatch(/its total spend is 60% of its budget \(\$6\.00 of \$10\.00\), past the 50% pause line/);
+    // A lifetime cap's pause clears only when the owner says so: no retry-after.
+    expect(res.headers.get("retry-after")).toBeNull();
+    expect(readPauseViewMock).toHaveBeenCalledWith(directPrincipal.agentId, expect.objectContaining({ capMicrocents: 10 * 100_000_000 }), expect.any(Number));
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

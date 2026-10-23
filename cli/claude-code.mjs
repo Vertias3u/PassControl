@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { GATE_HOOK_TIMEOUT_S } from "./subscription-gate.mjs";
 
 /** Not a secret: the sidecar discards whatever arrives in this header. */
 export const CLAUDE_CODE_AUTH_PLACEHOLDER = "passcontrol-sidecar";
@@ -66,10 +67,36 @@ function save(target, value, exists) {
 }
 
 /**
+ * `hooks` with API mode's note-only prompt hook for `port`, or without it when `port`
+ * is null. Every other hook, subscription mode's included, is left as it is.
+ */
+function withNoteOnlyHook(hooks, port) {
+  const isNoteOnly = (h) => isObject(h) && h.type === "http" && typeof h.url === "string" && OUR_NOTE_ONLY_URL.test(h.url);
+  const base = isObject(hooks) ? hooks : null;
+  const groups = Array.isArray(base?.UserPromptSubmit) ? base.UserPromptSubmit : [];
+  const kept = [];
+  for (const group of groups) {
+    if (!isObject(group) || !Array.isArray(group.hooks) || !group.hooks.some(isNoteOnly)) kept.push(group);
+    else {
+      const rest = group.hooks.filter((h) => !isNoteOnly(h));
+      if (rest.length) kept.push({ ...group, hooks: rest });
+    }
+  }
+  const ours = { hooks: [{ type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?note=only`, timeout: GATE_HOOK_TIMEOUT_S }] };
+  if (port !== null && groups.length === kept.length + 1 && groups.some((g) => same(g, ours))) return hooks;
+  if (port !== null) kept.push(ours);
+  if (!base && !kept.length) return hooks;
+  const next = { ...(base ?? {}) };
+  if (kept.length) next.UserPromptSubmit = kept;
+  else delete next.UserPromptSubmit;
+  return next;
+}
+
+/**
  * The env keys, and with `statusLineCommand` the status line too, in ONE save:
  * two saves would back up the first save's output and lose the user's original.
  */
-export function writeClaudeCodeSettings({ target, baseUrl, force = false, statusLineCommand = null }) {
+export function writeClaudeCodeSettings({ target, baseUrl, force = false, statusLineCommand = null, noteHookPort = null }) {
   const { exists, value } = readSettings(target);
   const env = typeof value.env === "object" && value.env !== null && !Array.isArray(value.env) ? value.env : {};
   const rawKeyFound = typeof env.ANTHROPIC_API_KEY === "string" && env.ANTHROPIC_API_KEY.length > 0;
@@ -87,7 +114,14 @@ export function writeClaudeCodeSettings({ target, baseUrl, force = false, status
     next = line.value;
     statusLine = line.existing !== undefined ? { changed: false, existing: line.existing } : { changed: line.changed };
   }
-  const changed = !envDone || Boolean(statusLine?.changed);
+  const hooks = withNoteOnlyHook(value.hooks, noteHookPort);
+  const hooksChanged = !same(hooks ?? null, value.hooks ?? null);
+  if (hooksChanged) {
+    next = { ...next };
+    if (hooks && Object.keys(hooks).length) next.hooks = hooks;
+    else delete next.hooks;
+  }
+  const changed = !envDone || Boolean(statusLine?.changed) || hooksChanged;
   const backupPath = changed ? save(target, next, exists) : null;
   return { changed, backupPath, rawKeyFound, ...(statusLine ? { statusLine } : {}) };
 }
@@ -109,6 +143,14 @@ export function removeClaudeCodeSettings({ target }) {
   if (isOurStatusLine(next.statusLine)) {
     const { statusLine: _ours, ...rest } = next;
     next = rest;
+  }
+  if (isObject(next.hooks)) {
+    const hooks = withNoteOnlyHook(next.hooks, null);
+    if (!same(hooks, next.hooks)) {
+      next = { ...next };
+      if (Object.keys(hooks).length) next.hooks = hooks;
+      else delete next.hooks;
+    }
   }
   if (next === value) return { changed: false };
   save(target, next, true);
@@ -176,7 +218,9 @@ export function removeClaudeCodeStatusLine({ target }) {
 
 const LOOPBACK_BASE = "http://127.0.0.1:";
 const OUR_LOGS_ENDPOINT = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/otlp\/v1\/logs$/;
-const OUR_HOOK_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook(\?t=\d{1,4})?$/;
+const OUR_HOOK_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook(\?(t=\d{1,4}|note=1))?$/;
+// API mode's own prompt hook, for the agent's note only (1.6.0): never a stop.
+const OUR_NOTE_ONLY_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook\?note=only$/;
 const OUR_SIDECAR_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}$/;
 const GATED_EVENTS = ["UserPromptSubmit", "PreToolUse", "PostToolBatch"];
 // The log-export settings this mode owns, with the value it writes.
@@ -196,8 +240,8 @@ export function subscriptionEnv(port) {
   };
 }
 
-function gateHook(port) {
-  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook`, timeout: 5 };
+function gateHook(port, note = false) {
+  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook${note ? "?note=1" : ""}`, timeout: GATE_HOOK_TIMEOUT_S };
 }
 
 // PreToolUse may hold a tool while the owner is asked (Phase 2), and Claude Code lets
@@ -210,10 +254,11 @@ function toolHook(port) {
   return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?t=${TOOL_HOOK_TIMEOUT_S}`, timeout: TOOL_HOOK_TIMEOUT_S };
 }
 
-export function subscriptionHooks(port) {
+/** `note`: the agent's opt-in note rides on the prompt hook (`--agent-note`). */
+export function subscriptionHooks(port, { note = false } = {}) {
   const hook = gateHook(port);
   return {
-    UserPromptSubmit: [{ hooks: [hook] }],
+    UserPromptSubmit: [{ hooks: [gateHook(port, note)] }],
     PreToolUse: [{ matcher: "*", hooks: [toolHook(port)] }],
     PostToolBatch: [{ hooks: [hook] }],
   };
@@ -247,8 +292,8 @@ function withoutOurHooks(hooks) {
 }
 
 /** `hooks` with exactly this port's gate hooks, leaving them where they are when already right. */
-function withOurHooks(hooks, port) {
-  const ours = subscriptionHooks(port);
+function withOurHooks(hooks, port, note = false) {
+  const ours = subscriptionHooks(port, { note });
   const base = isObject(hooks) ? hooks : {};
   const next = withoutOurHooks(base);
   for (const event of GATED_EVENTS) {
@@ -273,7 +318,7 @@ function urlAllowed(patterns, url) {
  * Subscription mode's settings, in one save. Throws, writing nothing, when the
  * user already exports Claude Code's logs somewhere else and `force` is not set.
  */
-export function writeClaudeCodeSubscription({ target, port, statusLineCommand, force = false }) {
+export function writeClaudeCodeSubscription({ target, port, statusLineCommand, force = false, note = false }) {
   const { exists, value } = readSettings(target);
   const env = isObject(value.env) ? value.env : {};
   const endpoint = env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
@@ -286,7 +331,7 @@ export function writeClaudeCodeSubscription({ target, port, statusLineCommand, f
       `${target} already exports Claude Code's logs (${theirs.join(", ")}). Subscription mode would send them to the sidecar instead. Re-run with --force to do that; nothing was written.`
     );
   }
-  let next = { ...value, env: { ...env, ...subscriptionEnv(port) }, hooks: withOurHooks(value.hooks, port) };
+  let next = { ...value, env: { ...env, ...subscriptionEnv(port) }, hooks: withOurHooks(value.hooks, port, note) };
   let statusLine;
   if (statusLineCommand) {
     const line = withStatusLine(next, statusLineCommand);
@@ -300,7 +345,7 @@ export function writeClaudeCodeSubscription({ target, port, statusLineCommand, f
     changed,
     backupPath,
     ...(statusLine ? { statusLine } : {}),
-    hookUrlsBlocked: Boolean(allowlist && [gateHook(port), toolHook(port)].some((h) => !urlAllowed(allowlist, h.url))),
+    hookUrlsBlocked: Boolean(allowlist && [gateHook(port), gateHook(port, note), toolHook(port)].some((h) => !urlAllowed(allowlist, h.url))),
     routed: env.ANTHROPIC_AUTH_TOKEN === CLAUDE_CODE_AUTH_PLACEHOLDER && typeof env.ANTHROPIC_BASE_URL === "string",
   };
 }

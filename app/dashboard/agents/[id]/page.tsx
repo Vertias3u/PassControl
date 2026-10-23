@@ -42,6 +42,9 @@ import { ReportedCallsPanel, ToolDecisionsPanel } from "@/components/ReportedCal
 import { readReportedCalls, readToolDecisions } from "./reported-data";
 import { AgentToolRules } from "@/components/AgentToolRules";
 import { readToolRules } from "@/lib/tool-rules";
+import { AgentPauseControl } from "@/components/AgentPauseControl";
+import { pauseReached } from "@/lib/budget-pause";
+import { readAgentPauseState } from "./pause-data";
 
 export const dynamic = "force-dynamic";
 
@@ -246,11 +249,12 @@ export default async function AgentPassportPage({
   // Bet D: only a passport can delegate, so a Direct-Key-only agent has no workers.
   const delegations = passport.agent.passportId ? await readAgentDelegations(user.id, passport.agent.id) : null;
   // Subscription mode (0084): calls Claude Code reported, read through RLS.
-  const [reported, toolDecisions, toolRules] = await Promise.all([
+  const [reported, toolDecisions, toolRules, pauseState] = await Promise.all([
     readReportedCalls(db, passport.agent.id),
     readToolDecisions(db, passport.agent.id),
     // Subscription mode, Phase 2 (0085): read through RLS like the rest of the page.
     readToolRules(db, passport.agent.id, user.id),
+    readAgentPauseState(db, user.id, passport.agent.id),
   ]);
   const hasReported = reported.state === "ok" && reported.rows.length > 0;
   const hasToolDecisions = toolDecisions.state === "ok" && toolDecisions.rows.length > 0;
@@ -344,6 +348,16 @@ export default async function AgentPassportPage({
           visaTtlSeconds={visaTtlSeconds()}
           passportSecretExposedAt={passportSecretExposedAt}
         />
+        {pauseState ? (
+          <AgentPauseControl
+            agentId={passport.agent.id}
+            percent={pauseState.percent}
+            reached={pauseState.line ? pauseReached(pauseState.line) : null}
+            liftedUntil={pauseState.liftedUntil}
+            liftUnknown={pauseState.liftUnknown}
+            switchTo={pauseState.switchTo}
+          />
+        ) : null}
         <section id="agent-overview" className="scroll-mt-40">
         <div id="agent-identity" className="scroll-mt-40">
         <AgentPassport

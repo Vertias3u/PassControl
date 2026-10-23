@@ -59,6 +59,7 @@ const STATUS: Record<LogEntry["status"], { explanation: string }> = {
   blocked_policy: { explanation: "The live policy recorded on this attempt refused it." },
   blocked_budget: { explanation: "The PassControl budget gate refused the attempt before provider forwarding." },
   blocked_budget_period: { explanation: "The agent's daily or monthly spend limit was used up for the current UTC period, so PassControl refused the attempt before provider forwarding. It clears on its own at the next UTC period boundary; raising the limit clears it sooner." },
+  blocked_budget_pause: { explanation: "The agent reached the pause line its owner set, a share of its spend limit, so PassControl paused it before provider forwarding. The limit itself was not reached. Letting it go on from the agent's page lifts the pause for an hour; the limit still applies." },
   blocked_budget_subagent: { explanation: "A sub-agent used the spending cap its agent's policy sets for one sub-agent in one session, so PassControl refused this call before provider forwarding. The agent's main thread and its other sub-agents keep running. The sub-agent and session ids are declared by the coding tool, so a new session or a new sub-agent starts at zero; the agent's own limits still apply to all of it." },
   blocked_budget_delegation: { explanation: "A worker acting under a delegation from this agent reached the spending cap of its delegation, or of a delegation above it, so PassControl refused this call before provider forwarding. The agent itself and its other workers keep running." },
   blocked_delegation_revoked: { explanation: "A worker presented a delegation from this agent that the owner revoked (one delegation, or every delegation issued before a point in time). PassControl refused the call before provider forwarding." },
@@ -141,6 +142,7 @@ export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null)
       break;
     case "blocked_budget":
     case "blocked_budget_period":
+    case "blocked_budget_pause":
     case "blocked_budget_subagent":
     case "blocked_budget_delegation":
     case "blocked_unpriced_endpoint":

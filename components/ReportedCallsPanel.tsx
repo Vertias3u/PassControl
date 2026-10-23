@@ -17,6 +17,12 @@ export type ReportedCallRow = {
   received_at: string;
   input_tokens: number | null;
   output_tokens: number | null;
+  // Prompt-cache tokens, reported apart from input. On Claude Code they are most of
+  // a call's cost (its system prompt is written to the cache, then read back), so a
+  // row without them reads as "2 tokens for $0.17". Optional: rows read before
+  // these were selected have neither.
+  cache_creation_tokens?: number | null;
+  cache_read_tokens?: number | null;
   reported_cost_usd_micros: number | null;
   duration_ms: number | null;
   status_code: number | null;
@@ -62,7 +68,24 @@ export function formatApiEquivalent(micros: number | null): string {
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+// How old rows go. Cloud sweeps every agent daily; a self-hosted install prunes an
+// agent's rows when that agent next reports, so a quiet agent keeps older ones.
+export function retentionSentence(): string {
+  return "Rows older than 90 days are removed the next time this agent reports.";
+}
+
 const count = (n: number | null) => (n === null ? "—" : n.toLocaleString("en-US"));
+
+/** "cache: 21,406 written, 13,240 read", or null when the row reports no cache use. */
+export function cacheLine(row: Pick<ReportedCallRow, "cache_creation_tokens" | "cache_read_tokens">): string | null {
+  const written = row.cache_creation_tokens ?? 0;
+  const read = row.cache_read_tokens ?? 0;
+  if (written <= 0 && read <= 0) return null;
+  const parts = [];
+  if (written > 0) parts.push(`${count(written)} written`);
+  if (read > 0) parts.push(`${count(read)} read`);
+  return `cache: ${parts.join(", ")}`;
+}
 
 function when(row: { occurred_at: string | null; received_at: string }): string {
   const at = row.occurred_at ?? row.received_at;
@@ -90,7 +113,7 @@ export function ReportedCallsPanel({ read }: { read: ReportedCallsRead }) {
             Calls Claude Code reported from a Claude Pro or Max login. They were not proxied, and PassControl
             holds no receipt for them: this is the client&apos;s own account. The cost is API-equivalent,
             what each call would have cost on the API. It is never charged to a budget, because the plan is a
-            flat fee. Kept for 90 days.
+            flat fee. {retentionSentence()}
           </>
         }
       />
@@ -134,6 +157,7 @@ export function ReportedCallsPanel({ read }: { read: ReportedCallsRead }) {
                   </td>
                   <td className="py-2 pr-4 whitespace-nowrap">
                     {count(row.input_tokens)} / {count(row.output_tokens)}
+                    {cacheLine(row) ? <span className="block text-xs text-muted-foreground">{cacheLine(row)}</span> : null}
                   </td>
                   <td className="py-2 pr-4 whitespace-nowrap">{formatApiEquivalent(row.reported_cost_usd_micros)}</td>
                   <td className="py-2 pr-4 whitespace-nowrap text-muted-foreground">
@@ -160,7 +184,7 @@ export function ToolDecisionsPanel({ read }: { read: ToolDecisionsRead }) {
           <>
             What this agent&apos;s tool rules decided in Claude Code on a Claude Pro or Max login, as its sidecar
             reported it. Only the tool&apos;s name and the decision: never the command, file or address it was
-            about. Kept for 90 days.
+            about. {retentionSentence()}
           </>
         }
       />

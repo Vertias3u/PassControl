@@ -476,7 +476,70 @@ function diffFallbacks(from: FallbackRow[], to: FallbackRow[]): string[] {
   return lines;
 }
 
+const BUDGET_FIELD_LABEL: Record<string, string> = {
+  budget_tokens: "Token cap",
+  budget_cents: "Cost cap",
+  budget_period: "Limit period",
+  budget_period_cents: "Periodic cost cap",
+  pause_percent: "Pause line",
+  pause_action: "Pause action",
+  pause_switch_provider: "Switch provider",
+  pause_switch_model: "Switch model",
+};
+
+function parseBudgetSide(value: unknown, fields: string[]): Side {
+  const declined = omittedChars(value);
+  if (declined !== null) return { ok: false, why: "omitted", chars: declined };
+  const side = parsePolicySide(value);
+  if (!side.ok) return side;
+  if (!isRecord(side.value)) return { ok: false, why: "unreadable" };
+  const snapshot = side.value;
+  for (const field of fields) {
+    if (!Object.hasOwn(snapshot, field)) return { ok: false, why: "unreadable" };
+    const entry = snapshot[field];
+    if (entry === null) continue;
+    const readable = field === "pause_action" ? entry === "pause" || entry === "switch"
+      : field === "budget_period" ? entry === "day" || entry === "month"
+      : field === "pause_switch_provider" || field === "pause_switch_model" ? typeof entry === "string"
+      : typeof entry === "number" && Number.isSafeInteger(entry) && entry >= 0;
+    if (!readable) return { ok: false, why: "unreadable" };
+  }
+  return side;
+}
+
+function budgetValue(field: string, value: unknown): string {
+  if (value === null) {
+    if (field === "pause_percent") return "not set";
+    if (field === "budget_tokens" || field.endsWith("_cents")) return "no cap";
+    return "none";
+  }
+  if (field === "pause_percent") return `${value}%`;
+  if (field.endsWith("_cents")) return `$${((value as number) / 100).toFixed(2)}`;
+  if (field === "budget_tokens") return (value as number).toLocaleString("en-US");
+  return String(value);
+}
+
+function summariseBudget(fields: string[], metadata: Record<string, unknown>): Summary {
+  const sides = pair(parseBudgetSide(metadata.from, fields), parseBudgetSide(metadata.to, fields));
+  if (!sides.ok) return unresolved("Budget", sides.why, sides.chars);
+  const before = sides.from as Record<string, unknown>;
+  const after = sides.to as Record<string, unknown>;
+  const detail = fields.filter((field) => before[field] !== after[field]).map((field) =>
+    `${BUDGET_FIELD_LABEL[field]}: ${budgetValue(field, before[field])} → ${budgetValue(field, after[field])}`
+  );
+  return {
+    summary: detail.length ? "Budget changed." : "Budget saved with no effective change.",
+    detail,
+    recorded: true,
+    snapshot: "recorded",
+  };
+}
+
 function summariseUpdate(fields: string, metadata: Record<string, unknown>): Summary {
+  const budgetFields = fields.split(",").map((field) => field.trim());
+  if (budgetFields.every((field) => Object.hasOwn(BUDGET_FIELD_LABEL, field))) {
+    return summariseBudget(budgetFields, metadata);
+  }
   if (fields === "expires_at") return summariseExpiry(metadata);
   if (fields === "passport_pubkey" && metadata.rotated === true) {
     return summariseRotation(metadata);
@@ -570,9 +633,7 @@ function summariseUpdate(fields: string, metadata: Record<string, unknown>): Sum
   }
 
   if (fields.startsWith("budget")) {
-    // updateAgentBudgets records `fields` only — there is no from/to to damage,
-    // so this row is always the absent kind. Say so rather than skipping it, or
-    // a budget change would be invisible in the one place someone looks for it.
+    // An older or mixed-field writer with no supported budget document.
     return unresolved("Budget", "absent");
   }
 

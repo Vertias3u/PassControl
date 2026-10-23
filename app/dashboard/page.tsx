@@ -1,5 +1,7 @@
 // Control Tower — server component. Loads owned agents + recent audit via the
 // user-scoped (RLS) client and composes the dashboard.
+import { Suspense } from "react";
+import { WeeklyRecapCard } from "@/components/dashboard/WeeklyRecapCard";
 import { userClient } from "@/lib/supabase/server";
 import { observeKillState, readKillState } from "@/lib/state/killswitch";
 import { GlobalKillSwitchBar } from "@/components/GlobalKillSwitchBar";
@@ -387,6 +389,8 @@ export default async function ControlTowerPage() {
           logsAvailable={logsAvailable}
           agentsAvailable={!agentsError}
         />
+
+        <Suspense fallback={null}><WeeklyRecapCard userId={user.id} at={renderedAt} /></Suspense>
 
         {/* Directly under the kill switch on purpose: arming it and watching the
             next departures come back refused is the whole product in one frame.

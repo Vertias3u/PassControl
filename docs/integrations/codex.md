@@ -20,6 +20,38 @@ does, and `codex logout` removes it.
 The agent's OpenAI scope must allow the model Codex uses (`-m`, or `model` in Codex's config). To
 undo, run `passcontrol configure codex --remove`.
 
+## On a ChatGPT plan
+
+Codex signed in with a ChatGPT plan talks to OpenAI directly, and PassControl stays out of that
+path. The agent's stops and tool rules still reach the session, through two Codex hooks:
+
+```bash
+passcontrol configure codex --subscription            # preview
+passcontrol configure codex --subscription --write    # adds two hooks to ~/.codex/hooks.json
+passcontrol sidecar                                    # start it before Codex
+```
+
+Then open Codex, type `/hooks`, and trust PassControl's two hooks. Codex skips a hook nobody has
+trusted, without saying so.
+
+- A suspended agent, or the kill switch, blocks the next prompt and refuses tools.
+- The agent's tool rules refuse what they deny. An "ask the owner" rule waits for the owner's answer.
+
+`hooks.json` is shared with other tools. Setup adds or replaces only PassControl's entries, keeps a
+backup the first time (`hooks.json.passcontrol-backup`), and
+`passcontrol configure codex --subscription --remove` takes out only PassControl's entries.
+
+What it cannot do:
+
+- **Codex has no strict hook mode.** If the sidecar is not running, or a hook fails, Codex goes
+  ahead. A missing sidecar shows a warning.
+- **Only some tool rules apply.** Command rules (Bash) and MCP tool rules work. Path rules (Read,
+  Write, Edit) and domain rules (WebFetch) name Claude Code's tools, which Codex does not have, so
+  they do not apply here.
+- **An "ask" rule cannot ask in Codex, so it refuses instead.**
+- **No per-session stop.** Codex's calls are not shown on the agent's page, and a single Codex
+  session cannot be stopped from the dashboard. Suspend the agent instead.
+
 ## Give it an agent of its own
 
 ```bash

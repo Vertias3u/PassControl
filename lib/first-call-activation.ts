@@ -7,6 +7,7 @@ export type FirstCallStatus =
   | "ok"
   | "blocked_budget"
   | "blocked_budget_period"
+  | "blocked_budget_pause"
   | "blocked_budget_subagent"
   | "blocked_budget_delegation"
   | "blocked_delegation_revoked"
@@ -356,6 +357,12 @@ export function activationDiagnosis(row: FirstCallRow): ActivationDiagnosis {
       return {
         title: "The daily or monthly limit refused the call",
         detail: "The request stopped before provider dispatch because this agent has used its spend limit for the current UTC period. It clears at the next period boundary.",
+        action: "fleet",
+      };
+    case "blocked_budget_pause":
+      return {
+        title: "The agent is paused at its pause line",
+        detail: "The request stopped before provider dispatch because this agent has used the share of its spend limit you set as its pause line. Let it go on for an hour from the agent's page, or raise the line.",
         action: "fleet",
       };
     case "blocked_budget_subagent":

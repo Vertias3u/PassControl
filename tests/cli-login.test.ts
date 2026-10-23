@@ -70,6 +70,7 @@ function stubGateway(
     demo?: "on" | "off";
     receipts?: "on" | "off";
     jws?: string;
+    createRefusal?: { status: number; body: unknown };
   } = {}
 ) {
   const seen: Seen[] = [];
@@ -108,6 +109,7 @@ function stubGateway(
         return send(200, { data: opts.agents ?? [] });
       }
       if (req.url === "/api/control/v1/agents" && req.method === "POST") {
+        if (opts.createRefusal) return send(opts.createRefusal.status, opts.createRefusal.body);
         return send(201, { data: { id: "agent-123", name: "test-host" } });
       }
       if (/^\/api\/control\/v1\/agents\/[^/]+\/rotate$/u.test(req.url ?? "")) {
@@ -294,6 +296,89 @@ describe("passcontrol login writes a working config", () => {
     const stub = stubGateway();
     await withGateway(stub, (port) => runLogin(port));
     expect(fs.statSync(configFile).mode & 0o777, "a passport secret may not be world-readable").toBe(0o600);
+  });
+});
+
+describe("a refused control-plane call says why", () => {
+  // The gateway's 409 names the limit and what to do about it; the CLI printed
+  // only "(409)". Seen on Cloud on 2026-10-12, where the answer was a limit.
+  it("prints the server's code and message, not only the status", async () => {
+    const stub = stubGateway({
+      createRefusal: {
+        status: 409,
+        body: {
+          error: {
+            code: "account_limit_reached",
+            message: "Too many agents were created in the last 24 hours (the limit is 3). Try again later.",
+            request_id: "req-1",
+          },
+        },
+      },
+    });
+    await withGateway(stub, async (port) => {
+      await expect(runLogin(port)).rejects.toThrow(
+        "Control plane refused POST /agents (409 account_limit_reached): Too many agents were created in the last 24 hours (the limit is 3). Try again later."
+      );
+    });
+  });
+
+  it("still names the status when the body is not the control API's shape", async () => {
+    const stub = stubGateway({ createRefusal: { status: 502, body: "<html>bad gateway</html>" } });
+    await withGateway(stub, async (port) => {
+      await expect(runLogin(port)).rejects.toThrow(/^Control plane refused POST \/agents \(502\)\.$/u);
+    });
+  });
+
+  it("does not print an overlong or multi-line server message as is", async () => {
+    const stub = stubGateway({
+      createRefusal: { status: 409, body: { error: { code: "x", message: `line one\n${"y".repeat(500)}` } } },
+    });
+    await withGateway(stub, async (port) => {
+      const error = await runLogin(port).catch((e: Error) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).not.toContain("\n");
+      expect((error as Error).message.length).toBeLessThan(320);
+    });
+  });
+});
+
+describe("a reused agent without demo access is not sent a doomed test call", () => {
+  // Only agents login CREATES get the keyless `demo` scope. Reusing one made in
+  // the dashboard ran the demo call anyway: refused at the scope gate, recorded
+  // on the agent's page as a refused call, and explained as "no model access",
+  // which was false for an agent with Anthropic access. Seen 2026-10-12.
+  async function reuse(scopes: unknown) {
+    const stub = stubGateway({ agents: [{ id: "agent-9", name: "e2e", allowed_scopes: scopes }] });
+    const result = await withGateway(stub, async (port) => {
+      process.env.PASSCONTROL_GATEWAY = `http://127.0.0.1:${port}`;
+      const mod = await importLogin();
+      const clock = virtualClock();
+      return mod.loginCommand(
+        { name: "test-host" },
+        {
+          openUrl: () => {},
+          now: clock.now,
+          sleep: clock.sleep,
+          promptLine: async () => "agent-9",
+          confirmYes: async () => false,
+        }
+      );
+    });
+    return { result, seen: stub.seen };
+  }
+
+  it("proves the passport with a visa and makes no demo call", async () => {
+    const { result, seen } = await reuse([{ provider: "anthropic", models: ["claude-haiku-4-5"] }]);
+    expect(seen.some((r) => r.url.includes("/agents/agent-9/rotate")), "it rotated the reused agent").toBe(true);
+    expect(seen.some((r) => r.url === "/api/auth/challenge"), "the passport was still proven").toBe(true);
+    expect(seen.some((r) => r.url === "/api/v1/demo/chat/completions"), "no doomed call").toBe(false);
+    expect(result.proof).toMatchObject({ visa: true, call: false, reason: "no_demo_scope" });
+  });
+
+  it("still runs the demo call when the reused agent has demo access", async () => {
+    const { result, seen } = await reuse([{ provider: "demo", models: ["*"] }]);
+    expect(seen.some((r) => r.url === "/api/v1/demo/chat/completions")).toBe(true);
+    expect(result.proof.call).toBe(true);
   });
 });
 

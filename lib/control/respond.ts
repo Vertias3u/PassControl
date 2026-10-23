@@ -57,14 +57,22 @@ const MESSAGES: Record<string, string> = {
   seal_unavailable: "This instance has no signing key configured, so it cannot seal sessions.",
 };
 
+// Codes whose caller-specific sentence is safe to show instead of the fixed one.
+// An account limit's sentence says WHICH limit (live or daily) and its number,
+// which decide what the caller does next (revoke one, or wait); it is built by
+// lib/account-limits.ts from the database's refusal and carries nothing else.
+const DETAIL_SHOWN = new Set(["account_limit_reached"]);
+
 export function errorResponse(
   status: number,
   code: string,
   requestId: string,
-  extraHeaders: Record<string, string> = {}
+  extraHeaders: Record<string, string> = {},
+  detail?: string
 ): Response {
+  const message = detail && DETAIL_SHOWN.has(code) ? detail : (MESSAGES[code] ?? "Request failed.");
   return new Response(
-    JSON.stringify({ error: { code, message: MESSAGES[code] ?? "Request failed.", request_id: requestId } }),
+    JSON.stringify({ error: { code, message, request_id: requestId } }),
     {
       status,
       headers: { "content-type": "application/json", "x-request-id": requestId, ...extraHeaders },

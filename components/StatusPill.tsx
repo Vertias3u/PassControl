@@ -10,13 +10,16 @@ import { CALL_OUTCOME, callOutcome } from "@/lib/call-outcome";
 // `import type` is erased at build time, so no server-only code reaches the client.
 export type StatusType = LogEntry["status"] | "active" | "suspended" | "revoked";
 
-type Tone = "success" | "warning" | "danger";
-const TONE_HEX: Record<Tone, string> = {
+type Tone = "success" | "warning" | "danger" | "calm";
+const TONE_COLOR: Record<Tone, string> = {
   success: "#10b981",
   warning: "#f59e0b",
   danger: "#ef4444",
+  calm: "var(--pc-calm)",
 };
 
+// Policy refusals and deliberate agent stops are calm. Failed checks still
+// need attention; the kill switch and an upstream error keep the incident tone.
 // Tone and icon per status. The WORDS for a call status come from
 // lib/call-outcome.ts, shared with the board, the drawer and the agent page, so
 // one outcome is never named two ways on the same screen.
@@ -29,17 +32,18 @@ const AGENT_LABEL: Record<"active" | "suspended" | "revoked", string> = {
 const CONFIG: Record<StatusType, { Icon: typeof CheckCircle2; tone: Tone }> = {
   active: { Icon: CheckCircle2, tone: "success" },
   ok: { Icon: CheckCircle2, tone: "success" },
-  suspended: { Icon: AlertCircle, tone: "warning" },
-  blocked_budget: { Icon: AlertCircle, tone: "warning" },
-  blocked_budget_period: { Icon: AlertCircle, tone: "warning" },
-  blocked_budget_subagent: { Icon: AlertCircle, tone: "warning" },
-  blocked_budget_delegation: { Icon: AlertCircle, tone: "warning" },
-  blocked_delegation_revoked: { Icon: AlertCircle, tone: "warning" },
+  suspended: { Icon: AlertCircle, tone: "calm" },
+  blocked_budget: { Icon: AlertCircle, tone: "calm" },
+  blocked_budget_period: { Icon: AlertCircle, tone: "calm" },
+  blocked_budget_pause: { Icon: AlertCircle, tone: "calm" },
+  blocked_budget_subagent: { Icon: AlertCircle, tone: "calm" },
+  blocked_budget_delegation: { Icon: AlertCircle, tone: "calm" },
+  blocked_delegation_revoked: { Icon: AlertCircle, tone: "calm" },
   blocked_delegation_unavailable: { Icon: AlertCircle, tone: "warning" },
-  blocked_scope: { Icon: AlertCircle, tone: "warning" },
+  blocked_scope: { Icon: AlertCircle, tone: "calm" },
   // Distinct from a scope violation: the visa's scope allowed this call and a
   // policy rule on the agent refused it anyway.
-  blocked_policy: { Icon: AlertCircle, tone: "warning" },
+  blocked_policy: { Icon: AlertCircle, tone: "calm" },
   // "Budget exceeded" above is ours; this one is the provider's own balance.
   provider_exhausted: { Icon: AlertCircle, tone: "warning" },
   // A setup gap here, not a fault out there — the call never left.
@@ -54,13 +58,13 @@ const CONFIG: Record<StatusType, { Icon: typeof CheckCircle2; tone: Tone }> = {
   // failed: an operator changed the credential while this call was being
   // assembled, and the retry will be fine.
   credential_changed: { Icon: AlertCircle, tone: "warning" },
-  // A configuration answer, not a spend answer — deliberately not the tone or
-  // the wording of a budget denial. The agent is not out of money.
-  blocked_unpriced_endpoint: { Icon: AlertCircle, tone: "warning" },
-  blocked_unpriced_model: { Icon: AlertCircle, tone: "warning" },
-  blocked_server_tool: { Icon: AlertCircle, tone: "warning" },
-  blocked_secret: { Icon: AlertCircle, tone: "warning" },
-  upstream_error: { Icon: HelpCircle, tone: "warning" },
+  // A configuration refusal, not a spend answer. The calm tone is shared,
+  // while the label makes clear that the agent is not out of money.
+  blocked_unpriced_endpoint: { Icon: AlertCircle, tone: "calm" },
+  blocked_unpriced_model: { Icon: AlertCircle, tone: "calm" },
+  blocked_server_tool: { Icon: AlertCircle, tone: "calm" },
+  blocked_secret: { Icon: AlertCircle, tone: "calm" },
+  upstream_error: { Icon: HelpCircle, tone: "danger" },
   // The call reached a provider and the accounting did not come back. Warning
   // rather than danger: nothing was refused and nothing necessarily failed.
   usage_unknown: { Icon: HelpCircle, tone: "warning" },
@@ -71,9 +75,9 @@ const CONFIG: Record<StatusType, { Icon: typeof CheckCircle2; tone: Tone }> = {
   // Same warning tone as its sibling above, and for the same reason: nothing was
   // spent and nothing is broken about the agent, but an operator should look.
   dispatch_unavailable: { Icon: AlertCircle, tone: "warning" },
-  blocked_endpoint: { Icon: AlertCircle, tone: "warning" },
-  revoked: { Icon: XCircle, tone: "danger" },
-  blocked_suspended: { Icon: XCircle, tone: "danger" },
+  blocked_endpoint: { Icon: AlertCircle, tone: "calm" },
+  revoked: { Icon: XCircle, tone: "calm" },
+  blocked_suspended: { Icon: XCircle, tone: "calm" },
   // Distinct from "Agent suspended": this call was stopped by the kill switch
   // (platform, tenant, or denylist), not by anything set on the agent itself.
   blocked_killed: { Icon: XCircle, tone: "danger" },
@@ -90,11 +94,14 @@ export function StatusPill({ status, label }: { status: StatusType; label?: stri
   // to borrow upstream_error's entry, which labelled it "Provider error".
   const { Icon, tone } = CONFIG[status] ?? { Icon: HelpCircle, tone: "warning" as const };
   const defaultLabel = defaultLabelFor(status);
-  const color = TONE_HEX[tone];
+  const color = TONE_COLOR[tone];
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold"
-      style={{ color, background: `${color}26` }}
+      style={{
+        color,
+        background: tone === "calm" ? "rgba(var(--pc-calm-rgb), 0.15)" : `${color}26`,
+      }}
     >
       <Icon className="h-3 w-3" />
       {label ?? defaultLabel}

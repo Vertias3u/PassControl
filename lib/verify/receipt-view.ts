@@ -445,6 +445,12 @@ const VERDICTS: Record<string, VerdictPresentation> = {
     detail: "The gateway could not confirm that the worker's delegation was still valid, and refused rather than guess.",
     tone: "held",
   },
+  blocked_budget_pause: {
+    label: "Paused — at its owner's pause line",
+    detail:
+      "The agent had used the share of its spending limit at which its owner asked PassControl to pause it. The limit itself was not reached; the owner can let the agent go on.",
+    tone: "held",
+  },
   blocked_budget_period: {
     label: "Refused — over its daily or monthly limit",
     detail:

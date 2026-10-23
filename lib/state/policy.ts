@@ -83,6 +83,24 @@ export interface CurrentPolicyRead {
   period:
     | { known: true; kind: PeriodKind | null; cents: number | null }
     | { known: false };
+  /**
+   * The soft pause line (1.6.0, migration 0087): pause at this % of a limit.
+   * Optional because most readers have no business with it. Absent or
+   * `known: false` (an older schema, an older cache entry, a failed read) means
+   * NO pause: a soft limit the database cannot confirm must not become a new
+   * denial path. `percent: null` is a real value: no pause line.
+   */
+  pause?: { known: true; percent: number | null; switchTo?: PauseSwitch | null } | { known: false };
+}
+
+/**
+ * What the agent goes on with past its pause line instead of pausing (1.6.0, L7,
+ * 0088). Null, or absent, is today's behaviour: it pauses. Read only from a row or
+ * cache entry that carries all of it; half a switch is a pause, never a guess.
+ */
+export interface PauseSwitch {
+  provider: string;
+  model: string;
 }
 
 /** Cached shape. Short keys because this is written on every cache miss. */
@@ -127,9 +145,29 @@ interface CachedPolicy {
   pdk?: boolean;
   pdp?: PeriodKind | null;
   pdc?: number | null;
+  /** The pause line (0087), with its own known-flag for the same reason. */
+  ppk?: boolean;
+  ppc?: number | null;
+  /**
+   * The switch at the pause line (0088): [provider, model], written only when it
+   * switches. No known-flag: an entry without it reads as "pause", which is what
+   * every entry written before 0088 meant, and the stricter of the two answers.
+   */
+  pss?: [string, string];
 }
 
 const UNKNOWN_PERIOD = { known: false } as const;
+
+function pauseSwitch(action: unknown, provider: unknown, model: unknown): PauseSwitch | null {
+  return action === "switch" && typeof provider === "string" && provider && typeof model === "string" && model
+    ? { provider, model }
+    : null;
+}
+
+/** A pause line is a whole 1–99; anything else (a hand-edited row) is no line. */
+function pausePercent(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 99 ? value : null;
+}
 
 function periodKind(value: unknown): PeriodKind | null {
   return value === "day" || value === "month" ? value : null;
@@ -205,6 +243,14 @@ export async function readCurrentAgentPolicyAndShadow(
               parsed.pdk === true
                 ? { known: true, kind: periodKind(parsed.pdp), cents: parsed.pdc ?? null }
                 : UNKNOWN_PERIOD,
+            pause:
+              parsed.ppk === true
+                ? {
+                    known: true,
+                    percent: pausePercent(parsed.ppc),
+                    switchTo: Array.isArray(parsed.pss) ? pauseSwitch("switch", parsed.pss[0], parsed.pss[1]) : null,
+                  }
+                : { known: false },
           };
         }
       } catch {
@@ -244,19 +290,46 @@ export async function readCurrentAgentPolicyAndShadow(
   // Selecting one column or three costs the same round trip. This is why shadow
   // mode and the sender-proof opt-in stay free on the hot path. The complete
   // read stays first: on a current schema nothing below it runs.
+  // A RUNG OF ITS OWN for 0088's switch at the pause line, above 0087's: without
+  // 0088 the agent pauses at its line, as it did before, and nothing else is lost.
+  const withSwitch = await db
+    .from("agents")
+    .select(
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents, pause_percent, pause_action, pause_switch_provider, pause_switch_model"
+    )
+    .eq("user_id", userId)
+    .eq("id", agentId)
+    .maybeSingle();
+
+  // A RUNG OF ITS OWN for 0087's pause line, ABOVE 0073's, for the reason every
+  // rung here exists: the gateway can deploy before the migration does, and a
+  // missing optional column must cost the pause, never the periodic limit.
+  const withPause = isMissingColumn(withSwitch.error)
+    ? await db
+        .from("agents")
+        .select(
+          "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents, pause_percent"
+        )
+        .eq("user_id", userId)
+        .eq("id", agentId)
+        .maybeSingle()
+    : withSwitch;
+
   // A RUNG OF ITS OWN for 0073's periodic limit, ABOVE the full select, for the
   // same reason 0055 got one: added to the current first rung, a database that
   // has not applied 0073 would fall to `withoutBudgetState` and silently lose
   // the budget epoch — turning off loss detection because a new, optional
   // column was missing. A schema that lacks it pays one extra round trip.
-  const withPeriod = await db
-    .from("agents")
-    .select(
-      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents"
-    )
-    .eq("user_id", userId)
-    .eq("id", agentId)
-    .maybeSingle();
+  const withPeriod = isMissingColumn(withPause.error)
+    ? await db
+        .from("agents")
+        .select(
+          "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents"
+        )
+        .eq("user_id", userId)
+        .eq("id", agentId)
+        .maybeSingle()
+    : withPause;
 
   const current = isMissingColumn(withPeriod.error)
     ? await db
@@ -349,6 +422,7 @@ export async function readCurrentAgentPolicyAndShadow(
       budgetState: { epoch: null, established: false },
       budget: { known: false },
       period: UNKNOWN_PERIOD,
+      pause: { known: false },
     };
   }
 
@@ -427,6 +501,17 @@ export async function readCurrentAgentPolicyAndShadow(
         })()
       : UNKNOWN_PERIOD;
 
+  // Known only on the top rung, the one that selected it.
+  const pauseRow = row as { pause_percent?: unknown; pause_action?: unknown; pause_switch_provider?: unknown; pause_switch_model?: unknown };
+  const pause: NonNullable<CurrentPolicyRead["pause"]> =
+    "pause_percent" in pauseRow
+      ? {
+          known: true,
+          percent: pausePercent(pauseRow.pause_percent),
+          switchTo: pauseSwitch(pauseRow.pause_action, pauseRow.pause_switch_provider, pauseRow.pause_switch_model),
+        }
+      : { known: false };
+
   if (options.cacheOnMiss !== false) {
     waitUntil(
       setCachedAgentPolicy(
@@ -440,6 +525,8 @@ export async function readCurrentAgentPolicyAndShadow(
           bs: budgetState.established,
           ...(budget.known ? { bk: true, bt: budget.tokens, bc: budget.cents } : {}),
           ...(period.known ? { pdk: true, pdp: period.kind, pdc: period.cents } : {}),
+          ...(pause.known ? { ppk: true, ppc: pause.percent } : {}),
+          ...(pause.known && pause.switchTo ? { pss: [pause.switchTo.provider, pause.switchTo.model] as [string, string] } : {}),
         } satisfies CachedPolicy),
         POLICY_CACHE_TTL_S,
         // THE ARGUMENT THAT WAS MISSING. The previous fence had a parameter for
@@ -451,7 +538,7 @@ export async function readCurrentAgentPolicyAndShadow(
       )
     );
   }
-  return { policy, shadow, senderConstraintMode, budgetState, budget, period };
+  return { policy, shadow, senderConstraintMode, budgetState, budget, period, pause };
 }
 
 /**

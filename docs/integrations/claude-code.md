@@ -89,6 +89,30 @@ command writes your user settings because Claude Code ignores telemetry settings
 file. It keeps anything of yours, and it refuses to redirect a log export you already send
 elsewhere unless you add `--force`. To undo, run `passcontrol configure claude-code --subscription --remove`.
 
+## Tell the agent its own limits (opt-in)
+
+Add `--agent-note` to either setup, and on a prompt Claude Code is told about its own limits, so
+it can plan the work before it is refused:
+
+```sh
+passcontrol configure claude-code --write --agent-note                  # through the sidecar
+passcontrol configure claude-code --subscription --write --agent-note   # on a Pro or Max plan
+```
+
+> PassControl budget note (sent when it changes): $5.00 of $20.00 left today; it resets at
+> 00:00. At this rate it runs out at 16:00.
+
+The note is sent only when something in it changes: another quarter of the budget used (and at
+90 %), the reset less than an hour away, the rate turning to reach the limit before the reset or
+away from it, or the tool rules changing. It costs the session almost no context. "At this rate"
+comes from the gateway: what a daily or monthly limit has counted so far this period, or for a
+limit with no period, the last 24 hours of spend.
+
+On a Pro or Max plan the note leads with the agent's tool rules, which apply there, because the
+plan's own calls never count against a PassControl budget. Any budget it mentions is named for
+what it covers: calls made through PassControl. It is off unless you add the flag, and running
+the command again without it takes it off.
+
 ## `/passcontrol` inside Claude Code
 
 ```bash

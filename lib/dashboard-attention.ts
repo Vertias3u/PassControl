@@ -1,3 +1,5 @@
+import { projectedDate } from "@/lib/budget-pace";
+
 export const BUDGET_ATTENTION_RATIO = 0.8;
 
 const DAY_MS = 86_400_000;
@@ -128,20 +130,6 @@ export function withLastSeenFromLogs<T extends { id: string; last_seen_at: strin
     if (stamped !== null && stamped >= fromLogs) return agent;
     return { ...agent, last_seen_at: new Date(fromLogs).toISOString() };
   });
-}
-
-function projectedDate(
-  spent: number,
-  limit: number | null,
-  burned: number,
-  observedMs: number,
-  nowMs: number
-): number | null {
-  if (limit == null || limit <= 0 || burned <= 0 || observedMs <= 0) return null;
-  if (spent >= limit) return nowMs;
-  const perMs = burned / observedMs;
-  const projected = nowMs + (limit - spent) / perMs;
-  return Number.isFinite(projected) && Math.abs(projected) <= 8.64e15 ? projected : null;
 }
 
 /**

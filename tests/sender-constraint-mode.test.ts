@@ -34,10 +34,20 @@ const CURRENT_SCHEMA = [
   // 0073, a rung of its own above the rest (see the pre-0073 test below).
   "budget_period",
   "budget_period_cents",
+  // 0087, a rung of its own above 0073's (see the pre-0087 test below).
+  "pause_percent",
+  // 0088, a rung of its own above 0087's (tests/policy-pause-switch.test.ts).
+  "pause_action",
+  "pause_switch_provider",
+  "pause_switch_model",
 ];
 
-/** The newest schema before 0073: every column above except the periodic limit. */
-const PRE_0073_SCHEMA = CURRENT_SCHEMA.filter((c) => !c.startsWith("budget_period"));
+/** The newest schema before 0088: every column above except the switch at the pause line. */
+const PRE_0088_SCHEMA = CURRENT_SCHEMA.filter((c) => !["pause_action", "pause_switch_provider", "pause_switch_model"].includes(c));
+/** The newest schema before 0087: every column above except the pause line. */
+const PRE_0087_SCHEMA = PRE_0088_SCHEMA.filter((c) => c !== "pause_percent");
+/** The newest schema before 0073: every column above except the periodic limit and the pause line. */
+const PRE_0073_SCHEMA = PRE_0087_SCHEMA.filter((c) => !c.startsWith("budget_period"));
 
 /**
  * A database whose selects fail with 42703 until the caller asks for a column
@@ -105,8 +115,8 @@ describe("the pre-0049 schema, where the control is a boolean", () => {
 
     expect(read.senderConstraintMode).toBe("off");
     // Current schemas still pay one query; this rung is only reached after the
-    // newer ones have already been refused by 42703 (0073 added one above).
-    expect(selects.length).toBeLessThanOrEqual(4);
+    // newer ones have already been refused by 42703 (0073, 0087 and 0088 added one each above).
+    expect(selects.length).toBeLessThanOrEqual(6);
   });
 
   it("still falls through to policy-only on a schema older than 0046", async () => {
@@ -177,7 +187,7 @@ describe("reading the sender-constraint mode", () => {
     // No budget columns means this database cannot record budget state, so
     // nothing is enforced and the gateway behaves exactly as it did before 0055.
     expect(read.budgetState).toEqual({ epoch: null, established: false });
-    expect(selects).toHaveLength(3);
+    expect(selects).toHaveLength(5);
   });
 
   // THE RUNG 0073 ADDED, above the full select. Folded into the current first
@@ -204,7 +214,39 @@ describe("reading the sender-constraint mode", () => {
     // Unknown, never "no periodic limit": the gateway then falls back to the
     // last limit its own snapshot recorded.
     expect(read.period).toEqual({ known: false });
-    expect(selects).toHaveLength(2);
+    expect(selects).toHaveLength(4);
+  });
+
+  // THE RUNG 0087 ADDED, above 0073's. The gateway can deploy before the live
+  // migration: a missing pause column must cost the pause, never the periodic limit.
+  it("narrows to a pre-0087 schema WITHOUT losing the periodic limit, and reads no pause", async () => {
+    const { client, selects } = db({
+      has: PRE_0087_SCHEMA,
+      row: { policy: null, budget_epoch: "epoch-1", budget_state_established_at: "2026-09-01T00:00:00Z", budget_period: "day", budget_period_cents: 2000 },
+    });
+    const read = await readCurrentAgentPolicyAndShadow(client, "u1", "a1", { cacheOnMiss: false });
+    expect(read.period).toEqual({ known: true, kind: "day", cents: 2000 });
+    expect(read.budgetState).toEqual({ epoch: "epoch-1", established: true });
+    expect(read.pause).toEqual({ known: false });
+    expect(selects).toHaveLength(3);
+  });
+
+  it("carries the pause line, refuses a value outside 1–99, and keeps it through its cache", async () => {
+    const at = (pause_percent: unknown) => db({ has: CURRENT_SCHEMA, row: { policy: null, pause_percent } });
+    const read = async (d: ReturnType<typeof db>) =>
+      (await readCurrentAgentPolicyAndShadow(d.client, "u1", "a1", { cacheOnMiss: false })).pause;
+    expect(await read(at(80))).toEqual({ known: true, percent: 80, switchTo: null });
+    expect(await read(at(null))).toEqual({ known: true, percent: null, switchTo: null });
+    expect(await read(at(150))).toEqual({ known: true, percent: null, switchTo: null });
+    expect(await read(at("80"))).toEqual({ known: true, percent: null, switchTo: null });
+
+    const { client } = at(75);
+    await readCurrentAgentPolicyAndShadow(client, "u1", "a1");
+    h.getMock.mockResolvedValue(h.setMock.mock.calls[0]![2] as string);
+    expect((await readCurrentAgentPolicyAndShadow(client, "u1", "a1")).pause).toEqual({ known: true, percent: 75, switchTo: null });
+    // Written by the previous deploy: no `ppk`. Unknown, which is no pause.
+    h.getMock.mockResolvedValue(JSON.stringify({ p: null, s: null, bk: true, bt: null, bc: null }));
+    expect((await readCurrentAgentPolicyAndShadow(client, "u1", "a1")).pause).toEqual({ known: false });
   });
 
   it("carries the periodic limit, and reads no limit as a known absence", async () => {
@@ -253,9 +295,9 @@ describe("reading the sender-constraint mode", () => {
     expect(read.shadow).toEqual({ draft: true });
     // No mode column AND no 0046 boolean means nothing was ever configured here.
     expect(read.senderConstraintMode).toBe("off");
-    // Five, not four: a schema this old refuses the legacy-boolean rung too.
-    // A real pre-0049 install HAS that column and still pays four.
-    expect(selects).toHaveLength(5);
+    // Six, not five: a schema this old refuses the legacy-boolean rung too.
+    // A real pre-0049 install HAS that column and still pays five.
+    expect(selects).toHaveLength(7);
   });
 
   it("narrows all the way to a pre-0020 schema", async () => {
@@ -265,7 +307,7 @@ describe("reading the sender-constraint mode", () => {
     expect(read.policy).toEqual({ live: true });
     expect(read.shadow).toBeNull();
     expect(read.senderConstraintMode).toBe("off");
-    expect(selects).toHaveLength(6);
+    expect(selects).toHaveLength(8);
   });
 
   // An infrastructure fault is not a configuration. The proxy refuses passport

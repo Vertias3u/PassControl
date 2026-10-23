@@ -137,6 +137,13 @@ describe("passcontrol statusline --panel", () => {
     expect(r.out).toMatch(/^ {2}Today {7}\$10\.00 of \$10\.00 · \$0\.00 left · resets in 7h$/m);
   });
 
+  it("says the agent is paused in its title, when its owner's pause line stops it (L4c)", async () => {
+    answer = json(200, { ...self({ tokens: null, cost: null, period: day(850_000_000, 1_000_000_000) }), pause: { percent: 80, paused: true, limit: "period", lifted_until: null } });
+    const r = await panel();
+    expect(r.out.split("\n")[0]).toBe("PassControl · agent 18eddeb0 · PAUSED");
+    expect(r.out).toMatch(/^ {2}Paused {6}at its 80% line · the owner can let it go on from the agent's page$/m);
+  });
+
   it("says how to start the sidecar when nothing answers", async () => {
     await new Promise<void>((r) => server.close(() => r()));
     const r = await panel();

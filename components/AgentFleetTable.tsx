@@ -19,11 +19,14 @@ import {
   parseUsdBudgetToCents,
 } from "@/lib/budget-input";
 import { StatusPill, type StatusType } from "./StatusPill";
+import { budgetMeterView } from "@/lib/budget-meter";
 import { BUDGET_ATTENTION_RATIO, budgetRiskRatio } from "@/lib/dashboard-attention";
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 import type { DeclaredKeyStorageView } from "@/lib/passport-key-storage";
 import { expectationVerdict } from "@/lib/key-custody-expectation";
 import { periodLimitSummary, usdFromMicrocents, type PeriodUsageView } from "@/lib/period-display";
+import { suggestCheaperModel } from "@/lib/cheaper-model";
+import type { ScopeEntry } from "@/lib/auth/visa";
 
 interface Agent {
   id: string;
@@ -35,6 +38,12 @@ interface Agent {
   /** The periodic limit (K1). Absent on a database without 0073. */
   budget_period?: "day" | "month" | null;
   budget_period_cents?: number | null;
+  /** The soft pause line (1.6.0). Absent on a database without 0087. */
+  pause_percent?: number | null;
+  /** 0088: what happens at the pause line. Absent before the migration. */
+  pause_action?: string | null;
+  pause_switch_provider?: string | null;
+  pause_switch_model?: string | null;
   spent_tokens: number;
   spent_microcents: number;
   last_seen_at: string | null;
@@ -540,17 +549,15 @@ function BudgetMeter({
   label: string;
   format?: (value: number) => string;
 }) {
-  const ratio = limit != null && limit > 0 ? Math.max(0, value / limit) : 0;
-  const percent = Math.min(100, ratio * 100);
-  const tone = ratio >= 1 ? "danger" : ratio >= BUDGET_ATTENTION_RATIO ? "warning" : "normal";
+  const { tone, percent } = budgetMeterView(value, limit);
   return (
-    <div className="pc-budget-meter" data-tone={tone}>
+    <div className="pc-budget-meter" data-tone={tone ?? undefined}>
       <div>
         <span>{format(value)} charged</span>
         <span>{limit == null ? "no cap" : `${format(limit)} cap`}</span>
       </div>
       <div className="pc-budget-meter__track" aria-label={`${label}: ${format(value)} charged${limit == null ? ", no cap" : ` of a ${format(limit)} cumulative cap`}`}>
-        <span style={{ width: `${limit == null ? 0 : percent}%` }} />
+        {tone !== null ? <span style={{ width: `${percent}%` }} /> : null}
       </div>
     </div>
   );
@@ -581,13 +588,27 @@ function PeriodLimitLine({ agent, usage }: { agent: Agent; usage: PeriodUsageVie
   );
 }
 
-function BudgetEditor({ agent, onClose }: { agent: Agent; onClose: () => void }) {
+export function BudgetEditor({ agent, onClose }: { agent: Agent; onClose: () => void }) {
   const [tokenBudget, setTokenBudget] = useState(agent.budget_tokens == null ? "" : String(agent.budget_tokens));
   const [costBudgetUsd, setCostBudgetUsd] = useState(formatCentsAsUsdInput(agent.budget_cents));
   const initialPeriod = agent.budget_period === "day" || agent.budget_period === "month" ? agent.budget_period : "";
   const initialPeriodUsd = formatCentsAsUsdInput(agent.budget_period_cents ?? null);
   const [period, setPeriod] = useState<"" | "day" | "month">(initialPeriod);
   const [periodUsd, setPeriodUsd] = useState(initialPeriodUsd);
+  const initialPause = agent.pause_percent == null ? "" : String(agent.pause_percent);
+  const [pause, setPause] = useState(initialPause);
+  // L7 (0088): at the line, pause or go on with a cheaper model. The suggestion is
+  // only ever a model the agent's scope already allows (lib/cheaper-model.ts).
+  const initialSwitch =
+    agent.pause_action === "switch" && agent.pause_switch_provider && agent.pause_switch_model
+      ? `${agent.pause_switch_provider}/${agent.pause_switch_model}`
+      : "";
+  const suggestion = useMemo(
+    () => suggestCheaperModel(Array.isArray(agent.allowed_scopes) ? (agent.allowed_scopes as ScopeEntry[]) : []),
+    [agent.allowed_scopes]
+  );
+  const [atLine, setAtLine] = useState<"pause" | "switch">(initialSwitch ? "switch" : "pause");
+  const [switchTo, setSwitchTo] = useState(initialSwitch || (suggestion ? `${suggestion.provider}/${suggestion.model}` : ""));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -603,11 +624,35 @@ function BudgetEditor({ agent, onClose }: { agent: Agent; onClose: () => void })
       if (period !== "" && periodCents === null) {
         throw new Error("Enter an amount for the daily or monthly limit, or choose no limit.");
       }
+      // Sent only when it changed, for the same reason: a database without 0087
+      // has no column to write it to.
+      const pauseChanged = pause.trim() !== initialPause;
+      const pausePercent = pause.trim() === "" ? null : Number(pause.trim());
+      if (pausePercent !== null && !(Number.isInteger(pausePercent) && pausePercent >= 1 && pausePercent <= 99)) {
+        throw new Error("The pause line is a whole percentage from 1 to 99, or blank for none.");
+      }
+      // provider/model, split at the first slash: an OpenRouter model id has its own.
+      const wantSwitch = atLine === "switch" && pausePercent !== null;
+      const slash = switchTo.trim().indexOf("/");
+      if (wantSwitch && slash < 1) {
+        throw new Error("Name the cheaper model as provider/model, for example anthropic/claude-haiku-4-5.");
+      }
+      const nextSwitch = wantSwitch ? `${switchTo.trim().slice(0, slash)}/${switchTo.trim().slice(slash + 1).trim()}` : "";
+      // Sent only when it changed: a database without 0088 has no column for it.
+      const switchChanged = nextSwitch !== initialSwitch;
       await updateAgentBudgets(agent.id, {
         budget_tokens: parseTokenBudgetInput(tokenBudget),
         budget_cents: parseUsdBudgetToCents(costBudgetUsd),
         ...(periodChanged
           ? { budget_period: period === "" ? null : period, budget_period_cents: periodCents }
+          : {}),
+        ...(pauseChanged ? { pause_percent: pausePercent } : {}),
+        ...(switchChanged
+          ? {
+              pause_switch: nextSwitch
+                ? { provider: nextSwitch.slice(0, nextSwitch.indexOf("/")), model: nextSwitch.slice(nextSwitch.indexOf("/") + 1) }
+                : null,
+            }
           : {}),
       });
       onClose();
@@ -671,6 +716,55 @@ function BudgetEditor({ agent, onClose }: { agent: Agent; onClose: () => void })
         A daily or monthly limit resets at midnight UTC or on the first of the month. A call counts toward the
         period in which it finishes, and spend earlier in the current period counts when you set one. A refused
         call gets <code>402 blocked_budget_period</code> with a <code>retry-after</code> to the next reset.
+      </p>
+      <div className="grid gap-3 md:grid-cols-2" data-budget-pause>
+        <label className="grid gap-1 text-sm">
+          <span className="text-xs uppercase tracking-wide text-muted-foreground">Pause at (% of each limit)</span>
+          <input
+            value={pause}
+            onChange={(e) => setPause(e.target.value)}
+            inputMode="numeric"
+            placeholder="No pause"
+            aria-describedby={`pause-help-${agent.id}`}
+          />
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span className="text-xs uppercase tracking-wide text-muted-foreground">At the pause line</span>
+          <select
+            value={atLine}
+            onChange={(e) => setAtLine(e.target.value as "pause" | "switch")}
+            disabled={pause.trim() === ""}
+            data-pause-action={atLine}
+          >
+            <option value="pause">Pause it</option>
+            <option value="switch">Switch to a cheaper model</option>
+          </select>
+        </label>
+      </div>
+      {atLine === "switch" && pause.trim() !== "" ? (
+        <label className="grid gap-1 text-sm" data-pause-switch>
+          <span className="text-xs uppercase tracking-wide text-muted-foreground">Cheaper model (provider/model)</span>
+          <input
+            value={switchTo}
+            onChange={(e) => setSwitchTo(e.target.value)}
+            placeholder={suggestion ? `${suggestion.provider}/${suggestion.model}` : "anthropic/claude-haiku-4-5"}
+            spellCheck={false}
+          />
+          <span className="text-xs text-muted-foreground">
+            {suggestion
+              ? `Suggested: ${suggestion.provider}/${suggestion.model}, which this agent may already call.`
+              : "It must be a model this agent may already call. Widen its scope first if you mean one it may not."}
+          </span>
+        </label>
+      ) : null}
+      <p id={`pause-help-${agent.id}`} className="m-0 text-xs leading-5 text-muted-foreground">
+        Optional. At this share of any limit above, PassControl pauses the agent before the limit itself is
+        reached, and you can let it go on for an hour from the agent&apos;s page. A paused call gets{" "}
+        <code>402 blocked_budget_pause</code>. Or it goes on with the cheaper model for the rest of the period:
+        calls to that provider are sent to it instead, the response says so, and calls to any other provider pause.
+        The limits still apply behind it. A cheaper model can refuse a request the usual one takes (a longer
+        context, a beta feature); the agent then gets that provider&apos;s error, and it is not retried on the usual
+        model.
       </p>
       {error ? <p className="m-0 text-sm" style={{ color: "var(--danger)" }}>{error}</p> : null}
       <div className="flex justify-end gap-2">

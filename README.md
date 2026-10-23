@@ -411,12 +411,13 @@ applies migrations, and seeds a local account. It writes `.env.docker`; use
 There are no shared default credentials. `passcontrol setup --app-dir <path>` selects a
 checkout; `passcontrol unlink` forgets a remembered one.
 
-Local lifecycle commands manage `http://localhost:3000` independently from the active Cloud API
-gateway. `setup`, `start`, and `restart` verify PassControl at `/api/version` and require the
-launcher to remain alive before switching the global active gateway. `status` reports the active
+By default, local lifecycle commands manage `http://localhost:3000` independently from the active
+Cloud API gateway. `setup`, `start`, and `restart` verify PassControl at `/api/version` and require
+the launcher to remain alive before switching the global active gateway. `status` reports the active
 API gateway and CLI-managed local dashboard separately; `open` opens the active gateway. Explicit
 loopback ports remain supported, but a portless local URL is rejected instead of becoming port 80.
-`--port-offset` moves Supabase and Redis ports only; the dashboard remains on port 3000.
+`--port-offset N` moves the whole local stack, including the dashboard to port `3000 + N`.
+For example, `passcontrol setup --port-offset 100` puts the dashboard at `http://localhost:3100`.
 
 Switching from a credentialed remote gateway clears gateway-bound local credentials only—it does
 not revoke the remote key or Passport. Interactive use requires a separate confirmation;

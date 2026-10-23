@@ -102,6 +102,35 @@ describe("formatWorkspaceAlert", () => {
     expect(slack).toContain("&lt;!here&gt; &amp; co");
   });
 
+  it("says a switch to the cheaper model is a switch, not a pause, and names the model inertly", () => {
+    const slack = formatWorkspaceAlert("slack", { ...base, type: "budget", status: "budget_pause_switched", model: "gpt-5-mini" }).text;
+    expect(slack).toContain("`summarizer` reached the pause line you set on its spending limit. PassControl switched its calls to `gpt-5-mini` instead of pausing it; its limits still apply.");
+    expect(slack).not.toMatch(/paused for 10 minutes/);
+    const odd = formatWorkspaceAlert("discord", { ...base, type: "budget", status: "budget_pause_switched", model: "<@U1> x" }).content;
+    expect(odd).not.toContain("<@U1>");
+  });
+
+  describe("the heads-up before a limit", () => {
+    const at = "2026-10-22T15:00:00.000Z";
+    const USD = 100_000_000;
+    const up = (headsUp: Record<string, unknown>) =>
+      formatWorkspaceAlert("slack", { ...base, type: "budget", status: "budget_headsup", headsUp: { at, period: "day", spentMicrocents: 16 * USD, targetMicrocents: 20 * USD, ...headsUp } as never }).text;
+
+    it("names the limit, the time in UTC and what was spent, and says nothing is paused", () => {
+      const text = up({ target: "limit" });
+      expect(text).toContain("`summarizer` is on pace to reach its daily limit of $20.00 around 15:00 UTC: $16.00 spent today. Nothing is paused yet.");
+      expect(text).toContain("PassControl sends this once a period for this agent.");
+      expect(text).not.toMatch(/10 minutes/);
+    });
+
+    it("aims at the pause line, and says what happens there", () => {
+      expect(up({ target: "pause", percent: 80, targetMicrocents: 16 * USD, spentMicrocents: 13 * USD, period: "month" })).toContain(
+        "`summarizer` is on pace to reach the 80% pause line on its monthly limit ($16.00) around 15:00 UTC: $13.00 spent this month. PassControl will pause it there."
+      );
+      expect(up({ target: "switch", percent: 80, model: "gpt-5-mini" })).toContain("PassControl will switch it to `gpt-5-mini` there.");
+    });
+  });
+
   it("says plainly that a test alert is a test", () => {
     expect(formatWorkspaceAlert("slack", { ...base, type: "test" }).text).toMatch(/^Test alert from PassControl/);
   });

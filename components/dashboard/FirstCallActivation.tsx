@@ -345,6 +345,8 @@ export function FirstCallActivation({
   }
 
   const diagnosis = state.stage === "diagnose" ? activationDiagnosis(state.row) : null;
+  const completedSteps = (["provider", "agent", "call", "refuse"] as const)
+    .filter((step) => stepState(state.stage, step) === "complete").length;
 
   return (
     <section
@@ -363,6 +365,7 @@ export function FirstCallActivation({
             Configuration is not proof. This guide completes when PassControl has stored one allowed call and one
             deliberate refusal from the same worker.
           </p>
+          <p aria-live="polite">{completedSteps} of 4 done</p>
         </div>
         <span className={live ? "is-live" : "is-connecting"} role="status">
           <Radio aria-hidden="true" /> {live ? "Watching call records" : "Connecting to call records"}

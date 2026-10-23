@@ -25,6 +25,13 @@ interface LogEntryBase {
   attemptId?: string;
   provider?: string;
   model?: string;
+  /**
+   * On a call switched to a cheaper model at the pause line only (1.6.0, L7,
+   * 0088): the model the agent asked for, while `model` is the model sent.
+   * Written only when set, and only a switch configured in 0088's columns makes
+   * one, so no database without 0088 is ever asked for the column.
+   */
+  requestedModel?: string;
   inputTokens?: number;
   outputTokens?: number;
   // `null` means the cost is UNKNOWN, which is not the same as zero: a custom
@@ -63,6 +70,10 @@ interface LogEntryBase {
     // opposite one: this clears by itself at the next boundary (the 402 carries
     // retry-after), a cumulative cap only clears when the owner raises it.
     | "blocked_budget_period"
+    // The owner's soft pause line (1.6.0, 0087): N % of a limit is used and the
+    // owner has not let the agent go on. The limit itself is not reached, and
+    // the owner lifts the pause from the agent's page (lib/budget-pause.ts).
+    | "blocked_budget_pause"
     // A DECLARED sub-agent used its per-session cap (C(b), 2026-10-10). The agent's
     // main thread and other sub-agents keep running, and a new session starts at zero.
     | "blocked_budget_subagent"
@@ -320,6 +331,7 @@ export async function writeLog(entry: LogEntry): Promise<void> {
     // An LLM row names neither column, so it is byte-identical to before.
     ...(entry.callKind ? { call_kind: entry.callKind } : {}),
     ...(entry.endpoint ? { endpoint: entry.endpoint } : {}),
+    ...(entry.requestedModel ? { requested_model: entry.requestedModel } : {}),
     // Conditional for exactly the reason above, one migration later (0079): a
     // call that declared no lineage names no client column, so its row is
     // byte-identical to before and a pre-0079 schema still accepts it. Agent and

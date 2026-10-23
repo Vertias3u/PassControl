@@ -8,16 +8,19 @@ function source(path: string): string {
 
 describe("the exported agent passport carries the canonical Vertias mark", () => {
   const passport = source("components/AgentPassport.tsx");
+
+  // The mirror keeps the passport it always had: the three-petal mark.
   const canonicalPaths = [
     "M29 57C25 47 12 36 10 20 8 9 14 3 19 6c6 4 7 20 9 33 1 8 1 13 1 18Z",
     "M29 57c-2-12-5-29-3-43 1-8 4-13 7-12 4 1 5 8 3 19-2 13-5 26-7 36Z",
     "M29 57c4-10 14-21 19-37 3-10-2-17-7-14-6 4-8 20-10 33-1 8-2 13-2 18Z",
   ];
-
-  it("reuses all three SiteLogo paths instead of a hand-traced approximation", () => {
-    expect(canonicalPaths).toHaveLength(3);
+  
+  it("reuses all three Vertias petal paths instead of a hand-traced approximation", () => {
     for (const path of canonicalPaths) expect(passport).toContain(`d="${path}"`);
     expect(passport).toContain('<g transform="translate(44.6 36) scale(0.6)">');
+    expect(passport).toContain("fill={petals.dark}");
+    expect(passport).toContain("fill={petals.mid}");
   });
 
   it("resolves every accent to three export-safe literal fills", () => {
@@ -28,8 +31,8 @@ describe("the exported agent passport carries the canonical Vertias mark", () =>
       for (const colour of triple) expect(passport).toContain(colour);
     }
 
-    expect(passport).toContain("fill={PALETTE.petals.dark}");
-    expect(passport).toContain("fill={PALETTE.petals.mid}");
+    // The dark and mid petals are drawn only by the mirror's three-petal mark, so
+    // they are checked with it, above.
     expect(passport).toContain("fill={PALETTE.petals.light}");
   });
 

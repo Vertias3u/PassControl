@@ -44,6 +44,20 @@ describe("tool rules at PreToolUse", () => {
     expect(JSON.stringify(onDecision.mock.calls)).not.toContain("push");
   });
 
+  it("says the rules live on the agent's page, not on this machine", async () => {
+    // Seen 2026-10-12: told only "the agent's tool rules refuse this", Claude Code
+    // went looking for the rule in the local PassControl config, which has none.
+    const { g } = gate();
+    const where = /set on the agent's page at https:\/\/gw\.example\/dashboard, not on this machine/;
+    const denied = await g.decide(bash("git push"), rules([{ tool: "Bash", command: "git push*", effect: "deny" }]), 600);
+    expect(denied.hookSpecificOutput.permissionDecisionReason).toMatch(where);
+    const asked = await g.decide(bash("npm publish"), rules([{ tool: "Bash", command: "npm publish*", effect: "ask" }]), 600);
+    expect(asked.hookSpecificOutput.permissionDecisionReason).toMatch(where);
+    const { g: unnamed } = gate({ dashboardUrl: "" });
+    const plain = await unnamed.decide(bash("git push"), rules([{ tool: "Bash", command: "git push*", effect: "deny" }]), 600);
+    expect(plain.hookSpecificOutput.permissionDecisionReason).toMatch(/set on the agent's dashboard page, not on this machine/);
+  });
+
   it("hands an ask rule to Claude Code's own prompt", async () => {
     const { g, onDecision } = gate();
     const out = await g.decide(bash("npm publish"), rules([{ tool: "Bash", command: "npm publish*", effect: "ask" }]), 600);

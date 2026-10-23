@@ -10,6 +10,7 @@
 // Nothing in the derived state is wrong when that happens — the stage is still
 // `diagnose` — so a logic-level test cannot see it. Only the markup can.
 import { describe, expect, it, vi } from "vitest";
+import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: () => {} }) }));
@@ -39,7 +40,7 @@ const log = (status: string) => ({
   created_at: "2026-08-20T10:00:00.000Z",
 });
 
-const html = (initialLogs: ReturnType<typeof log>[]) =>
+const html = (initialLogs: ReturnType<typeof log>[], overrides: Partial<ComponentProps<typeof FirstCallActivation>> = {}) =>
   renderToStaticMarkup(
     <FirstCallActivation
       userId="u1"
@@ -50,6 +51,7 @@ const html = (initialLogs: ReturnType<typeof log>[]) =>
       initialLogs={initialLogs}
       integrations={["generic"]}
       logsAvailable
+      {...overrides}
     />
   );
 
@@ -145,5 +147,33 @@ describe("first-call stepper markup", () => {
     const out = html([log("blocked_scope")]);
     expect(out).toContain('data-stage="diagnose"');
     expect(steps(out)).toEqual(["complete", "complete", "attention", "upcoming"]);
+  });
+});
+
+describe("first-call completion count", () => {
+  it.each<[string, number, Partial<ComponentProps<typeof FirstCallActivation>>]>([
+    ["provider", 0, { providerConfigured: false }],
+    ["agent", 1, { agents: [] }],
+    ["call", 2, {}],
+    ["diagnose", 2, { initialLogs: [log("blocked_scope")] }],
+    ["refuse", 3, { initialLogs: [log("ok")] }],
+    ["proven", 3, {
+      refusalTest: { agentId: "agent-1", startedAt: "2026-08-20T10:05:00.000Z" },
+      initialLogs: [
+        { ...log("blocked_scope"), id: "l2", model: "gpt-5", created_at: "2026-08-20T10:06:00.000Z" },
+        log("ok"),
+      ],
+    }],
+  ])("counts only completed steps at %s", (stage, count, overrides) => {
+    const out = html([], overrides);
+    expect(out).toContain(`data-stage="${stage}"`);
+    expect(out).toContain(`${count} of 4 done`);
+    expect(steps(out).filter((state) => state === "complete")).toHaveLength(count);
+    expect(out.indexOf(`${count} of 4 done`)).toBeLessThan(out.indexOf('<ol'));
+  });
+
+  it("hides the count with a dismissed guide or unreadable call history", () => {
+    expect(html([], { initiallyHidden: true })).toBe("");
+    expect(html([], { logsAvailable: false })).toBe("");
   });
 });

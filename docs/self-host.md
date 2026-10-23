@@ -105,13 +105,16 @@ launched process from its own terminal or process manager before retrying. The C
 refuses to take over an unrelated process merely because it occupies the port.
 
 **A service port is occupied:** use the reported port to identify the other local
-stack. Stop that stack if appropriate, or choose a Supabase/Redis offset during setup:
+stack. Stop that stack if appropriate, or choose a port offset for the whole local
+stack during setup:
 
 ```sh
 passcontrol setup --port-offset 100
 ```
 
-The offset does not move the dashboard: setup uses `http://localhost:3000`.
+The offset moves the whole local stack, including Supabase and Redis. The dashboard
+moves to port `3000 + offset`.
+For example, `--port-offset 100` puts the dashboard at `http://localhost:3100`.
 A CLI gateway value must be a bare origin, with an explicit port for loopback; do not
 put a provider path into `PASSCONTROL_GATEWAY`. Provider paths belong in the agent
 client's base URL instead.

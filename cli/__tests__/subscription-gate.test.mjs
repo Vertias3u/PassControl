@@ -2,7 +2,7 @@ import http from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 
-import { createStopGate, HOOK_PATH, selfAnswerState } from "../subscription-gate.mjs";
+import { createStopGate, GATE_HOOK_TIMEOUT_S, HOOK_PATH, SELF_READ_TIMEOUT_MS, selfAnswerState } from "../subscription-gate.mjs";
 import { createSidecar } from "../sidecar.mjs";
 
 // Subscription mode: a Claude Pro/Max session talks to
@@ -349,21 +349,25 @@ async function listen(server) {
   return server.address().port;
 }
 
-async function sidecarWithSelf(selfAnswer) {
+async function sidecarWithSelf(selfAnswer, { challengeDelayMs = 0 } = {}) {
   const seen = [];
   const gateway = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       if (req.url === "/api/auth/challenge") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ visa: "fake.visa.token", expires_in: 300 }));
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ visa: "fake.visa.token", expires_in: 300 }));
+        }, challengeDelayMs);
         return;
       }
       seen.push({ url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString("utf8") });
-      const { status, body } = selfAnswer(req);
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(body));
+      const { status, body, delayMs = 0 } = selfAnswer(req);
+      setTimeout(() => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      }, delayMs);
     });
   });
   const gatewayPort = await listen(gateway);
@@ -398,6 +402,16 @@ describe("the sidecar's hook endpoint", () => {
     expect(seen[0].headers["x-passcontrol-proof"]).toBeTruthy();
   });
 
+  it("adds the agent's note when the hook's URL opts in, and only then (1.6.0)", async () => {
+    const budget = { tokens: null, cost: null, period: { kind: "day", limit_microcents: 20e8, used_microcents: 2e8, remaining_microcents: 18e8, resets_in_seconds: 7200 } };
+    const { port } = await sidecarWithSelf(() => ({ status: 200, body: { agent_id: "a", budget, pace: null } }));
+    expect(await (await postHook(port, input("UserPromptSubmit"))).json()).toEqual({});
+    const api = await (await postHook(port, input("UserPromptSubmit", { session_id: "s-api" }), {}, "?note=only")).json();
+    expect(api.hookSpecificOutput.additionalContext).toMatch(/^PassControl budget note .*\$18\.00 of \$20\.00 left today/);
+    const sub = await (await postHook(port, input("UserPromptSubmit", { session_id: "s-sub" }), {}, "?note=1")).json();
+    expect(sub.hookSpecificOutput.additionalContext).toMatch(/not this Claude plan/);
+  });
+
   it("turns the gateway's opaque 403 into a stop", async () => {
     const { port } = await sidecarWithSelf(() => ({ status: 403, body: { error: "blocked_suspended" } }));
     const out = await (await postHook(port, input("PreToolUse"))).json();
@@ -412,6 +426,33 @@ describe("the sidecar's hook endpoint", () => {
     }));
     const out = await (await postHook(port, input("UserPromptSubmit"))).json();
     expect(out.reason).toMatch(/stopped this session/);
+  });
+
+  it("waits out a slow gateway, so a stop is not missed on a cold start", async () => {
+    // Seen on Cloud 2026-10-12: a 2 s read gave up on an answer that was coming,
+    // and the prompt went ahead with "the gateway did not answer in time".
+    const { port } = await sidecarWithSelf(() => ({ status: 403, body: { error: "blocked_suspended" }, delayMs: 3_000 }));
+    const out = await (await postHook(port, input("UserPromptSubmit"))).json();
+    expect(out.decision).toBe("block");
+  }, 10_000);
+
+  it("answers inside the hook's timeout even when minting the visa is slow too", async () => {
+    // The deadline covers the whole read. A 4 s read after a 3 s mint would answer
+    // after Claude Code's 5 s hook had given up, and the prompt would go ahead with
+    // no warning at all.
+    const { port } = await sidecarWithSelf(() => ({ status: 403, body: { error: "blocked_suspended" }, delayMs: 3_000 }), {
+      challengeDelayMs: 3_000,
+    });
+    const started = Date.now();
+    const out = await (await postHook(port, input("UserPromptSubmit"))).json();
+    expect(Date.now() - started).toBeLessThan(GATE_HOOK_TIMEOUT_S * 1000 - 500);
+    expect(out.systemMessage).toMatch(/did not answer in time/);
+  }, 10_000);
+
+  it("still answers inside the prompt hook's own timeout", () => {
+    // Past Claude Code's hook timeout the prompt goes ahead with no warning at all.
+    expect(SELF_READ_TIMEOUT_MS).toBeGreaterThanOrEqual(4_000);
+    expect(SELF_READ_TIMEOUT_MS).toBeLessThanOrEqual(GATE_HOOK_TIMEOUT_S * 1000 - 1_000);
   });
 
   it("fails open on a gateway error, with a warning", async () => {
@@ -528,3 +569,76 @@ describe("the sidecar's hook endpoint: tool rules", () => {
   });
 });
 
+
+// 1.6.0: the agent's own note (cli/agent-note.mjs), opt-in through the prompt hook's
+// URL (`?note=1` in subscription mode, `?note=only` in API mode). Sent on a prompt
+// only when its signature changes, and never in place of a stop.
+describe("stop gate: the agent's opt-in note", () => {
+  const budget = (used) => ({
+    tokens: null,
+    cost: null,
+    period: { kind: "day", limit_microcents: 20e8, used_microcents: used, remaining_microcents: 20e8 - used, resets_in_seconds: 7200 },
+  });
+  const open = (used, extra = {}) => ({ state: "open", self: { budget: budget(used), pace: null }, ...extra });
+  const context = (out) => out.hookSpecificOutput?.additionalContext;
+
+  it("is sent on the first prompt and not again until something meaningful moves", async () => {
+    const { gate, clock: c } = gateWith([open(1e8), open(2e8), open(12e8)], { freshMs: 5_000 });
+    expect(context(await gate.decide(input("UserPromptSubmit"), { note: "api" }))).toMatch(/^PassControl budget note .*\$19\.00 of \$20\.00 left today/);
+    c.advance(6_000);
+    expect(await gate.decide(input("UserPromptSubmit"), { note: "api" })).toEqual({}); // 10 %: same band
+    c.advance(6_000);
+    expect(context(await gate.decide(input("UserPromptSubmit"), { note: "api" }))).toMatch(/\$8\.00 of \$20\.00 left/); // 60 %
+  });
+
+  it("is per session: a new session hears it once too", async () => {
+    const { gate } = gateWith([open(1e8)]);
+    expect(context(await gate.decide(input("UserPromptSubmit"), { note: "api" }))).toBeTruthy();
+    expect(context(await gate.decide(input("UserPromptSubmit", { session_id: "other-session" }), { note: "api" }))).toBeTruthy();
+  });
+
+  it("only on a prompt, and not without the opt-in", async () => {
+    const { gate } = gateWith([open(1e8)]);
+    expect(await gate.decide(input("UserPromptSubmit"))).toEqual({});
+    expect(await gate.decide(input("PostToolBatch"), { note: "subscription" })).toEqual({});
+  });
+
+  it("in API mode never blocks or warns: the gateway enforces there", async () => {
+    const stopped = gateWith([{ state: "stopped" }]);
+    expect(await stopped.gate.decide(input("UserPromptSubmit"), { note: "api" })).toEqual({});
+    const blind = gateWith([{ state: "unknown", reason: "timeout" }]);
+    expect(await blind.gate.decide(input("UserPromptSubmit"), { note: "api" })).toEqual({});
+  });
+
+  it("in subscription mode a stop wins and carries no note", async () => {
+    const { gate } = gateWith([{ state: "stopped" }]);
+    const out = await gate.decide(input("UserPromptSubmit"), { note: "subscription" });
+    expect(out.decision).toBe("block");
+    expect(context(out)).toBeUndefined();
+  });
+
+  it("in subscription mode it carries the tool rules, and rides with a running agent's answer", async () => {
+    const rules = { state: "ok", document: { rules: [{ tool: "Bash", command: "git push*", effect: "ask_owner" }] } };
+    const { gate } = gateWith([open(1e8, { toolRules: rules })]);
+    const out = await gate.decide(input("UserPromptSubmit"), { note: "subscription" });
+    expect(out.decision).toBeUndefined();
+    expect(context(out)).toMatch(/Bash `git push\*` waits for the owner's approval/);
+    expect(context(out)).toMatch(/not this Claude plan/);
+  });
+});
+
+describe("selfAnswerState: the limits that come with an answer", () => {
+  it("keeps the budget and pace for the note, and only those", async () => {
+    const body = { agent_id: "a", scope: [], budget: { tokens: null, cost: null, period: null }, pace: null, as_of: "x" };
+    expect(await selfAnswerState(new Response(JSON.stringify(body), { status: 200 }))).toEqual({
+      state: "open",
+      self: { budget: body.budget, pace: null, pause: null },
+    });
+  });
+
+  it("keeps the pause too (L4c), or the note never learns the agent is paused", async () => {
+    const pause = { percent: 80, paused: true, limit: "period", lifted_until: null };
+    const body = { agent_id: "a", budget: { tokens: null, cost: null, period: null }, pace: null, pause };
+    expect((await selfAnswerState(new Response(JSON.stringify(body), { status: 200 }))).self).toEqual({ budget: body.budget, pace: null, pause });
+  });
+});

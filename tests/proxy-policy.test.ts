@@ -107,6 +107,26 @@ vi.mock("@/lib/state/holds", () => {
     establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
   };
 });
+// The soft pause (1.6.0, L4). Its readers are mocked as modules, the line itself
+// (pauseLine, pauseMessage) is the real one.
+const { readPauseViewMock, readPauseLiftMock, pausePromptOpenMock, pollTelegramMock } = vi.hoisted(() => ({
+  readPauseViewMock: vi.fn(),
+  readPauseLiftMock: vi.fn(),
+  pausePromptOpenMock: vi.fn(async (..._a: unknown[]) => false),
+  pollTelegramMock: vi.fn(async (..._a: unknown[]) => ({ state: "ok", decided: 0 })),
+}));
+vi.mock("@/lib/budget-pause", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/budget-pause")>()),
+  readPauseView: (...args: unknown[]) => readPauseViewMock(...args),
+}));
+vi.mock("@/lib/state/pause", () => ({
+  readPauseLift: (...args: unknown[]) => readPauseLiftMock(...args),
+  pausePromptOpen: (...args: unknown[]) => pausePromptOpenMock(...args),
+}));
+vi.mock("@/lib/alerts/approvals", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/alerts/approvals")>()),
+  pollTelegramDecisions: (...args: unknown[]) => pollTelegramMock(...args),
+}));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
@@ -494,9 +514,10 @@ describe("proxy agent policy", () => {
     // way to a provider key, for a decision that decides nothing.
     // 0055 added the budget-state pair to the SAME read, for the same reason:
     // the epoch check on the money path costs no round trip of its own. 0073's
-    // periodic limit rides it too, on a rung of its own above the rest.
+    // periodic limit rides it too, on a rung of its own above the rest, and
+    // 0087's pause line on one above that.
     expect(builder.select).toHaveBeenCalledWith(
-      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents"
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents, pause_percent, pause_action, pause_switch_provider, pause_switch_model"
     );
 
     // Cached together for the same reason, so a cache HIT is also one round
@@ -588,6 +609,8 @@ describe("proxy agent policy", () => {
     // discarding it here while the cache decoder honoured it made a legacy
     // install enforce while warm and drop to bearer-only once the entry expired.
     expect(policySelects).toEqual([
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents, pause_percent, pause_action, pause_switch_provider, pause_switch_model",
+      "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents, pause_percent",
       "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents",
       "policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents",
       "policy, policy_shadow, sender_constraint_mode",
@@ -667,7 +690,7 @@ describe("proxy agent policy", () => {
     // in passport silently fall back to bearer, so the passport path fails closed.
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "sender_constraint_state_unavailable" });
-    expect(policySelects).toEqual(["policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents"]);
+    expect(policySelects).toEqual(["policy, policy_shadow, sender_constraint_mode, budget_epoch, budget_state_established_at, budget_tokens, budget_cents, budget_period, budget_period_cents, pause_percent, pause_action, pause_switch_provider, pause_switch_model"]);
     expect(setCachedAgentPolicyMock).not.toHaveBeenCalled();
   });
 
@@ -1275,5 +1298,155 @@ describe("periodic spend limit (K1)", () => {
     expect(openHoldMock).toHaveBeenCalledWith(
       expect.objectContaining({ periodLimit: { mode: "set", kind: "month", capMicrocents: 10_000_000 } })
     );
+  });
+});
+
+// The soft pause (1.6.0, L4): at N % of a limit the agent stops until its owner
+// lets it go on. Checked once, before any hold, with the hard budget still behind it.
+describe("soft pause (L4)", () => {
+  const USD = 100_000_000;
+  const cached = (extra: Record<string, unknown>) =>
+    JSON.stringify({ p: {}, s: null, r: "off", be: "epoch-1", bs: true, ...extra });
+  // $20 a day, paused at 80 %.
+  const PAUSED_AT_80 = { bk: true, bt: null, bc: null, pdk: true, pdp: "day", pdc: 2000, ppk: true, ppc: 80 };
+  const spentToday = (used: number | null) => ({
+    tokens: null,
+    cost: null,
+    period: {
+      kind: "day",
+      limit_microcents: 20 * USD,
+      used_microcents: used,
+      remaining_microcents: used === null ? null : 20 * USD - used,
+      resets_in_seconds: 14 * 3600,
+    },
+  });
+  const call = async (entry: Record<string, unknown> = PAUSED_AT_80) => {
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached(entry));
+    return POST(request(), { params: Promise.resolve({ provider: "openai", path: ["chat", "completions"] }) });
+  };
+
+  beforeEach(() => {
+    readPauseViewMock.mockReset();
+    readPauseLiftMock.mockReset();
+    readPauseLiftMock.mockResolvedValue(false);
+    pausePromptOpenMock.mockReset();
+    pausePromptOpenMock.mockResolvedValue(false);
+    pollTelegramMock.mockClear();
+  });
+
+  // L4b: nothing waits for the owner's Telegram tap, so a paused call reads it. Only
+  // while a button is out, briefly, and then the lift is read again.
+  it("drains the owner's Telegram tap when a button is out, and goes on if it lifted the pause", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(17 * USD));
+    pausePromptOpenMock.mockResolvedValueOnce(true);
+    readPauseLiftMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(pollTelegramMock).toHaveBeenCalledWith(expect.any(String), 0, 1500);
+    expect(readPauseLiftMock).toHaveBeenCalledTimes(2);
+    expect(openHoldMock).toHaveBeenCalled();
+  });
+
+  it("stays paused when the drain finds no tap, and polls nothing when no button is out", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(17 * USD));
+    pausePromptOpenMock.mockResolvedValueOnce(true);
+    expect((await call()).status).toBe(402);
+    expect(pollTelegramMock).toHaveBeenCalledTimes(1);
+    pollTelegramMock.mockClear();
+    readPauseViewMock.mockResolvedValueOnce(spentToday(17 * USD));
+    expect((await call()).status).toBe(402);
+    expect(pollTelegramMock).not.toHaveBeenCalled();
+  });
+
+  it("stays paused when the drain itself fails", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(17 * USD));
+    pausePromptOpenMock.mockResolvedValueOnce(true);
+    pollTelegramMock.mockRejectedValueOnce(new Error("telegram down"));
+    expect((await call()).status).toBe(402);
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+
+  it("lets a call below the line through, and reads the lift only past it", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(15 * USD));
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(openHoldMock).toHaveBeenCalled();
+    expect(readPauseViewMock).toHaveBeenCalledWith(
+      "agent-a",
+      { capTokens: null, capMicrocents: null, period: { kind: "day", capMicrocents: 20 * USD } },
+      expect.any(Number)
+    );
+    expect(readPauseLiftMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses at the line with 402 blocked_budget_pause and its reason, before any hold or key", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(16 * USD));
+    const res = await call();
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({
+      error: "blocked_budget_pause",
+      message:
+        "PassControl paused this agent: today's spend is 80% of its limit ($16.00 of $20.00), past the 80% pause line. " +
+        "Its owner can let it go on for an hour from the agent's page in the dashboard; the limit itself still applies.",
+    });
+    // 402, never 429 (an SDK retries a 429 on its own), and the time a retry could
+    // work without the owner: the next UTC day. 2026-07-27T10:00Z → 14 h.
+    expect(res.headers.get("retry-after")).toBe(String(14 * 3600));
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(getCachedKeyMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    await flushDeferredWork();
+    expect(writeLogMock).toHaveBeenCalledWith(expect.objectContaining({ status: "blocked_budget_pause" }));
+  });
+
+  it("lets a lifted agent through, with the hard budget unchanged behind it", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(19 * USD));
+    readPauseLiftMock.mockResolvedValueOnce(true);
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(readPauseLiftMock).toHaveBeenCalledWith("agent-a");
+    expect(openHoldMock).toHaveBeenCalledWith(
+      expect.objectContaining({ periodLimit: { mode: "set", kind: "day", capMicrocents: 20 * USD } })
+    );
+  });
+
+  it("never raises the hard budget: a lifted agent at its limit is still refused by it", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(20 * USD));
+    readPauseLiftMock.mockResolvedValueOnce(true);
+    openHoldMock.mockResolvedValueOnce({ ok: false, reason: "period" });
+    const res = await call();
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "blocked_budget_period" });
+  });
+
+  it("stays paused when the lift cannot be read", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(17 * USD));
+    readPauseLiftMock.mockRejectedValueOnce(new Error("redis down"));
+    const res = await call();
+    expect(res.status).toBe(402);
+    expect((await res.json()).error).toBe("blocked_budget_pause");
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+
+  it("does not pause on a usage it cannot read: the hard budget decides", async () => {
+    readPauseViewMock.mockResolvedValueOnce(spentToday(null));
+    expect((await call()).status).toBe(200);
+    readPauseViewMock.mockRejectedValueOnce(new Error("redis down"));
+    expect((await call()).status).toBe(200);
+    expect(openHoldMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("costs nothing for an agent with no pause line, or one this cache entry predates", async () => {
+    expect((await call({ ...PAUSED_AT_80, ppc: null })).status).toBe(200);
+    const { ppk: _k, ppc: _c, ...older } = PAUSED_AT_80;
+    expect((await call(older)).status).toBe(200);
+    expect(readPauseViewMock).not.toHaveBeenCalled();
+    expect(readPauseLiftMock).not.toHaveBeenCalled();
+  });
+
+  it("has nothing to pause on for an agent with no limit at all", async () => {
+    expect((await call({ bk: true, bt: null, bc: null, pdk: true, pdp: null, pdc: null, ppk: true, ppc: 80 })).status).toBe(200);
+    expect(readPauseViewMock).not.toHaveBeenCalled();
   });
 });

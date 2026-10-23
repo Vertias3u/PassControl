@@ -10,6 +10,8 @@
 //
 // The message carries a field the AGENT chose (the model a refused call asked
 // for), so nothing in it may ping a channel, plant a link or break formatting.
+import type { HeadsUpAlert } from "@/lib/budget-headsup";
+import { redactSecrets } from "@/lib/redact";
 
 export type AlertDestinationKind = "slack" | "discord" | "telegram";
 
@@ -103,7 +105,7 @@ export function telegramTarget(destination: AlertDestination): { endpoint: strin
   return { endpoint: `https://${url.hostname}${url.pathname}`, chatId: url.searchParams.get("chat_id") ?? "" };
 }
 
-export type WorkspaceAlertType = "refused" | "budget" | "passport_rotated" | "break_glass" | "session_spend" | "test";
+export type WorkspaceAlertType = "refused" | "budget" | "passport_rotated" | "break_glass" | "session_spend" | "recap" | "test";
 
 export interface WorkspaceAlert {
   type: WorkspaceAlertType;
@@ -119,6 +121,10 @@ export interface WorkspaceAlert {
   session?: string;
   spentMicrocents?: number;
   thresholdMicrocents?: number;
+  /** budget_headsup (1.6.0, L8): what is reached when, at this period's rate. Server-computed. */
+  headsUp?: HeadsUpAlert;
+  /** recap: C6's server-computed weekly text (one bounded part if needed). */
+  recapText?: string;
 }
 
 const dollars = (microcents: number) => `$${(Math.max(0, microcents) / 100_000_000).toFixed(2)}`;
@@ -147,6 +153,8 @@ const REFUSAL: Record<string, string> = {
 function sentence(alert: WorkspaceAlert, code: (value: string) => string): string {
   const agent = code(inertName(alert.agentName));
   switch (alert.type) {
+    case "recap":
+      return redactSecrets(alert.recapText ?? "");
     case "test":
       return "Test alert from PassControl. Alerts for this workspace will arrive here.";
     case "refused": {
@@ -159,7 +167,13 @@ function sentence(alert: WorkspaceAlert, code: (value: string) => string): strin
     case "budget":
       return alert.status === "blocked_budget_period"
         ? `${agent} reached its budget for this period. PassControl is refusing its calls until the period resets.`
-        : alert.status === "blocked_budget_subagent"
+        : alert.status === "blocked_budget_pause"
+          ? `${agent} reached the pause line you set on its spending limit. PassControl paused its calls; let it go on for an hour from the agent's page.`
+          : alert.status === "budget_headsup" && alert.headsUp
+          ? headsUpSentence(agent, alert.headsUp, code)
+          : alert.status === "budget_pause_switched"
+          ? `${agent} reached the pause line you set on its spending limit. PassControl switched its calls to ${code(inertModel(alert.model ?? "?"))} instead of pausing it; its limits still apply.`
+          : alert.status === "blocked_budget_subagent"
           ? `A sub-agent of ${agent} reached its per-session spending cap. Its calls are refused; the main agent and other sub-agents keep running.`
           : alert.status === "blocked_budget_delegation"
             ? `A worker acting for ${agent} reached its delegation's spending cap. Its calls are refused; ${agent} keeps running.`
@@ -176,7 +190,25 @@ function sentence(alert: WorkspaceAlert, code: (value: string) => string): strin
   }
 }
 
+function headsUpSentence(agent: string, h: HeadsUpAlert, code: (value: string) => string): string {
+  const when = new Date(h.at);
+  const time = Number.isFinite(when.getTime()) ? `${when.toISOString().slice(11, 16)} UTC` : "soon";
+  const limit = h.period === "month" ? "monthly limit" : "daily limit";
+  const spent = `${dollars(h.spentMicrocents)} spent ${h.period === "month" ? "this month" : "today"}`;
+  if (h.target === "limit") return `${agent} is on pace to reach its ${limit} of ${dollars(h.targetMicrocents)} around ${time}: ${spent}. Nothing is paused yet.`;
+  const head = `${agent} is on pace to reach the ${h.percent ?? "?"}% pause line on its ${limit} (${dollars(h.targetMicrocents)}) around ${time}: ${spent}.`;
+  return h.target === "switch" && h.model
+    ? `${head} PassControl will switch it to ${code(inertModel(h.model))} there.`
+    : `${head} PassControl will pause it there.`;
+}
+
 const PAUSE = "Further alerts like this for this agent are paused for 10 minutes.";
+// The same throttle, worded without "paused" for the alert that is about a pause.
+const HUSH = "PassControl will not repeat this alert for this agent for 10 minutes.";
+// The switch and the heads-up are sent once a period (lib/state/budget-notice.ts).
+const ONCE = "PassControl sends this once a period for this agent.";
+const hush = (alert: WorkspaceAlert) =>
+  alert.status === "budget_pause_switched" || alert.status === "budget_headsup" ? ONCE : alert.status === "blocked_budget_pause" ? HUSH : PAUSE;
 
 export function formatWorkspaceAlert(kind: "slack", alert: WorkspaceAlert): { text: string };
 export function formatWorkspaceAlert(
@@ -189,26 +221,36 @@ export function formatWorkspaceAlert(
   alert: WorkspaceAlert
 ): { content: string; allowed_mentions: { parse: never[] } };
 export function formatWorkspaceAlert(kind: AlertDestinationKind, alert: WorkspaceAlert, chatId?: string) {
+  if (alert.type === "recap") {
+    const text = redactSecrets(alert.recapText ?? "");
+    if (kind === "telegram") {
+      return { chat_id: chatId ?? "", text: text.replaceAll("@", ""), disable_web_page_preview: true as const };
+    }
+    if (kind === "slack") {
+      return { text, mrkdwn: false, unfurl_links: false, unfurl_media: false };
+    }
+    return { content: text, allowed_mentions: { parse: [] as never[] } };
+  }
   const throttled = alert.type === "refused" || alert.type === "budget";
   if (kind === "telegram") {
     // Plain text, no parse_mode: nothing can become a link or formatting. A
     // plain-text @name still mentions someone in Telegram, so no @ survives.
     const quote = (value: string) => `"${value.replaceAll("@", "")}"`;
     const lines = [sentence(alert, quote)];
-    if (throttled) lines.push(PAUSE);
+    if (throttled) lines.push(hush(alert));
     lines.push(alert.dashboardUrl);
     return { chat_id: chatId ?? "", text: lines.join("\n"), disable_web_page_preview: true as const };
   }
   if (kind === "slack") {
     const code = (value: string) => `\`${slackEscape(value)}\``;
     const lines = [sentence(alert, code)];
-    if (throttled) lines.push(PAUSE);
+    if (throttled) lines.push(hush(alert));
     lines.push(`<${alert.dashboardUrl}|Open in PassControl>`);
     return { text: lines.join("\n") };
   }
   const code = (value: string) => `\`${value}\``;
   const lines = [sentence(alert, code)];
-  if (throttled) lines.push(PAUSE);
+  if (throttled) lines.push(hush(alert));
   lines.push(alert.dashboardUrl);
   // No mention of any kind resolves, whatever the text contains.
   return { content: lines.join("\n"), allowed_mentions: { parse: [] as never[] } };

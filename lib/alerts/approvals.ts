@@ -30,6 +30,7 @@
 // that cannot leave its code span.
 import { serviceClient } from "@/lib/supabase";
 import {
+  formatWorkspaceAlert,
   inertName,
   parseAlertDestination,
   slackEscape,
@@ -37,6 +38,7 @@ import {
   telegramTarget,
   type AlertDestination,
   type AlertDestinationKind,
+  type WorkspaceAlert,
 } from "@/lib/alerts/destination";
 import {
   PENDING_TTL_S,
@@ -47,6 +49,13 @@ import {
   releaseTelegramPoll,
   writeTelegramOffset,
 } from "@/lib/state/approvals";
+import { recordAdminAction } from "@/lib/audit";
+import { liftSeconds } from "@/lib/budget-pause";
+import { liftPause, newPausePromptId, recordPausePrompt, recordStopPrompt, takePausePrompt, takeStopPrompt } from "@/lib/state/pause";
+import { setAgentSuspended } from "@/lib/fleet";
+import { secondsUntilPeriodEnd } from "@/lib/period";
+import { logSecurityEvent } from "@/lib/seclog";
+import { dispatchSecurityAlert } from "@/lib/alert";
 
 const SEND_TIMEOUT_MS = 3000;
 // How much of the query and body each prompt shows. Telegram's message limit is
@@ -248,6 +257,12 @@ type TelegramUpdate = {
 };
 
 const CALLBACK = /^pc([ad]):([A-Za-z0-9_-]{22})$/u;
+// The soft pause's "Let it go on for an hour" (1.6.0, L4b). Read by this same loop:
+// a second getUpdates reader would share the offset and eat the other's taps.
+const PAUSE_CALLBACK = /^ppl:([A-Za-z0-9_-]{22})$/u;
+// The heads-up's "Suspend it now" (L8b): its own prefix and its own records
+// (lib/state/pause.ts), so neither button can be made to do the other's job.
+const STOP_CALLBACK = /^pps:([A-Za-z0-9_-]{22})$/u;
 
 export type PollResult =
   | { state: "ok"; decided: number }
@@ -301,7 +316,56 @@ export async function pollTelegramDecisions(userId: string, waitSeconds: number,
       const message = query.message?.message_id;
       let answer = "PassControl does not know this button.";
       const text = typeof query.message?.text === "string" ? query.message.text : "";
-      if (match && query.message?.edit_date !== undefined) {
+      const pauseMatch = typeof query.data === "string" ? PAUSE_CALLBACK.exec(query.data) : null;
+      const stopMatch = typeof query.data === "string" ? STOP_CALLBACK.exec(query.data) : null;
+      if (stopMatch && query.message?.edit_date !== undefined) {
+        answer = "This message was changed after PassControl sent it. Use the agent's page.";
+      } else if (stopMatch && text && (typeof chat === "number" || typeof chat === "string") && typeof message === "number") {
+        const agentId = await takeStopPrompt({
+          userId,
+          id: stopMatch[1]!,
+          chat: String(chat),
+          message: String(message),
+          textHash: await approvalTextHash(text),
+        }).catch(() => null);
+        if (!agentId) {
+          answer = "This button was already used, or has expired. Use the agent's page.";
+        } else if (await suspendFromTelegram(userId, agentId)) {
+          decided++;
+          answer = "Suspended.";
+          await post(`${base}/editMessageText`, {
+            chat_id: String(chat),
+            message_id: message,
+            text: `${text}\n\nSuspended at ${new Date().toISOString().slice(11, 16)} UTC. Resume it from the agent's page.`,
+            disable_web_page_preview: true,
+          }).catch(() => undefined);
+        } else {
+          answer = "PassControl could not suspend it just now. Use the agent's page.";
+        }
+      } else if (pauseMatch && query.message?.edit_date !== undefined) {
+        answer = "This message was changed after PassControl sent it. Use the agent's page.";
+      } else if (pauseMatch && text && (typeof chat === "number" || typeof chat === "string") && typeof message === "number") {
+        const agentId = await takePausePrompt({
+          userId,
+          id: pauseMatch[1]!,
+          chat: String(chat),
+          message: String(message),
+          textHash: await approvalTextHash(text),
+        }).catch(() => null);
+        const until = agentId ? await liftFromTelegram(userId, agentId) : null;
+        if (until) {
+          decided++;
+          answer = "Going on for an hour.";
+          await post(`${base}/editMessageText`, {
+            chat_id: String(chat),
+            message_id: message,
+            text: `${text}\n\nGoing on until ${until.toISOString().slice(11, 16)} UTC.`,
+            disable_web_page_preview: true,
+          }).catch(() => undefined);
+        } else {
+          answer = "This button was already used, or has expired. Use the agent's page.";
+        }
+      } else if (match && query.message?.edit_date !== undefined) {
         // PassControl never edits a question before it is answered, so an
         // edited one was changed by someone else holding the bot.
         answer = "This message was changed after PassControl sent it. Answer on the Approvals page.";
@@ -338,6 +402,154 @@ export async function pollTelegramDecisions(userId: string, waitSeconds: number,
     return { state: "error" };
   } finally {
     await releaseTelegramPoll(userId).catch(() => undefined);
+  }
+}
+
+/**
+ * Let a paused agent go on, from a tap takePausePrompt has already bound to this
+ * workspace. As long as the dashboard's lift: an hour, or until a daily or monthly
+ * limit resets. Returns when it ends, or null when it could not be set.
+ */
+async function liftFromTelegram(userId: string, agentId: string): Promise<Date | null> {
+  try {
+    const { data } = await serviceClient()
+      .from("agents")
+      .select("budget_period")
+      .eq("user_id", userId) // tenant boundary: service_role bypasses RLS
+      .eq("id", agentId)
+      .maybeSingle();
+    if (!data) return null;
+    const period = (data as { budget_period?: unknown }).budget_period;
+    const now = Date.now();
+    const seconds = liftSeconds(period === "day" || period === "month" ? period : null, now);
+    await liftPause(agentId, seconds);
+    await recordAdminAction({
+      userId,
+      action: "agent.pause_lift",
+      targetType: "agent",
+      targetId: agentId,
+      metadata: { lifted: true, seconds, by: "telegram" },
+    }).catch(() => undefined);
+    return new Date(now + seconds * 1000);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Suspend an agent from a tap takeStopPrompt has already bound to this workspace,
+ * through the fleet's own path: the Redis block first, the caches, then the row,
+ * each scoped to this tenant. Audited as the dashboard's suspend is. True only when
+ * the suspend took.
+ */
+async function suspendFromTelegram(userId: string, agentId: string): Promise<boolean> {
+  try {
+    const result = await setAgentSuspended(serviceClient(), userId, agentId, true);
+    if (!result.ok) return false;
+    // As the dashboard's suspend: the operator's security log and webhook see it.
+    const fields = { user: userId, agentId, suspended: true, by: "telegram" };
+    logSecurityEvent("agent.suspend", fields);
+    await dispatchSecurityAlert("agent.suspend", fields);
+    await recordAdminAction({
+      userId,
+      action: "agent.suspend",
+      targetType: "agent",
+      targetId: agentId,
+      metadata: { suspended: true, by: "telegram" },
+    }).catch(() => undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The heads-up (L8) on Telegram with "Suspend it now", for a workspace whose alerts
+ * go there. The text is the ordinary alert's, so the hash binds what the owner saw.
+ * False everywhere else, so the caller sends the ordinary alert. Never throws.
+ */
+export async function sendHeadsUpPrompt(userId: string, info: { agentId: string; alert: WorkspaceAlert }): Promise<boolean> {
+  try {
+    const read = await readDestination(userId);
+    if (!read || read.destination.kind !== "telegram") return false;
+    const target = telegramTarget(read.destination);
+    if (!target) return false;
+    const id = newPausePromptId();
+    const body = {
+      ...formatWorkspaceAlert("telegram", info.alert, target.chatId),
+      reply_markup: { inline_keyboard: [[{ text: "Suspend it now", callback_data: `pps:${id}` }]] },
+    };
+    const res = await post(target.endpoint, body);
+    if (!res.ok) return false;
+    const sent = (await res.json().catch(() => null)) as { result?: { message_id?: unknown; chat?: { id?: unknown } } } | null;
+    const message = sent?.result?.message_id;
+    const chat = sent?.result?.chat?.id;
+    if ((typeof message === "number" || typeof message === "string") && (typeof chat === "number" || typeof chat === "string")) {
+      const period = info.alert.headsUp?.period;
+      await recordStopPrompt(
+        id,
+        { uid: userId, agid: info.agentId, chat: String(chat), msg: String(message), hash: await approvalTextHash(body.text) },
+        period ? secondsUntilPeriodEnd(period, Date.now()) : undefined
+      );
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface PausePromptInfo {
+  agentId: string;
+  agentName: string;
+  /** What was reached, in words (lib/budget-pause.ts pauseReached). */
+  reached: string;
+  percent: number;
+  dashboardUrl: string;
+}
+
+/** The pause notice on Telegram, with its one button. Plain text: the agent's name is the owner's, but no @ survives. */
+export function formatPausePrompt(
+  info: Omit<PausePromptInfo, "agentId"> & { id: string },
+  chatId: string
+): { chat_id: string; text: string; disable_web_page_preview: true; reply_markup: { inline_keyboard: { text: string; callback_data: string }[][] } } {
+  const name = `"${info.agentName.replaceAll("@", "")}"`;
+  const text = [
+    `PassControl paused ${name}: ${info.reached}, past its ${info.percent}% pause line. The limit itself still applies.`,
+    "Let it go on for an hour here, or from its page:",
+    info.dashboardUrl,
+  ].join("\n");
+  return {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[{ text: "Let it go on for an hour", callback_data: `ppl:${info.id}` }]] },
+  };
+}
+
+/**
+ * The pause notice with its button, for a workspace whose alerts go to Telegram.
+ * False everywhere else, so the caller sends the ordinary alert. Never throws.
+ */
+export async function sendPausePrompt(userId: string, info: PausePromptInfo): Promise<boolean> {
+  try {
+    const read = await readDestination(userId);
+    if (!read || read.destination.kind !== "telegram") return false;
+    const target = telegramTarget(read.destination);
+    if (!target) return false;
+    const id = newPausePromptId();
+    const prompt = formatPausePrompt({ ...info, id }, target.chatId);
+    const res = await post(target.endpoint, prompt);
+    if (!res.ok) return false;
+    const body = (await res.json().catch(() => null)) as { result?: { message_id?: unknown; chat?: { id?: unknown } } } | null;
+    const message = body?.result?.message_id;
+    const chat = body?.result?.chat?.id;
+    // Unbound, the button would only ever answer "expired": the page still lifts.
+    if ((typeof message === "number" || typeof message === "string") && (typeof chat === "number" || typeof chat === "string")) {
+      await recordPausePrompt(id, { uid: userId, agid: info.agentId, chat: String(chat), msg: String(message), hash: await approvalTextHash(prompt.text) });
+    }
+    return true;
+  } catch {
+    return false;
   }
 }
 

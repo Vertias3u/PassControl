@@ -72,6 +72,9 @@ export const AUDIT_ACTIONS = [
   // Which Claude Code tools an agent may run on a Pro/Max login (0085). Counts by
   // effect only: the patterns can name private hosts and files.
   "agent.tool_rules",
+  // The owner letting a paused agent go on for an hour, or keeping it paused
+  // (1.6.0, the soft pause line). The line itself is an agent.update.
+  "agent.pause_lift",
   // The owner's yes or no to one service call under an "Ask me first" rule,
   // given in the dashboard. (A Telegram tap leaves the call's own audit row.)
   "approval.decide",

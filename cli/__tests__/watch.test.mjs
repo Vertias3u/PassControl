@@ -163,6 +163,18 @@ describe("the budget line", () => {
     expect(line).toBe("Today     [████████████████████████] $20.00 of $20.00 · $0.00 left · LIMIT REACHED");
   });
 
+  it("a paused agent says PAUSED (L4c)", () => {
+    const line = withBudget({
+      kind: "ok",
+      checkedAt: T,
+      self: {
+        budget: { period: { kind: "day", used_microcents: 1_700_000_000, limit_microcents: 2_000_000_000, remaining_microcents: 300_000_000 } },
+        pause: { percent: 80, paused: true, limit: "period", lifted_until: null },
+      },
+    });
+    expect(line).toMatch(/\$17\.00 of \$20\.00 · \$3\.00 left · PAUSED/);
+  });
+
   it("no limit draws no bar", () => {
     expect(withBudget({ kind: "ok", checkedAt: T, self: { budget: {} } })).toBe("Limit     none set · checked 14:03:00");
   });

@@ -24,8 +24,8 @@ export const CLOUD_FAILURE_GUIDE: readonly CloudFailureGuideItem[] = [
   },
   {
     title: "Agent budget",
-    codes: ["blocked_budget", "blocked_budget_period", "blocked_budget_subagent", "blocked_budget_delegation"],
-    meaning: "The agent reached its PassControl token or cost budget, its daily/monthly limit, or a sub-agent its per-session cap, before provider dispatch.",
+    codes: ["blocked_budget", "blocked_budget_period", "blocked_budget_pause", "blocked_budget_subagent", "blocked_budget_delegation"],
+    meaning: "The agent reached its PassControl token or cost budget, its daily/monthly limit, its owner's pause line, or a sub-agent its per-session cap, before provider dispatch.",
     action: "Review reconciled spend, then deliberately raise or reset that agent’s budget if appropriate.",
   },
   {

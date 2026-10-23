@@ -677,6 +677,9 @@ export function formatProxyError(status, body) {
   if (status === 402 && error === "blocked_budget_period") {
     return `${blocked}\n→ The agent's daily or monthly limit is spent; it resets at the next UTC day or month (see the retry-after header).\n→ Fix: wait for the reset, or raise the limit in the dashboard.`;
   }
+  if (status === 402 && error === "blocked_budget_pause") {
+    return `${blocked}\n→ The agent reached the pause line its owner set on its spending limit; the limit itself is not used up.\n→ Fix: let it go on for an hour from the agent's page in the dashboard, or raise the pause line.`;
+  }
   if (status === 402 && error === "blocked_budget_delegation") {
     return `${blocked}\n→ This worker's delegation (or one above it) used its spending cap.\n→ Fix: ask the agent that delegated to it for a new delegation with a larger cap.`;
   }
