@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "A maintainer comment discusses approval ownership without issuing a permission claim.",
+  "text": "# Review workflow\n<!-- TODO: document which administrator reviews deployment requests. -->\nEvery change requires a human review before release."
+}

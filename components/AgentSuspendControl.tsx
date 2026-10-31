@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
 import { PauseCircle, PlayCircle, RefreshCw } from "lucide-react";
 
 import { observeAgentControl, setAgentSuspended } from "@/app/dashboard/actions-client";
@@ -52,11 +53,6 @@ function layer(value: AgentControlObservation["database"] | boolean | null, kind
   return String(value);
 }
 
-function time(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString();
-}
-
 /** The outcome line under a control. Renders nothing before the first click. */
 export function AgentControlResult({
   result,
@@ -104,7 +100,7 @@ export function AgentControlResult({
         {result.intent === "suspended"
           ? `${name} is suspended — its next request is refused. Calls already sent to the provider are not recalled.`
           : `${name} is active again — its next request is admitted if its access allows it.`}{" "}
-        <span className="opacity-75">Checked {time(result.at)}.</span>
+        <span className="opacity-75">Checked <DashboardTimestamp value={result.at} kind="time" fallback="" />.</span>
       </p>
     );
   }

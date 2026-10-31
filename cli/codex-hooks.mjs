@@ -3,13 +3,14 @@
 // A Codex session signed in with a ChatGPT plan talks to OpenAI directly, so the
 // gateway cannot refuse its calls, as with a Claude Pro/Max login
 // (cli/subscription-gate.mjs). The stops and tool rules still reach it through
-// Codex's hooks: `passcontrol configure codex --subscription` adds two to
+// Codex's hooks: `passcontrol configure codex --subscription` adds three to
 // `$CODEX_HOME/hooks.json`, each running `passcontrol codex-hook`, which hands
 // Codex's input to the sidecar's hook endpoint (the one Claude Code calls) and
 // answers in Codex's terms:
 //
 //   UserPromptSubmit  a stopped agent's prompt is blocked and the turn ends
 //   PreToolUse        a stopped agent's tools, and the tool rules' denials, are refused
+//   PostToolUse       tool output is scanned for injection tells; always neutral
 //
 // Codex has command hooks only (no http hook), hence the relay. Three differences
 // from Claude Code are handled here, not in the sidecar:
@@ -46,7 +47,8 @@ import { GATE_HOOK_TIMEOUT_S, HOOK_PATH } from "./subscription-gate.mjs";
 export const CODEX_TOOL_HOOK_TIMEOUT_S = 600;
 const PROMPT_RELAY_MS = GATE_HOOK_TIMEOUT_S * 1000 - 500;
 const TOOL_RELAY_MS = (CODEX_TOOL_HOOK_TIMEOUT_S - 10) * 1000;
-const EVENTS = ["UserPromptSubmit", "PreToolUse"];
+const POST_TOOL_RELAY_MS = 1500;
+const EVENTS = ["UserPromptSubmit", "PreToolUse", "PostToolUse"];
 const BACKUP_SUFFIX = ".passcontrol-backup";
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -62,7 +64,7 @@ export function isPassControlCodexHook(hook) {
 }
 
 /**
- * The command both hooks run: node and the CLI by absolute path, so PATH never
+ * The command all hooks run: node and the CLI by absolute path, so PATH never
  * decides whether it runs. Refuses a path a shell would read differently.
  */
 export function codexHookCommand({ port, node = process.execPath, entry }) {
@@ -91,12 +93,13 @@ export function probeCodexHookCommand(command) {
   return { ok: true };
 }
 
-/** The two entries PassControl adds, as a hooks file of their own. */
+/** The three entries PassControl adds, as a hooks file of their own. */
 export function codexHookEntries(command) {
   return {
     hooks: {
       UserPromptSubmit: [{ hooks: [{ type: "command", command, timeout: GATE_HOOK_TIMEOUT_S }] }],
       PreToolUse: [{ matcher: ".*", hooks: [{ type: "command", command, timeout: CODEX_TOOL_HOOK_TIMEOUT_S }] }],
+      PostToolUse: [{ matcher: ".*", hooks: [{ type: "command", command, timeout: GATE_HOOK_TIMEOUT_S }] }],
     },
   };
 }
@@ -141,12 +144,19 @@ function save(target, value) {
   fs.renameSync(temp, target);
 }
 
-/** Add PassControl's two hooks, replacing any earlier ones of its own and nobody else's. */
+/** Add PassControl's three hooks, replacing any earlier ones of its own and nobody else's. */
 export function writeCodexHooks({ target, command }) {
   const { value, exists } = readHooksFile(target);
   const hooks = withoutOurs(value.hooks ?? {});
   for (const [event, groups] of Object.entries(codexHookEntries(command).hooks)) {
-    hooks[event] = [...(Array.isArray(hooks[event]) ? hooks[event] : []), ...groups];
+    // Codex keys trust by place (`<file>:<event>:<group>:<hook>`), so an entry of ours
+    // goes back where it stood: appended, it would swap with a hook added after it and
+    // both would quietly lose their trust. The groups before it held none of ours, so
+    // they are still the first `at`.
+    const before = Array.isArray(value.hooks?.[event]) ? value.hooks[event] : [];
+    const at = before.findIndex((g) => isObject(g) && Array.isArray(g.hooks) && g.hooks.some(isPassControlCodexHook));
+    const rest = Array.isArray(hooks[event]) ? hooks[event] : [];
+    hooks[event] = at < 0 ? [...rest, ...groups] : [...rest.slice(0, at), ...groups, ...rest.slice(at)];
   }
   const next = { ...value, hooks };
   if (JSON.stringify(next) === JSON.stringify(value)) return { changed: false, backupPath: null };
@@ -180,6 +190,7 @@ const ASK_IN_CODEX =
  * and a failed hook lets the tool run.
  */
 export function codexHookAnswer(event, out) {
+  if (event === "PostToolUse") return {}; // Telemetry must never alter Codex output.
   const o = isObject(out) ? out : {};
   const systemMessage = text(o.systemMessage);
   const warning = systemMessage ? { systemMessage } : {};
@@ -209,9 +220,10 @@ export function codexHookAnswer(event, out) {
 /**
  * What `passcontrol codex-hook` prints for one hook run: Codex's input in, the
  * sidecar's answer out, or nothing. Never throws, and never blocks on its own
- * failure: a sidecar that is down or slow lets the action go ahead, with a warning.
+ * failure: a sidecar that is down or slow lets the action go ahead, with a warning
+ * for prompts/pre-tool events. Post-tool telemetry always prints nothing.
  */
-export async function runCodexHook({ input, port, fetchImpl = fetch, promptTimeoutMs = PROMPT_RELAY_MS, toolTimeoutMs = TOOL_RELAY_MS }) {
+export async function runCodexHook({ input, port, fetchImpl = fetch, promptTimeoutMs = PROMPT_RELAY_MS, toolTimeoutMs = TOOL_RELAY_MS, postToolTimeoutMs = POST_TOOL_RELAY_MS }) {
   let parsed;
   try {
     parsed = JSON.parse(input);
@@ -221,6 +233,30 @@ export async function runCodexHook({ input, port, fetchImpl = fetch, promptTimeo
   const event = isObject(parsed) ? parsed.hook_event_name : null;
   if (!EVENTS.includes(event)) return "";
   const tool = event === "PreToolUse";
+  const postTool = event === "PostToolUse";
+  // A post-tool hook is telemetry only. Bound the entire operation, including a
+  // stalled response body or a transport that does not honor AbortSignal.
+  if (postTool) {
+    const controller = new AbortController();
+    let timer;
+    try {
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => { controller.abort(); resolve(""); }, postToolTimeoutMs);
+      });
+      const relay = async () => {
+        await fetchImpl(`http://127.0.0.1:${port}${HOOK_PATH}`, {
+          method: "POST", headers: { "content-type": "application/json" }, body: input, signal: controller.signal,
+        });
+        return "";
+      };
+      return await Promise.race([relay(), timeout]);
+    } catch {
+      return "";
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), tool ? toolTimeoutMs : promptTimeoutMs);
   const warn = (why) => JSON.stringify({ systemMessage: `PassControl: ${why}, so this goes ahead unchecked.` });

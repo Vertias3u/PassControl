@@ -10,8 +10,9 @@
 //     spend settled inside the lag window, and rebuilt `reserved:` from a
 //     non-atomic SCAN+MGET that raced concurrent reservations.
 //   * Settlement ran as a raw pipeline with nothing keyed on the attempt, while
-//     `Redis.fromEnv()` takes @upstash/redis's default `retries ?? 5` — so a
-//     fetch that threw AFTER the server had executed replayed the whole delta.
+//     `Redis.fromEnv()` took @upstash/redis's default `retries ?? 5` (now one,
+//     `REDIS_RETRY` in redis.ts) — so a fetch that threw AFTER the server had
+//     executed replayed the whole delta.
 //   * A stream that broke after delivering content settled at zero, refunding
 //     the entire hold for tokens the provider had actually generated.
 //

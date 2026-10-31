@@ -197,7 +197,12 @@ describe("configure claude-code --agent-note", () => {
   it("API mode: off by default, and offered", async () => {
     const home = freshHome();
     const r = await run(["configure", "claude-code", "--write"], home);
-    expect(read(projectSettings(home)).hooks).toBeUndefined();
+    // The note stays opt-in; the tool hook is always there (owner, 2026-10-30, "2 yes").
+    const hooks = read(projectSettings(home)).hooks;
+    expect(hooks.UserPromptSubmit).toBeUndefined();
+    expect(hooks.PreToolUse).toEqual([
+      { matcher: "*", hooks: [{ type: "http", url: "http://127.0.0.1:8788/_passcontrol/hook?t=600&mode=api", timeout: 600 }] },
+    ]);
     expect(r.out).toContain("--agent-note");
   });
 

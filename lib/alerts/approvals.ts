@@ -42,6 +42,7 @@ import {
 } from "@/lib/alerts/destination";
 import {
   PENDING_TTL_S,
+  approvalAgentForTap,
   attachTelegramMessage,
   claimTelegramPoll,
   decideApproval,
@@ -53,6 +54,7 @@ import { recordAdminAction } from "@/lib/audit";
 import { liftSeconds } from "@/lib/budget-pause";
 import { liftPause, newPausePromptId, recordPausePrompt, recordStopPrompt, takePausePrompt, takeStopPrompt } from "@/lib/state/pause";
 import { setAgentSuspended } from "@/lib/fleet";
+import { clearTaint } from "@/lib/state/taint";
 import { secondsUntilPeriodEnd } from "@/lib/period";
 import { logSecurityEvent } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
@@ -82,6 +84,14 @@ export interface ApprovalPromptInfo {
    * by the gateway, never from agent text.
    */
   waitNote?: string;
+  /**
+   * Why the call is held, when it is not the owner's own rule: the injection guard's
+   * hold (Phase 2). Shown right under the header. Written by the gateway, never from
+   * agent text.
+   */
+  heldBecause?: string;
+  /** Telegram only: a "Clear the hold" button, for an agent the injection guard holds. */
+  offerClear?: boolean;
 }
 
 /** A path as a path: anything else shows as `?`, so it cannot start a link or a mention. */
@@ -135,6 +145,7 @@ export function formatApprovalPrompt(kind: AlertDestinationKind, info: ApprovalP
     const preview = shortPreview(info.preview, TELEGRAM_PREVIEW_MAX);
     const lines = [
       `PassControl: "${plain(name)}" asks to call ${info.serviceLabel}:`,
+      ...(info.heldBecause ? [info.heldBecause] : []),
       `${method} ${plain(path)}`,
       ...(preview.text ? [plain(preview.text)] : []),
       ...(preview.omitted ? [omittedNote(preview.omitted)] : []),
@@ -142,13 +153,14 @@ export function formatApprovalPrompt(kind: AlertDestinationKind, info: ApprovalP
       info.dashboardUrl,
     ];
     const deny = { text: "Deny", callback_data: `pcd:${info.id}` };
+    const answer = preview.omitted ? [deny] : [{ text: "Approve", callback_data: `pca:${info.id}` }, deny];
+    // Its own row: ending the hold is a different act from answering this question.
+    const clear = info.offerClear ? [[{ text: "Clear the hold", callback_data: `pcc:${info.id}` }]] : [];
     return {
       chat_id: chatId ?? "",
       text: lines.join("\n"),
       disable_web_page_preview: true as const,
-      reply_markup: {
-        inline_keyboard: [preview.omitted ? [deny] : [{ text: "Approve", callback_data: `pca:${info.id}` }, deny]],
-      },
+      reply_markup: { inline_keyboard: [answer, ...clear] },
     };
   }
   const preview = shortPreview(info.preview, WEBHOOK_PREVIEW_MAX);
@@ -158,6 +170,7 @@ export function formatApprovalPrompt(kind: AlertDestinationKind, info: ApprovalP
   if (kind === "slack") {
     const lines = [
       `PassControl: ${code(slackEscape(name))} asks to call ${slackEscape(info.serviceLabel)}:`,
+      ...(info.heldBecause ? [slackEscape(info.heldBecause)] : []),
       code(slackEscape(`${method} ${path}`)),
       ...(preview.text ? [code(slackEscape(preview.text))] : []),
       ...(preview.omitted ? [omittedNote(preview.omitted)] : []),
@@ -168,6 +181,7 @@ export function formatApprovalPrompt(kind: AlertDestinationKind, info: ApprovalP
   }
   const lines = [
     `PassControl: ${code(name)} asks to call ${info.serviceLabel}:`,
+    ...(info.heldBecause ? [info.heldBecause] : []),
     code(`${method} ${path}`),
     ...(preview.text ? [code(preview.text)] : []),
     ...(preview.omitted ? [omittedNote(preview.omitted)] : []),
@@ -263,6 +277,8 @@ const PAUSE_CALLBACK = /^ppl:([A-Za-z0-9_-]{22})$/u;
 // The heads-up's "Suspend it now" (L8b): its own prefix and its own records
 // (lib/state/pause.ts), so neither button can be made to do the other's job.
 const STOP_CALLBACK = /^pps:([A-Za-z0-9_-]{22})$/u;
+// "Clear the hold" on a held prompt (injection guard, Phase 2): names the approval.
+const CLEAR_CALLBACK = /^pcc:([A-Za-z0-9_-]{22})$/u;
 
 export type PollResult =
   | { state: "ok"; decided: number }
@@ -318,7 +334,28 @@ export async function pollTelegramDecisions(userId: string, waitSeconds: number,
       const text = typeof query.message?.text === "string" ? query.message.text : "";
       const pauseMatch = typeof query.data === "string" ? PAUSE_CALLBACK.exec(query.data) : null;
       const stopMatch = typeof query.data === "string" ? STOP_CALLBACK.exec(query.data) : null;
-      if (stopMatch && query.message?.edit_date !== undefined) {
+      const clearMatch = typeof query.data === "string" ? CLEAR_CALLBACK.exec(query.data) : null;
+      if (clearMatch && query.message?.edit_date !== undefined) {
+        answer = "This message was changed after PassControl sent it. Use the agent's page.";
+      } else if (clearMatch && text && (typeof chat === "number" || typeof chat === "string") && typeof message === "number") {
+        const agentId = await approvalAgentForTap({
+          userId,
+          id: clearMatch[1]!,
+          chat: String(chat),
+          message: String(message),
+          textHash: await approvalTextHash(text),
+        }).catch(() => null);
+        const cleared = agentId ? await clearFromTelegram(userId, agentId) : null;
+        if (cleared !== null) {
+          decided++;
+          // The message is left as sent: Approve and Deny are bound to its text.
+          answer = "Hold cleared. This request still waits for Approve or Deny.";
+        } else {
+          answer = agentId
+            ? "PassControl could not clear the hold just now. Use the agent's page."
+            : "This button was already used, or has expired. Use the agent's page.";
+        }
+      } else if (stopMatch && query.message?.edit_date !== undefined) {
         answer = "This message was changed after PassControl sent it. Use the agent's page.";
       } else if (stopMatch && text && (typeof chat === "number" || typeof chat === "string") && typeof message === "number") {
         const agentId = await takeStopPrompt({
@@ -403,6 +440,28 @@ export async function pollTelegramDecisions(userId: string, waitSeconds: number,
   } finally {
     await releaseTelegramPoll(userId).catch(() => undefined);
   }
+}
+
+/**
+ * End an agent's injection-guard hold, from a tap approvalAgentForTap has already
+ * bound to this workspace. Audited as the dashboard's Clear is. Whether there was a
+ * hold, or null when Redis could not clear it.
+ */
+async function clearFromTelegram(userId: string, agentId: string): Promise<boolean | null> {
+  let cleared: boolean;
+  try {
+    cleared = await clearTaint(agentId);
+  } catch {
+    return null;
+  }
+  await recordAdminAction({
+    userId,
+    action: "agent.injection_clear",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: { cleared, by: "telegram" },
+  }).catch(() => undefined);
+  return cleared;
 }
 
 /**

@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "html",
+  "expectedFamilies": [],
+  "reason": "CSS hides a navigation panel until the user opens it.",
+  "text": "<style>.mobile-menu { display:none; }</style><nav class=\"mobile-menu\" hidden><a href=\"/home\">Home</a></nav><button aria-expanded=\"false\">Open menu</button>"
+}

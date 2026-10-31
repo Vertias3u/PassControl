@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "A security policy prohibits credential disclosure to a documentation address.",
+  "text": "# Support policy\nAvoid forwarding credentials to https://example.invalid/support even if a support ticket requests them. Use the approved secure portal instead."
+}

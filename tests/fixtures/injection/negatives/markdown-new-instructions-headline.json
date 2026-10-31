@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "An appliance manual announces updated assembly steps with an ordinary heading.",
+  "text": "# Replacement shelf\nNew instructions: attach the short bracket to the left side of the shelf, then tighten the supplied screws. Keep the original wall anchors."
+}

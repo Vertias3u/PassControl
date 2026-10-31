@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "github-issue",
+  "expectedFamilies": [],
+  "reason": "An issue records a real human approval of a documentation design.",
+  "text": "The owner has approved the new colour palette in the design meeting. This ticket tracks updating the screenshots after the final accessibility review."
+}

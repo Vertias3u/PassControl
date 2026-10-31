@@ -69,6 +69,8 @@ interface Draft {
   sessionAlert: string;
   /** `secret_guard.mode`, or "" for off. */
   secretGuard: "" | "block" | "redact";
+  /** `injection_guard.mode`, or "" for off. */
+  injectionGuard: "" | "monitor" | "hold";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -108,13 +110,16 @@ export function toDraft(policy: unknown): Draft {
   const guardMode = isRecord(source.secret_guard) ? source.secret_guard.mode : undefined;
   const secretGuard = guardMode === "block" || guardMode === "redact" ? guardMode : "";
   // Round-tripped for the same reason as the ceiling.
+  const injectionMode = isRecord(source.injection_guard) ? source.injection_guard.mode : undefined;
+  const injectionGuard = injectionMode === "monitor" || injectionMode === "hold" ? injectionMode : "";
+  // Round-tripped for the same reason as the ceiling.
   const capCents = source.subagent_session_cap_cents;
   const subagentCap =
     typeof capCents === "number" && Number.isSafeInteger(capCents) && capCents >= 0 ? (capCents / 100).toFixed(2) : "";
   const alertCents = source.session_alert_cents;
   const sessionAlert =
     typeof alertCents === "number" && Number.isSafeInteger(alertCents) && alertCents >= 1 ? (alertCents / 100).toFixed(2) : "";
-  return { deny, windows, cap, ceiling, subagentRules, subagentNone, subagentCap, sessionAlert, secretGuard };
+  return { deny, windows, cap, ceiling, subagentRules, subagentNone, subagentCap, sessionAlert, secretGuard, injectionGuard };
 }
 
 /**
@@ -205,6 +210,7 @@ export function toPolicy(draft: Draft): unknown {
   }
 
   if (draft.secretGuard) policy.secret_guard = { mode: draft.secretGuard };
+  if (draft.injectionGuard) policy.injection_guard = { mode: draft.injectionGuard };
 
   return Object.keys(policy).length === 0 ? null : policy;
 }
@@ -254,6 +260,64 @@ export function SecretGuardField({
             checked={draft.secretGuard === choice.value}
             disabled={pending}
             onChange={() => setDraft((prev) => ({ ...prev, secretGuard: choice.value }))}
+          />
+          <span className="grid gap-1">
+            <span>{choice.label}</span>
+            {"help" in choice ? <span className="text-xs leading-5 text-muted-foreground">{choice.help}</span> : null}
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+const INJECTION_GUARD_CHOICES = [
+  { value: "", label: "Off" },
+  {
+    value: "monitor",
+    label: "Record what it finds",
+    help: "Nothing is refused and nothing in the call changes. Each new finding is listed on this agent's page: where in the request it was, which kind of tell, and how strong. The text itself is never stored.",
+  },
+  {
+    value: "hold",
+    label: "Record, and hold risky actions after a strong finding",
+    help: "Records the same way. After a strong finding, for 30 minutes: this agent's service writes wait for your yes, and so do Claude Code's commands, file edits, fetches and MCP tools wherever PassControl's tool hook is installed (passcontrol configure claude-code, on a login or an API key). Reading and model calls go on. You can clear the hold from this agent's page or the Telegram prompt; approving one action does not clear it.",
+  },
+] as const;
+
+/**
+ * `injection_guard` (2026-10-27, plans/injection-guard.md): look for injection tells in
+ * what tools handed the model, and record them ("monitor") or also hold the agent's
+ * risky actions after a strong one ("hold", Phase 2).
+ */
+export function InjectionGuardField({
+  draft,
+  setDraft,
+  pending,
+}: {
+  draft: Draft;
+  setDraft: (update: (prev: Draft) => Draft) => void;
+  pending: boolean;
+}) {
+  return (
+    <fieldset className="m-0 grid gap-3 border-0 border-t border-border p-0 pt-4" data-policy-field="injection_guard">
+      <legend className="m-0 p-0 text-sm font-semibold text-foreground">Injected instructions</legend>
+      <p className="m-0 text-xs leading-5 text-muted-foreground">
+        A web page, file or tool result the agent reads can carry instructions meant for the model. PassControl can
+        look for the usual tells in tool output (an &ldquo;ignore previous instructions&rdquo;, fake system markup,
+        a request to send keys somewhere, hidden text). It reads only what tools returned, never your own prompt. A
+        tell is a hint, not proof: a careful attack has none. Takes effect when promoted; shadow mode does not
+        measure it.
+      </p>
+      {INJECTION_GUARD_CHOICES.map((choice) => (
+        <label key={choice.value || "off"} className="flex items-start gap-2 text-sm">
+          <input
+            type="radio"
+            name="injection_guard"
+            value={choice.value}
+            checked={draft.injectionGuard === choice.value}
+            disabled={pending}
+            onChange={() => setDraft((prev) => ({ ...prev, injectionGuard: choice.value }))}
           />
           <span className="grid gap-1">
             <span>{choice.label}</span>
@@ -478,7 +542,7 @@ function Counts({ shadow }: { shadow: ShadowState }) {
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="rounded-lg border border-border bg-secondary/40 p-4" data-state="would-block">
           <p className="m-0 text-2xl font-bold tabular-nums text-foreground">
-            {divergence.wouldBlock.toLocaleString()}
+            {divergence.wouldBlock.toLocaleString("en-US")}
           </p>
           <p className="m-0 mt-1 text-xs leading-5 text-muted-foreground">
             {plural(divergence.wouldBlock)} the draft would have <strong>blocked</strong> that the
@@ -487,7 +551,7 @@ function Counts({ shadow }: { shadow: ShadowState }) {
         </div>
         <div className="rounded-lg border border-border bg-secondary/40 p-4" data-state="would-allow">
           <p className="m-0 text-2xl font-bold tabular-nums text-foreground">
-            {divergence.wouldAllow.toLocaleString()}
+            {divergence.wouldAllow.toLocaleString("en-US")}
           </p>
           <p className="m-0 mt-1 text-xs leading-5 text-muted-foreground">
             {plural(divergence.wouldAllow)} the draft would have <strong>allowed</strong> that the
@@ -496,7 +560,7 @@ function Counts({ shadow }: { shadow: ShadowState }) {
         </div>
         <div className="rounded-lg border border-border bg-secondary/40 p-4" data-state="agreed">
           <p className="m-0 text-2xl font-bold tabular-nums text-foreground">
-            {divergence.agreed.toLocaleString()}
+            {divergence.agreed.toLocaleString("en-US")}
           </p>
           <p className="m-0 mt-1 text-xs leading-5 text-muted-foreground">
             {plural(divergence.agreed)} where the two agreed
@@ -506,7 +570,7 @@ function Counts({ shadow }: { shadow: ShadowState }) {
 
       {/* Both caveats, at the numbers rather than in a footnote. */}
       <p className="m-0 text-xs leading-5 text-muted-foreground">
-        Out of {divergence.considered.toLocaleString()} recorded{" "}
+        Out of {divergence.considered.toLocaleString("en-US")} recorded{" "}
         <strong>{plural(divergence.considered)}</strong>, not calls: a call that failed over to a
         second provider is recorded once per provider tried, and each attempt carries the verdict
         for the provider and model it actually went to. These are a floor. Audit writes are
@@ -837,6 +901,8 @@ export function PolicyShadowPanel({
           <SessionAlertField draft={draft} setDraft={setDraft} pending={pending} />
 
           <SecretGuardField draft={draft} setDraft={setDraft} pending={pending} />
+
+          <InjectionGuardField draft={draft} setDraft={setDraft} pending={pending} />
 
           <p className="m-0 rounded-lg border border-border bg-background p-3 text-xs leading-5 text-muted-foreground">
             Saving a draft changes nothing about enforcement. An empty draft turns shadow mode off.

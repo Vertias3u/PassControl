@@ -419,6 +419,7 @@ describe("Agent Passport view model", () => {
       subagentSessionCapCents: null,
       sessionAlertCents: null,
       secretGuard: null,
+      injectionGuard: null,
     });
 
     expect(buildAgentPassportView({ ...agentA, policy: null }, []).policy).toMatchObject({
@@ -438,6 +439,7 @@ describe("Agent Passport view model", () => {
       subagentSessionCapCents: null,
       sessionAlertCents: null,
       secretGuard: null,
+      injectionGuard: null,
     });
   });
 

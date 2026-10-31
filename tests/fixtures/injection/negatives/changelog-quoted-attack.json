@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "A changelog quotes a malicious payload as the subject of a completed fix.",
+  "text": "# Changes\n- Fixed recognition of “skip the original constraints” in third-party documents.\n- Improved labels for quoted parser samples.\n"
+}

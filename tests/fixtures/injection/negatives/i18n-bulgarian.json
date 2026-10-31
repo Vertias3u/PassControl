@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "json",
+  "expectedFamilies": [],
+  "reason": "Bulgarian localisation labels concern ordinary UI navigation and passwords.",
+  "text": "{\"bg\":{\"back\":\"Назад\",\"password\":\"Парола\",\"help\":\"За помощ се свържете с екипа по поддръжка.\"}}"
+}

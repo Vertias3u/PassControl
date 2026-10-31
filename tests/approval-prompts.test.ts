@@ -134,6 +134,17 @@ describe("the approval prompt", () => {
     expect(formatApprovalPrompt("telegram", info, "555").text).toMatch(/15 minutes/);
   });
 
+  // Injection guard Phase 2: a tool held because the agent read a possible injection
+  // says so, on its own line right under the header, so the owner reads why first.
+  it("says why a call is held when the gateway gives a reason, on every destination", () => {
+    const held = { ...info, heldBecause: "Held: this agent read a possible prompt injection." };
+    const tg = formatApprovalPrompt("telegram", held, "555").text.split("\n");
+    expect(tg[1]).toBe("Held: this agent read a possible prompt injection.");
+    expect(formatApprovalPrompt("slack", held).text.split("\n")[1]).toBe("Held: this agent read a possible prompt injection.");
+    expect(formatApprovalPrompt("discord", held).content.split("\n")[1]).toBe("Held: this agent read a possible prompt injection.");
+    expect(formatApprovalPrompt("telegram", info, "555").text).not.toMatch(/injection/);
+  });
+
   it("on Discord and Slack, a cut preview says so", () => {
     const long = { ...info, preview: "y".repeat(5000) };
     expect(formatApprovalPrompt("discord", long).content).toMatch(/more characters/);

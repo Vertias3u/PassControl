@@ -86,6 +86,17 @@ const allowed = new Set([
   // it at load, so a missing file is a CLI that cannot start.
   "cli/local-stack.mjs",
   "cli/gateway-probe.mjs",
+  // The injection guard's scanner, shared with the gateway, and the sidecar's scan of
+  // PostToolBatch tool output. cli/sidecar.mjs and cli/watch*.mjs import them at load,
+  // so a missing file is a sidecar and a `watch` that cannot start.
+  "cli/injection-scan.mjs",
+  "cli/injection-sidecar.mjs",
+  // Phase 2's hold: which tools a tainted agent waits on. The tool gate imports it.
+  "cli/injection-hold.mjs",
+  // Their types, for the gateway's TypeScript. `cli` is packed whole, so a types file
+  // missing here makes `release:cli` refuse the tarball as unexpected.
+  "cli/injection-scan.d.mts",
+  "cli/injection-hold.d.mts",
   // The sidecar's receipt-id journal. cli/sidecar.mjs imports it at load, so a
   // missing file is a sidecar that cannot start.
   "cli/journal.mjs",

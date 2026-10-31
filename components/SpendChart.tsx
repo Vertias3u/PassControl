@@ -118,7 +118,7 @@ export function SpendChart({
       <div className="pc-spend-view__summary">
         <div className="pc-spend-stat">
           <div>Reported tokens in loaded window</div>
-          <strong>{totalTokens.toLocaleString()}</strong>
+          <strong>{totalTokens.toLocaleString("en-US")}</strong>
           <span data-unconfirmed-calls={unconfirmedCalls}>
             {callCount} agent call{callCount === 1 ? "" : "s"}
             {unconfirmedCalls ? ` · excludes ${unconfirmedCalls} with usage unconfirmed` : ""}
@@ -166,7 +166,7 @@ export function SpendChart({
                   log.cost_microcents == null
                     ? "no recorded cost"
                     : `$${(log.cost_microcents / 1e8).toFixed(6)}`;
-                const label = `${time(log.created_at)} · ${log.provider ?? "unknown"}/${log.model ?? "unknown"} · ${tokens.toLocaleString()} tokens · ${money}`;
+                const label = `${time(log.created_at)} · ${log.provider ?? "unknown"}/${log.model ?? "unknown"} · ${tokens.toLocaleString("en-US")} tokens · ${money}`;
                 return (
                   <div
                     key={log.id}
@@ -194,7 +194,7 @@ export function SpendChart({
             <div key={provider}>
               <span>{provider}</span>
               <strong>${(data.cost / 1e8).toFixed(4)}</strong>
-              <small>{data.calls} calls · {data.tokens.toLocaleString()} tokens</small>
+              <small>{data.calls} calls · {data.tokens.toLocaleString("en-US")} tokens</small>
             </div>
           ))}
         </div>

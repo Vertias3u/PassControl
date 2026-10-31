@@ -93,8 +93,15 @@ vi.mock("@/lib/observability", () => ({
   logFailOpen: vi.fn(),
 }));
 
+// Injection guard Phase 2: the taint store.
+const inj = vi.hoisted(() => ({
+  readTaint: vi.fn(async (_agentId: string, _now: number): Promise<unknown> => null),
+}));
+vi.mock("@/lib/state/taint", () => ({ readTaint: (a: string, n: number) => inj.readTaint(a, n) }));
+
 import { GET } from "@/app/api/v1/self/route";
 import { generateDirectAgentKey } from "@/lib/auth/direct-key";
+import { POLICY_UNREADABLE } from "@/lib/gate";
 
 const AGENT = "11111111-1111-4111-8111-111111111111";
 const OTHER = "33333333-3333-4333-8333-333333333333";
@@ -502,5 +509,60 @@ describe("the soft pause", () => {
       withPause({ known: true, percent: 20, switchTo: null });
       expect((await (await get()).json()).pause).not.toHaveProperty("switch_to");
     });
+  });
+});
+
+// Injection guard Phase 2 (owner, 2026-10-30): /self tells the agent it is tainted only
+// in hold mode, where the hold is visible anyway. Monitor mode and off stay silent, so an
+// agent cannot learn it is watched.
+describe("GET /api/v1/self, the injection guard", () => {
+  const T = Date.UTC(2026, 9, 30, 12, 0, 0);
+  const withPolicy = (policy: unknown) =>
+    h.readPolicy.mockResolvedValue({ policy, shadow: null, senderConstraintMode: "off", budget: { known: true, tokens: 1_000, cents: 2 }, period: { known: true, kind: null, cents: null } });
+
+  beforeEach(() => {
+    inj.readTaint.mockResolvedValue(null);
+  });
+
+  it("monitor mode: no injection field, and the taint is never read", async () => {
+    withPolicy({ injection_guard: { mode: "monitor" } });
+    const body = await (await get()).json();
+    expect(body).not.toHaveProperty("injection");
+    expect(JSON.stringify(body)).not.toMatch(/injection|taint|monitor/);
+    expect(inj.readTaint).not.toHaveBeenCalled();
+  });
+
+  it("off: no injection field", async () => {
+    withPolicy(null);
+    expect(await (await get()).json()).not.toHaveProperty("injection");
+    expect(inj.readTaint).not.toHaveBeenCalled();
+  });
+
+  it("hold, not tainted: says so", async () => {
+    withPolicy({ injection_guard: { mode: "hold" } });
+    const body = await (await get()).json();
+    expect(body.injection).toEqual({ mode: "hold", readable: true, tainted_until: null });
+    expect(inj.readTaint.mock.calls[0]![0]).toBe(AGENT);
+  });
+
+  it("hold, tainted: the end only, never what was found", async () => {
+    withPolicy({ injection_guard: { mode: "hold" } });
+    inj.readTaint.mockResolvedValue({ since: T, until: T + 30 * 60_000, families: ["instruction_override"], surface: "proxy" });
+    const body = await (await get()).json();
+    expect(body.injection).toEqual({ mode: "hold", readable: true, tainted_until: new Date(T + 30 * 60_000).toISOString() });
+    expect(JSON.stringify(body)).not.toMatch(/instruction_override|proxy|since/);
+  });
+
+  it("hold, the taint unreadable: says it could not tell, and still answers", async () => {
+    withPolicy({ injection_guard: { mode: "hold" } });
+    inj.readTaint.mockRejectedValue(new Error("redis down"));
+    const res = await get();
+    expect(res.status).toBe(200);
+    expect((await res.json()).injection).toEqual({ mode: "hold", readable: false, tainted_until: null });
+  });
+
+  it("an unreadable policy: no injection field (no guard is applied)", async () => {
+    withPolicy(POLICY_UNREADABLE);
+    expect(await (await get()).json()).not.toHaveProperty("injection");
   });
 });

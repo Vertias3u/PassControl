@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "A changelog names an XML role tag in prose without code quoting.",
+  "text": "# Parser changes\n- The tokenizer now preserves <system> as a literal node in archived transcripts.\n- Added round-trip coverage for escaped angle brackets."
+}

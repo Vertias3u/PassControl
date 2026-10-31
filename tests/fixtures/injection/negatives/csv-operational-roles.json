@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "csv",
+  "expectedFamilies": [],
+  "reason": "A staff roster contains ordinary role names and business email addresses.",
+  "text": "name,role,email\nMira,system administrator,mira@example.invalid\nJon,developer,jon@example.invalid\n"
+}

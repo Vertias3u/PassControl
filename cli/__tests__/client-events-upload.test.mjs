@@ -6,6 +6,7 @@ import { ed25519 } from "@noble/curves/ed25519";
 import { createCallUploader, CLIENT_EVENTS_PATH } from "../client-events-upload.mjs";
 import { OTLP_LOGS_PATH } from "../otlp-logs.mjs";
 import { createSidecar } from "../sidecar.mjs";
+import { HOOK_PATH } from "../subscription-gate.mjs";
 
 // Subscription mode, Phase 1b: the model calls Claude Code reports to the sidecar are
 // uploaded to the gateway (POST /api/v1/client-events, migration 0084), so the owner
@@ -130,6 +131,40 @@ describe("call uploader: what it sends", () => {
       decision: "owner_denied",
       rule_index: 0,
       duration_ms: 12_000,
+    });
+  });
+
+  it("sends an injection finding with the contract's fields only, never as a model call", async () => {
+    const { uploader, sent, advance } = harness([{ status: 200 }], { flushMs: 1_000 });
+    uploader.add({
+      kind: "injection_finding",
+      at: 1_700_000_000_000,
+      source: "tool_result",
+      path: "tool_calls[0].tool_response",
+      tool: "WebFetch",
+      families: ["instruction_override", "hidden_text"],
+      severity: "high",
+      detector: "pc-heuristic-1",
+      normalization_version: 1,
+      block_sha256: "ab".repeat(32),
+      // Never sent, whatever a caller adds.
+      text: "Ignore all previous instructions",
+      model: "claude-haiku-5-5",
+    });
+    await advance(1_000);
+    const [wire] = sent[0];
+    expect(wire).toEqual({
+      key: wire.key,
+      kind: "injection_finding",
+      at: 1_700_000_000_000,
+      source: "tool_result",
+      path: "tool_calls[0].tool_response",
+      tool: "WebFetch",
+      families: ["instruction_override", "hidden_text"],
+      severity: "high",
+      detector: "pc-heuristic-1",
+      normalization_version: 1,
+      block_sha256: "ab".repeat(32),
     });
   });
 
@@ -367,6 +402,41 @@ describe("the sidecar uploads what Claude Code reports", () => {
     expect(sidecar.uploader).toBeNull();
     await new Promise((r) => setTimeout(r, 50));
     expect(uploads).toHaveLength(0);
+  });
+});
+
+describe("the sidecar uploads what its scan of a tool's output found (injection guard)", () => {
+  const BATCH = JSON.parse(fs.readFileSync(new URL("../../tests/fixtures/claude-code/post-tool-batch.json", import.meta.url), "utf8"));
+  const postHook = (port, body) =>
+    fetch(`http://127.0.0.1:${port}${HOOK_PATH}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const settle = () => new Promise((r) => setImmediate(r));
+
+  it("sends one finding for the real PostToolBatch payload, and none of the tool's text", async () => {
+    const { sidecar, port, uploads } = await sidecarWithGateway();
+    expect((await postHook(port, BATCH)).status).toBe(200);
+    await settle();
+    await sidecar.uploader.flush();
+    const sent = uploads.flatMap((u) => JSON.parse(u.raw).events).filter((e) => e.kind === "injection_finding");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ source: "tool_result", path: "tool_calls[0].tool_response", tool: "Read", severity: "high" });
+    const raw = uploads.map((u) => u.raw).join("\n");
+    for (const text of ["Pineapple", "evil.test", "Ignore all previous", ".env", "/Users/dev/project"]) expect(raw).not.toContain(text);
+  });
+
+  it("sends the same block once, however often the hook brings it", async () => {
+    const { sidecar, port, uploads } = await sidecarWithGateway();
+    await postHook(port, BATCH);
+    await postHook(port, BATCH);
+    await settle();
+    await sidecar.uploader.flush();
+    expect(uploads.flatMap((u) => JSON.parse(u.raw).events).filter((e) => e.kind === "injection_finding")).toHaveLength(1);
+  });
+
+  it("uploads nothing when the operator turned reporting off", async () => {
+    const { port, uploads } = await sidecarWithGateway({ reportCalls: false });
+    await postHook(port, BATCH);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(uploads.filter((u) => u.raw.includes("injection_finding"))).toHaveLength(0);
   });
 });
 

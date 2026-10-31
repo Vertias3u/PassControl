@@ -6,6 +6,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
+// These status/action assertions exercise the view after its clock effect has run.
+vi.mock("@/components/dashboard/useHydratedNow", () => ({ useHydratedNow: () => Date.now() }));
+
 const m = vi.hoisted(() => ({
   getUser: vi.fn(),
   rateLimit: vi.fn(),

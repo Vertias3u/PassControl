@@ -82,3 +82,18 @@ describe("AgentPauseControl with a configured switch (UI-01)", () => {
     expect(html).not.toContain("so it holds");
   });
 });
+
+it("lifted: the server markup does not depend on the server's time zone", () => {
+  const props = { reached: "today's spend is 82% of its limit", liftedUntil: "2026-10-30T12:30:00.000Z" };
+  const was = process.env.TZ;
+  try {
+    process.env.TZ = "UTC";
+    const utc = render(props);
+    process.env.TZ = "Asia/Tokyo";
+    expect(render(props)).toBe(utc);
+    expect(utc).toContain('dateTime="2026-10-30T12:30:00.000Z"');
+  } finally {
+    if (was === undefined) delete process.env.TZ;
+    else process.env.TZ = was;
+  }
+});

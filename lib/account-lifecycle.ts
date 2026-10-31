@@ -7,7 +7,8 @@ import { scanKeys } from "@/lib/reconcile";
 // consumer that parsed version 2 has no idea `profile` exists and the whole
 // point of the number is that it can tell.
 // 4: `data.reportedCalls`, the calls a client reported (0084, subscription mode).
-export const ACCOUNT_EXPORT_SCHEMA_VERSION = 4;
+// 5: `data.injectionFindings`, injection guard findings held for the tenant (0089, 0090).
+export const ACCOUNT_EXPORT_SCHEMA_VERSION = 5;
 const PAGE_SIZE = 1_000;
 
 export const ACCOUNT_EXPORT_TABLES = [
@@ -133,6 +134,41 @@ async function loadReportedCalls(db: SupabaseClient, userId: string): Promise<un
   }
 }
 
+// What the injection guard found (0089), and the tool a sidecar finding names (0090).
+// Scoped by user_id by hand: the export client may be the service role, which bypasses
+// RLS. A database before 0089 has nothing to export; one at 0089 has no `tool_name`, and
+// is read without it, as the tables above fall back a column at a time.
+const INJECTION_FINDING_COLUMNS =
+  "id,user_id,agent_id,created_at,surface,source,path,families,severity,detector,normalization_version,content_hmac,provider,model,tool_name";
+const INJECTION_FINDING_COLUMNS_0089 = INJECTION_FINDING_COLUMNS.replace(/,tool_name$/, "");
+
+async function loadInjectionFindings(db: SupabaseClient, userId: string): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  let columns = INJECTION_FINDING_COLUMNS;
+  for (let start = 0; ; start += PAGE_SIZE) {
+    const page_ = (select: string) =>
+      db
+        .from("injection_findings")
+        .select(select)
+        .eq("user_id", userId)
+        .order("created_at", { ascending: true })
+        .order("id", { ascending: true })
+        .range(start, start + PAGE_SIZE - 1) as unknown as Promise<{ data: unknown[] | null; error: { code?: string } | null }>;
+    let { data, error } = await page_(columns);
+    if (["42703", "PGRST204"].includes(error?.code ?? "") && columns !== INJECTION_FINDING_COLUMNS_0089) {
+      columns = INJECTION_FINDING_COLUMNS_0089;
+      ({ data, error } = await page_(columns));
+    }
+    if (error) {
+      if (["42P01", "PGRST205"].includes(error.code ?? "")) return [];
+      throw new Error("account_export_injectionFindings_unavailable");
+    }
+    const page = data ?? [];
+    rows.push(...page);
+    if (page.length < PAGE_SIZE) return rows;
+  }
+}
+
 async function loadBetaExport(admin: SupabaseClient | undefined, userId: string) {
   if (!admin) return { application: null, invitations: [], feedback: null };
   const { data: application, error: applicationError } = await admin
@@ -179,10 +215,11 @@ export async function loadAccountExport(db: SupabaseClient, user: User, admin: S
     ]);
   if (profileError || mfaError) throw new Error("account_export_profile_unavailable");
 
-  const [entries, beta, reportedCalls] = await Promise.all([
+  const [entries, beta, reportedCalls, injectionFindings] = await Promise.all([
     Promise.all(ACCOUNT_EXPORT_TABLES.map(async (spec) => [spec.key, await readAllRows(db, user, spec)] as const)),
     loadBetaExport(admin, user.id),
     loadReportedCalls(db, user.id),
+    loadInjectionFindings(db, user.id),
   ]);
   const data = Object.fromEntries(entries) as ExportRows;
   return {
@@ -211,7 +248,7 @@ export async function loadAccountExport(db: SupabaseClient, user: User, admin: S
       avatar: profile?.avatar_path ? "stored" : null,
       updatedAt: profile?.updated_at ?? null,
     },
-    data: { ...data, reportedCalls, beta },
+    data: { ...data, reportedCalls, injectionFindings, beta },
     exclusions: [
       "Provider credential plaintext and Vault references",
       "Direct Agent Key and control API key hashes",

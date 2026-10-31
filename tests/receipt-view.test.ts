@@ -681,3 +681,34 @@ describe("a receipt whose cost is unknown", () => {
     expect(formatCost(1_234_000_000, true).primary).toBe("$12.34");
   });
 });
+
+// The injection guard's additive `inj` claim (owner, 2026-10-30). Kinds only: the page
+// says what the gateway's detector flagged in this call's tool output, in plain words,
+// and that a tell is a hint, not proof. Anything malformed renders as no row at all.
+describe("describeInjection", () => {
+  it("says how many blocks were flagged, by which detector, and their kinds in plain words", async () => {
+    const { describeInjection } = await import("@/lib/verify/receipt-view");
+    const view = describeInjection({ d: "pc-heuristic-1", n: 2, f: ["instruction_override", "exfil_directive"] });
+    expect(view).toEqual({
+      summary: "2 blocks of tool output carried injection tells",
+      kinds: ["Tells the model to drop its instructions", "Asks for secrets to be sent somewhere"],
+      detector: "pc-heuristic-1",
+    });
+    expect(describeInjection({ d: "pc-heuristic-1", n: 1, f: ["hidden_text"] })?.summary).toBe(
+      "1 block of tool output carried injection tells"
+    );
+  });
+
+  it("shows an unknown kind as itself, made printable", async () => {
+    const { describeInjection } = await import("@/lib/verify/receipt-view");
+    expect(describeInjection({ d: "x", n: 1, f: ["future_kind\u0007"] })?.kinds).toEqual(["future_kind?"]);
+  });
+
+  it.each([undefined, null, "x", [], { d: "x", n: 0, f: [] }, { d: "x", n: "2", f: [] }, { n: 1, f: [] }, { d: "x", n: 1, f: "a" }])(
+    "renders nothing for %j",
+    async (inj) => {
+      const { describeInjection } = await import("@/lib/verify/receipt-view");
+      expect(describeInjection(inj)).toBeNull();
+    }
+  );
+});

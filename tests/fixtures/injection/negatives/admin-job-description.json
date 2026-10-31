@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "A job description mentions system administrators as ordinary people.",
+  "text": "# On-call responsibilities\nThe system administrator rotates certificates on Monday. A second administrator verifies the service accounts before the maintenance window closes."
+}

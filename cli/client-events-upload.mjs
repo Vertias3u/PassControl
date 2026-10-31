@@ -40,6 +40,7 @@ const newKey = () => `evt_${randomBytes(16).toString("base64url")}`;
 /** One event from readClaudeCodeEvents, as the gateway takes it. Absent fields are left out. */
 function toWire(event, key) {
   if (event.kind === "tool_decision") return toolDecisionWire(event, key);
+  if (event.kind === "injection_finding") return injectionFindingWire(event, key);
   const wire = {
     key,
     kind: event.kind === "api_error" ? "model_error" : "model_call",
@@ -70,6 +71,27 @@ function toolDecisionWire(event, key) {
     decision: event.decision,
     rule_index: event.ruleIndex,
     duration_ms: event.waitMs,
+  };
+  for (const name of Object.keys(wire)) if (wire[name] === null || wire[name] === undefined) delete wire[name];
+  return wire;
+}
+
+// What the sidecar's scan of a tool's output found (cli/injection-sidecar.mjs): the
+// gateway's fixed fields only (plans/injection-guard.md §2b), so nothing a caller adds,
+// least of all text, is ever sent.
+function injectionFindingWire(event, key) {
+  const wire = {
+    key,
+    kind: "injection_finding",
+    at: event.at,
+    source: event.source,
+    path: event.path,
+    tool: event.tool,
+    families: event.families,
+    severity: event.severity,
+    detector: event.detector,
+    normalization_version: event.normalization_version,
+    block_sha256: event.block_sha256,
   };
   for (const name of Object.keys(wire)) if (wire[name] === null || wire[name] === undefined) delete wire[name];
   return wire;

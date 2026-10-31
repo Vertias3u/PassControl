@@ -40,6 +40,8 @@ import { DISPLAYED_SERVICES, SERVICE_DISPLAY } from "@/lib/services/display";
 import { HashLanding } from "@/components/HashLanding";
 import { ReportedCallsPanel, ToolDecisionsPanel } from "@/components/ReportedCallsPanel";
 import { readReportedCalls, readToolDecisions } from "./reported-data";
+import { InjectionFindingsPanel } from "@/components/InjectionFindingsPanel";
+import { readInjectionFindings, readInjectionTaintView } from "./injection-data";
 import { AgentToolRules } from "@/components/AgentToolRules";
 import { readToolRules } from "@/lib/tool-rules";
 import { AgentPauseControl } from "@/components/AgentPauseControl";
@@ -181,6 +183,16 @@ function AgentPolicySummary({ policy }: { policy: AgentPolicyView }) {
                   : "Not checked"}
             </dd>
           </div>
+          <div>
+            <dt className="font-semibold text-foreground">Injected instructions</dt>
+            <dd className="mt-1 text-muted-foreground" data-policy-summary="injection_guard">
+              {policy.injectionGuard === "hold"
+                ? "Risky actions held after a strong finding"
+                : policy.injectionGuard === "monitor"
+                  ? "Recorded, never refused"
+                  : "Not checked"}
+            </dd>
+          </div>
         </dl>
       )}
     </section>
@@ -249,14 +261,24 @@ export default async function AgentPassportPage({
   // Bet D: only a passport can delegate, so a Direct-Key-only agent has no workers.
   const delegations = passport.agent.passportId ? await readAgentDelegations(user.id, passport.agent.id) : null;
   // Subscription mode (0084): calls Claude Code reported, read through RLS.
-  const [reported, toolDecisions, toolRules, pauseState] = await Promise.all([
+  const [reported, toolDecisions, toolRules, pauseState, injectionFindings] = await Promise.all([
     readReportedCalls(db, passport.agent.id),
     readToolDecisions(db, passport.agent.id),
     // Subscription mode, Phase 2 (0085): read through RLS like the rest of the page.
     readToolRules(db, passport.agent.id, user.id),
     readAgentPauseState(db, user.id, passport.agent.id),
+    // The injection guard's records (0089), through RLS too.
+    readInjectionFindings(db, passport.agent.id),
   ]);
   const hasReported = reported.state === "ok" && reported.rows.length > 0;
+  const injectionGuardOn = passport.policy.injectionGuard !== null;
+  // Hold mode only: the agent was found through the signed-in user's session above.
+  const injectionHold =
+    passport.policy.injectionGuard === "hold"
+      ? { agentId: passport.agent.id, taint: await readInjectionTaintView(passport.agent.id, Date.now()) }
+      : undefined;
+  const hasInjectionSection =
+    injectionGuardOn || (injectionFindings.state === "ok" && injectionFindings.rows.length > 0);
   const hasToolDecisions = toolDecisions.state === "ok" && toolDecisions.rows.length > 0;
 
   // The section nav's three groups. Operate is the identity's live status, and
@@ -296,6 +318,9 @@ export default async function AgentPassportPage({
         ...(hasReported ? [{ href: "#agent-reported" as const, label: "Reported", ariaLabel: "Calls reported by Claude Code" }] : []),
         ...(hasToolDecisions
           ? [{ href: "#agent-tool-decisions" as const, label: "Tool log", ariaLabel: "What the tool rules decided" }]
+          : []),
+        ...(hasInjectionSection
+          ? [{ href: "#agent-injection" as const, label: "Injection", ariaLabel: "Injected instructions found in tool output" }]
           : []),
         { href: "#agent-trace", label: "Trace", ariaLabel: "Decision trace" },
       ],
@@ -496,6 +521,7 @@ export default async function AgentPassportPage({
             part of it (no receipt, not proxied, cost API-equivalent). */}
         <ReportedCallsPanel read={reported} />
         <ToolDecisionsPanel read={toolDecisions} />
+        <InjectionFindingsPanel read={injectionFindings} enabled={injectionGuardOn} hold={injectionHold} />
         <div id="agent-trace" className="scroll-mt-40">
         <DecisionTracePanel
           agentId={passport.agent.id}

@@ -51,7 +51,7 @@ describe("configure codex --subscription", () => {
     expect(existsSync(join(home, ".codex", "passcontrol.config.toml"))).toBe(false);
   });
 
-  it("writes the two hooks next to someone else's, says to trust them, and removes only its own", async () => {
+  it("writes the three hooks next to someone else's, says to trust them, and removes only its own", async () => {
     const home = freshHome();
     mkdirSync(join(home, ".codex"), { recursive: true });
     const theirs = { hooks: { UserPromptSubmit: [{ hooks: [{ type: "command", command: "other-tool hook", timeout: 10 }] }] } };
@@ -59,7 +59,7 @@ describe("configure codex --subscription", () => {
 
     const w = await run(["configure", "codex", "--subscription", "--write", "--port", "8791"], home);
     expect(w.code).toBe(0);
-    expect(w.out + w.err).toMatch(/type \/hooks, and trust PassControl's two hooks/);
+    expect(w.out + w.err).toMatch(/type \/hooks, and trust PassControl's three hooks/);
     // The exact command, run as Codex would under a bare PATH (the bare `passcontrol` failed this).
     expect(w.out).toMatch(/the hook command runs on its own/);
     const s = read(hooksFile(home));
@@ -67,6 +67,8 @@ describe("configure codex --subscription", () => {
     expect(s.hooks.UserPromptSubmit[0]).toEqual(theirs.hooks.UserPromptSubmit[0]);
     expect(s.hooks.PreToolUse[0].hooks[0]).toMatchObject({ type: "command", timeout: 600 });
     expect(s.hooks.PreToolUse[0].hooks[0].command).toMatch(/codex-hook --port 8791$/);
+    expect(s.hooks.PostToolUse[0].hooks[0]).toMatchObject({ type: "command", timeout: 5 });
+    expect(s.hooks.PostToolUse[0].hooks[0].command).toBe(s.hooks.PreToolUse[0].hooks[0].command);
     expect(existsSync(`${hooksFile(home)}.passcontrol-backup`)).toBe(true);
 
     const again = await run(["configure", "codex", "--subscription", "--write", "--port", "8791"], home);

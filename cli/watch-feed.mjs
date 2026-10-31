@@ -21,6 +21,8 @@
 // cannot keep up is dropped rather than buffered for, and nothing on the proxy
 // path waits on a subscriber.
 
+import { INJECTION_FAMILIES } from "./injection-scan.mjs";
+
 export const WATCH_PATH = "/_passcontrol/watch";
 /** Paths under this prefix are the sidecar's own and are never forwarded. */
 export const LOCAL_PREFIX = "/_passcontrol/";
@@ -270,6 +272,41 @@ export function createWatchFeed({ runId, capacity = 200, maxSubscribers = 8, ena
     }
   }
 
+  /** A local scan saw a tell; this says nothing about server recording. */
+  function injection(event) {
+    try {
+      const families = INJECTION_FAMILIES.filter((f) => Array.isArray(event.families) && event.families.includes(f));
+      if (!families.length) return;
+      const record = {
+        type: "injection_finding", seq: ++seq,
+        at: Number.isFinite(event.at) ? event.at : now(), source: "tool_result",
+        tool: held(/^[A-Za-z0-9_.-]{1,128}$/, event.tool), families,
+      };
+      remember(record);
+      broadcast(record);
+    } catch {
+      // Like calls, findings are best-effort metadata only.
+    }
+  }
+
+  /**
+   * One tool the injection guard held (Phase 2): tool name and outcome only, never
+   * its input. Not a call, so the board does not count it. Never throws.
+   */
+  function toolHold(event) {
+    try {
+      if (!["approved", "denied", "timeout", "unavailable", "through"].includes(event?.outcome)) return;
+      const record = {
+        type: "tool_hold", seq: ++seq,
+        at: Number.isFinite(event.at) ? event.at : now(),
+        tool: held(/^[A-Za-z0-9_.-]{1,128}$/, event.tool),
+        outcome: event.outcome,
+      };
+      remember(record);
+      broadcast(record);
+    } catch {}
+  }
+
   /**
    * The latest usage window, already held to its shape by the caller. Replaces the
    * last one and tells every board. Never throws.
@@ -335,6 +372,8 @@ export function createWatchFeed({ runId, capacity = 200, maxSubscribers = 8, ena
     begin,
     record,
     report,
+    injection,
+    toolHold,
     setWindow,
     window: () => usageWindow,
     serve,

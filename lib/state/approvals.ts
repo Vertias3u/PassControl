@@ -57,7 +57,10 @@ const k = {
   pollOffset: (uid: string) => `apvtg:off:${uid}`,
 };
 
+export type ApprovalHold = "injection_tainted" | "injection_unknown";
+
 export interface ApprovalRequest {
+  hold?: ApprovalHold;
   userId: string;
   agentId: string;
   service: string;
@@ -78,6 +81,7 @@ export type ApprovalCheck =
   | { state: "full"; id?: undefined };
 
 export interface Approval {
+  hold?: ApprovalHold;
   id: string;
   state: "pending" | "approved" | "denied" | "used";
   agentId: string;
@@ -186,6 +190,7 @@ export async function checkApproval(request: ApprovalRequest, opts: { create: bo
     "preview", clip(request.preview, APPROVAL_PREVIEW_MAX),
     "fp", request.fingerprint,
   ];
+  if (request.hold) fields.push("hold", request.hold);
   const res = (await redis().eval(
     CHECK_LUA,
     [k.fingerprint(request.fingerprint), k.queue(request.userId)],
@@ -250,6 +255,35 @@ export async function decideApproval(input: {
 }
 
 /** Bind an approval to the Telegram message that asks about it, and the text it shows. */
+// KEYS[1] the record. ARGV: uid, chat, message, hash of the text sent. The agent
+// only for a tap on the message this approval was sent as, with its own text, in
+// its own workspace; nothing is changed.
+const TAP_AGENT_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return false end
+if redis.call('HGET', KEYS[1], 'uid') ~= ARGV[1] then return false end
+if redis.call('HGET', KEYS[1], 'tg_chat') ~= ARGV[2] then return false end
+if redis.call('HGET', KEYS[1], 'tg_msg') ~= ARGV[3] then return false end
+if redis.call('HGET', KEYS[1], 'tg_hash') ~= ARGV[4] then return false end
+return redis.call('HGET', KEYS[1], 'agid')
+`;
+
+/**
+ * The agent a held prompt was about, for its "Clear the hold" button (injection
+ * guard, Phase 2), bound as Approve and Deny are. Null for any tap that is not from
+ * that message. Decides nothing. Throws when Redis cannot answer.
+ */
+export async function approvalAgentForTap(input: {
+  userId: string;
+  id: string;
+  chat: string;
+  message: string;
+  textHash: string;
+}): Promise<string | null> {
+  if (!isApprovalId(input.id) || !input.userId || !input.chat || !input.message || !input.textHash) return null;
+  const agent = await redis().eval(TAP_AGENT_LUA, [k.record(input.id)], [input.userId, input.chat, input.message, input.textHash]);
+  return typeof agent === "string" && agent !== "" ? agent : null;
+}
+
 export async function attachTelegramMessage(id: string, chat: string, message: string, textHash: string): Promise<void> {
   await redis().eval(ATTACH_LUA, [k.record(id)], [chat, message, textHash]);
 }
@@ -267,6 +301,7 @@ function toApproval(id: string, raw: Record<string, unknown> | null): Approval |
   return {
     id,
     state,
+    ...(raw.hold === "injection_tainted" || raw.hold === "injection_unknown" ? { hold: raw.hold } : {}),
     agentId: text("agid"),
     service: text("svc"),
     method: text("method"),

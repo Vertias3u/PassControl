@@ -24,6 +24,7 @@ const h = vi.hoisted(() => ({
   agentRow: vi.fn(),
   agentsFilters: [] as [string, unknown][],
   awaitApproval: vi.fn(),
+  existingApproval: vi.fn(),
   writeLog: vi.fn(),
   signReceipt: vi.fn(),
   rateLimit: vi.fn(),
@@ -79,9 +80,18 @@ vi.mock("@/lib/observability", () => ({
 vi.mock("@/lib/approvals/gate", () => ({
   approvalWaitMs: () => 15_000,
   awaitApproval: (...a: unknown[]) => h.awaitApproval(...a),
+  existingApproval: (...a: unknown[]) => h.existingApproval(...a),
 }));
 
+// Injection guard Phase 2: the taint store.
+const inj = vi.hoisted(() => ({
+  readTaint: vi.fn(async (_agentId: string, _now: number): Promise<unknown> => null),
+}));
+vi.mock("@/lib/state/taint", () => ({ readTaint: (a: string, n: number) => inj.readTaint(a, n) }));
+
 import { POST } from "@/app/api/v1/tool-approvals/route";
+import { POLICY_UNREADABLE } from "@/lib/gate";
+import { generateDirectAgentKey } from "@/lib/auth/direct-key";
 
 const AGENT = "11111111-1111-4111-8111-111111111111";
 const OTHER = "33333333-3333-4333-8333-333333333333";
@@ -116,6 +126,7 @@ beforeEach(() => {
   h.readPolicy.mockResolvedValue({ policy: {}, shadow: {}, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
   h.agentRow.mockResolvedValue({ data: { tool_rules: RULES, name: "Claude Code @ laptop" }, error: null });
   h.awaitApproval.mockResolvedValue({ state: "approved", id: "apv_1" });
+  h.existingApproval.mockResolvedValue({ state: "none" });
   h.rateLimit.mockResolvedValue({ success: true, remaining: 10 });
   h.rateLimitFailClosed.mockResolvedValue({ success: true, remaining: 10 });
 });
@@ -186,10 +197,11 @@ describe("asking", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ state: "approved" });
     const { request, prompt } = asked();
+    expect(request).not.toHaveProperty("hold");
     expect(request).toMatchObject({ service: "claude-code", method: "TOOL", path: "Bash", preview: "cd repo && git push origin main" });
     expect(prompt).toMatchObject({
       agentName: "Claude Code @ laptop",
-      serviceLabel: "a Claude Code tool",
+      serviceLabel: "a local tool",
       method: "TOOL",
       path: "Bash",
       preview: "cd repo && git push origin main",
@@ -247,5 +259,133 @@ describe("asking", () => {
     const res = await post(ask({ tool_name: "Write", tool_input: { file_path: "/a", content: "y".repeat(20_000) } }));
     expect(res.status).toBe(413);
     expect(h.awaitApproval).not.toHaveBeenCalled();
+  });
+});
+
+// Injection guard Phase 2 (owner, 2026-10-30): while the agent is tainted, a risky tool
+// with no ask_owner rule is still put to the owner. The gateway decides that from ITS
+// OWN taint and policy, never from anything the sidecar says, so the 2026-10-12 rule
+// (an agent cannot ask its owner arbitrary questions) holds: only a risky tool, only in
+// hold mode, only while this agent is tainted.
+describe("held because the agent is tainted", () => {
+  const T = Date.UTC(2026, 9, 30, 12, 0, 0);
+  const NO_RULES = { tool_rules: null, name: "Claude Code @ laptop" };
+  const tainted = () => inj.readTaint.mockResolvedValue({ since: T, until: T + 1_800_000, families: ["instruction_override"], surface: "sidecar" });
+
+  beforeEach(() => {
+    h.readPolicy.mockResolvedValue({ policy: { injection_guard: { mode: "hold" } }, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+    inj.readTaint.mockResolvedValue(null);
+    h.agentRow.mockResolvedValue({ data: NO_RULES, error: null });
+  });
+
+  it("asks the owner about a risky tool, says why, and reads the credential's own agent", async () => {
+    tainted();
+    const res = await post({ ...ask({ tool_input: { command: "git push --force origin main" } }), agent_id: OTHER });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ state: "approved" });
+    expect(inj.readTaint.mock.calls[0]![0]).toBe(AGENT);
+    expect(asked().request).toMatchObject({ agentId: AGENT, userId: TENANT, path: "Bash", preview: "git push --force origin main" });
+    expect(String(asked().prompt.heldBecause)).toMatch(/prompt injection/);
+    expect(asked().request).toHaveProperty("hold", "injection_tainted");
+    expect(asked().prompt.offerClear).toBe(true);
+  });
+
+  it.each(["Write", "Edit", "WebFetch", "mcp__github__create_pull_request"])("holds %s too", async (tool) => {
+    tainted();
+    expect((await post(ask({ tool_name: tool, tool_input: { file_path: "/repo/a", url: "https://x.test" } }))).status).toBe(200);
+  });
+
+  it("never a tool outside the set, tainted or not", async () => {
+    tainted();
+    const res = await post(ask({ tool_name: "Read", tool_input: { file_path: "/repo/README.md" } }));
+    expect(res.status).toBe(409);
+    expect(h.awaitApproval).not.toHaveBeenCalled();
+  });
+
+  it("an explicit deny rule still wins", async () => {
+    tainted();
+    h.agentRow.mockResolvedValue({ data: { tool_rules: { rules: [{ tool: "Bash", command: "git push*", effect: "deny" }] }, name: "x" }, error: null });
+    expect((await post(ask())).status).toBe(409);
+    expect(h.awaitApproval).not.toHaveBeenCalled();
+  });
+
+  it("rules this build cannot read still refuse: the sidecar denies every tool for them", async () => {
+    tainted();
+    h.agentRow.mockResolvedValue({ data: { tool_rules: { rules: [{ tool: "Bash", effect: "allow" }] }, name: "x" }, error: null });
+    expect((await post(ask())).status).toBe(409);
+  });
+
+  it("not tainted: refuses, as without the guard", async () => {
+    expect((await post(ask())).status).toBe(409);
+    expect(h.awaitApproval).not.toHaveBeenCalled();
+  });
+
+  // 1.7.0 public e2e, F3: Approvals says a cleared hold's request "still waits for
+  // Approve or Deny". The sidecar keeps asking while the tool waits, so after Clear
+  // its next ask must find the owner's answer, not a refusal that makes it moot.
+  describe("after the hold is cleared, a question it asked is still the owner's", () => {
+    it.each([["pending"], ["approved"], ["denied"]])("answers %s from the question already asked, asking nothing new", async (state) => {
+      h.existingApproval.mockResolvedValue({ state, ...(state === "approved" ? { id: "apv_1" } : {}) });
+      const res = await post(ask());
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ state });
+      expect(h.awaitApproval).not.toHaveBeenCalled();
+      expect(h.existingApproval.mock.calls[0]![0]).toMatchObject({ agentId: AGENT, userId: TENANT, path: "Bash", method: "TOOL" });
+    });
+
+    it("the approval store unreadable: unavailable, never a yes", async () => {
+      h.existingApproval.mockResolvedValue({ state: "unavailable" });
+      expect((await post(ask())).status).toBe(503);
+    });
+
+    it("never looks for a tool the hold does not cover", async () => {
+      expect((await post(ask({ tool_name: "Read", tool_input: { file_path: "/repo/README.md" } }))).status).toBe(409);
+      expect(h.existingApproval).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each([
+    ["monitor mode", { injection_guard: { mode: "monitor" } }],
+    ["the guard off", {}],
+  ])("%s: refuses even when a taint is stored", async (_why, policy) => {
+    tainted();
+    h.readPolicy.mockResolvedValue({ policy, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+    expect((await post(ask())).status).toBe(409);
+    expect(h.awaitApproval).not.toHaveBeenCalled();
+  });
+
+  // Owner "1b": without the policy, a live taint (which exists only in hold mode) still holds.
+  it("an unreadable policy: a live taint still asks the owner; none refuses", async () => {
+    h.readPolicy.mockResolvedValue({ policy: POLICY_UNREADABLE, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+    expect((await post(ask())).status).toBe(409);
+    tainted();
+    expect((await post(ask())).status).toBe(200);
+    expect(asked().prompt.offerClear).toBe(true);
+  });
+
+  it("a taint that cannot be read holds: the owner is asked (the store's fail-closed side)", async () => {
+    inj.readTaint.mockRejectedValue(new Error("redis down"));
+    expect((await post(ask())).status).toBe(200);
+    expect(String(asked().prompt.heldBecause)).toMatch(/could not be checked|possible prompt injection/);
+    expect(asked().request).toHaveProperty("hold", "injection_unknown");
+    expect(asked().prompt.offerClear).toBe(false);
+  });
+
+  it("reads the policy for a Direct Agent Key as well", async () => {
+    h.authenticateDirectAgentKey.mockResolvedValue({
+      kind: "direct_key", keyId: "k1", agentId: AGENT, userId: TENANT, scopes: SCOPE,
+      budgetTokens: null, budgetCents: null, spentTokens: 0, spentMicrocents: 0, suspended: false,
+    });
+    tainted();
+    const res = await post(ask(), { "x-api-key": generateDirectAgentKey() });
+    expect(res.status).toBe(200);
+    expect(h.readPolicy).toHaveBeenCalled();
+  });
+
+  it("an ask_owner rule is asked as before, with no injection reason", async () => {
+    tainted();
+    h.agentRow.mockResolvedValue({ data: { tool_rules: RULES, name: "x" }, error: null });
+    await post(ask());
+    expect(asked().prompt.heldBecause).toBeUndefined();
   });
 });

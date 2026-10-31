@@ -33,6 +33,7 @@ import {
   describeFailure,
   describeOwner,
   describeLineage,
+  describeInjection,
   describeFailover,
   describeVerdict,
   formatCost,
@@ -460,6 +461,7 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
   const cost = formatCost(claims.cost, claims.unp);
   const failover = describeFailover(claims.why);
   const lineage = describeLineage(claims.ctx);
+  const injection = describeInjection(claims.inj);
   const tone =
     verdict.tone === "clear"
       ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600"
@@ -592,6 +594,25 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
                 <span className="mt-1 block text-xs leading-5 text-muted-foreground">
                   {lineage.note[0]!.toUpperCase() + lineage.note.slice(1)}. Any program on the same machine could send
                   different values; they group calls, and the identity above still says which agent made this one.
+                </span>
+              </dd>
+            </div>
+          ) : null}
+          {injection ? (
+            <div className="sm:col-span-2" data-injection="found">
+              <dt className="m-0 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                Injection guard
+              </dt>
+              <dd className="mt-1 mb-0">
+                <span className="text-sm text-foreground">{injection.summary}</span>
+                <ul className="m-0 mt-1 list-none p-0 text-sm text-foreground">
+                  {injection.kinds.map((kind, i) => (
+                    <li key={i}>{kind}</li>
+                  ))}
+                </ul>
+                <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                  Flagged by the issuer&apos;s detector ({injection.detector}). A tell is a hint, not proof, and the
+                  receipt names kinds only, never the text.
                 </span>
               </dd>
             </div>

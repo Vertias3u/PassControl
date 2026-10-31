@@ -23,19 +23,23 @@ undo, run `passcontrol configure codex --remove`.
 ## On a ChatGPT plan
 
 Codex signed in with a ChatGPT plan talks to OpenAI directly, and PassControl stays out of that
-path. The agent's stops and tool rules still reach the session, through two Codex hooks:
+path. The agent's stops and tool rules still reach the session, through three Codex hooks:
 
 ```bash
 passcontrol configure codex --subscription            # preview
-passcontrol configure codex --subscription --write    # adds two hooks to ~/.codex/hooks.json
+passcontrol configure codex --subscription --write    # adds three hooks to ~/.codex/hooks.json
 passcontrol sidecar                                    # start it before Codex
 ```
 
-Then open Codex, type `/hooks`, and trust PassControl's two hooks. Codex skips a hook nobody has
-trusted, without saying so.
+Then open Codex, type `/hooks`, and trust PassControl's three hooks. Codex skips a hook nobody has
+trusted, without saying so. Set up before the third hook existed? Re-run the `--write` line and trust
+the new one; the two you trusted stay trusted.
 
 - A suspended agent, or the kill switch, blocks the next prompt and refuses tools.
 - The agent's tool rules refuse what they deny. An "ask the owner" rule waits for the owner's answer.
+- With the injection guard on, what Codex's tools return is scanned on this machine. That hook never
+  blocks a tool or changes its output. In hold mode a strong finding puts the agent's next commands and
+  file edits to the owner.
 
 `hooks.json` is shared with other tools. Setup adds or replaces only PassControl's entries, keeps a
 backup the first time (`hooks.json.passcontrol-backup`), and

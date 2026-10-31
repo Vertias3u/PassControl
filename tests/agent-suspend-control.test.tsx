@@ -75,3 +75,18 @@ describe("desired-state controls", () => {
     expect(control).toMatch(/void run\(result\.intent\)/);
   });
 });
+
+it("confirmed: the server markup does not depend on the server's time zone", () => {
+  const result = { phase: "observed", intent: "suspended", observation: obs({}), at: "2026-10-30T12:30:00.000Z" } as const;
+  const was = process.env.TZ;
+  try {
+    process.env.TZ = "UTC";
+    const utc = render(result);
+    process.env.TZ = "Asia/Tokyo";
+    expect(render(result)).toBe(utc);
+    expect(utc).toContain('dateTime="2026-10-30T12:30:00.000Z"');
+  } finally {
+    if (was === undefined) delete process.env.TZ;
+    else process.env.TZ = was;
+  }
+});

@@ -513,7 +513,7 @@ export async function readCurrentAgentPolicyAndShadow(
       : { known: false };
 
   if (options.cacheOnMiss !== false) {
-    waitUntil(
+    waitUntil(Promise.resolve(
       setCachedAgentPolicy(
         userId,
         agentId,
@@ -536,7 +536,7 @@ export async function readCurrentAgentPolicyAndShadow(
         // may read the fence itself: it must be the one captured before the read.
         fence
       )
-    );
+    ).catch(() => false)); // a fill is best effort; unhandled, every outage call logged it
   }
   return { policy, shadow, senderConstraintMode, budgetState, budget, period, pause };
 }

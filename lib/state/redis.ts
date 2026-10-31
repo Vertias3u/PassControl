@@ -5,10 +5,21 @@ import { Redis } from "@upstash/redis";
 import { logFailOpen } from "../observability";
 import { sessionStopKey } from "./kill-keys";
 
+/**
+ * One quick retry, not Upstash's default of five with backoff (about 4.3 s per
+ * command when Redis refuses): a budgeted call makes about five commands in a row,
+ * so an outage held it past 20 s before it was refused (stress run 2026-10-30).
+ * A replay is safe because every budget transition is idempotent on its attempt id
+ * (holds.ts). The cost, accepted by the owner: a kill or suspend read gives up, and
+ * fails open, after about 100 ms instead of 4 s. No abort timeout is set: aborting
+ * an OPEN that Redis had already run would leave a hold no one settles.
+ */
+export const REDIS_RETRY = { retries: 1, backoff: () => 50 } as const;
+
 let _redis: Redis | null = null;
 export function redis(): Redis {
   if (_redis) return _redis;
-  _redis = Redis.fromEnv();
+  _redis = Redis.fromEnv({ retry: REDIS_RETRY });
   return _redis;
 }
 

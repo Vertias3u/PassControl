@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "An image URL with a literal placeholder documents a harmless CDN width parameter.",
+  "text": "# Template syntax\nThis illustrative image shows the width placeholder used by the documentation renderer:\n![sample](https://cdn.example.invalid/sample.png?width=${WIDTH})\nWIDTH is a public integer, not sensitive data."
+}

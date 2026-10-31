@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "html",
+  "expectedFamilies": [],
+  "reason": "A hidden UI option names a system administrator role, without asserting authority.",
+  "text": "<select><option>Member</option><option hidden>System administrator</option></select><p>The hidden option is enabled only in the admin view.</p>"
+}

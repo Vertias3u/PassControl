@@ -6,7 +6,7 @@
 // Bearer token with no "use this API key?" prompt. The sidecar strips it and the
 // gateway injects the real key, so Claude Code never holds one.
 //
-// The settings file belongs to the user. Only these two keys, and with
+// The settings file belongs to the user. The env keys and tool hook, and with
 // --statusline a `statusLine` running `passcontrol statusline`, are written or
 // removed, in one save; the previous file is backed up, a file that is not a JSON
 // object is refused rather than overwritten, a different gateway already
@@ -96,7 +96,7 @@ function withNoteOnlyHook(hooks, port) {
  * The env keys, and with `statusLineCommand` the status line too, in ONE save:
  * two saves would back up the first save's output and lose the user's original.
  */
-export function writeClaudeCodeSettings({ target, baseUrl, force = false, statusLineCommand = null, noteHookPort = null }) {
+export function writeClaudeCodeSettings({ target, baseUrl, force = false, statusLineCommand = null, noteHookPort = null, toolHookPort = null }) {
   const { exists, value } = readSettings(target);
   const env = typeof value.env === "object" && value.env !== null && !Array.isArray(value.env) ? value.env : {};
   const rawKeyFound = typeof env.ANTHROPIC_API_KEY === "string" && env.ANTHROPIC_API_KEY.length > 0;
@@ -114,7 +114,8 @@ export function writeClaudeCodeSettings({ target, baseUrl, force = false, status
     next = line.value;
     statusLine = line.existing !== undefined ? { changed: false, existing: line.existing } : { changed: line.changed };
   }
-  const hooks = withNoteOnlyHook(value.hooks, noteHookPort);
+  // configure passes the sidecar's port; URL.port is "" for :80, which would write a hook to nowhere.
+  const hooks = withApiTools(withNoteOnlyHook(value.hooks, noteHookPort), toolHookPort ?? (new URL(baseUrl).port || 80));
   const hooksChanged = !same(hooks ?? null, value.hooks ?? null);
   if (hooksChanged) {
     next = { ...next };
@@ -126,7 +127,7 @@ export function writeClaudeCodeSettings({ target, baseUrl, force = false, status
   return { changed, backupPath, rawKeyFound, ...(statusLine ? { statusLine } : {}) };
 }
 
-/** PassControl's two env keys and its status line, in one save. */
+/** PassControl's env keys, tool hook, optional note and status line, in one save. */
 export function removeClaudeCodeSettings({ target }) {
   if (!fs.existsSync(target)) return { changed: false };
   const { value } = readSettings(target);
@@ -145,7 +146,7 @@ export function removeClaudeCodeSettings({ target }) {
     next = rest;
   }
   if (isObject(next.hooks)) {
-    const hooks = withNoteOnlyHook(next.hooks, null);
+    const hooks = withApiTools(withNoteOnlyHook(next.hooks, null), null);
     if (!same(hooks, next.hooks)) {
       next = { ...next };
       if (Object.keys(hooks).length) next.hooks = hooks;
@@ -218,11 +219,10 @@ export function removeClaudeCodeStatusLine({ target }) {
 
 const LOOPBACK_BASE = "http://127.0.0.1:";
 const OUR_LOGS_ENDPOINT = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/otlp\/v1\/logs$/;
-const OUR_HOOK_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook(\?(t=\d{1,4}|note=1))?$/;
+const OUR_HOOK_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook(\?(t=\d{1,4}(&mode=api)?|note=1))?$/;
 // API mode's own prompt hook, for the agent's note only (1.6.0): never a stop.
 const OUR_NOTE_ONLY_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook\?note=only$/;
 const OUR_SIDECAR_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}$/;
-const GATED_EVENTS = ["UserPromptSubmit", "PreToolUse", "PostToolBatch"];
 // The log-export settings this mode owns, with the value it writes.
 const LOGS_ENV = {
   OTEL_LOGS_EXPORTER: "otlp",
@@ -250,8 +250,38 @@ function gateHook(port, note = false) {
 // told, and a Phase 1 hook (no `t`, 5 s) refuses a tool that would need the owner
 // instead of letting it through on the timeout.
 export const TOOL_HOOK_TIMEOUT_S = 600;
-function toolHook(port) {
-  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?t=${TOOL_HOOK_TIMEOUT_S}`, timeout: TOOL_HOOK_TIMEOUT_S };
+function toolHook(port, api = false) {
+  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?t=${TOOL_HOOK_TIMEOUT_S}${api ? "&mode=api" : ""}`, timeout: TOOL_HOOK_TIMEOUT_S };
+}
+
+/** API mode always asks the sidecar before a tool. */
+export function apiToolHooks(port) {
+  return { PreToolUse: [{ matcher: "*", hooks: [toolHook(port, true)] }] };
+}
+
+const OUR_API_TOOL_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook\?t=\d{1,4}&mode=api$/;
+
+// Writing: the same ownership matcher and merge as subscription mode, scoped to tools, so
+// an API setup replaces subscription mode's tool hook instead of adding a second one.
+// Removing (port null): only API mode's own hook. Subscription mode's stays, or a Pro/Max
+// setup would keep its prompt and batch hooks and lose its tool rules.
+function withApiTools(hooks, port) {
+  const base = isObject(hooks) ? hooks : {};
+  const tools = Object.hasOwn(base, "PreToolUse") ? { PreToolUse: base.PreToolUse } : {};
+  const next = { ...base };
+  delete next.PreToolUse;
+  if (port !== null) return { ...next, ...withOurHooks(tools, port, false, apiToolHooks(port)) };
+  if (!Array.isArray(tools.PreToolUse)) return isObject(hooks) ? { ...next, ...tools } : hooks;
+  const isApiTool = (h) => isObject(h) && h.type === "http" && typeof h.url === "string" && OUR_API_TOOL_URL.test(h.url);
+  const kept = [];
+  for (const group of tools.PreToolUse) {
+    if (!isObject(group) || !Array.isArray(group.hooks) || !group.hooks.some(isApiTool)) kept.push(group);
+    else {
+      const rest = group.hooks.filter((h) => !isApiTool(h));
+      if (rest.length) kept.push({ ...group, hooks: rest });
+    }
+  }
+  return kept.length ? { ...next, PreToolUse: kept } : next;
 }
 
 /** `note`: the agent's opt-in note rides on the prompt hook (`--agent-note`). */
@@ -292,11 +322,10 @@ function withoutOurHooks(hooks) {
 }
 
 /** `hooks` with exactly this port's gate hooks, leaving them where they are when already right. */
-function withOurHooks(hooks, port, note = false) {
-  const ours = subscriptionHooks(port, { note });
+function withOurHooks(hooks, port, note = false, ours = subscriptionHooks(port, { note })) {
   const base = isObject(hooks) ? hooks : {};
   const next = withoutOurHooks(base);
-  for (const event of GATED_EVENTS) {
+  for (const event of Object.keys(ours)) {
     const current = Array.isArray(base[event]) ? base[event] : [];
     const already = current.filter((g) => isObject(g) && Array.isArray(g.hooks) && g.hooks.some(isOurHook));
     if (already.length === 1 && same(already[0], ours[event][0])) next[event] = current;

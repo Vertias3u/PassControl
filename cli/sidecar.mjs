@@ -7,6 +7,8 @@ import { classifyConnect, classifyProxyRequest, isLoopbackBindHost } from "./pro
 import { createVisaClient } from "./visa-client.mjs";
 import { declaredLineage, declaredSession } from "./declared-session.mjs";
 import { defaultJournalDir, openJournal } from "./journal.mjs";
+import { heldUnderTaint } from "./injection-hold.mjs";
+import { findingsFromHook } from "./injection-sidecar.mjs";
 import { answer, createWatchFeed, isNotACall, isLocalCaller, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
 import { createStopGate, HOOK_PATH, SELF_READ_TIMEOUT_MS, selfAnswerState } from "./subscription-gate.mjs";
 import { createToolGate } from "./tool-gate.mjs";
@@ -178,7 +180,14 @@ export function createSidecar({
   // Subscription mode's Stop (cli/subscription-gate.mjs): Claude Code's hooks ask
   // here, and the answer comes from the gateway's /api/v1/self, read with this
   // sidecar's visa and the session the hook names.
+  let highVersion = 0;
+  let relayVersion = 0;
+  let readHighVersion = 0;
+  let readRelayVersion = 0;
+  let holdOptOutWarned = false;
   async function readSelf(session) {
+    const highAtStart = highVersion;
+    const relayAtStart = relayVersion;
     // One deadline over the whole read, a visa mint included: past the hook's own
     // timeout the action goes ahead with no warning. A mint cut short here is not
     // aborted (the proxy shares it); it finishes and is cached for the next read.
@@ -201,7 +210,16 @@ export function createSidecar({
         if (session) headers["x-claude-code-session-id"] = session;
         return fetch(`${origin}${path}`, { headers, signal });
       })]);
-      return await Promise.race([deadline, selfAnswerState(response)]);
+      const answer = await Promise.race([deadline, selfAnswerState(response)]);
+      if (answer.state === "open") {
+        readHighVersion = Math.max(readHighVersion, highAtStart);
+        readRelayVersion = Math.max(readRelayVersion, relayAtStart);
+        if (answer.injection?.mode === "hold" && !reportCalls && !holdOptOutWarned) {
+          holdOptOutWarned = true;
+          warn("The injection guard's hold needs this sidecar to upload what it finds. --no-report-calls turns that off, so tools are held only for what the gateway itself saw.");
+        }
+      }
+      return answer;
     } catch (error) {
       return { state: "unknown", reason: error?.name === "TimeoutError" ? "the gateway did not answer in time" : (error?.message ?? "error") };
     }
@@ -272,13 +290,41 @@ export function createSidecar({
     const body = await response.json().catch(() => ({}));
     return { status: response.status, error: body?.error, retryAfterS: Number(response.headers.get("retry-after")) };
   }
+  const injectionSeen = new Set();
   const uploader = reportCalls ? createCallUploader({ send: sendReportedCalls }) : null;
   // Its decisions reach the agent's page with the reported calls (same opt-out).
   const toolGate = createToolGate({
     askOwner,
     dashboardUrl: `${origin}/dashboard`,
     onDecision: (record) => uploader?.add({ kind: "tool_decision", at: Date.now(), ...record }),
+    onHold: (record) => feed.toolHold({ at: Date.now(), ...record }),
+    refresh: async () => {
+      await stopGate.refresh();
+      return { rulesEntry: stopGate.toolRules(), injection: stopGate.injection() };
+    },
   });
+
+  let injectionRefresh = null;
+  async function freshInjectionFor(tool) {
+    if (!heldUnderTaint(tool) || !stopGate.injectionHoldMode()) return;
+    if (injectionRefresh) return injectionRefresh;
+    if (highVersion <= readHighVersion && relayVersion <= readRelayVersion) return;
+    injectionRefresh = (async () => {
+      if (uploader && highVersion > readHighVersion) {
+        let timer;
+        try {
+          await Promise.race([
+            Promise.resolve().then(() => uploader.flush()),
+            new Promise((resolve) => { timer = setTimeout(resolve, 3_000); }),
+          ]);
+        } catch {
+          // A failed upload must not prevent the read or change the opt-out.
+        } finally { clearTimeout(timer); }
+      }
+      await stopGate.refresh();
+    })();
+    try { await injectionRefresh; } finally { injectionRefresh = null; }
+  }
 
   const relayedSessions = new Set();
   function rememberRelayed(headers) {
@@ -410,6 +456,7 @@ export function createSidecar({
       }
       let out;
       try {
+        if (input.hook_event_name === "PreToolUse") await freshInjectionFor(input.tool_name);
         out = await stopGate.decide(input, { note: hookNote(req.url) });
       } catch {
         out = {};
@@ -419,7 +466,7 @@ export function createSidecar({
       if (out.continue !== false && input.hook_event_name === "PreToolUse") {
         let tool;
         try {
-          tool = await toolGate.decide(input, stopGate.toolRules(), hookTimeoutS(req.url));
+          tool = await toolGate.decide(input, stopGate.toolRules(), hookTimeoutS(req.url), stopGate.injection());
         } catch {
           tool = {};
         }
@@ -429,6 +476,23 @@ export function createSidecar({
       const body = JSON.stringify(out);
       res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
       res.end(body);
+      // Injection tells in what the tools returned (plans/injection-guard.md §2b): after
+      // the answer is written, so the scan never delays or changes it.
+      if (input.hook_event_name === "PostToolBatch" || input.hook_event_name === "PostToolUse") {
+        setImmediate(() => {
+          try {
+            for (const event of findingsFromHook(input, { seen: injectionSeen })) {
+              if (event.severity === "high") highVersion++;
+              feed.injection(event);
+              // With the reported calls (same opt-out). The gateway records it only while
+              // the owner has the guard on, and never says which.
+              uploader?.add(event);
+            }
+          } catch {
+            // Local telemetry must never change or delay the hook answer.
+          }
+        });
+      }
     });
     req.on("error", () => res.destroy());
   }
@@ -472,6 +536,13 @@ export function createSidecar({
   // from a capped peek at a CLONE of the body, so the client's bytes are untouched
   // and nothing here waits on the peek.
   function writeResponse(res, upstream, reqHeaders, watch = null) {
+    // Also mark streamed responses on completion: a /self read while the stream
+    // was open cannot cover a finding the gateway sees later in that stream.
+    if (watch) {
+      relayVersion++;
+      res.once("finish", () => { relayVersion++; });
+      res.once("close", () => { relayVersion++; });
+    }
     // At the headers, not at the end of the body: a streamed call whose client
     // disconnects mid-stream still produced a receipt, and the user's record of
     // it must not depend on how long they kept reading. With the session the call

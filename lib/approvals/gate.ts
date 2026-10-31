@@ -86,3 +86,22 @@ export async function awaitApproval(input: {
   }
   return { state: "pending" };
 }
+
+/**
+ * The owner's answer to a question already asked about exactly this request,
+ * without asking it again: for a hold-mode agent's write once its hold is cleared,
+ * because Approvals tells the owner that request still waits for Approve or Deny.
+ * `none` when nothing was asked. Fails closed, as asking does.
+ */
+export async function existingApproval(request: ApprovalRequest): Promise<ApprovalOutcome | { state: "none" }> {
+  let found;
+  try {
+    found = await checkApproval(request, { create: false });
+  } catch {
+    return { state: "unavailable" };
+  }
+  if (found.state === "approved") return { state: "approved", id: found.id };
+  if (found.state === "denied") return { state: "denied" };
+  if (found.state === "pending") return { state: "pending" };
+  return { state: "none" };
+}

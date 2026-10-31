@@ -128,6 +128,15 @@ export interface ReceiptClaims {
    * the earlier provider refused before doing any work.
    */
   why?: string;
+  /**
+   * Present only when the issuing gateway's injection guard flagged tool output in
+   * this call's request: the detector, how many blocks, and their kinds (for example
+   * `instruction_override`). Kinds only, never the text. A tell is a hint, not proof.
+   *
+   * Optional, and `ver` stays where it was: a verifier that predates it ignores it.
+   * Treat `f` as open-ended strings: a newer detector may add kinds.
+   */
+  inj?: { d: string; n: number; f: string[] };
   ver: number;
   [claim: string]: unknown;
 }

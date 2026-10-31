@@ -17,6 +17,11 @@
 // proof), never signed, and with a cost that is API-equivalent and never charged.
 // A database before 0084 answers 503 `client_events_unavailable`; nothing else
 // depends on this table.
+//
+// One more kind rides the same batch: `injection_finding`, what the sidecar's scan of a
+// tool's output found (plans/injection-guard.md §2b). It goes to `injection_findings`
+// as `surface='sidecar'`, only while the owner has the injection guard on, and the answer
+// never says which: off, it is counted with the rejected events like any other.
 export const runtime = "edge";
 
 import { evaluateGate } from "@/lib/gate";
@@ -34,11 +39,16 @@ import {
   isMissingTable,
   type ClientReportedRow,
 } from "@/lib/client-reported";
+import { POLICY_UNREADABLE } from "@/lib/gate";
 import { err } from "@/lib/gateway/responses";
+import type { InjectionFinding } from "@/lib/injection-guard";
+import { recordInjectionFindings, redisSeenStore, sidecarFinding, type FindingsDb } from "@/lib/injection-findings";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { captureError } from "@/lib/observability";
 import { rateLimit } from "@/lib/ratelimit";
 import { readKillState } from "@/lib/state/killswitch";
+import { injectionGuardMode } from "@/lib/scope";
+import { taintFromFindings } from "@/lib/state/taint";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { isSuspended, redis } from "@/lib/state/redis";
 
@@ -56,8 +66,9 @@ export async function POST(req: Request): Promise<Response> {
   const { principal, db, credentialToken } = authentication;
   const { agentId, userId } = principal;
 
+  let policy: Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>> | null = null;
   if (principal.kind === "passport") {
-    const policy = await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+    policy = await readCurrentAgentPolicyAndShadow(db, userId, agentId);
     const sender = await enforceSenderConstraint(req, credentialToken, principal, policy);
     if (!sender.ok) return sender.response;
   }
@@ -105,14 +116,21 @@ export async function POST(req: Request): Promise<Response> {
   const who = { userId, agentId, auth: principal.kind === "passport" ? ("passport" as const) : ("direct_key" as const) };
   const rows: ClientReportedRow[] = [];
   const keys = new Set<string>();
+  const findingEvents: unknown[] = [];
   for (const event of batch.events) {
+    if ((event as { kind?: unknown } | null)?.kind === "injection_finding") {
+      findingEvents.push(event);
+      continue;
+    }
     const row = clientReportedRow(event, who, nowMs);
     if (!row || keys.has(row.event_key)) continue;
     keys.add(row.event_key);
     rows.push(row);
   }
-  const rejected = batch.events.length - rows.length;
-  if (rows.length === 0) return json({ accepted: 0, rejected });
+  const findingsAccepted = await recordSidecarFindings(db, findingEvents, { userId, agentId, policy });
+  const accepted = rows.length + findingsAccepted;
+  const rejected = batch.events.length - accepted;
+  if (rows.length === 0) return json({ accepted, rejected });
 
   // ── 6. Append. A retry of an event already stored is a no-op.
   const { error } = await db
@@ -124,7 +142,53 @@ export async function POST(req: Request): Promise<Response> {
     return err(500, "client_events_write_failed");
   }
   await ageOutOldRows(db, agentId, userId);
-  return json({ accepted: rows.length, rejected });
+  return json({ accepted, rejected });
+}
+
+// The injection findings in a batch, recorded only while the agent's live policy has the
+// guard on. A Direct Agent Key's policy is read here, and only when the batch carries a
+// finding; a passport's was read for its sender proof. Unreadable means off, as on the
+// proxy. Returns how many were taken: stored, or already stored (a re-sent block). A
+// database without 0089 or 0090 takes none, and the batch's reported calls are unaffected.
+async function recordSidecarFindings(
+  db: Parameters<typeof readCurrentAgentPolicyAndShadow>[0],
+  events: unknown[],
+  who: { userId: string; agentId: string; policy: Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>> | null }
+): Promise<number> {
+  if (events.length === 0) return 0;
+  const findings: InjectionFinding[] = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    const finding = sidecarFinding(event, who.userId);
+    if (!finding || seen.has(finding.contentHmac)) continue;
+    seen.add(finding.contentHmac);
+    findings.push(finding);
+  }
+  if (findings.length === 0) return 0;
+  const policy = who.policy ?? (await readCurrentAgentPolicyAndShadow(db, who.userId, who.agentId));
+  const mode = policy.policy === POLICY_UNREADABLE ? null : injectionGuardMode(policy.policy);
+  if (mode === null) return 0;
+  const outcome = await recordInjectionFindings({
+    db: db as unknown as FindingsDb,
+    seen: redisSeenStore(),
+    userId: who.userId,
+    agentId: who.agentId,
+    provider: "",
+    model: "",
+    findings,
+    surface: "sidecar",
+  });
+  if (outcome.state === "failed") {
+    await captureError(new Error("client_events injection findings write failed"), { route: ROUTE }).catch(() => {});
+  }
+  // Hold mode (Phase 2): a new high finding taints the agent, which the sidecar learns
+  // from /self, never from this answer. A taint that cannot be set holds nothing.
+  try {
+    await taintFromFindings({ agentId: who.agentId, mode, outcome, surface: "sidecar", now: Date.now() });
+  } catch (error) {
+    await captureError(error, { route: ROUTE, agentId: who.agentId, code: "injection_taint_failed" }).catch(() => {});
+  }
+  return outcome.state === "recorded" || outcome.state === "nothing_new" ? findings.length : 0;
 }
 
 // Best-effort: a failed sweep never fails the upload, and tomorrow's claim retries it.

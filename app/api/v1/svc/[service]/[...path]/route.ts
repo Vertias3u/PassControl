@@ -8,7 +8,8 @@
 //   4 catalog refusal (incl. the never list)   5 service rules (live, fail CLOSED)
 //   6 per-service hourly cap   6b a write's body, read only now, bounded
 //   6c "Ask me first": the owner's approval of exactly this request, when the
-//      matched rule asks for it (lib/approvals/gate.ts), before any decrypt
+//      matched rule asks for it (lib/approvals/gate.ts), before any decrypt; and
+//      for every write while the injection guard holds a tainted agent (Phase 2)
 //   7 resolve the tenant's token (the one decrypt path)   8 inject + forward
 //   9 redact + audit row + signed receipt
 //
@@ -41,6 +42,8 @@ import { PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S } from "@/lib/gateway/limits";
 import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
 import { isSuspended } from "@/lib/state/redis";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
+import { HELD_TAINTED, HELD_UNKNOWN, injectionHoldReason } from "@/lib/injection-hold";
+import { injectionGuardMode } from "@/lib/scope";
 import { evaluateGate } from "@/lib/gate";
 import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
 import { writeLog } from "@/lib/log";
@@ -50,7 +53,7 @@ import { captureSecurityEvent } from "@/lib/observability";
 import { forwardableUpstreamSearch } from "@/lib/providers/endpoint";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { approvalFingerprint, approvalPreview } from "@/lib/approvals/fingerprint";
-import { approvalWaitMs, awaitApproval } from "@/lib/approvals/gate";
+import { approvalWaitMs, awaitApproval, existingApproval } from "@/lib/approvals/gate";
 import { APPROVAL_PREVIEW_MAX } from "@/lib/state/approvals";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 import type { SenderProofObservation } from "@/lib/sender-constraint";
@@ -127,12 +130,14 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   const receiptId = crypto.randomUUID();
 
   // A proof is authentication, so it is checked before anything spends the
-  // agent's allowance. The policy read is taken ONLY for the sender-constraint
-  // mode: nothing else in it decides a service call.
+  // agent's allowance. The policy read is taken for the sender-constraint mode and,
+  // on a write, the injection guard's hold (6c): nothing else in it decides a service call.
   let passportAuthMethod: PassportAuthMethod = "passport";
   let senderProofWould: SenderProofObservation | undefined;
+  let policySnapshot: Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>> | null = null;
   if (principal.kind === "passport") {
     const snapshot = await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+    policySnapshot = snapshot;
     const senderConstraint = await enforceSenderConstraint(req, credentialToken, principal, snapshot);
     if (!senderConstraint.ok) return senderConstraint.response;
     passportAuthMethod = senderConstraint.authMethod;
@@ -429,13 +434,30 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   // Before the decrypt: a call nobody approved never has the token in memory.
   // Each pending retry has already counted against the hourly cap (step 6).
   // Any admitting rule that asks holds the call, not only the first match.
-  if (serviceCallAsks(rules, method, segments)) {
+  //
+  // The injection guard's hold (Phase 2) asks too, for every write a tainted agent's
+  // rules admit; reads pass. Only an admitted call gets here, so the hold adds a
+  // question and never admits anything (lib/injection-hold.ts has the unknowns).
+  //
+  // Once a hold is cleared, a hold-mode agent's write may still be a question the hold
+  // asked. Approvals tells the owner that request still waits for Approve or Deny, so
+  // their answer, or its absence, decides it until the question expires (1.7.0 e2e, F3).
+  let heldBecause: string | undefined;
+  let askedBefore = false;
+  if (isWrite) {
+    policySnapshot ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+    heldBecause = await injectionHoldReason(policySnapshot.policy, agentId, Date.now());
+    askedBefore = !heldBecause && injectionGuardMode(policySnapshot.policy) === "hold";
+  }
+  const asks = serviceCallAsks(rules, method, segments) || heldBecause !== undefined;
+  if (asks || askedBefore) {
     const forwardedBody = isWrite ? (capturedBody ?? "") : null;
     const preview = approvalPreview(forwardedBody, search);
     // The owner approves what they can read, so a request too large to show
     // in full is not asked about at all: approving the start of a body would
-    // admit whatever follows it.
-    if (preview.length > APPROVAL_PREVIEW_MAX) {
+    // admit whatever follows it. For the same reason none was asked before.
+    const tooLarge = preview.length > APPROVAL_PREVIEW_MAX;
+    if (tooLarge && asks) {
       record("blocked_policy", 413);
       captureBlocked("approval_body_too_large", 413);
       return governed(
@@ -456,8 +478,13 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
       headers,
       body: forwardedBody,
     });
-    const approval = await awaitApproval({
-      request: { userId, agentId, service, method, path: upstreamPath, preview, fingerprint },
+    const request = {
+      userId, agentId, service, method, path: upstreamPath, preview, fingerprint,
+      ...(heldBecause === HELD_TAINTED ? { hold: "injection_tainted" as const }
+        : heldBecause === HELD_UNKNOWN ? { hold: "injection_unknown" as const } : {}),
+    };
+    const approval = asks ? await awaitApproval({
+      request,
       prompt: {
         agentName,
         serviceLabel: entry.label,
@@ -465,10 +492,11 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
         path: upstreamPath,
         preview,
         dashboardUrl: `${requestUrl.origin}/dashboard/approvals`,
+        ...(heldBecause ? { heldBecause, offerClear: heldBecause === HELD_TAINTED } : {}),
       },
       waitMs: approvalWaitMs(),
-    });
-    if (approval.state !== "approved") {
+    }) : tooLarge ? { state: "none" as const } : await existingApproval(request);
+    if (approval.state !== "approved" && approval.state !== "none") {
       // Its own security-event codes, and never the workspace's "refused"
       // alert: the owner was just asked, and a second ping says nothing new.
       captureBlocked(`approval_${approval.state}`, 403);

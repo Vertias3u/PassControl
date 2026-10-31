@@ -15,7 +15,7 @@ const MAX_PROVIDER_LEN = 50;
 // sides: a scope entry that never matches denies, and a deny rule that trips
 // this makes the whole document malformed, which also denies.
 const MAX_WILDCARDS = 4;
-const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens", "subagent_models", "subagent_session_cap_cents", "session_alert_cents", "secret_guard"]);
+const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens", "subagent_models", "subagent_session_cap_cents", "session_alert_cents", "secret_guard", "injection_guard"]);
 // Exported for the policy editor, which must offer exactly the days the parser
 // accepts. Retyping them there is how the form ends up letting an operator save
 // a window the gateway reads as malformed — the failure mode validateFallbacks
@@ -221,9 +221,17 @@ interface AgentPolicy {
    * request (lib/secret-guard.ts). null = absent, the guard is off.
    */
   secretGuard: SecretGuardMode | null;
+  /**
+   * `injection_guard: { mode }` (2026-10-27, plans/injection-guard.md): what the proxy
+   * does with tool output that carries an injection tell. null = absent, off. "monitor"
+   * records and refuses nothing; "hold" (Phase 2) also holds a tainted agent's risky
+   * actions for the owner (lib/state/taint.ts, lib/injection-hold.ts).
+   */
+  injectionGuard: InjectionGuardMode | null;
 }
 
 export type SecretGuardMode = "block" | "redact";
+export type InjectionGuardMode = "monitor" | "hold";
 
 export interface AgentPolicyView {
   configured: boolean;
@@ -236,6 +244,7 @@ export interface AgentPolicyView {
   subagentSessionCapCents: number | null;
   sessionAlertCents: number | null;
   secretGuard: SecretGuardMode | null;
+  injectionGuard: InjectionGuardMode | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -319,7 +328,7 @@ export const POLICY_LIMITS = {
 function parsePolicy(value: unknown): AgentPolicy | null {
   // Existing rows and pre-policy visas must preserve the legacy path exactly.
   if (value === null) {
-    return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null, subagentModels: null, subagentSessionCapCents: null, sessionAlertCents: null, secretGuard: null };
+    return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null, subagentModels: null, subagentSessionCapCents: null, sessionAlertCents: null, secretGuard: null, injectionGuard: null };
   }
   if (!isRecord(value)) return null;
   if (Object.keys(value).some((key) => !POLICY_KEYS.has(key))) return null;
@@ -472,7 +481,18 @@ function parsePolicy(value: unknown): AgentPolicy | null {
     secretGuard = guard.mode;
   }
 
-  return { deny, windows, maxRequestsPerHour, maxOutputTokens, subagentModels, subagentSessionCapCents, sessionAlertCents, secretGuard };
+  // Same shape. A mode this build does not know is refused rather than read as a weaker
+  // one: monitoring what the owner asked to be held would be a quiet downgrade.
+  let injectionGuard: InjectionGuardMode | null = null;
+  if ("injection_guard" in value) {
+    const guard = value.injection_guard;
+    if (!isRecord(guard) || Object.keys(guard).length !== 1 || (guard.mode !== "monitor" && guard.mode !== "hold")) {
+      return null;
+    }
+    injectionGuard = guard.mode;
+  }
+
+  return { deny, windows, maxRequestsPerHour, maxOutputTokens, subagentModels, subagentSessionCapCents, sessionAlertCents, secretGuard, injectionGuard };
 }
 
 /**
@@ -483,6 +503,11 @@ function parsePolicy(value: unknown): AgentPolicy | null {
  */
 export function secretGuardMode(value: unknown): SecretGuardMode | null {
   return parsePolicy(value)?.secretGuard ?? null;
+}
+
+/** The injection guard's mode for this live policy, or null (off, or refused), as above. */
+export function injectionGuardMode(value: unknown): InjectionGuardMode | null {
+  return parsePolicy(value)?.injectionGuard ?? null;
 }
 
 /**
@@ -541,6 +566,7 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
       subagentSessionCapCents: null,
       sessionAlertCents: null,
       secretGuard: null,
+      injectionGuard: null,
     };
   }
   return {
@@ -554,6 +580,7 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
     subagentSessionCapCents: policy.subagentSessionCapCents,
     sessionAlertCents: policy.sessionAlertCents,
     secretGuard: policy.secretGuard,
+    injectionGuard: policy.injectionGuard,
   };
 }
 

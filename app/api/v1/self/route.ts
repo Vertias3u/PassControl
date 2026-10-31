@@ -32,6 +32,13 @@
 // agent-wide /self ask it already makes (no extra call per session). The governed
 // agent can therefore read its own tool rules: they are guard rails, not a secret
 // (a deliberate choice, recorded 2026-10-12). Never the policy, never the service rules.
+//
+// And one narrowing of that rule (owner, 2026-10-30): `injection` appears only when the
+// owner put the agent's injection guard in `hold` mode. The sidecar cannot hold Claude
+// Code's tools for a taint it cannot see, and a hold is visible to the agent anyway. It
+// says until when the agent is tainted, never what was found: naming the pattern would
+// teach an attacker which wording got through. Monitor mode and off add nothing, so an
+// agent cannot learn it is watched; an unreadable policy applies no guard, as on the proxy.
 export const runtime = "edge";
 
 import { budgetPace } from "@/lib/budget-pace";
@@ -45,6 +52,9 @@ import {
   principalSuspended,
 } from "@/lib/gateway/authenticate";
 import { readClientLineage, sessionStoppedMessage } from "@/lib/client-lineage";
+import { POLICY_UNREADABLE } from "@/lib/gate";
+import { injectionGuardMode } from "@/lib/scope";
+import { readTaint } from "@/lib/state/taint";
 import { err, errMessage } from "@/lib/gateway/responses";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { rateLimit } from "@/lib/ratelimit";
@@ -145,6 +155,7 @@ export async function GET(req: Request): Promise<Response> {
 
   const wantsToolRules = new URL(req.url).searchParams.get("include") === "tool_rules";
   const toolRules = wantsToolRules ? await readToolRules(db, agentId, userId) : undefined;
+  const injection = await injectionView(policy.policy, agentId, nowMs);
 
   return new Response(
     JSON.stringify({
@@ -157,9 +168,26 @@ export async function GET(req: Request): Promise<Response> {
       pause,
       as_of: new Date(nowMs).toISOString(),
       ...(toolRules ? { tool_rules: toolRules } : {}),
+      ...(injection ? { injection } : {}),
     }),
     { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } }
   );
+}
+
+/** The hold's state for the sidecar, or null outside hold mode (see the header). */
+async function injectionView(
+  policy: unknown,
+  agentId: string,
+  nowMs: number
+): Promise<{ mode: "hold"; readable: boolean; tainted_until: string | null } | null> {
+  if (policy === POLICY_UNREADABLE || injectionGuardMode(policy) !== "hold") return null;
+  try {
+    const taint = await readTaint(agentId, nowMs);
+    return { mode: "hold", readable: true, tainted_until: taint ? new Date(taint.until).toISOString() : null };
+  } catch {
+    // The sidecar goes on with a warning (its declared posture); /self still answers.
+    return { mode: "hold", readable: false, tainted_until: null };
+  }
 }
 
 /** `agents.spent_*` for this tenant's agent, or null when it cannot be read. */

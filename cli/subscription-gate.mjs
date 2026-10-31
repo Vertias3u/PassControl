@@ -109,6 +109,7 @@ export function createStopGate({
   let agent = null;
   // The agent's tool rules as the last answer that carried them gave them.
   let rules = null;
+  let injectionEntry = null;
   // The limits from the latest open answer, for the note; and each session's last note.
   let latest = null;
   const noted = new Map();
@@ -144,6 +145,7 @@ export function createStopGate({
       answer ??= { state: "unknown", reason: "no answer" };
       if (answer.state === "open" && answer.self) latest = { self: answer.self, at: now() };
       if (answer.state === "open") {
+        injectionEntry = { value: answer.injection, at: now() };
         rules = { read: answer.toolRules && typeof answer.toolRules === "object" ? answer.toolRules : { state: "none" }, at: now() };
       }
       if (["open", "stopped"].includes(answer.state) || (session !== null && answer.state === "session_stopped")) {
@@ -240,7 +242,21 @@ export function createStopGate({
     return rules && age(rules) <= maxStaleMs ? rules : null;
   }
 
-  return { decide, toolRules };
+  function injection() {
+    if (!injectionEntry || injectionEntry.value === undefined) return "off";
+    if (age(injectionEntry) > maxStaleMs) return "unknown";
+    const value = injectionEntry.value;
+    if (!value || value.mode !== "hold" || value.readable !== true) return "unknown";
+    if (value.tainted_until === null) return "clear";
+    if (typeof value.tainted_until !== "string") return "unknown";
+    const until = Date.parse(value.tainted_until);
+    if (!Number.isFinite(until)) return "unknown";
+    return until > now() ? "tainted" : "clear";
+  }
+
+  // Keep the last known mode even after max-stale: a fresh read may recover it.
+  const injectionHoldMode = () => injectionEntry?.value?.mode === "hold";
+  return { decide, toolRules, injection, injectionHoldMode, refresh: () => ask(null) };
 }
 
 /**
@@ -253,6 +269,7 @@ export async function selfAnswerState(response) {
     const body = await response.json().catch(() => null);
     const toolRules = body && typeof body === "object" ? body.tool_rules : undefined;
     const answer = toolRules && typeof toolRules === "object" ? { state: "open", toolRules } : { state: "open" };
+    if (body && typeof body === "object" && Object.hasOwn(body, "injection")) answer.injection = body.injection;
     // The limits and the soft pause, for the agent's note; nothing else from the answer is kept.
     if (body && typeof body === "object" && body.budget && typeof body.budget === "object") {
       const kept = (v) => (v && typeof v === "object" ? v : null);

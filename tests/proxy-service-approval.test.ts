@@ -93,7 +93,15 @@ vi.mock("@/lib/alerts/approvals", () => ({
 }));
 vi.mock("@/lib/alerts/workspace", () => ({ notifyWorkspace: (...a: unknown[]) => h.notifyWorkspace(...a) }));
 
+// Injection guard Phase 2: the taint store.
+const inj = vi.hoisted(() => ({
+  readTaint: vi.fn(async (_agentId: string, _now: number): Promise<unknown> => null),
+}));
+vi.mock("@/lib/state/taint", () => ({ readTaint: (a: string, n: number) => inj.readTaint(a, n) }));
+
 import { DELETE, GET, HEAD, PATCH, POST, PUT } from "@/app/api/v1/svc/[service]/[...path]/route";
+import { POLICY_UNREADABLE } from "@/lib/gate";
+import { generateDirectAgentKey } from "@/lib/auth/direct-key";
 import { serviceRulesRevision, parseServiceRules } from "@/lib/services/rules";
 
 const TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB";
@@ -231,6 +239,7 @@ describe("a call under an ask rule", () => {
       expect.objectContaining({ userId: TENANT, agentId: AGENT, service: "github", method: "POST", preview: ISSUE }),
       { create: true }
     );
+    expect(h.checkApproval.mock.calls.at(-1)![0]).not.toHaveProperty("hold");
     expect(h.sendApprovalPrompt).toHaveBeenCalledTimes(1);
     expect(h.sendApprovalPrompt).toHaveBeenCalledWith(
       TENANT,
@@ -388,5 +397,193 @@ describe("a call under a rule without ask", () => {
     expect((await call("GET", "/user")).status).toBe(200);
     expect(h.checkApproval).not.toHaveBeenCalled();
     expect(h.sendApprovalPrompt).not.toHaveBeenCalled();
+  });
+});
+
+// Injection guard Phase 2 (owner, 2026-10-30): while the agent is tainted in hold mode,
+// every WRITE its rules admit waits for the owner, as if its rule said ask; reads pass.
+// Decided before the decrypt, so a held write never has the token in memory. The taint
+// store unreadable holds (closed): the approval store already fails closed.
+describe("a write while the agent is tainted (injection guard, hold)", () => {
+  const T = Date.UTC(2026, 9, 30, 12, 0, 0);
+  const WRITE_RULES = {
+    github: {
+      allow: [
+        { method: "GET", path: "/user" },
+        { method: "POST", path: "/repos/acme/web/issues" },
+      ],
+    },
+  };
+  const tainted = () =>
+    inj.readTaint.mockResolvedValue({ since: T, until: T + 1_800_000, families: ["instruction_override"], surface: "proxy" });
+
+  beforeEach(() => {
+    useAskRules();
+    h.rulesRead.mockResolvedValue({ data: { service_rules: WRITE_RULES, name: "release-bot" }, error: null });
+    // A real stored hold document, read by the real parser.
+    h.readPolicy.mockResolvedValue({ policy: { injection_guard: { mode: "hold" } }, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+    inj.readTaint.mockReset();
+    inj.readTaint.mockResolvedValue(null);
+    h.checkApproval.mockResolvedValue({ state: "created", id: "AbCdEfGhIjKlMnOpQrStUv" });
+    h.fetch.mockResolvedValue(new Response("{}", { status: 201 }));
+  });
+
+  it("holds an admitted write for the owner, says why, and decrypts and sends nothing", async () => {
+    tainted();
+    const res = await post();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("approval_pending");
+    expectNothingSent();
+    expect(inj.readTaint.mock.calls[0]![0]).toBe(AGENT);
+    expect(h.checkApproval.mock.calls.at(-1)![0]).toHaveProperty("hold", "injection_tainted");
+    expect(h.sendApprovalPrompt).toHaveBeenCalledWith(
+      TENANT,
+      expect.objectContaining({ preview: ISSUE, heldBecause: expect.stringMatching(/prompt injection/), offerClear: true })
+    );
+  });
+
+  it("sends the write once the owner approves exactly it", async () => {
+    tainted();
+    h.checkApproval.mockResolvedValue({ state: "approved", id: "AbCdEfGhIjKlMnOpQrStUv" });
+    const res = await post();
+    expect(res.status).toBe(201);
+    expect(upstreamCalls()[0]![1].body).toBe(ISSUE);
+  });
+
+  it("lets a read through, and never reads the taint for it", async () => {
+    tainted();
+    h.fetch.mockResolvedValue(new Response("{}", { status: 200 }));
+    expect((await call("GET", "/user")).status).toBe(200);
+    expect(h.checkApproval).not.toHaveBeenCalled();
+    expect(inj.readTaint).not.toHaveBeenCalled();
+  });
+
+  it("not tainted: the write goes straight through, and no question is opened", async () => {
+    h.checkApproval.mockResolvedValue({ state: "none" });
+    expect((await post()).status).toBe(201);
+    for (const [, opts] of h.checkApproval.mock.calls) expect(opts).toEqual({ create: false });
+    expect(h.sendApprovalPrompt).not.toHaveBeenCalled();
+  });
+
+  // 1.7.0 public e2e, F3: the owner cleared the hold, then pressed Deny on the request
+  // still waiting on Approvals, and the agent's retry went upstream. Approvals says a
+  // cleared hold's request "still waits for Approve or Deny" and that denying "refuses
+  // it every time the agent retries", so a question the hold asked stays the owner's.
+  describe("after the hold is cleared, a question it asked is still the owner's", () => {
+    it("a saved Deny refuses the retry, and sends nothing", async () => {
+      h.checkApproval.mockResolvedValue({ state: "denied", id: "AbCdEfGhIjKlMnOpQrStUv" });
+      const res = await post();
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("approval_denied");
+      expectNothingSent();
+      expect(h.checkApproval.mock.calls.at(-1)![1]).toEqual({ create: false });
+    });
+
+    it("an unanswered question still waits, and asks the owner no second time", async () => {
+      h.checkApproval.mockResolvedValue({ state: "pending", id: "AbCdEfGhIjKlMnOpQrStUv" });
+      const res = await post();
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("approval_pending");
+      expectNothingSent();
+      expect(h.sendApprovalPrompt).not.toHaveBeenCalled();
+    });
+
+    it("an Approve sends it", async () => {
+      h.checkApproval.mockResolvedValue({ state: "approved", id: "AbCdEfGhIjKlMnOpQrStUv" });
+      expect((await post()).status).toBe(201);
+      expect(upstreamCalls()[0]![1].body).toBe(ISSUE);
+    });
+
+    it("the approval store unreadable: refused (closed), as when it asks", async () => {
+      h.checkApproval.mockRejectedValue(new Error("redis down"));
+      const res = await post();
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toBe("approval_unavailable");
+      expectNothingSent();
+    });
+  });
+
+  it("a write no rule admits is still refused, never asked about", async () => {
+    tainted();
+    const res = await call("DELETE", "/repos/acme/web", "", {});
+    expect(res.status).toBe(403);
+    expect(h.checkApproval).not.toHaveBeenCalled();
+    expectNothingSent();
+  });
+
+  it("the taint store unreadable: held (closed)", async () => {
+    inj.readTaint.mockRejectedValue(new Error("redis down"));
+    expect((await post()).status).toBe(409);
+    expect(h.sendApprovalPrompt).toHaveBeenCalledWith(TENANT, expect.objectContaining({ heldBecause: expect.stringMatching(/could not be checked/), offerClear: false }));
+    expect(h.checkApproval.mock.calls.at(-1)![0]).toHaveProperty("hold", "injection_unknown");
+    expectNothingSent();
+  });
+
+  it.each([
+    ["monitor mode", { injection_guard: { mode: "monitor" } }],
+    ["the guard off", null],
+  ])("%s: a stored taint holds nothing", async (_why, policy) => {
+    tainted();
+    h.readPolicy.mockResolvedValue({ policy, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+    expect((await post()).status).toBe(201);
+    expect(h.checkApproval).not.toHaveBeenCalled();
+  });
+
+  describe("a Direct Agent Key, whose policy /svc reads only for this", () => {
+    const dak = () => {
+      h.authenticateDirectAgentKey.mockResolvedValue({
+        kind: "direct_key", keyId: "k1", agentId: AGENT, userId: TENANT, scopes: [{ provider: "anthropic", models: ["*"] }],
+        budgetTokens: null, budgetCents: null, spentTokens: 0, spentMicrocents: 0, suspended: false,
+      });
+      return { "x-api-key": generateDirectAgentKey(), "content-type": "application/json" };
+    };
+    const dakPost = () => {
+      const segments = ["repos", "acme", "web", "issues"];
+      const req = new Request(`${ORIGIN}/api/v1/svc/github/repos/acme/web/issues?service=github&${segments.map((x) => `path=${x}`).join("&")}`, {
+        method: "POST",
+        headers: dak(),
+        body: ISSUE,
+      });
+      return POST(req, { params: Promise.resolve({ service: "github", path: segments }) });
+    };
+
+    it("tainted: held", async () => {
+      tainted();
+      expect((await dakPost()).status).toBe(409);
+      expect(h.readPolicy).toHaveBeenCalled();
+    });
+
+    // Owner, 2026-10-30 ("1b"): without the policy, only an agent KNOWN to be in hold mode
+    // is held, and a live taint is that knowledge (one exists only in hold mode). Everyone
+    // else's writes go, whatever POLICY_FAIL_CLOSED says.
+    const unreadable = () =>
+      h.readPolicy.mockResolvedValue({ policy: POLICY_UNREADABLE, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+
+    it.each([["by default", false], ["under POLICY_FAIL_CLOSED", true]])(
+      "an unreadable policy with a live hold still holds (%s), and says why",
+      async (_why, failClosed) => {
+        if (failClosed) process.env.POLICY_FAIL_CLOSED = "true";
+        tainted();
+        unreadable();
+        expect((await dakPost()).status).toBe(409);
+        expect(h.sendApprovalPrompt).toHaveBeenCalledWith(TENANT, expect.objectContaining({ heldBecause: expect.stringMatching(/recently read/), offerClear: true }));
+        expectNothingSent();
+      }
+    );
+
+    it("an unreadable policy with no live hold: the write goes, even under POLICY_FAIL_CLOSED", async () => {
+      process.env.POLICY_FAIL_CLOSED = "true";
+      unreadable();
+      expect((await dakPost()).status).toBe(201);
+      expect(h.checkApproval).not.toHaveBeenCalled();
+    });
+
+    it("an unreadable policy and an unreadable taint store: the write goes (nothing says this agent is guarded)", async () => {
+      process.env.POLICY_FAIL_CLOSED = "true";
+      inj.readTaint.mockRejectedValue(new Error("redis down"));
+      unreadable();
+      expect((await dakPost()).status).toBe(201);
+      expect(h.checkApproval).not.toHaveBeenCalled();
+    });
   });
 });

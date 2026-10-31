@@ -157,3 +157,68 @@ it("answers only PreToolUse", async () => {
   const { g } = gate();
   expect(await g.decide({ hook_event_name: "UserPromptSubmit" }, rules([{ tool: "Bash", effect: "deny" }]), 600)).toEqual({});
 });
+
+describe("injection holds", () => {
+  const none = { read: { state: "none" }, at: NOW };
+  it.each([none, rules([])])("asks the owner without a matching rule", async (entry) => {
+    const onHold = vi.fn();
+    const { g, askOwner, onDecision } = gate({ onHold });
+    const out = await g.decide(bash("SECRET"), entry, 600, "tainted");
+    expect(askOwner).toHaveBeenCalledOnce();
+    expect(out.systemMessage).toMatch(/held by the injection guard because the agent recently read something that looked like a prompt injection/);
+    expect(onDecision).toHaveBeenCalledWith({ session: "sess-1", agent: null, tool: "Bash", decision: "owner_approved", ruleIndex: null, waitMs: 0 });
+    expect(onHold).toHaveBeenCalledWith({ tool: "Bash", outcome: "approved" });
+    expect(JSON.stringify(onHold.mock.calls)).not.toContain("SECRET");
+  });
+  it("keeps deny and read-only tools unchanged", async () => {
+    const { g, askOwner } = gate();
+    expect(decision(await g.decide(bash("x"), rules([{ tool: "Bash", effect: "deny" }]), 600, "tainted"))).toBe("deny");
+    expect(await g.decide(bash("x", { tool_name: "Read" }), none, 600, "tainted")).toEqual({});
+    expect(askOwner).not.toHaveBeenCalled();
+  });
+  it.each(["off", "clear", "unknown"])("does not escalate %s and rate limits the unknown warning", async (state) => {
+    let time = NOW;
+    const { g, askOwner } = gate({ now: () => time });
+    const out = await g.decide(bash("x"), none, 600, state);
+    expect(out.systemMessage).toBe(state === "unknown" ? "PassControl could not check this agent's injection guard, so this goes ahead." : undefined);
+    expect(await g.decide(bash("x"), none, 600, state)).toEqual({});
+    time += 60_000;
+    expect((await g.decide(bash("x"), none, 600, state)).systemMessage).toBe(out.systemMessage);
+    expect(askOwner).not.toHaveBeenCalled();
+  });
+  it.each([null, "ask"])("falls back to %s after refused and refreshes before the next decision", async (effect) => {
+    const refresh = vi.fn();
+    const onHold = vi.fn();
+    const { g, onDecision } = gate({ refresh, onHold, askOwner: async () => ({ state: "refused" }) });
+    const entry = effect ? rules([{ tool: "Bash", effect }]) : none;
+    expect(decision(await g.decide(bash("x"), entry, 600, "tainted"))).toBe(effect);
+    // The tool goes ahead on its own rules: the page gets their record, never "owner unavailable".
+    expect(onDecision.mock.calls.map(([r]) => r.decision)).toEqual(effect ? ["ask"] : []);
+    expect(refresh).not.toHaveBeenCalled();
+    await g.decide(bash("x"), entry, 600, "clear");
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(onHold).toHaveBeenCalledWith({ tool: "Bash", outcome: "through" });
+  });
+  it("uses refreshed rules and injection state after a refusal", async () => {
+    const askOwner = vi.fn(async () => ({ state: "refused" }));
+    const refresh = vi.fn(async () => ({ rulesEntry: rules([{ tool: "Bash", effect: "deny" }]), injection: "clear" }));
+    const { g } = gate({ askOwner, refresh });
+    await g.decide(bash("x"), none, 600, "tainted");
+    expect(decision(await g.decide(bash("x"), none, 600, "tainted"))).toBe("deny");
+    expect(askOwner).toHaveBeenCalledOnce();
+  });
+  it("keeps unreadable rules authoritative and explains holds with insufficient hook time", async () => {
+    const { g, askOwner } = gate();
+    expect(decision(await g.decide(bash("x"), { read: { state: "invalid" } }, 600, "tainted"))).toBe("deny");
+    expect((await g.decide(bash("x"), null, 600, "tainted")).systemMessage).toContain("tool rules");
+    const out = await g.decide(bash("x"), none, null, "tainted");
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain("held by the injection guard");
+    expect(askOwner).not.toHaveBeenCalled();
+  });
+  it.each(["denied", "timeout", "unavailable", "full", "too_large"])("explains an injection hold ending %s", async (state) => {
+    const { g } = gate({ askOwner: async () => ({ state }) });
+    const out = await g.decide(bash("x"), none, 600, "tainted");
+    expect(decision(out)).toBe("deny");
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain("held by the injection guard because the agent recently read something that looked like a prompt injection");
+  });
+});

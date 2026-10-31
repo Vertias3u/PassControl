@@ -256,15 +256,15 @@ export function CallDetailDrawer({
       : value == null
         ? "Not reported"
         : unconfirmedUsage
-          ? `${value.toLocaleString()} (unconfirmed)`
-          : value.toLocaleString();
+          ? `${value.toLocaleString("en-US")} (unconfirmed)`
+          : value.toLocaleString("en-US");
   const totalTokens =
     tokenFacts?.kind === "reported"
-      ? tokenFacts.total.toLocaleString()
+      ? tokenFacts.total.toLocaleString("en-US")
       : tokenFacts?.kind === "unconfirmed"
-        ? `${tokenFacts.observed.toLocaleString()} (unconfirmed)`
+        ? `${tokenFacts.observed.toLocaleString("en-US")} (unconfirmed)`
         : tokenFacts?.kind === "partial"
-          ? `${tokenFacts.known.toLocaleString()} + not reported`
+          ? `${tokenFacts.known.toLocaleString("en-US")} + not reported`
           : tokenFacts?.kind === "not_reported"
             ? "Not reported"
             : "Not sent — nothing to measure";
@@ -428,7 +428,7 @@ export function CallDetailDrawer({
             <dt>Budget tokens</dt>
             <dd>
               {charge?.kind === "charged"
-                ? charge.tokens.toLocaleString()
+                ? charge.tokens.toLocaleString("en-US")
                 : charge?.kind === "not_recorded"
                   ? "Not recorded on this row"
                   : charge?.kind === "held"
@@ -437,7 +437,7 @@ export function CallDetailDrawer({
             </dd>
           </div>
           <div><dt>Usage status</dt><dd>{usageLabel(row)}</dd></div>
-          <div><dt>Latency</dt><dd>{row.latency_ms == null ? "Not recorded" : `${row.latency_ms.toLocaleString()} ms`}</dd></div>
+          <div><dt>Latency</dt><dd>{row.latency_ms == null ? "Not recorded" : `${row.latency_ms.toLocaleString("en-US")} ms`}</dd></div>
         </dl>
 
         <section className="pc-call-detail__shadow" data-state={shadow.state}>

@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "html",
+  "expectedFamilies": [],
+  "reason": "White-on-white placeholder content is a harmless skeleton state.",
+  "text": "<div style=\"color:white;background:white\">Loading account overview</div><p aria-live=\"polite\">Preparing your dashboard</p>"
+}

@@ -8,6 +8,9 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Check, RefreshCw, X } from "lucide-react";
 
+import { clearInjectionTaint } from "@/app/dashboard/agents/[id]/injection-actions";
+import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
+import { HELD_TAINTED, HELD_UNKNOWN } from "@/lib/injection-hold";
 import { decideApprovalAction, type DecideResult } from "@/app/dashboard/approvals/actions";
 
 export interface PendingApprovalView {
@@ -20,8 +23,9 @@ export interface PendingApprovalView {
   preview: string;
   createdAt: number;
   onTelegram: boolean;
-  /** A Claude Code tool (subscription mode), held by the sidecar rather than the gateway. */
+  /** A tool on the agent's machine (Claude Code or Codex), held by the sidecar rather than the gateway. */
   tool?: boolean;
+  hold?: "tainted" | "cleared" | "unknown" | null;
 }
 
 type Outcome = { ok: boolean; text: string };
@@ -34,7 +38,7 @@ type Outcome = { ok: boolean; text: string };
 export function approvalOutcome(result: DecideResult, tool: boolean): Outcome {
   if ("error" in result) return { ok: false, text: result.error };
   if (result.state === "approved") {
-    return { ok: true, text: tool ? "Approved. If Claude Code is still waiting, the tool runs now, once." : "Approved. The agent's next try sends it, once." };
+    return { ok: true, text: tool ? "Approved. If the agent is still waiting, the tool runs now, once." : "Approved. The agent's next try sends it, once." };
   }
   if (result.state === "denied") return { ok: true, text: tool ? "Denied. The tool is refused." : "Denied. The agent's retries are refused." };
   return { ok: false, text: "Already answered somewhere else, or expired." };
@@ -48,8 +52,11 @@ function ago(createdAt: number, now: number): string {
 export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null }) {
   const router = useRouter();
   const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({});
+  const [clearErrors, setClearErrors] = useState<Record<string, string>>({});
   const [pending, start] = useTransition();
-  const [now] = useState(() => Date.now());
+  // After mount only: a server sample and a browser one a second later can round to
+  // different minutes, and a mismatch left Approve and Deny dead on the first click.
+  const now = useHydratedNow();
 
   if (items === null) {
     return (
@@ -64,6 +71,13 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
     start(async () => {
       const outcome = approvalOutcome(await decideApprovalAction(id, decision), tool);
       setOutcomes((current) => ({ ...current, [id]: outcome }));
+    });
+
+  const clear = (item: PendingApprovalView) =>
+    start(async () => {
+      const result = await clearInjectionTaint(item.agentId);
+      setClearErrors((current) => ({ ...current, [item.id]: result.error ?? "" }));
+      if (!result.error) router.refresh();
     });
 
   return (
@@ -100,6 +114,7 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
                 key={item.id}
                 className="pc-approval grid gap-3 rounded-xl border border-border bg-card p-4"
                 data-approval={item.id}
+                data-hold={item.hold ?? undefined}
                 data-state={outcome ? (outcome.ok ? "answered" : "error") : "pending"}
               >
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -108,10 +123,28 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
                     <span className="font-normal text-muted-foreground">asks to call {item.serviceLabel}</span>
                   </strong>
                   <small className="text-muted-foreground">
-                    {ago(item.createdAt, now)}
+                    {now === null ? "Waiting" : ago(item.createdAt, now)}
                     {item.onTelegram ? " · also asked on Telegram" : ""}
                   </small>
                 </div>
+                {item.hold ? (
+                  <p className="pc-inline-notice">{item.hold === "cleared"
+                    ? "Held by the injection guard when it was asked. The hold has since been cleared; this request still waits for Approve or Deny."
+                    : item.hold === "tainted" ? HELD_TAINTED : HELD_UNKNOWN}</p>
+                ) : null}
+                {item.hold === "tainted" ? (
+                  <div className="grid gap-2">
+                    <button type="button" className="ghost justify-self-start" disabled={pending} onClick={() => clear(item)} data-action="clear-hold">
+                      Clear the hold
+                    </button>
+                    <p className="text-sm text-muted-foreground">
+                      Clearing ends the hold for the agent’s next actions; this request still waits for Approve or Deny.
+                    </p>
+                    {clearErrors[item.id] ? (
+                      <p className="pc-approval__outcome pc-inline-notice is-danger" role="status">{clearErrors[item.id]}</p>
+                    ) : null}
+                  </div>
+                ) : null}
                 <code className="break-all text-sm" data-approval-request>
                   {item.method} {item.path}
                 </code>

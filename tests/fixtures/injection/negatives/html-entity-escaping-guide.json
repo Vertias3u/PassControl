@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "html",
+  "expectedFamilies": [],
+  "reason": "An escaping guide prints entity-encoded role tags as explanatory text.",
+  "text": "<h1>Escape angle brackets</h1><p>Use &lt;system&gt; to display a tag name as text in the manual. Never interpret it as a conversation message.</p>"
+}

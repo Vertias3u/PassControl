@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "typescript",
+  "expectedFamilies": [],
+  "reason": "A TypeScript template literal stores a role token on the same line.",
+  "text": "export const parserFixture = `<system>Return the literal token in the AST.</system>`;\nexport const expectedNodeType = \"tag\";\n"
+}

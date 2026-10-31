@@ -141,6 +141,11 @@ interface ReceiptInputBase {
    * with `src: "declared"`, so it can never read as passport-proven.
    */
   lineage?: ClientLineage | null;
+  /**
+   * The injection guard's findings in this request, as injectionReceiptClaim
+   * (lib/injection-guard.ts) gives them (plans/injection-guard.md §5). Absent when nothing was found.
+   */
+  injection?: InjectionReceiptClaim | null;
 }
 
 type PassportReceiptIdentity = {
@@ -295,7 +300,19 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
       ...(parent ? { par: parent } : {}),
     };
   }
+  // Additive for the same reason (owner, 2026-10-30), `ver` unchanged: present only
+  // when the injection guard found something in this request. Kinds only, never a
+  // path, an HMAC or a word of the block; the agent receives a receipt's id, never
+  // the receipt, so it cannot read back which wording got through.
+  if (input.injection) claims.inj = input.injection;
   return claims;
+}
+
+/** The `inj` claim: the detector, how many blocks it flagged, and their families. */
+export interface InjectionReceiptClaim {
+  d: string;
+  n: number;
+  f: string[];
 }
 
 /**

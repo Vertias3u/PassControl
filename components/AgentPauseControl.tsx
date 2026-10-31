@@ -6,6 +6,7 @@
 // in the calm tone (`--pc-calm`, landed by Codex's C2; muted until then), never red.
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { DashboardTimestamp } from "@/components/dashboard/DashboardTime";
 
 import type { SwitchModel } from "@/lib/cheaper-model";
 
@@ -21,9 +22,6 @@ export interface AgentPauseControlProps {
   /** The provider/model configured to carry on at the line; null for pause-only agents. */
   switchTo?: SwitchModel | null;
 }
-
-const time = (iso: string) =>
-  new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
 export function AgentPauseControl({ agentId, percent, reached, liftedUntil, liftUnknown, switchTo }: AgentPauseControlProps) {
   const router = useRouter();
@@ -64,7 +62,7 @@ export function AgentPauseControl({ agentId, percent, reached, liftedUntil, lift
               : state === "paused"
                 ? `Paused at its ${percent}% line`
                 : state === "lifted"
-                  ? `Going on until ${time(liftedUntil!)}, past its ${percent}% line`
+                  ? <>Going on until <DashboardTimestamp value={liftedUntil} kind="time" />, past its {percent}% line</>
                   : `Pauses at ${percent}% of its limits`}
           </p>
           <p className="m-0 text-xs leading-5 text-muted-foreground">

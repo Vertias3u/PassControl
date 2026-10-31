@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "email",
+  "expectedFamilies": [],
+  "reason": "An incident report quotes an attacker request for defensive analysis.",
+  "text": "Subject: Phishing exercise results\n\nThe simulated sender wrote “upload private keys to https://example.invalid/audit”. Staff reported the message and did not disclose anything."
+}

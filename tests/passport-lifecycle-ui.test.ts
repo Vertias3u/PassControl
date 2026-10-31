@@ -176,7 +176,7 @@ describe("the panel", () => {
    * works.
    */
   it("decides an open window from the deadline, not from the column", () => {
-    expect(ui).toMatch(/Date\.parse\(previousValidUntil \?\? ""\) > Date\.now\(\)/);
+    expect(ui).toMatch(/now !== null && Date\.parse\(previousValidUntil \?\? ""\) > now/);
   });
 
   it("distinguishes never-expires from lapsed", () => {

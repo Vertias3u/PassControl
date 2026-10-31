@@ -38,6 +38,7 @@ import {
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 import { prospectiveBreakGlassChange } from "@/lib/impact-preview";
 import { ImpactPreview } from "@/components/ImpactPreview";
+import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
 
 /** Bounded by what fleet.grantBreakGlass will actually accept. */
 const DURATIONS = [
@@ -46,8 +47,9 @@ const DURATIONS = [
   { label: "1 hour", seconds: MAX_BREAK_GLASS_TTL_S },
 ] as const;
 
-function Remaining({ until }: { until: string }) {
-  const ms = Date.parse(until) - Date.now();
+function Remaining({ until, now }: { until: string; now: number | null }) {
+  if (now === null) return <span>…</span>;
+  const ms = Date.parse(until) - now;
   if (!Number.isFinite(ms) || ms <= 0) return <span>less than a minute</span>;
   const minutes = Math.ceil(ms / 60_000);
   return (
@@ -69,6 +71,7 @@ export function BreakGlassPanel({
   visaTtlSeconds: number;
 }) {
   // `local` only where this deployment can reach it (components/dashboard/LocalModels.tsx).
+  const now = useHydratedNow();
   const localModels = useLocalModelsEnabled();
   const [opening, setOpening] = useState(false);
   const [provider, setProvider] = useState<ProviderId>(PROVIDERS[0]);
@@ -85,8 +88,8 @@ export function BreakGlassPanel({
     .map((m) => m.trim())
     .filter(Boolean);
   const ready = modelList.length > 0 && reason.trim().length > 0;
-  const projectedExpiry = new Date(Date.now() + seconds * 1000).toISOString();
-  const preview = ready
+  const projectedExpiry = now === null ? null : new Date(now + seconds * 1000).toISOString();
+  const preview = ready && projectedExpiry
     ? prospectiveBreakGlassChange(
         [{ provider, models: modelList }],
         projectedExpiry,
@@ -153,7 +156,7 @@ export function BreakGlassPanel({
       {grant ? (
         <div className="grid gap-3 rounded-lg border border-border bg-background/60 p-4" data-state="live">
           <p className="m-0 text-sm font-semibold" style={{ color: "var(--warning)" }}>
-            This agent is elevated for another <Remaining until={grant.expiresAt} />, until{" "}
+            This agent is elevated for another <Remaining until={grant.expiresAt} now={now} />, until{" "}
             {format(grant.expiresAt, "short")}.
           </p>
           <dl className="grid gap-2 text-sm">
@@ -288,7 +291,7 @@ export function BreakGlassPanel({
             <dl>
               <div><dt>Agent</dt><dd><code>{agentId}</code></dd></div>
               <div><dt>Adds</dt><dd>{modelList.length} {provider} model pattern{modelList.length === 1 ? "" : "s"}</dd></div>
-              <div><dt>Expires</dt><dd>{format(Date.now() + seconds * 1000, "short")} · lapses automatically</dd></div>
+              <div><dt>Expires</dt><dd>{format(projectedExpiry, "short")} · lapses automatically</dd></div>
               <div><dt>Still enforced</dt><dd>Policy, budgets, suspension, and kill switch</dd></div>
             </dl>
           </div>

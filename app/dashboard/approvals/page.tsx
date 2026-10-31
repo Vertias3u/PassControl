@@ -3,9 +3,11 @@ import { redirect } from "next/navigation";
 import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { ApprovalsPanel, type PendingApprovalView } from "@/components/ApprovalsPanel";
 import { pollTelegramDecisions } from "@/lib/alerts/approvals";
+import { approvalHoldView } from "@/lib/approval-hold-view";
 import { needsMfaStepUp } from "@/lib/mfa";
 import { SERVICE_CATALOG, isServiceId } from "@/lib/services/catalog";
 import { listPendingApprovals } from "@/lib/state/approvals";
+import { readTaint } from "@/lib/state/taint";
 import { userClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +33,11 @@ export default async function ApprovalsPage() {
   let items: PendingApprovalView[] | null = null;
   try {
     const pending = await listPendingApprovals(user.id);
+    const heldAgentIds = [...new Set(pending.filter((p) => p.hold === "injection_tainted").map((p) => p.agentId))];
+    const liveTaints = await Promise.allSettled(
+      heldAgentIds.map(async (agentId) => (await readTaint(agentId, Date.now())) !== null)
+    );
+    const liveByAgent = new Map(heldAgentIds.map((agentId, index) => [agentId, liveTaints[index]]));
     const ids = [...new Set(pending.map((p) => p.agentId))];
     const names = new Map<string, string>();
     if (ids.length > 0) {
@@ -41,12 +48,12 @@ export default async function ApprovalsPage() {
       id: p.id,
       agentId: p.agentId,
       agentName: names.get(p.agentId) ?? "An agent",
-      // A Claude Code tool on a Pro/Max login (subscription mode, Phase 2) is asked
-      // about through the same store, under `claude-code`.
+      // A tool on the agent's machine (Claude Code on Pro/Max, or Codex on ChatGPT) is
+      // asked about through the same store, under `claude-code` for either.
       serviceLabel: isServiceId(p.service)
         ? SERVICE_CATALOG[p.service].label
         : p.service === "claude-code"
-          ? "a Claude Code tool"
+          ? "a local tool"
           : p.service,
       method: p.method,
       path: p.path,
@@ -54,6 +61,7 @@ export default async function ApprovalsPage() {
       createdAt: p.createdAt,
       onTelegram: p.telegram !== null,
       tool: p.service === "claude-code",
+      hold: approvalHoldView(p.hold, liveByAgent.get(p.agentId)),
     }));
   } catch {
     items = null;
@@ -65,7 +73,7 @@ export default async function ApprovalsPage() {
       active="approvals"
       eyebrow="Ask me first"
       title="Approvals"
-      description="Service calls your agents made under a rule set to “Ask me first”. Each one is held until you answer. Approving sends that exact request once; denying refuses it every time the agent retries."
+      description="Requests held by a rule set to “Ask me first” or by the injection guard wait here for your answer. Approving sends that exact request once; denying refuses it every time the agent retries."
     >
       <ApprovalsPanel items={items} />
     </DashboardShell>

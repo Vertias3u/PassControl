@@ -9,6 +9,7 @@ import { buildServiceConnectSetup } from "@/lib/service-connect";
 import { SERVICE_CATALOG } from "@/lib/services/catalog";
 import { DISPLAYED_SERVICES, SERVICE_DISPLAY } from "@/lib/services/display";
 import { isProvider, type ProviderId } from "@/lib/providers";
+import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
 
 export interface AgentSetupKey {
   id: string;
@@ -18,14 +19,13 @@ export interface AgentSetupKey {
   revokedAt: string | null;
 }
 
-type SetupState = "ready" | "needs-model" | "no-active-key" | "no-provider" | "revoked";
+type SetupState = "checking-key" | "ready" | "needs-model" | "no-active-key" | "no-provider" | "revoked";
 type CopyKind = "install" | "env" | "load" | "smoke";
 
 const PLACEHOLDER_ORIGIN = "https://YOUR-PASSCONTROL-HOST";
 
-function activeKeys(keys: readonly AgentSetupKey[]): AgentSetupKey[] {
-  const now = Date.now();
-  return keys.filter((key) => !key.revokedAt && !(key.expiresAt && Date.parse(key.expiresAt) <= now));
+function activeKeys(keys: readonly AgentSetupKey[], now: number | null): AgentSetupKey[] {
+  return keys.filter((key) => !key.revokedAt && !(key.expiresAt && (now === null || Date.parse(key.expiresAt) <= now)));
 }
 
 /**
@@ -59,18 +59,21 @@ export function AgentSetupPanel({
   const [provider, setProvider] = useState<ProviderId | null>(providers[0] ?? null);
   const [copied, setCopied] = useState<CopyKind | null>(null);
 
-  const usable = activeKeys(keys);
+  const now = useHydratedNow();
+  const usable = activeKeys(keys, now);
   const model = provider ? setupExampleModel(scopes, provider) : null;
   const state: SetupState =
     status === "revoked"
       ? "revoked"
       : !provider
         ? "no-provider"
-        : usable.length === 0
-          ? "no-active-key"
-          : model === null
-            ? "needs-model"
-            : "ready";
+        : now === null && usable.length === 0 && keys.some((key) => !key.revokedAt && key.expiresAt)
+          ? "checking-key"
+          : usable.length === 0
+            ? "no-active-key"
+            : model === null
+              ? "needs-model"
+              : "ready";
   const setup =
     state === "ready" && provider && model
       ? buildDirectConnectSetup({ origin, provider, key: null, model })
@@ -139,6 +142,7 @@ export function AgentSetupPanel({
           ) : null}
         </div>
       ) : null}
+      {state === "checking-key" ? <p className="m-0 text-sm text-muted-foreground">Checking installation key expiry…</p> : null}
       {state === "no-active-key" ? (
         <p className="m-0 text-sm text-muted-foreground">
           This agent has no active Direct Agent Key. <a href="#direct-agent-keys">Create an installation key</a> to connect a worker with one.

@@ -1,7 +1,7 @@
 "use client";
 // One agent's tool rules (subscription mode, Phase 2; migration 0085).
 //
-// On a Claude Pro/Max login, Claude Code's tools run on the user's machine and the
+// Claude Code's tools run on the user's machine (on a Pro/Max login or an API key) and the
 // gateway never sees them. Claude Code's PreToolUse hook asks the local sidecar first,
 // and the sidecar answers from these rules: refuse a tool, hand it to Claude Code's own
 // prompt, or hold it until the owner says yes (cli/tool-gate.mjs).
@@ -107,11 +107,13 @@ export function AgentToolRules({
       ) : null}
 
       <p className="text-sm text-muted-foreground">
-        For Claude Code on a Claude Pro or Max login, through <code>passcontrol sidecar</code>. The sidecar
+        For Claude Code through <code>passcontrol sidecar</code>, on a Claude Pro or Max login or an API key. The sidecar
         checks each tool call against these rules before it runs: the strictest matching rule wins, and a tool
         no rule names is left to Claude Code&apos;s own permissions. They work inside Claude Code, through its
         hooks: a guard rail for your own sessions, not a wall against a client that skips them. Set up with{" "}
-        <code>passcontrol configure claude-code --subscription --write</code>. Codex on a ChatGPT plan gets
+        <code>passcontrol configure claude-code --subscription --write</code> for a login, or{" "}
+        <code>passcontrol configure claude-code --write</code> for an API key (re-run it if you set that up
+        before this release). Codex on a ChatGPT plan gets
         the command (Bash) and MCP tool rules only, set up with{" "}
         <code>passcontrol configure codex --subscription --write</code>.
       </p>

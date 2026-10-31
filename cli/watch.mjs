@@ -16,6 +16,7 @@
 // fields are held to the feed's own patterns on arrival, and every cell is stripped
 // of control characters again before it is drawn.
 import http from "node:http";
+import { INJECTION_FAMILIES } from "./injection-scan.mjs";
 import { formatUsd, limitReached, panelRows, paused } from "./budget-format.mjs";
 import { WATCH_PATH } from "./watch-feed.mjs";
 import { heldUsageWindow, resetTime, usageWindowText } from "./usage-window.mjs";
@@ -139,6 +140,29 @@ export function applyEvent(state, event) {
     if (state.run !== run) state.rows = [];
     state.run = run;
     state.feed = { state: "live" };
+    return state;
+  }
+  if (event.type === "tool_hold") {
+    if (!Number.isInteger(event.seq) || event.seq < 1 || !["approved", "denied", "timeout", "unavailable", "through"].includes(event.outcome)) return state;
+    const row = { type: "tool_hold", seq: event.seq, at: count(event.at), tool: held(/^[A-Za-z0-9_.-]{1,128}$/, event.tool), outcome: event.outcome };
+    const existing = state.rows.findIndex((r) => r.seq === row.seq);
+    if (existing === -1) state.rows.push(row);
+    else state.rows[existing] = row;
+    if (state.rows.length > MAX_ROWS) state.rows.splice(0, state.rows.length - MAX_ROWS);
+    return state;
+  }
+  if (event.type === "injection_finding") {
+    if (!Number.isInteger(event.seq) || event.seq < 1 || event.source !== "tool_result") return state;
+    const families = INJECTION_FAMILIES.filter((f) => Array.isArray(event.families) && event.families.includes(f));
+    if (!families.length) return state;
+    const row = {
+      type: "injection_finding", seq: event.seq, at: count(event.at), source: "tool_result",
+      tool: held(/^[A-Za-z0-9_.-]{1,128}$/, event.tool), families,
+    };
+    const existing = state.rows.findIndex((r) => r.seq === row.seq);
+    if (existing === -1) state.rows.push(row);
+    else state.rows[existing] = row;
+    if (state.rows.length > MAX_ROWS) state.rows.splice(0, state.rows.length - MAX_ROWS);
     return state;
   }
   if (event.type === "call") {
@@ -275,6 +299,17 @@ const BAR_STYLE = { boarded: "green", denied: "red", error: "yellow" };
 
 /** One board row, `width` wide at most. */
 function rowLine(row, cols, { run, now, formatTime, color }) {
+  if (row.type === "tool_hold") {
+    const tool = held(/^[A-Za-z0-9_.-]{1,128}$/, row.tool) ?? "—";
+    return paint(color, "yellow", clean(`${fit(row.at !== null ? formatTime(row.at) : "", cols.time)}  HELD · injection guard · ${tool} · ${row.outcome}`));
+  }
+  if (row.type === "injection_finding") {
+    const families = INJECTION_FAMILIES.filter((f) => Array.isArray(row.families) && row.families.includes(f));
+    const tool = held(/^[A-Za-z0-9_.-]{1,128}$/, row.tool) ?? "—";
+    // The local scan saw it; whether the gateway recorded it is the owner's policy, unknown here.
+    const text = `${fit(row.at ? formatTime(row.at) : "", cols.time)}  INJECTION? · tool_result · ${tool} · ${families.join("+")}`;
+    return paint(color, "yellow", clean(text));
+  }
   const cells = [fit(row.at !== null ? formatTime(row.at) : "", cols.time)];
   if (cols.withSession) cells.push(fit(sessionText(row, run), cols.session));
   cells.push(agentText(row, cols.agent));
@@ -396,9 +431,10 @@ export function renderBoard(state, { width, height, port, now = Date.now(), form
   const cols = columns(w);
   const rows = state.rows;
   const tally = { boarded: 0, denied: 0, error: 0, seen: 0 };
-  for (const r of rows) tally[r.outcome] += 1;
-  const counts = rows.length
-    ? `${rows.length} call${rows.length === 1 ? "" : "s"}: ${tally.seen ? `${tally.seen} seen, ` : ""}${tally.boarded} boarded, ${tally.denied} denied${tally.error ? `, ${tally.error} error` : ""}`
+  const calls = rows.filter((r) => r.type !== "injection_finding" && r.type !== "tool_hold");
+  for (const r of calls) tally[r.outcome] += 1;
+  const counts = calls.length
+    ? `${calls.length} call${calls.length === 1 ? "" : "s"}: ${tally.seen ? `${tally.seen} seen, ` : ""}${tally.boarded} boarded, ${tally.denied} denied${tally.error ? `, ${tally.error} error` : ""}`
     : "no calls yet";
   const lines = [
     `${paint(color, "bold", "PassControl watch")} · sidecar :${port} · ${feedText(state.feed, port)} · ${counts}`,

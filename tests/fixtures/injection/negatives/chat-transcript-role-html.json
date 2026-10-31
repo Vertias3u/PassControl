@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "chat-transcript",
+  "expectedFamilies": [],
+  "reason": "A saved parser transcript describes literal role markup on separate lines.",
+  "text": "Archive entry 18 — tokenizer debugging session\nUser pasted this token sequence for inspection:\n<system>\nAssistant explained that the token belongs to the transcript format.\nEnd of archived excerpt."
+}

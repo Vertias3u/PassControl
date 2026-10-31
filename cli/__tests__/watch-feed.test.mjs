@@ -432,6 +432,22 @@ describe("the watch feed: one event per call, and what each says", () => {
 });
 
 describe("the watch feed unit pieces", () => {
+  it("broadcasts and replays one sanitized local finding row, with bounded retention", () => {
+    const feed = createWatchFeed({ runId: "r", capacity: 1 });
+    const live = [];
+    feed.attach({ write: (line) => live.push(JSON.parse(line)), on() {}, destroy() {} });
+    const event = { at: 123, tool: "Read", families: ["hidden_text", "instruction_override", "hidden_text", "evil.test"], text: "SECRET", path: "SECRET", block_sha256: "SECRET" };
+    feed.injection(event);
+    expect(live[1]).toEqual({ type: "injection_finding", seq: 1, at: 123, source: "tool_result", tool: "Read", families: ["instruction_override", "hidden_text"] });
+    feed.injection({ ...event, tool: "bad/tool" });
+    const replay = [];
+    feed.attach({ write: (line) => replay.push(JSON.parse(line)), on() {}, destroy() {} });
+    expect(replay).toHaveLength(2);
+    expect(replay[1]).toEqual({ ...live[1], seq: 2, tool: null });
+    expect(JSON.stringify([...live, ...replay])).not.toContain("SECRET");
+    feed.close();
+  });
+
   it("drops a subscriber that cannot keep up instead of buffering for it", () => {
     const feed = createWatchFeed({ runId: "r" });
     let destroyed = false;

@@ -58,6 +58,6 @@ describe("the account export carries reported calls", () => {
   });
 
   it("bumped the schema version for the new section", () => {
-    expect(ACCOUNT_EXPORT_SCHEMA_VERSION).toBe(4);
+    expect(ACCOUNT_EXPORT_SCHEMA_VERSION).toBe(5);
   });
 });

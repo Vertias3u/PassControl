@@ -92,6 +92,7 @@ import { dashboardOriginForOffset, portHolders, stackPortConflictMessage } from 
 import { startSidecar } from "../cli/sidecar.mjs";
 import { listProfiles, profilePath, readProfile, TOOL_PROFILE_PORTS, writeProfile } from "../cli/profiles.mjs";
 import {
+  apiToolHooks,
   claudeCodeEnv,
   claudeCodeSettingsPath,
   removeClaudeCodeSettings,
@@ -282,6 +283,8 @@ ${heading("Integrate")}
   ${cmd} env [integration]        print settings without writing anything
   ${cmd} configure <integration> [--write] [--force] [--dedicated]
                                  preview or write integration config
+  ${cmd} configure claude-code --write
+                                 route model calls; tools ask the sidecar first
   ${cmd} configure claude-code --subscription [--write|--remove]
                                  a Pro/Max login: stops, calls, usage window
   ${cmd} configure codex --subscription [--write|--remove]
@@ -2784,7 +2787,7 @@ function aiderConfig(opts = {}) {
 /**
  * Claude Code's own model calls, through the sidecar (cli/claude-code.mjs). The
  * project's settings by default; `--global` for every session; `--remove` takes
- * PassControl's two keys back out. The MCP chat tool stays a separate command
+ * PassControl's env keys and tool hook back out. The MCP chat tool stays a separate command
  * Claude Code owns.
  */
 function configureClaudeCode(opts = {}) {
@@ -2799,11 +2802,11 @@ function configureClaudeCode(opts = {}) {
   }
   const { baseUrl, port } = sidecarBaseUrl({ ...opts, provider: "anthropic" });
   const note = Boolean(opts.agentNote);
-  const preview = { env: claudeCodeEnv(baseUrl) };
-  if (note) preview.hooks = { UserPromptSubmit: [{ hooks: [{ type: "http", url: `http://127.0.0.1:${port}/_passcontrol/hook?note=only`, timeout: 5 }] }] };
+  const preview = { env: claudeCodeEnv(baseUrl), hooks: apiToolHooks(port) };
+  if (note) preview.hooks = { ...preview.hooks, UserPromptSubmit: [{ hooks: [{ type: "http", url: `http://127.0.0.1:${port}/_passcontrol/hook?note=only`, timeout: 5 }] }] };
   console.log(`Preview: ${target}\n\n${JSON.stringify(preview, null, 2)}`);
   if (!opts.write) {
-    step(`Dry run only. Re-run with \`--write\` to merge these two keys${scope === "project" ? " (or --write --global for every session)" : ""}.`);
+    step(`Dry run only. Re-run with \`--write\` to merge these env keys and the tool hook${scope === "project" ? " (or --write --global for every session)" : ""}.`);
   } else {
     const result = writeClaudeCodeSettings({
       target,
@@ -2811,12 +2814,14 @@ function configureClaudeCode(opts = {}) {
       force: Boolean(opts.force),
       statusLineCommand: opts.statusline ? statusLineSettingsCommand(port) : null,
       noteHookPort: note ? port : null,
+      toolHookPort: port,
     });
     if (!result.changed) ok(`${target} already routes Claude Code through PassControl`);
     else {
       if (result.backupPath) step(`backed up ${result.backupPath}`);
       ok(`wrote ${target}`);
     }
+    ok("Claude Code’s tools now ask the sidecar first for the agent’s tool rules and the injection guard’s hold.");
     if (result.statusLine?.existing) {
       warn(`${target} already has a status line (${result.statusLine.existing}); it was left as it is. To show the budget there, add \`${statusLineSettingsCommand(port)}\` to it yourself.`);
     } else if (result.statusLine?.changed) ok("added the agent's budget to Claude Code's status line");
@@ -2982,7 +2987,7 @@ function profileCommand(rest, opts) {
 /**
  * Subscription mode for Codex (cli/codex-hooks.mjs): a ChatGPT login keeps talking
  * to OpenAI directly; PassControl's stops and tool rules reach the session through
- * two hooks in $CODEX_HOME/hooks.json, next to anyone else's.
+ * three hooks in $CODEX_HOME/hooks.json, next to anyone else's.
  */
 function configureCodexSubscription(opts = {}) {
   const target = codexHooksPath();
@@ -2998,14 +3003,14 @@ function configureCodexSubscription(opts = {}) {
   const command = codexHookCommand({ port, entry: fs.realpathSync(CLI_ENTRY) });
   console.log(`Preview: added to ${target} (anything already there is kept)\n\n${JSON.stringify(codexHookEntries(command), null, 2)}`);
   if (!opts.write) {
-    step("Dry run only. Re-run with `--write` to add these two hooks.");
+    step("Dry run only. Re-run with `--write` to add these three hooks.");
   } else {
     const result = writeCodexHooks({ target, command });
     if (!result.changed) ok(`${target} already has PassControl's hooks`);
     else {
       if (result.backupPath) step(`backed up ${result.backupPath}`);
       ok(`wrote ${target}`);
-      warn("Not on yet: Codex runs a hook only after you trust it. Open Codex, type /hooks, and trust PassControl's two hooks. Until then they are skipped without a word.");
+      warn("Not on yet: Codex runs a hook only after you trust it. Open Codex, type /hooks, and trust PassControl's three hooks (any you trusted before stay trusted). Until then they are skipped without a word.");
     }
     const probe = probeCodexHookCommand(command);
     if (probe.ok) ok("the hook command runs on its own, without your shell's PATH");
@@ -3013,6 +3018,7 @@ function configureCodexSubscription(opts = {}) {
   }
   step(`Start the sidecar before Codex: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
   step("Your ChatGPT login stays between Codex and OpenAI. PassControl never sees it or sits in the path.");
+  step("What Codex's tools return is also scanned on this machine for the injection guard (the PostToolUse hook). That hook never blocks a tool or changes what it returned.");
   step("What it does: a suspended agent, or the kill switch, blocks the next prompt and refuses tools. The agent's tool rules refuse what they deny; an \"ask the owner\" rule waits for the owner's answer.");
   step("What it cannot do, plainly:");
   step("  Codex has no strict hook mode. If the sidecar is not running, or a hook fails, Codex goes ahead (with a warning when the sidecar is down).");
@@ -3475,13 +3481,19 @@ async function verifyCommand(rest, opts) {
     // Lineage is DECLARED by the client: any local process can send those
     // headers. Say so on the same line, so nobody reads it as passport-proven.
     // Printable ASCII only: a signed value is still not a terminal's to obey.
+    const shown = (v) => String(v).replace(/[^\x20-\x7e]/g, "?").slice(0, 128);
     if (c.ctx?.ses) {
-      const shown = (v) => String(v).replace(/[^\x20-\x7e]/g, "?").slice(0, 128);
       const who = c.ctx.agt
         ? `sub-agent ${shown(c.ctx.agt)}${c.ctx.par ? `, spawned by ${shown(c.ctx.par)}` : ""}`
         : "main agent";
       step(`Session:  ${shown(c.ctx.ses)} · ${who}`);
       step(`          declared by the client (${shown(c.ctx.cli ?? "unknown")}), not verified`);
+    }
+    const inj = c.inj;
+    if (typeof inj === "object" && inj !== null && !Array.isArray(inj) &&
+        typeof inj.d === "string" && inj.d && Number.isSafeInteger(inj.n) && inj.n >= 1 && Array.isArray(inj.f)) {
+      step(`Injection: ${inj.n} block(s) of tool output carried injection tells (${shown(inj.d)})`);
+      step(`           kinds: ${inj.f.slice(0, 16).map(shown).join(", ")}`);
     }
   }
   if (c.own) {

@@ -96,6 +96,15 @@ describe.runIf(gate.run)("the approval store", () => {
     expect(pending[0]).toMatchObject({ agentId: "agent-1", service: "discord", method: "POST", preview: '{"content":"hello"}' });
   });
 
+  // The injection guard's hold code, through the real hash and Upstash's decoding.
+  it("keeps an injection hold's code on the pending item, and writes none for an ordinary ask", async () => {
+    const userId = tenant();
+    await approvals.checkApproval({ ...request(userId), hold: "injection_tainted" }, { create: true });
+    await approvals.checkApproval(request(userId), { create: true });
+    const items = await approvals.listPendingApprovals(userId);
+    expect(items.map((i) => i.hold ?? null).sort()).toEqual(["injection_tainted", null]);
+  });
+
   it("does not create anything when asked only to look", async () => {
     const user = tenant();
     expect(await approvals.checkApproval(request(user), { create: false })).toEqual({ state: "none" });
@@ -181,6 +190,30 @@ describe.runIf(gate.run)("the approval store", () => {
         telegram: { chat: "555", message: "42", textHash: "h" },
       })
     ).toEqual({ state: "missing" });
+  });
+
+  // Injection guard Phase 2: "Clear the hold" on a held prompt names the approval, so
+  // the tap is bound exactly as Approve and Deny are, and answers only with the agent.
+  it("names a held prompt's agent only for a tap on its own message, text and workspace", async () => {
+    const user = tenant();
+    const { id } = await approvals.checkApproval(request(user), { create: true });
+    await approvals.attachTelegramMessage(id!, "555", "42", "h");
+    const tap = (over: Partial<{ userId: string; chat: string; message: string; textHash: string }> = {}) =>
+      approvals.approvalAgentForTap({ userId: user, id: id!, chat: "555", message: "42", textHash: "h", ...over });
+    expect(await tap()).toBe("agent-1");
+    expect(await tap({ chat: "556" })).toBeNull();
+    expect(await tap({ message: "43" })).toBeNull();
+    expect(await tap({ textHash: "other" })).toBeNull();
+    expect(await tap({ userId: tenant() })).toBeNull();
+    // Naming the agent decides nothing: the question is still open.
+    expect((await approvals.readApproval(user, id!))?.state).toBe("pending");
+  });
+
+  it("names no agent for an approval never sent to Telegram, or a malformed id", async () => {
+    const user = tenant();
+    const { id } = await approvals.checkApproval(request(user), { create: true });
+    expect(await approvals.approvalAgentForTap({ userId: user, id: id!, chat: "555", message: "42", textHash: "h" })).toBeNull();
+    expect(await approvals.approvalAgentForTap({ userId: user, id: "nope", chat: "555", message: "42", textHash: "h" })).toBeNull();
   });
 
   it("keeps a large preview whole, for the Approvals page to show", async () => {

@@ -27,6 +27,7 @@ import { expectationVerdict } from "@/lib/key-custody-expectation";
 import { periodLimitSummary, usdFromMicrocents, type PeriodUsageView } from "@/lib/period-display";
 import { suggestCheaperModel } from "@/lib/cheaper-model";
 import type { ScopeEntry } from "@/lib/auth/visa";
+import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
 
 interface Agent {
   id: string;
@@ -167,6 +168,7 @@ export function AgentFleetTable({
   // Suspend/reactivate outcomes per agent — the shared contract in
   // AgentSuspendControl: desired state in, observed state out, and a lost
   // response is "could not confirm", never a silent no-op.
+  const now = useHydratedNow();
   const [controlResults, setControlResults] = useState<Record<string, ControlResult>>({});
   const runControl = async (agentId: string, intent: ReturnType<typeof intentFor>, read = false) => {
     setControlResults((current) => ({ ...current, [agentId]: { phase: "pending", intent } }));
@@ -336,7 +338,7 @@ export function AgentFleetTable({
                   title={a.last_seen_at ? format(a.last_seen_at) : undefined}
                   data-state={logsAvailable || a.last_seen_at ? undefined : "unavailable"}
                 >
-                  {relativeTime(a.last_seen_at, logsAvailable)}
+                  {relativeTime(a.last_seen_at, logsAvailable, now)}
                 </td>
                 <td>
                   <div className="pc-fleet-actions">
@@ -401,7 +403,7 @@ export function AgentFleetTable({
                   Key custody (declared):{" "}
                   <KeyCustody view={custodyOf(agent)} expectation={keyCustodyExpectation} />
                 </p>
-                <p title={agent.last_seen_at ? format(agent.last_seen_at) : undefined}>Last activity: {relativeTime(agent.last_seen_at, logsAvailable)}</p>
+                <p title={agent.last_seen_at ? format(agent.last_seen_at) : undefined}>Last activity: {relativeTime(agent.last_seen_at, logsAvailable, now)}</p>
                 <div className="pc-fleet-card__actions">
                   <Link href={`/dashboard/agents/${agent.id}`} className="pc-open-agent">
                     Open agent <ArrowUpRight aria-hidden="true" />
@@ -526,9 +528,10 @@ function RowMenu({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function relativeTime(value: string | null, scanned = true): string {
+function relativeTime(value: string | null, scanned: boolean, now: number | null): string {
   if (!value) return scanned ? "never" : "unknown";
-  const elapsed = Date.now() - Date.parse(value);
+  if (now === null) return "…";
+  const elapsed = now - Date.parse(value);
   if (!Number.isFinite(elapsed)) return "unknown";
   const minutes = Math.max(0, Math.floor(elapsed / 60_000));
   if (minutes < 1) return "just now";
@@ -542,7 +545,7 @@ function BudgetMeter({
   value,
   limit,
   label,
-  format = (amount) => Math.round(amount).toLocaleString(),
+  format = (amount) => Math.round(amount).toLocaleString("en-US"),
 }: {
   value: number;
   limit: number | null;

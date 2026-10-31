@@ -75,6 +75,9 @@ export const AUDIT_ACTIONS = [
   // The owner letting a paused agent go on for an hour, or keeping it paused
   // (1.6.0, the soft pause line). The line itself is an agent.update.
   "agent.pause_lift",
+  // The owner ending an injection-guard hold early (Phase 2). Says only whether
+  // there was one: never what was found.
+  "agent.injection_clear",
   // The owner's yes or no to one service call under an "Ask me first" rule,
   // given in the dashboard. (A Telegram tap leaves the call's own audit row.)
   "approval.decide",

@@ -41,6 +41,7 @@ import {
   prospectiveAgentChange,
   prospectivePassportRotation,
 } from "@/lib/impact-preview";
+import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
 
 /** Options bounded by what fleet.rotatePassport will actually accept. */
 const GRACE_CHOICES = [
@@ -50,8 +51,9 @@ const GRACE_CHOICES = [
   { label: "7 days", seconds: MAX_ROTATION_GRACE_S, hint: "The longest window allowed." },
 ] as const;
 
-function Countdown({ until }: { until: string }) {
-  const remaining = Date.parse(until) - Date.now();
+function Countdown({ until, now }: { until: string; now: number | null }) {
+  if (now === null) return null;
+  const remaining = Date.parse(until) - now;
   if (!Number.isFinite(remaining) || remaining <= 0) return null;
   const days = Math.floor(remaining / 86_400_000);
   const hours = Math.floor(remaining / 3_600_000);
@@ -88,6 +90,7 @@ export function PassportLifecycle({
   currentPassportId: string;
   visaTtlSeconds: number;
 }) {
+  const now = useHydratedNow();
   const router = useRouter();
   const [editingExpiry, setEditingExpiry] = useState(false);
   const [expiryInput, setExpiryInput] = useState(
@@ -112,10 +115,10 @@ export function PassportLifecycle({
   const windowOpen =
     Boolean(previousPassportId) &&
     Boolean(previousValidUntil) &&
-    Date.parse(previousValidUntil ?? "") > Date.now();
-  const expired = Boolean(expiresAt) && Date.parse(expiresAt ?? "") <= Date.now();
-  const expiryWarning = Boolean(expiresAt) && !expired &&
-    Date.parse(expiresAt ?? "") - Date.now() <=
+    now !== null && Date.parse(previousValidUntil ?? "") > now;
+  const expired = now !== null && Boolean(expiresAt) && Date.parse(expiresAt ?? "") <= now;
+  const expiryWarning = now !== null && Boolean(expiresAt) && !expired &&
+    Date.parse(expiresAt ?? "") - now <=
       PASSPORT_EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000;
   const proposedExpiry = expiryInput
     ? new Date(`${expiryInput}:00.000Z`).toISOString()
@@ -246,7 +249,7 @@ export function PassportLifecycle({
             </button>
           </div>
           <p className="m-0 text-xs leading-5 text-muted-foreground">
-            {secret.until && Date.parse(secret.until) > Date.now() ? (
+            {secret.until && now !== null && Date.parse(secret.until) > now ? (
               <>
                 The <strong>old key still works until {when(secret.until)}</strong>. Both keys
                 authenticate until then, so deploy this one before it passes.
@@ -287,7 +290,7 @@ export function PassportLifecycle({
           </p>
           <p className="m-0 mt-1 text-xs leading-5 text-muted-foreground">
             The key retired at the last rotation still works for another{" "}
-            <Countdown until={previousValidUntil} />, until {when(previousValidUntil)}. That is what
+            <Countdown until={previousValidUntil} now={now} />, until {when(previousValidUntil)}. That is what
             lets a fleet redeploy without an outage — and it is also a key you have decided to
             retire, still opening the door. It stops working on its own; nothing needs to be run.
           </p>
@@ -339,7 +342,7 @@ export function PassportLifecycle({
           data-state="expiry-warning"
         >
           <p className="m-0 text-sm font-semibold" style={{ color: "var(--warning)" }}>
-            Passport renewal is due in <Countdown until={expiresAt} />.
+            Passport renewal is due in <Countdown until={expiresAt} now={now} />.
           </p>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
             It expires at {when(expiresAt)}. Renewal keeps the current keypair and requires no

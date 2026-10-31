@@ -4,19 +4,22 @@ import { useState } from "react";
 import { formatCost } from "@/lib/verify/receipt-view";
 import type { DelegationListing } from "@/lib/delegation/manage";
 import { revokeAllDelegationsAction, revokeDelegationAction } from "@/app/dashboard/agents/[id]/delegation-actions";
+import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
 
 const BUTTON =
   "inline-flex items-center justify-center rounded-lg border border-border bg-background px-3 py-1.5 text-sm font-semibold text-foreground transition-opacity hover:bg-muted disabled:cursor-wait disabled:opacity-60";
 
-type Status = "active" | "expired" | "revoked";
+type Status = "active" | "expired" | "revoked" | "checking";
 
-function statusOf(d: DelegationListing, now: number): Status {
+function statusOf(d: DelegationListing, now: number | null): Status {
   if (d.revoked) return "revoked";
+  if (now === null) return "checking";
   return Date.parse(d.expires_at) <= now ? "expired" : "active";
 }
 
-const STATUS_LABEL: Record<Status, string> = { active: "Active", expired: "Expired", revoked: "Revoked" };
+const STATUS_LABEL: Record<Status, string> = { checking: "Checking expiry", active: "Active", expired: "Expired", revoked: "Revoked" };
 const STATUS_CLASS: Record<Status, string> = {
+  checking: "text-muted-foreground",
   active: "text-emerald-700 dark:text-emerald-400",
   expired: "text-muted-foreground",
   revoked: "text-amber-600 dark:text-amber-400",
@@ -110,7 +113,7 @@ function RevokeAll({ agentId }: { agentId: string }) {
  * exchange; the panel says so before it lists anything.
  */
 export function WorkersPanel({ agentId, delegations }: { agentId: string; delegations: DelegationListing[] | null }) {
-  const now = Date.now();
+  const now = useHydratedNow();
   return (
     <section className="pc-section rounded-xl border border-border bg-card p-5 shadow-sm sm:p-6">
       <h2 className="text-lg font-semibold text-foreground">Workers</h2>

@@ -115,3 +115,20 @@ describe("what a usage_unknown row is allowed to claim", () => {
     expect(html).toContain("<dt>Budget charge</dt>");
   });
 });
+
+it("keeps call token and latency grouping stable with a German default locale", () => {
+  const original = Number.prototype.toLocaleString;
+  const spy = vi.spyOn(Number.prototype, "toLocaleString").mockImplementation(function (
+    this: number, locales?: Intl.LocalesArgument, options?: Intl.NumberFormatOptions,
+  ) {
+    return original.call(this, locales ?? "de-DE", options);
+  });
+  try {
+    const html = render({ ...base, input_tokens: 1234, output_tokens: 0, enforced_tokens: 1234 });
+    expect(html).toContain("1,234");
+    expect(html).toContain("4,310 ms");
+    expect(html).not.toContain("1.234");
+  } finally {
+    spy.mockRestore();
+  }
+});

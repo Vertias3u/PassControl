@@ -9,10 +9,12 @@ import type { AgentAccessKeyView } from "@/app/dashboard/agents/[id]/passport-da
 import { useDashboardTime } from "@/components/dashboard/DashboardTime";
 import { buttonVariants } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
+import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
 
-function keyState(key: AgentAccessKeyView): "active" | "expired" | "revoked" {
+function keyState(key: AgentAccessKeyView, now: number | null): "active" | "expired" | "revoked" | "checking expiry" {
   if (key.revokedAt) return "revoked";
-  if (key.expiresAt && Date.parse(key.expiresAt) <= Date.now()) return "expired";
+  if (key.expiresAt && now === null) return "checking expiry";
+  if (key.expiresAt && now !== null && Date.parse(key.expiresAt) <= now) return "expired";
   return "active";
 }
 
@@ -27,6 +29,7 @@ export function DirectAgentKeyPanel({
   status: string;
   keys: AgentAccessKeyView[];
 }) {
+  const now = useHydratedNow();
   const router = useRouter();
   const { format, zoneLabel } = useDashboardTime();
   const [createOpen, setCreateOpen] = useState(false);
@@ -107,7 +110,7 @@ export function DirectAgentKeyPanel({
       ) : (
         <ul className="m-0 grid list-none gap-3 p-0">
           {keys.map((key) => {
-            const state = keyState(key);
+            const state = keyState(key, now);
             return (
               <li key={key.id} className="flex flex-col gap-4 rounded-xl border border-border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between" data-state={state}>
                 <div className="min-w-0">
@@ -117,7 +120,7 @@ export function DirectAgentKeyPanel({
                   </div>
                   <p className="mt-1 font-mono text-xs text-muted-foreground">pc_agent_…{key.suffix}</p>
                   <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    Created {format(key.createdAt)} · Last stored call {key.lastUsedAt ? format(key.lastUsedAt) : "never"} · {key.recordedCalls.toLocaleString()} recorded {key.recordedCalls === 1 ? "call" : "calls"} · {zoneLabel}
+                    Created {format(key.createdAt)} · Last stored call {key.lastUsedAt ? format(key.lastUsedAt) : "never"} · {key.recordedCalls.toLocaleString("en-US")} recorded {key.recordedCalls === 1 ? "call" : "calls"} · {zoneLabel}
                   </p>
                   {key.expiresAt ? <p className="mt-1 text-xs text-muted-foreground">Expires {format(key.expiresAt)}</p> : null}
                 </div>
@@ -159,7 +162,7 @@ export function DirectAgentKeyPanel({
               </label>
               <label className="grid gap-1.5 text-sm">
                 <span className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Optional expiry</span>
-                <input type="date" min={new Date().toISOString().slice(0, 10)} value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} />
+                <input type="date" min={now === null ? undefined : new Date(now).toISOString().slice(0, 10)} value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} />
                 <span className="text-xs text-muted-foreground">Blank means no scheduled expiry. Revocation remains available at any time.</span>
               </label>
               {error ? <p role="alert" className="pc-inline-error">{error}</p> : null}

@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "One benign diagnostic sentence mentions curl, a health URL, and a local .env file.",
+  "text": "# Troubleshooting\nUse curl to inspect https://status.example.invalid/health while checking that the .env file exists locally. Only the health endpoint is requested; no file contents are included."
+}

@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "json",
+  "expectedFamilies": [],
+  "reason": "A German localisation file uses soft hyphens for display wrapping.",
+  "text": "{\"de\":{\"admin\":\"Systemadministrator\",\"description\":\"Daten­schutz und Benutzer­verwaltung\",\"cancel\":\"Abbrechen\"}}"
+}

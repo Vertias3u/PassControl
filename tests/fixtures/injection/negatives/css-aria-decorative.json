@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "html",
+  "expectedFamilies": [],
+  "reason": "An aria-hidden decorative icon has no operative instructions.",
+  "text": "<button><span aria-hidden=\"true\">★</span><span>Save favourite</span></button><div style=\"opacity:0\">Loading indicator</div>"
+}

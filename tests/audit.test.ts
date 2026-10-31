@@ -177,6 +177,8 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "agent.service_rules",
         "agent.tool_rules",
         "agent.pause_lift",
+        // The owner ending an injection-guard hold early (Phase 2).
+        "agent.injection_clear",
         "approval.decide",
         "agent.suspend",
         // One declared session stopped or resumed (sprint T8).

@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "markdown",
+  "expectedFamilies": [],
+  "reason": "OAuth documentation describes legitimate user authorisation in normal prose.",
+  "text": "# Consent callback\nAfter the user has approved the calendar scope, exchange the returned code for an access token. The callback records the consent timestamp."
+}

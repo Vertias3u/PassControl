@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "shell",
+  "expectedFamilies": [],
+  "reason": "A deployment guide sources a local env file and curls a health URL on separate lines.",
+  "text": "# Local staging diagnostics\n. ./.env\ncurl --fail https://status.example.invalid/health\n# Print only the HTTP status, never configuration values.\n"
+}

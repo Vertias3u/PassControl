@@ -43,11 +43,11 @@ describe("where the settings go", () => {
 });
 
 describe("writing", () => {
-  it("creates the file with only the two keys, readable by its owner", () => {
+  it("creates the file with env keys and the tool hook, readable by its owner", () => {
     const target = path.join(dir, ".claude", "settings.local.json");
     const out = writeClaudeCodeSettings({ target, baseUrl: BASE });
     expect(out).toEqual({ changed: true, backupPath: null, rawKeyFound: false });
-    expect(read(target)).toEqual({ env: claudeCodeEnv(BASE) });
+    expect(read(target)).toEqual({ env: claudeCodeEnv(BASE), hooks: { PreToolUse: apiTools() } });
     expect(claudeCodeEnv(BASE)).toEqual({ ANTHROPIC_BASE_URL: BASE, ANTHROPIC_AUTH_TOKEN: CLAUDE_CODE_AUTH_PLACEHOLDER });
     expect(fs.statSync(target).mode & 0o777).toBe(0o600);
   });
@@ -57,7 +57,7 @@ describe("writing", () => {
     fs.writeFileSync(target, JSON.stringify({ model: "opus", env: { FOO: "1" }, permissions: { allow: ["Read"] } }));
     const out = writeClaudeCodeSettings({ target, baseUrl: BASE });
     expect(out.backupPath).toBe(`${target}.bak`);
-    expect(read(target)).toEqual({ model: "opus", permissions: { allow: ["Read"] }, env: { FOO: "1", ...claudeCodeEnv(BASE) } });
+    expect(read(target)).toEqual({ model: "opus", permissions: { allow: ["Read"] }, env: { FOO: "1", ...claudeCodeEnv(BASE) }, hooks: { PreToolUse: apiTools() } });
     expect(read(`${target}.bak`)).toEqual({ model: "opus", env: { FOO: "1" }, permissions: { allow: ["Read"] } });
   });
 
@@ -162,7 +162,7 @@ describe("the status line", () => {
     fs.writeFileSync(target, JSON.stringify(original));
     const out = writeClaudeCodeSettings({ target, baseUrl: BASE, statusLineCommand: CMD });
     expect(out.statusLine).toEqual({ changed: true });
-    expect(read(target)).toEqual({ model: "opus", env: claudeCodeEnv(BASE), statusLine: { type: "command", command: CMD } });
+    expect(read(target)).toEqual({ model: "opus", env: claudeCodeEnv(BASE), hooks: { PreToolUse: apiTools() }, statusLine: { type: "command", command: CMD } });
     expect(read(`${target}.bak`)).toEqual(original);
   });
 
@@ -172,7 +172,7 @@ describe("the status line", () => {
     fs.writeFileSync(target, JSON.stringify({ statusLine: mine }));
     const out = writeClaudeCodeSettings({ target, baseUrl: BASE, statusLineCommand: CMD });
     expect(out.statusLine).toEqual({ changed: false, existing: "~/.claude/my-statusline.sh" });
-    expect(read(target)).toEqual({ statusLine: mine, env: claudeCodeEnv(BASE) });
+    expect(read(target)).toEqual({ statusLine: mine, env: claudeCodeEnv(BASE), hooks: { PreToolUse: apiTools() } });
   });
 
   it("--remove takes both out in one save, keeping the backup as it was before", () => {
@@ -381,7 +381,7 @@ describe("the agent's note", () => {
     const out = writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788 });
     expect(out.changed).toBe(true);
     const s = read(target());
-    expect(s.hooks).toEqual({ UserPromptSubmit: [{ hooks: [NOTE_ONLY] }] });
+    expect(s.hooks).toEqual({ UserPromptSubmit: [{ hooks: [NOTE_ONLY] }], PreToolUse: apiTools() });
     expect(writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788 }).changed).toBe(false);
   });
 
@@ -397,13 +397,56 @@ describe("the agent's note", () => {
     expect(read(target()).hooks).toEqual({ UserPromptSubmit: [{ hooks: [mine] }] });
   });
 
-  it("neither setup removes the other's hooks", () => {
+  it("API setup replaces the subscription tool hook and preserves its other hooks", () => {
     writeClaudeCodeSubscription({ target: target(), port: 8788, statusLineCommand: null });
     writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788, force: true });
     writeClaudeCodeSettings({ target: target(), baseUrl: BASE, force: true });
-    expect(read(target()).hooks).toEqual(subscriptionHooks(8788));
+    expect(read(target()).hooks).toEqual({ ...subscriptionHooks(8788), PreToolUse: apiTools() });
     writeClaudeCodeSettings({ target: target(), baseUrl: BASE, noteHookPort: 8788, force: true });
     removeClaudeCodeSubscription({ target: target() });
     expect(read(target()).hooks).toEqual({ UserPromptSubmit: [{ hooks: [NOTE_ONLY] }] });
+  });
+});
+
+const apiTools = (port = 8788) => [{ matcher: "*", hooks: [{ type: "http", url: `http://127.0.0.1:${port}/_passcontrol/hook?t=600&mode=api`, timeout: 600 }] }];
+
+describe("API tool hook", () => {
+  it("always writes the hook and makes no backup on an identical second write", () => {
+    const target = path.join(dir, "settings.json");
+    writeClaudeCodeSettings({ target, baseUrl: BASE });
+    expect(read(target).hooks.PreToolUse).toEqual(apiTools());
+    expect(writeClaudeCodeSettings({ target, baseUrl: BASE })).toMatchObject({ changed: false, backupPath: null });
+    expect(fs.existsSync(`${target}.bak`)).toBe(false);
+  });
+
+  // Removing API mode must not take subscription mode's tool hook with it: that would
+  // leave a Pro/Max setup with its prompt and batch hooks but no tool rules.
+  it("API --remove leaves a subscription-mode install whole", () => {
+    const target = path.join(dir, "settings.json");
+    writeClaudeCodeSubscription({ target, port: 8788, statusLineCommand: null });
+    const before = read(target).hooks;
+    removeClaudeCodeSettings({ target });
+    expect(read(target).hooks).toEqual(before);
+  });
+
+  it("preserves user groups and mixed hooks through port changes, switching and removal", () => {
+    const target = path.join(dir, "settings.json");
+    const mine = { type: "command", command: "echo mine" };
+    const userGroups = [{ matcher: "Read", hooks: [mine] }, { matcher: "Bash", hooks: [mine] }];
+    fs.writeFileSync(target, JSON.stringify({ hooks: { PreToolUse: userGroups } }));
+    writeClaudeCodeSettings({ target, baseUrl: BASE, noteHookPort: 8788 });
+    expect(read(target).hooks.PreToolUse).toEqual([...userGroups, ...apiTools()]);
+    writeClaudeCodeSettings({ target, baseUrl: BASE.replace("8788", "9000"), force: true, noteHookPort: 8788 });
+    expect(read(target).hooks.PreToolUse).toEqual([...userGroups, ...apiTools(9000)]);
+    expect(read(target).hooks.UserPromptSubmit[0].hooks[0].url).toContain("8788/_passcontrol/hook?note=only");
+    writeClaudeCodeSubscription({ target, port: 9000 });
+    expect(read(target).hooks.PreToolUse).toEqual([...userGroups, ...subscriptionHooks(9000).PreToolUse]);
+    writeClaudeCodeSettings({ target, baseUrl: BASE.replace("8788", "9000") });
+    expect(read(target).hooks.PreToolUse).toEqual([...userGroups, ...apiTools(9000)]);
+    const settings = read(target);
+    settings.hooks.PreToolUse.at(-1).hooks.push(mine);
+    fs.writeFileSync(target, JSON.stringify(settings));
+    removeClaudeCodeSettings({ target });
+    expect(read(target).hooks.PreToolUse).toEqual([...userGroups, { matcher: "*", hooks: [mine] }]);
   });
 });

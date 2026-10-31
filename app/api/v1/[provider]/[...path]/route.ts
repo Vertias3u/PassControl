@@ -37,6 +37,10 @@ import { pauseLine, pauseMessage, pauseReached, readPauseView, type PauseLine } 
 import { claimStopPoll, pausePromptOpen, readPauseLift, stopPromptOpen } from "@/lib/state/pause";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
+import { findInjectionTells, injectionHmacKey, injectionReceiptClaim, type InjectionFinding } from "@/lib/injection-guard";
+import { PROXY_TAINT_WAIT_MS } from "@/lib/injection-hold";
+import { recordInjectionFindings, redisSeenStore, type FindingsDb } from "@/lib/injection-findings";
+import { taintFromFindings } from "@/lib/state/taint";
 import {
   canonicalEndpointPath,
   isModelListingIndex,
@@ -48,6 +52,7 @@ import {
   isEmbeddingsEndpoint,
   isResponsesEndpoint,
   secretGuardMode,
+  injectionGuardMode,
   subagentAllowlist,
   subagentSessionCapCents,
   sessionAlertCents,
@@ -1427,6 +1432,106 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   const secretsHeader = (): Record<string, string> =>
     secretsRedacted > 0 ? { "x-passcontrol-secrets-redacted": String(secretsRedacted) } : {};
 
+  // ── 4c'. The injection guard, monitor mode (2026-10-27, plans/injection-guard.md) ──
+  // Off unless the live policy sets `injection_guard`. Reads only what tools handed the
+  // model (lib/injection-blocks.ts), never the system prompt or the user's own words.
+  // Refuses nothing and changes nothing forwarded. The scan waits for the next turn of
+  // the event loop, so it runs while the call waits on the provider rather than in front
+  // of it. Nothing about a finding reaches the client: a header or message naming what
+  // matched would teach an attacker which wording got through. Only new blocks are
+  // recorded (lib/injection-findings.ts). An unreadable policy applies no guard.
+  //
+  // `hold` (Phase 2) scans the same way and, on a new high finding, taints the agent
+  // (lib/state/taint.ts). The model call is never refused: reading hostile text is not
+  // the danger, acting on it is, and that is held at /svc and the sidecar's tool gate.
+  //
+  // The scan's result is kept for the attempt's receipt (an additive `inj` claim). The
+  // receipt is signed in waitUntil after the upstream answers, so awaiting it there costs
+  // the hot path nothing.
+  const injectionMode =
+    currentPolicySnapshot.policy === POLICY_UNREADABLE ? null : injectionGuardMode(currentPolicySnapshot.policy);
+  let injectionScan: Promise<InjectionFinding[]> | null = null;
+  // Hold mode only (owner, 2026-10-30, "3 fix"): an answer to a request carrying a strong
+  // finding waits for that finding's taint, at most PROXY_TAINT_WAIT_MS. Otherwise an
+  // action the answer prompts could reach /svc before the hold existed.
+  let awaitInjectionTaint: () => Promise<void> = async () => {};
+  // For the receipt. Never throws: it is awaited beside the settlement, and nothing about
+  // the guard may cost the call its log row.
+  const injectionClaim = async () => {
+    try {
+      return injectionReceiptClaim(injectionScan ? await injectionScan : null);
+    } catch {
+      return undefined;
+    }
+  };
+  if (injectionMode) {
+    const mode = injectionMode;
+    const scanned = bodyObj;
+    const scan = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      try {
+        return findInjectionTells(scanned, injectionHmacKey(userId));
+      } catch {
+        // A sensor fault never touches the call, nor its receipt.
+        return [];
+      }
+    })();
+    injectionScan = scan;
+    const recordAndTaint = (async () => {
+        try {
+          const findings = await scan;
+          if (findings.length === 0) return;
+          const outcome = await recordInjectionFindings({
+            db: serviceClient() as unknown as FindingsDb,
+            seen: redisSeenStore(),
+            userId,
+            agentId,
+            provider,
+            model,
+            findings,
+          });
+          try {
+            const taint = await taintFromFindings({ agentId, mode, outcome, surface: "proxy", now: Date.now() });
+            if (taint) {
+              await captureSecurityEvent("proxy.injection_taint", {
+                route: "api.proxy",
+                method: req.method,
+                provider,
+                agentId,
+                jti,
+                code: `tainted:${taint.families.join(",")}`,
+              });
+            }
+          } catch (error) {
+            // A taint that cannot be set holds nothing; say so, and leave the call alone.
+            await captureError(error, { route: "api.proxy", agentId, code: "injection_taint_failed" }).catch(() => {});
+          }
+          if (outcome.state !== "recorded") return;
+          const families = [...new Set(outcome.recorded.flatMap((f) => f.families))];
+          await captureSecurityEvent("proxy.injection_tell", {
+            route: "api.proxy",
+            method: req.method,
+            provider,
+            agentId,
+            jti,
+            code: `recorded:${families.join(",")}`,
+          });
+        } catch {
+          // A sensor fault never touches the call.
+        }
+      })();
+    waitUntil(recordAndTaint);
+    if (mode === "hold") {
+      awaitInjectionTaint = async () => {
+        const findings = await scan;
+        if (!findings.some((f) => f.severity === "high")) return;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([recordAndTaint, new Promise<void>((resolve) => (timer = setTimeout(resolve, PROXY_TAINT_WAIT_MS)))]);
+        clearTimeout(timer);
+      };
+    }
+  }
+
   // ── 4d. The soft pause (1.6.0, L4, lib/budget-pause.ts) ─────────────────────
   // Off unless the live row sets `pause_percent` (0087) and there is a limit to
   // draw it on. ONCE, here, before the attempt loop, so a fallback cannot skip it
@@ -2233,6 +2338,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           owner: await currentOwner(),
           previousReceiptId: target.prev,
           failoverReason: target.why,
+          injection: await injectionClaim(),
             }))(),
         ]);
 
@@ -3283,6 +3389,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   );
   if (primaryOutcome.kind !== "retryable") {
     // `skipped` is only ever returned for a non-primary attempt.
+    await awaitInjectionTaint();
     return markSwitched((primaryOutcome as { kind: "response"; response: Response }).response);
   }
 
@@ -3339,12 +3446,16 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       { primary: false }
     );
     if (next.kind === "skipped") continue;
-    if (next.kind === "response") return next.response;
+    if (next.kind === "response") {
+      await awaitInjectionTaint();
+      return next.response;
+    }
     held = next;
     heldSettled = false;
   }
 
   await settleHeld();
+  await awaitInjectionTaint();
   return markSwitched(held.response);
 }
 

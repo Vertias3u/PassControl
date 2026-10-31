@@ -816,7 +816,7 @@ export function ControlGraph({
                 <dl>
                   {!presentation ? <div><dt>Passport suffix</dt><dd><code>{selectedAgent.passportSuffix ? `…${selectedAgent.passportSuffix}` : "Direct-only identity"}</code></dd></div> : null}
                   <div><dt>Normal access</dt><dd>{selectedAgent.scopes.length ? selectedAgent.scopes.map((scope) => `${scope.provider}: ${scope.models.join(", ") || "no models"}`).join(" · ") : "No provider scope"}</dd></div>
-                  {!presentation ? <div><dt>Token budget</dt><dd>{selectedAgent.budgetTokens == null ? "Unlimited" : `${selectedAgent.spentTokens.toLocaleString()} / ${selectedAgent.budgetTokens.toLocaleString()}`}</dd></div> : null}
+                  {!presentation ? <div><dt>Token budget</dt><dd>{selectedAgent.budgetTokens == null ? "Unlimited" : `${selectedAgent.spentTokens.toLocaleString("en-US")} / ${selectedAgent.budgetTokens.toLocaleString("en-US")}`}</dd></div> : null}
                   {!presentation ? <div><dt>Cost budget</dt><dd>{selectedAgent.budgetCents == null ? "Unlimited" : `$${(selectedAgent.spentMicrocents / 100_000_000).toFixed(2)} / $${(selectedAgent.budgetCents / 100).toFixed(2)}`}</dd></div> : null}
                   <div><dt>Live policy</dt><dd>{selectedAgent.policyEnabled ? "Configured" : "No additional policy"}</dd></div>
                   <div><dt>Break glass</dt><dd>{selectedAgent.elevationExpiresAt ? <>Open until <DashboardTimestamp value={selectedAgent.elevationExpiresAt} kind="short" /></> : "Closed"}</dd></div>

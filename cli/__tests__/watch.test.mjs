@@ -457,3 +457,29 @@ describe("whatever else answers on the port", () => {
     await s.close();
   });
 });
+
+
+describe("local injection findings", () => {
+  it("renders the local observation in terminal and plain output without counting it as a call", () => {
+    const state = createBoardState();
+    applyEvent(state, { type: "injection_finding", seq: 1, at: T, source: "tool_result", tool: "Read", families: ["hidden_text", "instruction_override", "hidden_text", "evil.test"], text: "SECRET" });
+    const line = "INJECTION? · tool_result · Read · instruction_override+hidden_text";
+    // Under the TIME column, as a call's row is.
+    expect(plainLine(state.rows[0], { run: "r" })).toMatch(/^\d{2}:\d{2}:\d{2}  INJECTION\? /);
+    expect(plainLine(state.rows[0], { run: "r" }).endsWith(`  ${line}`)).toBe(true);
+    const output = render(state, 120, 8);
+    expect(output.some((l) => l.endsWith(line))).toBe(true);
+    expect(output[0]).toContain("no calls yet");
+    expect(JSON.stringify(state)).not.toContain("SECRET");
+    expect(output.join("\n")).not.toContain("recorded");
+    for (const width of [40, 60, 100]) expect(render(state, width, 8).every((s) => visibleLength(s) <= width)).toBe(true);
+  });
+
+  it("rejects unsafe finding fields received over the feed", () => {
+    const state = createBoardState();
+    applyEvent(state, { type: "injection_finding", seq: 1, source: "tool_result", tool: "Read\x1b[2J", families: ["hidden_text", "\x1b[2J"] });
+    expect(plainLine(state.rows[0], { run: "r" }).trimStart()).toBe("INJECTION? · tool_result · — · hidden_text");
+    applyEvent(state, { type: "injection_finding", seq: 2, source: "evil", families: ["hidden_text"] });
+    expect(state.rows).toHaveLength(1);
+  });
+});

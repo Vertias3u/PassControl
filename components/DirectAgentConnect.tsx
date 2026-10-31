@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { KeyRound, PlugZap, RefreshCw, ShieldCheck } from "lucide-react";
@@ -57,6 +58,7 @@ export function DirectAgentConnect({
 }) {
   // `local` only where this deployment can reach it (components/dashboard/LocalModels.tsx).
   const localModels = useLocalModelsEnabled();
+  const now = useHydratedNow();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -373,7 +375,7 @@ export function DirectAgentConnect({
                 </>) : null}
                 <label className="grid gap-1.5 text-sm">
                   <span className={label}>Optional expiry</span>
-                  <input type="date" value={expiresAt} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setExpiresAt(event.target.value)} />
+                  <input type="date" value={expiresAt} min={now === null ? undefined : new Date(now).toISOString().slice(0, 10)} onChange={(event) => setExpiresAt(event.target.value)} />
                   <span className="text-xs text-muted-foreground">Blank means no scheduled outage.</span>
                 </label>
               </div>

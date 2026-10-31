@@ -18,11 +18,19 @@
 // this agent, once: never just the piece a rule matched, or approving `git push` would
 // approve `git push && curl … | sh`. An input larger than the owner can be shown is
 // refused rather than asked about in part.
+//
+// The injection guard's hold (Phase 2, owner 2026-10-30) is the one other way in: while
+// this agent is tainted in `hold` mode, a risky tool (cli/injection-hold.mjs) is put to
+// the owner even with no ask_owner rule. Decided from the gateway's OWN policy read and
+// taint store, never from anything in the request, so it widens the door only for
+// those tools, in that mode, while that agent is tainted. An explicit deny still wins,
+// and rules this build cannot read still refuse. The unknowns are lib/injection-hold.ts's.
 export const runtime = "edge";
 
 import { evaluateGate } from "@/lib/gate";
+import { heldUnderTaint } from "@/cli/injection-hold.mjs";
 import { evaluateToolRules, parseToolRules } from "@/cli/tool-rules.mjs";
-import { approvalWaitMs, awaitApproval } from "@/lib/approvals/gate";
+import { approvalWaitMs, awaitApproval, existingApproval } from "@/lib/approvals/gate";
 import {
   authenticateGatewayRequest,
   enforceSenderConstraint,
@@ -35,6 +43,8 @@ import { APPROVAL_PREVIEW_MAX } from "@/lib/state/approvals";
 import { readKillState } from "@/lib/state/killswitch";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { isSuspended } from "@/lib/state/redis";
+import { HELD_TAINTED, HELD_UNKNOWN, injectionHoldReason } from "@/lib/injection-hold";
+import { injectionGuardMode } from "@/lib/scope";
 
 const TOOL_APPROVAL_RATE_LIMIT = Number(process.env.TOOL_APPROVAL_RATE_LIMIT ?? "30");
 const RATE_WINDOW_S = 60;
@@ -70,8 +80,9 @@ export async function POST(req: Request): Promise<Response> {
   const { principal, db, credentialToken } = authentication;
   const { agentId, userId } = principal;
 
+  let policy: Awaited<ReturnType<typeof readCurrentAgentPolicyAndShadow>> | null = null;
   if (principal.kind === "passport") {
-    const policy = await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+    policy = await readCurrentAgentPolicyAndShadow(db, userId, agentId);
     const sender = await enforceSenderConstraint(req, credentialToken, principal, policy);
     if (!sender.ok) return sender.response;
   }
@@ -134,21 +145,37 @@ export async function POST(req: Request): Promise<Response> {
   }
   const rules = parseToolRules(rawRules);
   const verdict = rules.ok ? evaluateToolRules(rules, { tool_name: toolName, tool_input: toolInput, cwd }) : { effect: null };
-  if (verdict.effect !== "ask_owner") {
-    return errMessage(409, "not_ask_owner", "This agent's tool rules do not put this tool call to its owner.");
+  // Once a hold is cleared, the sidecar's next ask about a tool still waiting finds the
+  // question the hold asked: Approvals tells the owner it still waits for Approve or
+  // Deny, so their answer decides it (1.7.0 e2e, F3).
+  let heldBecause: string | undefined;
+  let askedBefore = false;
+  if (rules.ok && verdict.effect !== "ask_owner" && verdict.effect !== "deny" && heldUnderTaint(toolName)) {
+    policy ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
+    heldBecause = await injectionHoldReason(policy.policy, agentId, Date.now());
+    askedBefore = !heldBecause && injectionGuardMode(policy.policy) === "hold";
   }
+  const asks = verdict.effect === "ask_owner" || heldBecause !== undefined;
+  const notAsked = () => errMessage(409, "not_ask_owner", "This agent's tool rules do not put this tool call to its owner.");
+  if (!asks && !askedBefore) return notAsked();
 
   // ── 6. Ask, about exactly what the owner is shown.
   const preview = toolName === "Bash" && typeof toolInput.command === "string" ? toolInput.command : canonical(toolInput);
-  if (preview.length > APPROVAL_PREVIEW_MAX) return err(413, "tool_approval_too_large");
+  // Too large to ask about, so none was asked before either.
+  if (preview.length > APPROVAL_PREVIEW_MAX) return asks ? err(413, "tool_approval_too_large") : notAsked();
   const fingerprint = await sha256Hex(
     canonical(["pc-tool-approval-v1", userId, agentId, typeof session === "string" ? session : "", toolName, toolInput])
   );
-  const approval = await awaitApproval({
-    request: { userId, agentId, service: "claude-code", method: "TOOL", path: toolName, preview, fingerprint },
+  const request = {
+    userId, agentId, service: "claude-code", method: "TOOL", path: toolName, preview, fingerprint,
+    ...(heldBecause === HELD_TAINTED ? { hold: "injection_tainted" as const }
+      : heldBecause === HELD_UNKNOWN ? { hold: "injection_unknown" as const } : {}),
+  };
+  const approval = !asks ? await existingApproval(request) : await awaitApproval({
+    request,
     prompt: {
       agentName,
-      serviceLabel: "a Claude Code tool",
+      serviceLabel: "a local tool", // Claude Code's or Codex's: the sidecar serves both
       method: "TOOL",
       path: toolName,
       preview,
@@ -156,9 +183,11 @@ export async function POST(req: Request): Promise<Response> {
       // The store holds a question 15 minutes, but the sidecar refuses the tool at
       // the agent's own wait: say that one.
       waitNote: `The tool waits up to ${rules.ok ? rules.approvalWaitS : 0} seconds for your answer, then is refused.`,
+      ...(heldBecause ? { heldBecause, offerClear: heldBecause === HELD_TAINTED } : {}),
     },
     waitMs: approvalWaitMs(),
   });
+  if (approval.state === "none") return notAsked();
   if (approval.state === "unavailable") {
     return errMessage(503, "approval_unavailable", "The owner's approval could not be checked. Try again shortly.");
   }

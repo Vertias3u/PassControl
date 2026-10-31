@@ -13,6 +13,7 @@
 // checking up on. The TONE mapping is shared; the words are not.
 import type { DepartureTone } from "@/lib/departures";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
+import { familyLabel } from "@/lib/injection-labels";
 import {
   AGENT_TOKEN_TYP,
   RECEIPT_TYP,
@@ -928,6 +929,31 @@ export function describeLineage(ctx: unknown): LineagePresentation | null {
     session: shownValue(c.ses),
     who: agt ? `sub-agent ${shownValue(agt)}${par ? `, spawned by ${shownValue(par)}` : ""}` : "main agent",
     note: `declared by the client (${shownValue(typeof c.cli === "string" && c.cli ? c.cli : "unknown")}), not verified`,
+  };
+}
+
+// ── The injection guard's findings (owner, 2026-10-30) ───────────────────────
+
+export interface InjectionPresentation {
+  summary: string;
+  kinds: string[];
+  detector: string;
+}
+
+/**
+ * A receipt's `inj`: what the issuing gateway's detector flagged in this call's tool
+ * output, kinds only. Null for anything malformed, and on every receipt without it,
+ * which is how a call with nothing found has always rendered.
+ */
+export function describeInjection(inj: unknown): InjectionPresentation | null {
+  if (typeof inj !== "object" || inj === null || Array.isArray(inj)) return null;
+  const c = inj as Record<string, unknown>;
+  if (typeof c.d !== "string" || !c.d || !Number.isSafeInteger(c.n) || (c.n as number) < 1 || !Array.isArray(c.f)) return null;
+  const n = c.n as number;
+  return {
+    summary: `${n} block${n === 1 ? "" : "s"} of tool output carried injection tells`,
+    kinds: c.f.slice(0, 16).map((f) => familyLabel(shownValue(f))),
+    detector: shownValue(c.d),
   };
 }
 

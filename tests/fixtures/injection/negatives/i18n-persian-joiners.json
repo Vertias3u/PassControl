@@ -1,0 +1,7 @@
+{
+  "label": "negative",
+  "shape": "json",
+  "expectedFamilies": [],
+  "reason": "Persian UI strings use legitimate zero-width non-joiners.",
+  "text": "{\"fa\":{\"settings\":\"تنظیمات\",\"features\":\"ویژگی‌ها\",\"welcome\":\"خوش آمدید\"}}"
+}

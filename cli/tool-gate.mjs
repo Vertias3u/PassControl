@@ -25,6 +25,7 @@
 //
 // Each outcome that is not a plain pass is handed to `onDecision` for the agent's
 // page: tool name, decision, rule number and wait. Never the command, path or URL.
+import { underTaint } from "./injection-hold.mjs";
 import { evaluateToolRules, parseToolRules } from "./tool-rules.mjs";
 
 /** The wait ends this long before Claude Code would give up on the hook. */
@@ -46,12 +47,17 @@ function verdict(permissionDecision, reason) {
  *   askOwner: (input: object, ask: { ruleIndex: number, subject: string, session: string | null, waitMs: number }) =>
  *     Promise<{ state: "approved" | "denied" | "timeout" | "unavailable" | "full" | "refused" | "too_large" }>,
  *   onDecision?: (record: { session: string | null, agent: string | null, tool: string, decision: string, ruleIndex: number | null, waitMs: number }) => void,
+ *   onHold?: (record: { tool: string, outcome: string }) => void,
+ *   refresh?: () => Promise<object | null>,
  *   now?: () => number,
  *   dashboardUrl?: string,
  * }} options
  */
-export function createToolGate({ askOwner, onDecision = () => {}, now = () => Date.now(), dashboardUrl = "" }) {
+export function createToolGate({ askOwner, onDecision = () => {}, now = () => Date.now(), dashboardUrl = "", onHold = () => {}, refresh = async () => null }) {
   let warnedAt = null;
+  let injectionWarnedAt = null;
+  let needsRefresh = false;
+  let refreshing = null;
   const where = dashboardUrl ? ` on ${dashboardUrl}` : " on the agent's dashboard page";
   // Said with every rule's refusal: told only "the tool rules refuse this", Claude
   // Code went looking for the rule in the local PassControl config, which has none.
@@ -79,16 +85,24 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
    * @param {{ read: { state: string, document?: unknown }, at: number } | null} rulesEntry
    *                             The rules from the latest trusted /self read, or null.
    * @param {number | null} hookTimeoutS  What the hook's URL says it waits; null when it does not say.
+   * @param {"off" | "clear" | "tainted" | "unknown"} injection
    */
-  async function decide(input, rulesEntry, hookTimeoutS) {
+  async function decide(input, rulesEntry, hookTimeoutS, injection = "off") {
     if (input?.hook_event_name !== "PreToolUse") return {};
+    if (needsRefresh || refreshing) {
+      if (!refreshing) {
+        needsRefresh = false;
+        refreshing = Promise.resolve().then(refresh).finally(() => { refreshing = null; });
+      }
+      const fresh = await refreshing;
+      if (fresh) ({ rulesEntry, injection } = fresh);
+    }
     const read = rulesEntry?.read;
-    if (read?.state === "none") return {};
     if (read?.state === "invalid") {
       record(input, "rules_invalid", null, 0);
       return verdict("deny", `PassControl: this agent's tool rules cannot be read here, so no tool runs until they are fixed${where}.`);
     }
-    const parsed = read?.state === "ok" ? parseToolRules(read.document) : null;
+    const parsed = read?.state === "none" ? parseToolRules({ rules: [] }) : read?.state === "ok" ? parseToolRules(read.document) : null;
     if (!parsed) {
       if (warnedAt !== null && now() - warnedAt < WARN_EVERY_MS) return {};
       warnedAt = now();
@@ -99,36 +113,77 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
       return verdict("deny", `PassControl: this agent's tool rules cannot be read here, so no tool runs until they are fixed${where}.`);
     }
 
-    const hit = evaluateToolRules(parsed, input);
-    if (hit.effect === null) return {};
-    const rule = `rule ${hit.ruleIndex + 1}`;
+    const original = evaluateToolRules(parsed, input);
+    const hit = injection === "tainted" ? underTaint(original, input.tool_name) : original;
+    const escalated = hit.reason === "injection_taint";
+    const guardText = "This tool was held by the injection guard because the agent recently read something that looked like a prompt injection.";
+    let warning = {};
+    if (injection === "unknown" && (injectionWarnedAt === null || now() - injectionWarnedAt >= WARN_EVERY_MS)) {
+      injectionWarnedAt = now();
+      warning = { systemMessage: "PassControl could not check this agent's injection guard, so this goes ahead." };
+    }
+    const withWarning = (out) => ({ ...out, ...warning });
+    function holdRecord(outcome) {
+      if (escalated) {
+        try { onHold({ tool: String(input.tool_name ?? "").slice(0, 128), outcome }); } catch {}
+      }
+    }
+    const ruleIndex = escalated ? null : hit.ruleIndex;
+    if (hit.effect === null) return withWarning({});
+    const rule = escalated ? "injection guard" : `rule ${hit.ruleIndex + 1}`;
     if (hit.effect === "deny") {
       record(input, "deny", hit.ruleIndex, 0);
-      return verdict("deny", `PassControl: the agent's tool rules refuse this (${rule}: ${short(hit.subject)}). ${rulesLive}`);
+      return withWarning(verdict("deny", `PassControl: the agent's tool rules refuse this (${rule}: ${short(hit.subject)}). ${rulesLive}`));
     }
     if (hit.effect === "ask") {
       record(input, "ask", hit.ruleIndex, 0);
-      return verdict("ask", `PassControl: the agent's tool rules ask you to confirm this (${rule}: ${short(hit.subject)}). ${rulesLive}`);
+      return withWarning(verdict("ask", `PassControl: the agent's tool rules ask you to confirm this (${rule}: ${short(hit.subject)}). ${rulesLive}`));
     }
 
     // ask_owner
     const waitS = hookTimeoutS === null ? 0 : Math.min(parsed.approvalWaitS, hookTimeoutS - HOOK_MARGIN_S);
+    if (waitS < MIN_WAIT_S && escalated) {
+      record(input, "owner_unavailable", null, 0);
+      holdRecord("unavailable");
+      return verdict("deny", `PassControl: ${guardText} The hook cannot wait for the owner. Run \`passcontrol configure claude-code --subscription --write\`, then try again.`);
+    }
     if (waitS < MIN_WAIT_S) {
       record(input, "owner_unavailable", hit.ruleIndex, 0);
-      return verdict(
+      return withWarning(verdict(
         "deny",
         `PassControl: this needs the agent's owner to say yes (${rule}), and Claude Code's hook would give up before the answer. Run \`passcontrol configure claude-code --subscription --write\`, then try again.`
-      );
+      ));
     }
     const started = now();
     let answer;
     try {
-      answer = await askOwner(input, { ruleIndex: hit.ruleIndex, subject: hit.subject, session: declared(input.session_id), waitMs: waitS * 1000 });
+      answer = await askOwner(input, { ruleIndex, subject: escalated ? "injection guard" : hit.subject, session: declared(input.session_id), waitMs: waitS * 1000 });
     } catch {
       answer = { state: "unavailable" };
     }
     const waited = Math.max(0, now() - started);
-    switch (answer?.state) {
+    if (escalated) {
+      const state = answer?.state;
+      if (state === "refused") {
+        // Not an owner outcome: the tool goes ahead on its own rules, so the agent's page
+        // gets the record those rules give (only an "ask"), never "owner unavailable".
+        needsRefresh = true;
+        holdRecord("through");
+        if (original.effect === "ask") {
+          record(input, "ask", original.ruleIndex, 0);
+          return verdict("ask", `PassControl: ${guardText} The gateway now sees no taint. The tool rules still ask you to confirm this (rule ${original.ruleIndex + 1}: ${short(original.subject)}). ${rulesLive}`);
+        }
+        return { systemMessage: `PassControl: ${guardText} The gateway now sees no taint, so this goes ahead.` };
+      }
+      const outcome = ["approved", "denied", "timeout"].includes(state) ? state : "unavailable";
+      holdRecord(outcome);
+      record(input, `owner_${outcome}`, null, waited);
+      if (outcome === "approved") return { systemMessage: `PassControl: ${guardText} The agent's owner approved it.` };
+      const ending = outcome === "denied" ? "The agent's owner said no." : outcome === "timeout" ? `The agent's owner did not answer within ${waitS} s, so this was not run.` : "The owner could not be asked, so this was not run.";
+      return verdict("deny", `PassControl: ${guardText} ${ending}`);
+    }
+    function ruleAnswer() {
+      switch (answer?.state) {
       case "approved":
         record(input, "owner_approved", hit.ruleIndex, waited);
         return {};
@@ -150,7 +205,9 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
       default:
         record(input, "owner_unavailable", hit.ruleIndex, waited);
         return verdict("deny", `PassControl: this needs the agent's owner to say yes (${rule}), and they could not be reached, so it was not run.`);
+      }
     }
+    return withWarning(ruleAnswer());
   }
 
   return { decide };
