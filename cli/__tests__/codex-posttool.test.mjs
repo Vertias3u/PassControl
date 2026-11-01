@@ -117,7 +117,10 @@ describe("Codex post-tool hooks", () => {
     const post = (value) => ({ hook_event_name: "PostToolUse", tool_name: "unsafe/name", output: value });
     expect(findingsFromHook(post(Array.from({ length: 30 }, (_, i) => `${attack} ${i}`)))).toHaveLength(20);
     const scan = vi.fn();
-    expect(findingsFromHook(post(attack + "é".repeat(524288)), { scan })).toEqual([]);
+    // 1.7.1: past the 8 MB scan budget a leaf is not read, and is a gap, never clean.
+    expect(findingsFromHook(post(attack + "é".repeat(4.5 * 1024 * 1024)), { scan })).toEqual([
+      expect.objectContaining({ kind: "injection_incomplete", gap: "too_large", path: "output" }),
+    ]);
     expect(scan).not.toHaveBeenCalled();
     expect(findingsFromHook(post(attack))[0]).not.toHaveProperty("tool");
     expect(findingsFromHook(post("clean"))).toEqual([]);

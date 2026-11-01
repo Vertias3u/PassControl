@@ -7,8 +7,9 @@ const SHOWN = 50;
 // Not `content_hmac`: it identifies a block to the gateway's de-duplication and means
 // nothing to a reader.
 const COLUMNS_0089 = "id, created_at, source, path, families, severity, detector, provider, model";
-// 0090 adds the sidecar's rows and the tool that returned the block.
-const COLUMNS = `${COLUMNS_0089}, surface, tool_name`;
+// 0090 adds the sidecar's rows and the tool that returned the block; 0091, the gap.
+const COLUMNS_0090 = `${COLUMNS_0089}, surface, tool_name`;
+const COLUMNS_BY_AGE = [`${COLUMNS_0090}, gap`, COLUMNS_0090, COLUMNS_0089];
 const isMissingColumn = (error: unknown) => {
   const code = (error as { code?: unknown } | null)?.code;
   return code === "42703" || code === "PGRST204";
@@ -37,8 +38,9 @@ export async function readInjectionFindings(db: { from: (table: string) => unkno
       .order("created_at", { ascending: false })
       .limit(SHOWN);
   try {
-    let { data, error } = await read(COLUMNS);
-    if (error && isMissingColumn(error)) ({ data, error } = await read(COLUMNS_0089));
+    let age = 0;
+    let { data, error } = await read(COLUMNS_BY_AGE[age]!);
+    while (error && isMissingColumn(error) && age < COLUMNS_BY_AGE.length - 1) ({ data, error } = await read(COLUMNS_BY_AGE[++age]!));
     if (error || !Array.isArray(data)) return { state: "unavailable" };
     return { state: "ok", rows: data as InjectionFindingRow[] };
   } catch {
@@ -54,7 +56,9 @@ export async function readInjectionFindings(db: { from: (table: string) => unkno
 export async function readInjectionTaintView(agentId: string, nowMs: number): Promise<InjectionTaintView> {
   try {
     const taint = await readTaint(agentId, nowMs);
-    return taint ? { state: "tainted", until: new Date(taint.until).toISOString() } : { state: "clear" };
+    if (!taint) return { state: "clear" };
+    const until = new Date(taint.until).toISOString();
+    return taint.families.length === 0 ? { state: "tainted", until, unchecked: true } : { state: "tainted", until };
   } catch {
     return { state: "unknown" };
   }

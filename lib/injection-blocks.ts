@@ -34,6 +34,25 @@ const ANTHROPIC_UNTRUSTED = new Set(["tool_result", "document", "search_result"]
 /** Server-tool results: `web_fetch_tool_result`, `web_search_tool_result`, `mcp_tool_result`, … */
 const isServerToolResult = (type: string) => type.endsWith("_tool_result");
 
+// 1.7.1 (external review P6): every other type the gateway has decided about. These carry
+// the user's or the model's own words, or media; anything not here and not read above is
+// a format it has no rule for, and is named (unknownTypes), never assumed trusted.
+const CONTENT_TRUSTED = new Set([
+  // Anthropic
+  "text", "image", "tool_use", "thinking", "redacted_thinking", "server_tool_use", "mcp_tool_use", "container_upload",
+  // OpenAI Chat content parts
+  "image_url", "input_audio", "file", "refusal",
+]);
+const CHAT_ROLES = new Set(["user", "assistant", "system", "developer", "tool", "function"]);
+/** Responses items that are the model's own, the owner's, or carry no text. Not here, and
+ * so named: an item with results of its own this does not read (`code_interpreter_call`'s
+ * outputs, `mcp_list_tools`' descriptions). */
+const RESPONSES_TRUSTED = new Set([
+  "message", "reasoning", "item_reference", "function_call", "custom_tool_call", "local_shell_call", "computer_call",
+  "web_search_call", "image_generation_call", "mcp_approval_request", "mcp_approval_response",
+]);
+const MAX_UNKNOWN_TYPES = 5;
+
 /** Keys that name or locate content rather than carry it. */
 const SKIP_KEYS = new Set([
   "type",
@@ -60,24 +79,62 @@ function isMedia(key: string, value: string, parent: Record<string, unknown>): b
   return (key === "data" && parent.type === "base64") || key === "file_data" || value.startsWith("data:");
 }
 
-function collect(value: unknown, path: string, source: string, depth: number, out: UntrustedBlock[]): void {
-  if (out.length >= MAX_BLOCKS || depth > MAX_DEPTH) return;
+/** Why reading stopped before the end (1.7.1): what was not read is not clean. */
+export type UntrustedCut = "too_many_blocks" | "too_deep";
+
+/** Where the read stands: the blocks so far, and the first reason it stopped early. */
+interface Reading {
+  out: UntrustedBlock[];
+  cut?: UntrustedCut;
+  unknown?: Set<string>;
+}
+
+function noteUnknown(reading: Reading, name: string): void {
+  reading.unknown ??= new Set();
+  if (reading.unknown.size < MAX_UNKNOWN_TYPES) reading.unknown.add(/^[a-z0-9_:]{1,64}$/.test(name) ? name : "?");
+}
+
+// Only the block limit ends the read: a branch too deep is skipped, and the rest is read.
+const full = (r: Reading) => r.out.length >= MAX_BLOCKS && r.cut !== undefined;
+
+const TEXT_PROBE_NODES = 10_000;
+
+/** Whether text sits anywhere under `value`; past TEXT_PROBE_NODES nodes, assumed so. */
+function holdsText(value: unknown): boolean {
+  const pending = [value];
+  for (let seen = 0; pending.length > 0; seen++) {
+    if (seen >= TEXT_PROBE_NODES) return true;
+    const node = pending.pop();
+    if (typeof node === "string") {
+      if (node.length > 0) return true;
+    } else if (Array.isArray(node)) pending.push(...node);
+    else if (isRecord(node)) pending.push(...Object.values(node));
+  }
+  return false;
+}
+
+function collect(value: unknown, path: string, source: string, depth: number, reading: Reading): void {
+  const { out } = reading;
+  if (out.length >= MAX_BLOCKS || depth > MAX_DEPTH) {
+    if (!full(reading) && holdsText(value)) reading.cut = out.length >= MAX_BLOCKS ? "too_many_blocks" : (reading.cut ?? "too_deep");
+    return;
+  }
   if (typeof value === "string") {
     if (value.length > 0) out.push({ path, source, text: value });
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach((item, i) => collect(item, `${path}[${i}]`, source, depth + 1, out));
+    for (let i = 0; i < value.length && !full(reading); i++) collect(value[i], `${path}[${i}]`, source, depth + 1, reading);
     return;
   }
   if (!isRecord(value)) return;
   for (const [key, item] of Object.entries(value)) {
-    if (out.length >= MAX_BLOCKS) return;
+    if (full(reading)) return;
     if (SKIP_KEYS.has(key)) continue;
     // A search result's `source` is its URL; a document's is an object holding the text.
     if (key === "source" && typeof item === "string") continue;
     if (typeof item === "string" && isMedia(key, item, value)) continue;
-    collect(item, `${path}.${key}`, source, depth + 1, out);
+    collect(item, `${path}.${key}`, source, depth + 1, reading);
   }
 }
 
@@ -96,30 +153,34 @@ function newestTurnStart(items: unknown[], isModelTurn: (item: Record<string, un
   return i;
 }
 
-function fromMessages(messages: unknown[], out: UntrustedBlock[]): void {
+function fromMessages(messages: unknown[], reading: Reading): void {
   const start = newestTurnStart(messages, (m) => m.role === "assistant");
   messages.forEach((message, i) => {
-    if (i < start || !isRecord(message) || out.length >= MAX_BLOCKS) return;
+    if (i < start || !isRecord(message) || full(reading)) return;
     const base = `messages[${i}]`;
     // OpenAI Chat: the whole message is a tool's answer.
     if (message.role === "tool" || message.role === "function") {
-      collect(message.content, `${base}.content`, message.role, 1, out);
+      collect(message.content, `${base}.content`, message.role, 1, reading);
       return;
     }
+    if (typeof message.role !== "string" || !CHAT_ROLES.has(message.role)) noteUnknown(reading, `role:${String(message.role)}`);
     // Anthropic: untrusted blocks sit among the user's and the model's own.
     if (message.role === "system" || !Array.isArray(message.content)) return;
     message.content.forEach((block, j) => {
       if (!isRecord(block) || typeof block.type !== "string") return;
-      if (!ANTHROPIC_UNTRUSTED.has(block.type) && !isServerToolResult(block.type)) return;
+      if (!ANTHROPIC_UNTRUSTED.has(block.type) && !isServerToolResult(block.type)) {
+        if (!CONTENT_TRUSTED.has(block.type)) noteUnknown(reading, block.type);
+        return;
+      }
       const blockPath = `${base}.content[${j}]`;
-      if (block.type === "tool_result") collect(block.content, `${blockPath}.content`, block.type, 1, out);
-      else collect(block, blockPath, block.type, 1, out);
+      if (block.type === "tool_result") collect(block.content, `${blockPath}.content`, block.type, 1, reading);
+      else collect(block, blockPath, block.type, 1, reading);
     });
   });
 }
 
 /** OpenAI Responses `input` items whose payload came from a tool. */
-function fromResponsesInput(items: unknown[], out: UntrustedBlock[]): void {
+function fromResponsesInput(items: unknown[], reading: Reading): void {
   // The model's own items: its messages and the calls it made (`function_call`,
   // `mcp_call`, `file_search_call`, …), never a `*_call_output`.
   const start = newestTurnStart(
@@ -127,21 +188,35 @@ function fromResponsesInput(items: unknown[], out: UntrustedBlock[]): void {
     (item) => item.role === "assistant" || (typeof item.type === "string" && item.type.endsWith("_call"))
   );
   items.forEach((item, i) => {
-    if (i < start || !isRecord(item) || typeof item.type !== "string" || out.length >= MAX_BLOCKS) return;
+    if (i < start || !isRecord(item) || typeof item.type !== "string" || full(reading)) return;
     const base = `input[${i}]`;
-    if (item.type.endsWith("_call_output")) collect(item.output, `${base}.output`, item.type, 1, out);
+    if (item.type.endsWith("_call_output")) collect(item.output, `${base}.output`, item.type, 1, reading);
     else if (item.type === "mcp_call") {
-      collect(item.output, `${base}.output`, item.type, 1, out);
-      collect(item.error, `${base}.error`, item.type, 1, out);
-    } else if (item.type === "file_search_call") collect(item.results, `${base}.results`, item.type, 1, out);
+      collect(item.output, `${base}.output`, item.type, 1, reading);
+      collect(item.error, `${base}.error`, item.type, 1, reading);
+    } else if (item.type === "file_search_call") collect(item.results, `${base}.results`, item.type, 1, reading);
+    else if (!RESPONSES_TRUSTED.has(item.type)) noteUnknown(reading, item.type);
   });
 }
 
-/** The tool-supplied text in a request body's newest turn, in body order, at most 2,000. */
+/**
+ * The tool-supplied text in a request body's newest turn, in body order, at most 2,000
+ * blocks, `cut` when text was left unread past that or past the depth limit, and
+ * `unknownTypes`, at most five, for formats it has no rule for (telemetry only).
+ */
+export function readUntrusted(body: unknown): { blocks: UntrustedBlock[]; cut?: UntrustedCut; unknownTypes?: string[] } {
+  const reading: Reading = { out: [] };
+  if (!isRecord(body)) return { blocks: reading.out };
+  if (Array.isArray(body.messages)) fromMessages(body.messages, reading);
+  if (Array.isArray(body.input)) fromResponsesInput(body.input, reading);
+  return {
+    blocks: reading.out,
+    ...(reading.cut ? { cut: reading.cut } : {}),
+    ...(reading.unknown?.size ? { unknownTypes: [...reading.unknown] } : {}),
+  };
+}
+
+/** The blocks alone (readUntrusted, without saying whether it stopped early). */
 export function untrustedBlocks(body: unknown): UntrustedBlock[] {
-  const out: UntrustedBlock[] = [];
-  if (!isRecord(body)) return out;
-  if (Array.isArray(body.messages)) fromMessages(body.messages, out);
-  if (Array.isArray(body.input)) fromResponsesInput(body.input, out);
-  return out;
+  return readUntrusted(body).blocks;
 }

@@ -18,10 +18,12 @@
 // A database before 0084 answers 503 `client_events_unavailable`; nothing else
 // depends on this table.
 //
-// One more kind rides the same batch: `injection_finding`, what the sidecar's scan of a
-// tool's output found (plans/injection-guard.md §2b). It goes to `injection_findings`
-// as `surface='sidecar'`, only while the owner has the injection guard on, and the answer
-// never says which: off, it is counted with the rejected events like any other.
+// Two more kinds ride the same batch: `injection_finding`, what the sidecar's scan of a
+// tool's output found (plans/injection-guard.md §2b), and since 1.7.1
+// `injection_incomplete`, output it could not fully check (too large, or the scan
+// failed). Both go to `injection_findings` as `surface='sidecar'`, only while the owner
+// has the injection guard on, and the answer never says which: off, they are counted
+// with the rejected events like any other.
 export const runtime = "edge";
 
 import { evaluateGate } from "@/lib/gate";
@@ -118,7 +120,8 @@ export async function POST(req: Request): Promise<Response> {
   const keys = new Set<string>();
   const findingEvents: unknown[] = [];
   for (const event of batch.events) {
-    if ((event as { kind?: unknown } | null)?.kind === "injection_finding") {
+    const kind = (event as { kind?: unknown } | null)?.kind;
+    if (kind === "injection_finding" || kind === "injection_incomplete") {
       findingEvents.push(event);
       continue;
     }

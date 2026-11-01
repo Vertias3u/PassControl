@@ -22,7 +22,18 @@ export type InjectionFindingRow = {
   /** 0090: where the block was seen, and the tool that returned it (sidecar rows only). */
   surface?: "proxy" | "sidecar" | string;
   tool_name?: string | null;
+  /** 0091: why output was not fully checked, on a `severity: "incomplete"` row only. */
+  gap?: string | null;
 };
+
+// 1.7.1: output the guard could not fully check. Not a tell, and not clean.
+const GAP_LABELS: Record<string, string> = {
+  too_large: "Too large to check",
+  scan_failed: "The check failed",
+  too_many_blocks: "Too many blocks to check",
+  too_deep: "Nested too deep to check",
+};
+const gapLabel = (gap: string | null | undefined) => (gap ? (GAP_LABELS[gap] ?? gap) : "Not fully checked");
 
 export type InjectionFindingsRead = { state: "ok"; rows: InjectionFindingRow[] } | { state: "unavailable" };
 
@@ -38,6 +49,7 @@ const SOURCE_LABELS: Record<string, string> = {
   function: "Function message",
   function_call_output: "Function output",
   custom_tool_call_output: "Tool output",
+  request: "The whole request",
   mcp_call: "MCP call output",
   file_search_call: "File search result",
 };
@@ -58,14 +70,16 @@ function when(at: string): string {
 }
 
 const FOUND =
-  "Tool output inside this agent's calls (a fetched page, a file, a search result) that carried the tells injected " +
-  "instructions usually carry.";
+  "Tool output this agent read (a fetched page, a file, a search result) that carried the tells injected " +
+  "instructions usually carry, from model calls through the gateway or from what a local tool hook was handed, " +
+  "and tool output that could not be fully checked, with why.";
 const MONITOR = "Recorded only: nothing was refused and nothing in the call changed.";
 const HOLD =
-  "A strong one makes this agent's service writes wait for you for 30 minutes, and Claude Code's risky tools too " +
-  "wherever PassControl's tool hook is installed; nothing it reads is refused.";
+  "A strong finding, or output that could not be fully checked, makes this agent's service writes wait for you for " +
+  "30 minutes. Risky local tools wait too wherever PassControl's tool hook is installed, but go ahead with a warning if the sidecar or the dashboard cannot answer in time. " +
+  "Nothing it reads is refused.";
 const CAVEATS =
-  "A tell is a hint, not proof, and a careful attack may have none. Each block is listed once, however often the " +
+  "A tell is a hint, not proof, and a careful attack may have none: no finding does not mean the text is safe. Each block is listed once, however often the " +
   "conversation re-sent it, and its text was never stored.";
 
 export function InjectionFindingsPanel({
@@ -88,7 +102,7 @@ export function InjectionFindingsPanel({
     <section id="agent-injection" data-state={state} className="pc-section scroll-mt-40">
       <SectionHeader
         eyebrow="Injection guard"
-        title="Injected instructions"
+        title="Possible injection tells"
         description={
           <>
             {FOUND} {hold ? HOLD : MONITOR} {CAVEATS} {findingsRetentionSentence()}
@@ -129,16 +143,22 @@ export function InjectionFindingsPanel({
                       <code className="block text-xs text-muted-foreground">{row.path}</code>
                     </td>
                     <td className="py-2 pr-4">
-                      <ul className="m-0 list-none p-0">
-                        {row.families.map((family) => (
-                          <li key={family} data-family={family}>
-                            {familyLabel(family)}
-                          </li>
-                        ))}
-                      </ul>
+                      {row.severity === "incomplete" ? (
+                        <span data-gap={row.gap ?? undefined}>{gapLabel(row.gap)}</span>
+                      ) : (
+                        <ul className="m-0 list-none p-0">
+                          {row.families.map((family) => (
+                            <li key={family} data-family={family}>
+                              {familyLabel(family)}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </td>
                     <td className="py-2 pr-4 whitespace-nowrap">
-                      {row.severity === "high" ? (
+                      {row.severity === "incomplete" ? (
+                        <span className="text-amber-600 dark:text-amber-400">Not fully checked</span>
+                      ) : row.severity === "high" ? (
                         <span className="text-amber-600 dark:text-amber-400">Strong</span>
                       ) : (
                         <span className="text-muted-foreground">Weak</span>

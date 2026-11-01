@@ -174,3 +174,19 @@ export async function captureSecurityEvent(event: string, context: Observability
     ...shape,
   });
 }
+
+/**
+ * The injection guard's events (1.7.1, external review P10): to Sentry where it is set
+ * up, and otherwise one fixed line in the log, so a self-hosted gateway still shows when
+ * its guard ran degraded (a gap, a hold that ran late, a format it does not know). The
+ * event's name and its code only: both are this codebase's own fixed strings.
+ */
+export async function captureGuardEvent(event: string, context: ObservabilityContext): Promise<void> {
+  if (isSentryConfigured()) return captureSecurityEvent(event, context);
+  const safe = (value: unknown) => (typeof value === "string" && /^[a-z0-9_:,.-]{1,200}$/.test(value) ? value : null);
+  const name = safe(event);
+  if (!name) return;
+  const code = safe(context.code);
+  // eslint-disable-next-line no-console
+  console.warn(`[passcontrol:injection] ${name}${code ? ` ${code}` : ""}`);
+}

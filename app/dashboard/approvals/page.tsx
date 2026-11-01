@@ -33,7 +33,7 @@ export default async function ApprovalsPage() {
   let items: PendingApprovalView[] | null = null;
   try {
     const pending = await listPendingApprovals(user.id);
-    const heldAgentIds = [...new Set(pending.filter((p) => p.hold === "injection_tainted").map((p) => p.agentId))];
+    const heldAgentIds = [...new Set(pending.filter((p) => p.hold === "injection_tainted" || p.hold === "injection_incomplete").map((p) => p.agentId))];
     const liveTaints = await Promise.allSettled(
       heldAgentIds.map(async (agentId) => (await readTaint(agentId, Date.now())) !== null)
     );

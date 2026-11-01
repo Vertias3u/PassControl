@@ -149,6 +149,35 @@ vi.mock("@/lib/state/taint", () => ({
   taintFromFindings: (input: Record<string, unknown>) => taintFromFindingsMock(input),
 }));
 
+// The security events the injection guard emits (1.7.1, external review P10): metadata only.
+// They go through captureGuardEvent (Sentry, or a log line without it); other security
+// events still use captureSecurityEvent.
+const { captureSecurityEventMock } = vi.hoisted(() => ({ captureSecurityEventMock: vi.fn(async (_event: string, _ctx: unknown) => undefined) }));
+vi.mock("@/lib/observability", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/observability")>()),
+  captureGuardEvent: (event: string, ctx: unknown) => captureSecurityEventMock(event, ctx),
+}));
+
+// 1.7.1 (P6): formats the guard has no rule for, noted once an hour (lib/injection-coverage.ts).
+const { noteUnknownCoverageMock } = vi.hoisted(() => ({ noteUnknownCoverageMock: vi.fn(async (_agentId: string, _types: string[]) => undefined) }));
+vi.mock("@/lib/injection-coverage", () => ({ noteUnknownCoverage: (a: string, t: string[]) => noteUnknownCoverageMock(a, t) }));
+
+// The real guard, with a switch to make its scan throw (1.7.1: a sensor fault is a gap).
+const guardFault = vi.hoisted(() => ({ throwOnce: false }));
+vi.mock("@/lib/injection-guard", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/injection-guard")>();
+  return {
+    ...real,
+    findInjectionTells: (...args: Parameters<typeof real.findInjectionTells>) => {
+      if (guardFault.throwOnce) {
+        guardFault.throwOnce = false;
+        throw new RangeError("Maximum call stack size exceeded");
+      }
+      return real.findInjectionTells(...args);
+    },
+  };
+});
+
 // What the attempt's receipt is signed from, for the injection guard's `inj` claim. A
 // pass-through: signing itself is unchanged.
 const { signReceiptSpy } = vi.hoisted(() => ({ signReceiptSpy: vi.fn() }));
@@ -2093,6 +2122,19 @@ describe("the injection guard (monitor)", () => {
     fetchMock.mockResolvedValue(okJson());
   });
 
+  // 1.7.1 (P6): a block format it has no rule for is said, and nothing else happens.
+  it("an unknown block type is noted for the operator, never recorded or held", async () => {
+    withMonitor();
+    noteUnknownCoverageMock.mockClear();
+    const msgs = messages("clean output");
+    (msgs[2]!.content as unknown[]).push({ type: "fancy_new_result", body: "?" });
+    const res = await POST(injReq(msgs), params);
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(noteUnknownCoverageMock).toHaveBeenCalledWith(baseClaims.agid, ["fancy_new_result"]));
+    expect(recordInjectionFindingsMock).not.toHaveBeenCalled();
+    expect(taintFromFindingsMock).not.toHaveBeenCalled();
+  });
+
   it("is off by default: nothing is scanned or recorded", async () => {
     const res = await POST(injReq(messages(ATTACK)), params);
     expect(res.status).toBe(200);
@@ -2207,6 +2249,7 @@ describe("the injection guard (monitor)", () => {
 
     it("a write that hangs costs the answer at most the bound, then the call goes (fail open)", async () => {
       withHold();
+      captureSecurityEventMock.mockClear();
       const record = deferred();
       recordInjectionFindingsMock.mockReturnValueOnce(record.promise);
       const started = Date.now();
@@ -2215,7 +2258,48 @@ describe("the injection guard (monitor)", () => {
       expect(res.status).toBe(200);
       expect(waited).toBeGreaterThanOrEqual(PROXY_TAINT_WAIT_MS - 50);
       expect(waited).toBeLessThan(PROXY_TAINT_WAIT_MS + 1_500);
+      // 1.7.1 (P5): the fail-open is observable, never silent.
+      expect(captureSecurityEventMock).toHaveBeenCalledWith("proxy.injection_wait_expired", expect.objectContaining({ agentId: baseClaims.agid }));
       record.resolve({ state: "failed", unrecorded: [] });
+    });
+
+    // 1.7.1 (P1): a scanner that throws never touches the call; it is a scan_failed gap,
+    // identified by the request's own bytes, and the hold waits for it.
+    it("a scan that throws: the call goes, and a scan_failed gap is recorded and waited for", async () => {
+      withHold();
+      recordInjectionFindingsMock.mockImplementationOnce(async (input) => ({ state: "recorded", recorded: input.findings }));
+      const taint = deferred();
+      taintFromFindingsMock.mockReturnValueOnce(taint.promise);
+      guardFault.throwOnce = true;
+      const pending = POST(injReq(messages(ATTACK)), params);
+      await vi.waitFor(() => expect(taintFromFindingsMock).toHaveBeenCalledTimes(1));
+      const input = recordInjectionFindingsMock.mock.calls.at(-1)![0] as { findings: Record<string, unknown>[] };
+      expect(input.findings).toEqual([expect.objectContaining({ severity: "incomplete", gap: "scan_failed", path: "body", families: [] })]);
+      expect(await settled(pending)).toBe(false);
+      taint.resolve({ since: 1, until: 2, families: [], incomplete: true, surface: "proxy" });
+      expect((await pending).status).toBe(200);
+    });
+
+    // 1.7.1 (P1): a body the gateway could not fully read waits like a strong finding.
+    it("a body read only in part: recorded as a gap, and the answer waits for its taint", async () => {
+      withHold();
+      captureSecurityEventMock.mockClear();
+      recordInjectionFindingsMock.mockImplementationOnce(async (input) => ({ state: "recorded", recorded: input.findings }));
+      const taint = deferred();
+      taintFromFindingsMock.mockReturnValueOnce(taint.promise);
+      const wide = Array.from({ length: 2_001 }, (_, i) => ({ type: "text", text: `row ${i}` }));
+      const pending = POST(injReq(messages(wide as unknown as string)), params);
+      await vi.waitFor(() => expect(taintFromFindingsMock).toHaveBeenCalledTimes(1));
+      const input = recordInjectionFindingsMock.mock.calls.at(-1)![0] as { findings: Record<string, unknown>[] };
+      expect(input.findings).toEqual([expect.objectContaining({ severity: "incomplete", gap: "too_many_blocks", families: [] })]);
+      expect(await settled(pending)).toBe(false);
+      taint.resolve({ since: 1, until: 2, families: [], incomplete: true, surface: "proxy" });
+      expect((await pending).status).toBe(200);
+      await vi.waitFor(() =>
+        expect(captureSecurityEventMock).toHaveBeenCalledWith("proxy.injection_incomplete", expect.objectContaining({ code: "incomplete:too_many_blocks" }))
+      );
+      expect(captureSecurityEventMock).toHaveBeenCalledWith("proxy.injection_taint", expect.objectContaining({ code: "tainted:incomplete" }));
+      expect(captureSecurityEventMock).not.toHaveBeenCalledWith("proxy.injection_tell", expect.anything());
     });
   });
 

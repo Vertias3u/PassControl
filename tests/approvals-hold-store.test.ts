@@ -25,7 +25,7 @@ beforeEach(() => {
 const request = { userId: "owner", agentId: "agent", service: "github", method: "POST", path: "/issues", preview: "hello", fingerprint: "unchanged" };
 
 describe("approval hold storage", () => {
-  it.each(["injection_tainted", "injection_unknown"] as const)("round-trips %s through the hash and pending list", async (hold) => {
+  it.each(["injection_tainted", "injection_unknown", "injection_incomplete"] as const)("round-trips %s through the hash and pending list", async (hold) => {
     const result = await checkApproval({ ...request, hold }, { create: true });
     expect(h.rows.get(`apv:${result.id}`)).toHaveProperty("hold", hold);
     expect(await listPendingApprovals("owner")).toEqual([expect.objectContaining({ hold })]);

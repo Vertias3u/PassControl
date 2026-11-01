@@ -138,3 +138,20 @@ describe("the draft form round-trips the output ceiling", () => {
     }
   });
 });
+
+// 1.7.1 (external review P8, P9): the guard's copy keeps the gateway's hold and the local
+// hook's apart, says the local one can go ahead, and does not claim every Codex tool.
+describe("the injection guard field's copy", () => {
+  it("says how it reads, where, what it cannot see, and that a local hold can go ahead", async () => {
+    const { InjectionGuardField } = await import("@/components/PolicyShadowPanel");
+    const html = renderToStaticMarkup(
+      createElement(InjectionGuardField, { draft: { injectionGuard: "hold" } as never, setDraft: () => {}, pending: false })
+    );
+    expect(html).toContain("Injection guard");
+    expect(html).toMatch(/fixed rules: no model, and nothing it learns/);
+    expect(html).toMatch(/some built-in or hosted tools may not hand\s+theirs over/);
+    expect(html).toMatch(/incomplete check/);
+    expect(html).toMatch(/service writes through PassControl wait for your yes/);
+    expect(html).toMatch(/go ahead with a warning if the sidecar or the dashboard cannot answer in time/);
+  });
+});

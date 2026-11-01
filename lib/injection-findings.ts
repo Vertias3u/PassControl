@@ -97,13 +97,27 @@ export function sidecarFinding(event: unknown, userId: string): InjectionFinding
   if (typeof e.source !== "string" || !SIDECAR_SOURCES.has(e.source)) return null;
   if (typeof e.path !== "string" || !PATH_SHAPE.test(e.path)) return null;
   if (e.tool !== undefined && e.tool !== null && (typeof e.tool !== "string" || !TOOL_NAME.test(e.tool))) return null;
+  // Only the detector this gateway runs; a new detector is added here when it ships.
+  if (e.detector !== INJECTION_DETECTOR || e.normalization_version !== INJECTION_NORMALIZATION) return null;
+  if (typeof e.block_sha256 !== "string" || !SHA256_HEX.test(e.block_sha256)) return null;
+  // 1.7.1: output the sidecar could not fully check (`kind: "injection_incomplete"`). Only
+  // the gaps a sidecar can have; the block limits are the gateway's own.
+  if (e.kind === "injection_incomplete") {
+    if (e.families !== undefined || (e.gap !== "too_large" && e.gap !== "scan_failed")) return null;
+    return {
+      path: e.path,
+      source: e.source,
+      families: [],
+      severity: "incomplete",
+      gap: e.gap,
+      contentHmac: sidecarContentHmac(userId, e.block_sha256),
+      toolName: typeof e.tool === "string" ? e.tool : null,
+    };
+  }
   if (!Array.isArray(e.families) || e.families.length === 0 || e.families.length > INJECTION_FAMILIES.length) return null;
   const families = new Set(e.families);
   if (families.size !== e.families.length || ![...families].every((f) => INJECTION_FAMILIES.includes(f as InjectionFamily))) return null;
   if (e.severity !== "high" && e.severity !== "low") return null;
-  // Only the detector this gateway runs; a new detector is added here when it ships.
-  if (e.detector !== INJECTION_DETECTOR || e.normalization_version !== INJECTION_NORMALIZATION) return null;
-  if (typeof e.block_sha256 !== "string" || !SHA256_HEX.test(e.block_sha256)) return null;
   return {
     path: e.path,
     source: e.source,
@@ -157,6 +171,8 @@ export async function recordInjectionFindings(input: {
     model: MODEL_SHAPE.test(input.model) ? input.model : null,
     // Only a sidecar row names the column, so the proxy's writes still fit a database at 0089.
     ...(surface === "sidecar" ? { tool_name: f.toolName ?? null } : {}),
+    // Likewise only a gap names 0091's column: a tell's row fits a database before it.
+    ...(f.gap ? { gap: f.gap } : {}),
   }));
   let inserted: InjectionFinding[];
   try {

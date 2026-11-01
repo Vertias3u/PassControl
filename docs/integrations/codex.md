@@ -37,8 +37,9 @@ the new one; the two you trusted stay trusted.
 
 - A suspended agent, or the kill switch, blocks the next prompt and refuses tools.
 - The agent's tool rules refuse what they deny. An "ask the owner" rule waits for the owner's answer.
-- With the injection guard on, what Codex's tools return is scanned on this machine. That hook never
-  blocks a tool or changes its output. In hold mode a strong finding puts the agent's next commands and
+- With the injection guard on, the tool output Codex hands its PostToolUse hook is checked on this
+  machine. Some built-in or hosted tools may not hand theirs to the hook, and those are not checked.
+  That hook never blocks a tool or changes its output. In hold mode a strong finding puts the agent's next commands and
   file edits to the owner.
 
 `hooks.json` is shared with other tools. Setup adds or replaces only PassControl's entries, keeps a

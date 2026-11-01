@@ -46,6 +46,8 @@ describe("InjectionFindingsPanel", () => {
   it("says plainly that nothing was refused, that a tell is not proof, and that no text was kept", () => {
     const html = renderToStaticMarkup(<InjectionFindingsPanel read={{ state: "ok", rows: [row()] }} enabled />).toLowerCase();
     expect(html).toContain("nothing was refused");
+    expect(html).toContain("possible injection tells");
+    expect(html).toContain("no finding does not mean the text is safe");
     expect(html).toContain("not proof");
     expect(html).toContain("never stored");
     expect(html).not.toMatch(/blocked|denied/);
@@ -122,6 +124,9 @@ describe("InjectionFindingsPanel in hold mode", () => {
     expect(html).not.toContain("nothing was refused");
     expect(html).toContain("not proof");
     expect(html).toContain("tool hook is installed");
+    // 1.7.1 (P8): the local hold is best effort, and says so; a gap holds too.
+    expect(html).toMatch(/go ahead with a warning if the sidecar or the dashboard cannot answer in time/);
+    expect(html).toMatch(/could not be fully checked/);
   });
 
   it("monitor mode: no hold box", () => {
@@ -158,8 +163,52 @@ describe("readInjectionFindings and 0090's columns", () => {
 
   it("falls back to 0089's columns on a database before 0090", async () => {
     const seen: string[] = [];
-    const out = await readInjectionFindings(chain([{ data: null, error: { code: "42703" } }, { data: [row()], error: null }], seen), "a");
+    // It refuses 0091's columns and 0090's before 0089's are read.
+    const missing = { data: null, error: { code: "42703" } };
+    const out = await readInjectionFindings(chain([missing, missing, { data: [row()], error: null }], seen), "a");
     expect(out.state).toBe("ok");
-    expect(seen[1]).not.toContain("tool_name");
+    expect(seen[2]).not.toContain("tool_name");
+  });
+});
+
+// 1.7.1: output the guard could not fully check is listed as that, never as a tell, and
+// never as clean.
+describe("InjectionFindingsPanel and 0091's gaps", () => {
+  it.each([
+    ["too_large", "Too large to check"],
+    ["scan_failed", "The check failed"],
+    ["too_many_blocks", "Too many blocks to check"],
+    ["too_deep", "Nested too deep to check"],
+  ])("a %s row reads as not fully checked, with why", (gap, why) => {
+    const html = renderToStaticMarkup(
+      <InjectionFindingsPanel read={{ state: "ok", rows: [row({ severity: "incomplete", families: [], gap, source: "request", path: "body" })] }} enabled />
+    );
+    expect(html).toContain('data-severity="incomplete"');
+    expect(html).toContain("Not fully checked");
+    expect(html).toContain(why);
+    expect(html).not.toContain(">Weak<");
+  });
+
+  it("reads the gap, and falls back a column at a time on older databases", async () => {
+    const chain = (results: { data: unknown; error: unknown }[], seen: string[]) => {
+      const q: Record<string, unknown> = {};
+      q.select = (c: string) => (seen.push(c), q);
+      q.eq = () => q;
+      q.order = () => q;
+      q.limit = async () => results.shift();
+      return { from: () => q };
+    };
+    const seen: string[] = [];
+    await readInjectionFindings(chain([{ data: [], error: null }], seen), "a");
+    expect(seen[0]).toContain("gap");
+    const older: string[] = [];
+    const out = await readInjectionFindings(
+      chain([{ data: null, error: { code: "42703" } }, { data: null, error: { code: "42703" } }, { data: [row()], error: null }], older),
+      "a"
+    );
+    expect(out.state).toBe("ok");
+    expect(older[1]).toContain("tool_name");
+    expect(older[1]).not.toContain("gap");
+    expect(older[2]).not.toContain("tool_name");
   });
 });

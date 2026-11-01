@@ -41,10 +41,11 @@ function freePort() {
   });
 }
 
-function gatewayOn(port: number, answer: (res: import("node:http").ServerResponse) => void) {
+function gatewayOn(port: number, answer: (res: import("node:http").ServerResponse) => void, seen: string[] = []) {
   return new Promise<Server>((resolve) => {
     const s = createServer((req, res) => {
       req.resume();
+      seen.push(`${req.method} ${req.url} ${req.headers.authorization ? "auth" : "none"}`);
       if (req.url === "/api/auth/challenge") return answer(res);
       res.setHeader("content-type", "application/json");
       res.end("{}");
@@ -122,6 +123,25 @@ describe("a sidecar started before its gateway", () => {
     expect(await until(() => /visa warmed/i.test(s.out()))).toBe(true);
     expect(s.exitCode()).toBeNull();
   }, 30_000);
+});
+
+// 1.7.1 F2: a self-hosted gateway is a dev server that compiles a route on its first
+// request; the first tool checks after a start outlasted the sidecar's wait. Once its visa
+// works the sidecar asks each hook route once, so they are compiled before they matter.
+describe("a sidecar whose visa warmed", () => {
+  it("asks the gateway's hook routes once: /self with its visa, the others with nothing", async () => {
+    const gatewayPort = await freePort();
+    const seen: string[] = [];
+    await gatewayOn(gatewayPort, visaAnswer, seen);
+    const s = await runSidecar(gatewayPort);
+    expect(await until(() => seen.some((l) => l.startsWith("GET /api/v1/client-events")))).toBe(true);
+    expect(await until(() => seen.some((l) => l.startsWith("GET /api/v1/self")))).toBe(true);
+    expect(seen).toContain("GET /api/v1/tool-approvals none");
+    expect(seen).toContain("GET /api/v1/client-events none");
+    expect(seen.find((l) => l.startsWith("GET /api/v1/self"))).toMatch(/ auth$/);
+    expect(seen.filter((l) => l.startsWith("POST /api/v1/"))).toEqual([]);
+    expect(s.exitCode()).toBeNull();
+  }, 20_000);
 });
 
 describe("a sidecar whose passport the gateway refuses", () => {

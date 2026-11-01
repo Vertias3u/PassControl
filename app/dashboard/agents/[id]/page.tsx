@@ -17,6 +17,7 @@ import { DashboardShell } from "@/components/dashboard/DashboardShell";
 import { StatusPill, type StatusType } from "@/components/StatusPill";
 import { DirectAgentKeyPanel } from "@/components/DirectAgentKeyPanel";
 import { AgentSetupPanel } from "@/components/AgentSetupPanel";
+import { AgentRevokeControl } from "@/components/AgentRevokeControl";
 import { AgentOperatingHeader } from "@/components/AgentOperatingHeader";
 import { serviceClient } from "@/lib/supabase";
 import { SectionHeader } from "@/components/dashboard/SectionHeader";
@@ -184,10 +185,10 @@ function AgentPolicySummary({ policy }: { policy: AgentPolicyView }) {
             </dd>
           </div>
           <div>
-            <dt className="font-semibold text-foreground">Injected instructions</dt>
+            <dt className="font-semibold text-foreground">Injection guard</dt>
             <dd className="mt-1 text-muted-foreground" data-policy-summary="injection_guard">
               {policy.injectionGuard === "hold"
-                ? "Risky actions held after a strong finding"
+                ? "Risky actions held after a strong finding or an incomplete check"
                 : policy.injectionGuard === "monitor"
                   ? "Recorded, never refused"
                   : "Not checked"}
@@ -320,7 +321,7 @@ export default async function AgentPassportPage({
           ? [{ href: "#agent-tool-decisions" as const, label: "Tool log", ariaLabel: "What the tool rules decided" }]
           : []),
         ...(hasInjectionSection
-          ? [{ href: "#agent-injection" as const, label: "Injection", ariaLabel: "Injected instructions found in tool output" }]
+          ? [{ href: "#agent-injection" as const, label: "Injection", ariaLabel: "Possible injection tells in tool output" }]
           : []),
         { href: "#agent-trace", label: "Trace", ariaLabel: "Decision trace" },
       ],
@@ -373,6 +374,7 @@ export default async function AgentPassportPage({
           visaTtlSeconds={visaTtlSeconds()}
           passportSecretExposedAt={passportSecretExposedAt}
         />
+        <AgentRevokeControl agentId={passport.agent.id} status={passport.agent.status} />
         {pauseState ? (
           <AgentPauseControl
             agentId={passport.agent.id}

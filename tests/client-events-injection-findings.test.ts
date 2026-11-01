@@ -371,3 +371,35 @@ describe("POST /api/v1/client-events, injection_finding in hold mode", () => {
     expect(t.taintFromFindings).not.toHaveBeenCalled();
   });
 });
+
+// 1.7.1: output the sidecar could not fully check arrives as its own kind, is recorded
+// as a gap, and goes to the taint step like a finding.
+describe("POST /api/v1/client-events, kind injection_incomplete", () => {
+  const incomplete = (over: Record<string, unknown> = {}) => {
+    const { families: _f, severity: _s, ...rest } = finding();
+    return { ...rest, kind: "injection_incomplete", gap: "too_large", ...over };
+  };
+
+  it("records a gap row: severity incomplete, no families, the gap, the tool", async () => {
+    const res = await post(batch(incomplete()));
+    expect(await res.json()).toEqual({ accepted: 1, rejected: 0 });
+    expect(findingsWritten()).toEqual([
+      expect.objectContaining({ surface: "sidecar", severity: "incomplete", families: [], gap: "too_large", tool_name: "WebFetch", agent_id: AGENT, user_id: TENANT }),
+    ]);
+    expect(written("client_reported_calls")).toEqual([]);
+  });
+
+  it("hold mode hands it to the taint step", async () => {
+    h.readPolicy.mockResolvedValue(policyWith({ injection_guard: { mode: "hold" } }));
+    await post(batch(incomplete()));
+    const input = t.taintFromFindings.mock.calls[0]![0] as { mode: string; outcome: { recorded: { gap?: string }[] } };
+    expect(input.mode).toBe("hold");
+    expect(input.outcome.recorded[0]!.gap).toBe("too_large");
+  });
+
+  it("refuses a gap the sidecar cannot have, and counts it", async () => {
+    const res = await post(batch(incomplete({ gap: "too_many_blocks" })));
+    expect(await res.json()).toEqual({ accepted: 0, rejected: 1 });
+    expect(findingsWritten()).toEqual([]);
+  });
+});

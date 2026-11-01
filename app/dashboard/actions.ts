@@ -344,6 +344,27 @@ async function setAgentSuspendedBody(
   return observation(agentId, requested, database ?? null, suspensionFlag);
 }
 
+async function revokeAgentBody(agentId: string): Promise<{ id: string }> {
+  const { user } = await requireUser();
+  if (!UUID_RE.test(String(agentId))) throw new ActionError("This agent is unavailable.");
+  const result = await fleet.revokeAgent(serviceClient(), user.id, agentId);
+  if (!result.ok) {
+    if (result.status === 404) throw new ActionError("This agent is unavailable.");
+    throw new Error("agent_revoke_failed");
+  }
+  await recordAdminAction({
+    userId: user.id,
+    action: "agent.revoke",
+    targetType: "agent",
+    targetId: agentId,
+    metadata: { via: "dashboard" },
+  });
+  revalidatePath("/");
+  revalidatePath("/dashboard");
+  revalidatePath(`/dashboard/agents/${agentId}`);
+  return result.value;
+}
+
 /** Read-only: where does this agent's stop actually stand? Behind "Refresh status". */
 async function observeAgentControlBody(
   agentId: string,
@@ -1944,6 +1965,12 @@ export async function observeMasterKill(
   ...args: Parameters<typeof observeMasterKillBody>
 ): Promise<ActionResult<Awaited<ReturnType<typeof observeMasterKillBody>>>> {
   return runAction("observeMasterKill", () => observeMasterKillBody(...args));
+}
+
+export async function revokeAgent(
+  ...args: Parameters<typeof revokeAgentBody>
+): Promise<ActionResult<Awaited<ReturnType<typeof revokeAgentBody>>>> {
+  return runAction("revokeAgent", () => revokeAgentBody(...args));
 }
 
 export async function setAgentSuspended(

@@ -41,6 +41,7 @@ const newKey = () => `evt_${randomBytes(16).toString("base64url")}`;
 function toWire(event, key) {
   if (event.kind === "tool_decision") return toolDecisionWire(event, key);
   if (event.kind === "injection_finding") return injectionFindingWire(event, key);
+  if (event.kind === "injection_incomplete") return injectionIncompleteWire(event, key);
   const wire = {
     key,
     kind: event.kind === "api_error" ? "model_error" : "model_call",
@@ -89,6 +90,25 @@ function injectionFindingWire(event, key) {
     tool: event.tool,
     families: event.families,
     severity: event.severity,
+    detector: event.detector,
+    normalization_version: event.normalization_version,
+    block_sha256: event.block_sha256,
+  };
+  for (const name of Object.keys(wire)) if (wire[name] === null || wire[name] === undefined) delete wire[name];
+  return wire;
+}
+
+// What the sidecar could not fully check (1.7.1): why, where, and a hash over what went
+// unread. No families: nothing was found, because not all of it was read.
+function injectionIncompleteWire(event, key) {
+  const wire = {
+    key,
+    kind: "injection_incomplete",
+    at: event.at,
+    source: event.source,
+    path: event.path,
+    tool: event.tool,
+    gap: event.gap,
     detector: event.detector,
     normalization_version: event.normalization_version,
     block_sha256: event.block_sha256,

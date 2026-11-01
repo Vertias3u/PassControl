@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isSentryConfigured, logFailOpen, scrubSentryEvent } from "@/lib/observability";
+import { captureGuardEvent, isSentryConfigured, logFailOpen, scrubSentryEvent } from "@/lib/observability";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -13,6 +13,24 @@ describe("Sentry observability scrubber", () => {
 
     expect(warn).toHaveBeenCalledOnce();
     expect(warn).toHaveBeenCalledWith("[passcontrol:fail_open] kill_read");
+  });
+
+  // 1.7.1 (external review P10): without Sentry (self-host), the injection guard's
+  // degraded states still leave a fixed line in the log. Event and code only.
+  it("logs an injection guard event when Sentry is off, with nothing but its name and code", async () => {
+    const before = process.env.SENTRY_DSN;
+    delete process.env.SENTRY_DSN;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await captureGuardEvent("proxy.injection_incomplete", { route: "api.proxy", agentId: "agent-1", code: "incomplete:too_deep" });
+      await captureGuardEvent("proxy.injection_wait_expired", { route: "api.proxy", agentId: "agent-1" });
+      expect(warn.mock.calls).toEqual([
+        ["[passcontrol:injection] proxy.injection_incomplete incomplete:too_deep"],
+        ["[passcontrol:injection] proxy.injection_wait_expired"],
+      ]);
+    } finally {
+      if (before !== undefined) process.env.SENTRY_DSN = before;
+    }
   });
 
   it("is disabled when SENTRY_DSN is unset", () => {

@@ -9,7 +9,7 @@
 // a user writing ABOUT injection is the false positive most worth avoiding.
 import { describe, expect, it } from "vitest";
 
-import { untrustedBlocks } from "@/lib/injection-blocks";
+import { readUntrusted, untrustedBlocks } from "@/lib/injection-blocks";
 
 const shape = (body: unknown) => untrustedBlocks(body).map(({ path, source }) => `${source} ${path}`);
 
@@ -150,6 +150,39 @@ describe("bounds", () => {
     for (let i = 0; i < 500; i++) content = [{ type: "text", content }];
     expect(() => untrustedBlocks({ messages: [{ role: "tool", content }] })).not.toThrow();
   });
+
+  // 1.7.1 (external review P1): stopping early is said, never silent. What was not read
+  // cannot be called clean.
+  it("says when it stopped at the block limit", () => {
+    const at = (n: number) => ({ messages: [{ role: "tool", content: Array.from({ length: n }, (_, i) => ({ type: "text", text: `t${i}` })) }] });
+    expect(readUntrusted(at(2_000)).cut).toBeUndefined();
+    const over = readUntrusted(at(2_001));
+    expect(over.blocks).toHaveLength(2_000);
+    expect(over.cut).toBe("too_many_blocks");
+  });
+
+  it("says when text sat deeper than it reads", () => {
+    let content: unknown = "deep";
+    for (let i = 0; i < 40; i++) content = [{ type: "text", content }];
+    expect(readUntrusted({ messages: [{ role: "tool", content }] }).cut).toBe("too_deep");
+    let shallow: unknown = "fine";
+    for (let i = 0; i < 5; i++) shallow = [{ type: "text", content: shallow }];
+    expect(readUntrusted({ messages: [{ role: "tool", content: shallow }] }).cut).toBeUndefined();
+  });
+
+  it("a deep branch does not stop the read of what follows it", () => {
+    let deep: unknown = "deep";
+    for (let i = 0; i < 40; i++) deep = [{ type: "text", content: deep }];
+    const read = readUntrusted({ messages: [{ role: "tool", content: deep }, { role: "tool", content: "after the deep one" }] });
+    expect(read.cut).toBe("too_deep");
+    expect(read.blocks.map((b) => b.text)).toContain("after the deep one");
+  });
+
+  it("an empty container past the depth limit is not a cut", () => {
+    let content: unknown = [];
+    for (let i = 0; i < 40; i++) content = [content];
+    expect(readUntrusted({ messages: [{ role: "tool", content }] }).cut).toBeUndefined();
+  });
 });
 
 // A conversation is re-sent whole on every call, but the attacker writes tool OUTPUT, not
@@ -215,5 +248,45 @@ describe("only the newest turn", () => {
       ],
     };
     expect(shape(body)).toEqual(["function_call_output input[5].output", "function_call_output input[6].output"]);
+  });
+});
+
+// 1.7.1 (external review P6): a format the gateway has no rule for is named, so the
+// operator sees what the guard cannot read. Telemetry only: it never holds.
+describe("readUntrusted: formats the gateway has no rule for", () => {
+  const known = (body: unknown) => readUntrusted(body).unknownTypes;
+
+  it("names an unknown block type in the newest turn, and nothing for the known ones", () => {
+    const body = {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }, { type: "image", source: {} }] },
+        { role: "assistant", content: [{ type: "thinking", thinking: "" }, { type: "tool_use", id: "t", name: "x", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", content: "ok" }, { type: "web_fetch_tool_result", content: {} }, { type: "fancy_new_result", body: "?" }] },
+      ],
+    };
+    expect(known(body)).toEqual(["fancy_new_result"]);
+  });
+
+  it("an older turn is not this request's news", () => {
+    const body = {
+      messages: [
+        { role: "user", content: [{ type: "old_kind" }] },
+        { role: "assistant", content: [{ type: "text", text: "" }] },
+        { role: "user", content: [{ type: "tool_result", content: "ok" }] },
+      ],
+    };
+    expect(known(body)).toBeUndefined();
+  });
+
+  it("an unknown chat role, and a Responses item that carries results it does not read", () => {
+    expect(known({ messages: [{ role: "critic", content: "x" }] })).toEqual(["role:critic"]);
+    expect(known({ input: [{ type: "message", role: "user", content: "x" }, { type: "code_interpreter_call", outputs: [{ type: "logs", logs: "x" }] }, { type: "mcp_list_tools", tools: [] }] }))
+      .toEqual(["code_interpreter_call", "mcp_list_tools"]);
+    expect(known({ input: [{ type: "function_call", arguments: "{}" }, { type: "function_call_output", output: "x" }, { type: "reasoning" }] })).toBeUndefined();
+  });
+
+  it("a name that is not a plain identifier is a '?', and at most five are named", () => {
+    const blocks = ["Bad Type!", ...Array.from({ length: 9 }, (_, i) => `kind_${i}`)].map((type) => ({ type }));
+    expect(known({ messages: [{ role: "user", content: blocks }] })).toEqual(["?", "kind_0", "kind_1", "kind_2", "kind_3"]);
   });
 });

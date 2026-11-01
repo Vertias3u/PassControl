@@ -12,25 +12,30 @@
 //    or not: a policy outage must not put every tenant's writes to their owners.
 import { POLICY_UNREADABLE } from "@/lib/gate";
 import { injectionGuardMode } from "@/lib/scope";
-import { readTaint } from "@/lib/state/taint";
+import { readTaint, type Taint } from "@/lib/state/taint";
 
 export const HELD_TAINTED =
   "Held by the injection guard: this agent recently read text that looked like a prompt injection. Approve only if you expected this.";
+export const HELD_INCOMPLETE =
+  "Held by the injection guard: PassControl could not fully check what a tool returned to this agent (too large to check, or the check failed). Approve only if you expected this.";
 export const HELD_UNKNOWN =
   "Held by the injection guard: whether this agent read a possible prompt injection could not be checked. Approve only if you expected this.";
+
+/** What a live taint says to the owner: a tell, once there is one; else what went unchecked. */
+const heldFor = (taint: Taint | null) => (!taint ? undefined : taint.families.length > 0 ? HELD_TAINTED : HELD_INCOMPLETE);
 
 /** The owner-facing reason the hold applies, or undefined when it does not. */
 export async function injectionHoldReason(policy: unknown, agentId: string, nowMs: number): Promise<string | undefined> {
   if (policy === POLICY_UNREADABLE) {
     try {
-      return (await readTaint(agentId, nowMs)) ? HELD_TAINTED : undefined;
+      return heldFor(await readTaint(agentId, nowMs));
     } catch {
       return undefined;
     }
   }
   if (injectionGuardMode(policy) !== "hold") return undefined;
   try {
-    return (await readTaint(agentId, nowMs)) ? HELD_TAINTED : undefined;
+    return heldFor(await readTaint(agentId, nowMs));
   } catch {
     return HELD_UNKNOWN;
   }

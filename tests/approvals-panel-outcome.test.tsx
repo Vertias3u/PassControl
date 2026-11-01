@@ -42,6 +42,23 @@ describe("held approval items", () => {
   const item = { id: "approval-1", agentId: "agent-1", agentName: "Scout", serviceLabel: "GitHub", method: "POST", path: "/issues", preview: "", createdAt: Date.now(), onTelegram: false };
   const render = (hold: PendingApprovalView["hold"]) => renderToStaticMarkup(<ApprovalsPanel items={[{ ...item, hold }]} />);
 
+  // Decisions and Clear must wait for React's handlers so early owner clicks are not lost.
+  it("disables Approve, Deny and Clear in the server-rendered markup until mounted", () => {
+    const buttons = render("tainted").match(/<button\b[^>]*>/g) ?? [];
+    for (const action of ["approve", "deny", "clear-hold"]) {
+      const button = buttons.find((tag) => tag.includes(`data-action="${action}"`));
+      expect(button).toBeDefined();
+      expect(button).toContain('disabled=""');
+    }
+  });
+
+  it("an unchecked hold says the output could not be fully checked, and offers Clear", () => {
+    const html = render("unchecked");
+    expect(html).toContain('data-hold="unchecked"');
+    expect(html).toContain("could not fully check");
+    expect(html).toContain('data-action="clear-hold"');
+  });
+
   it("shows the tainted reason and Clear, while keeping Approve and Deny", () => {
     const html = render("tainted");
     expect(html).toContain('data-hold="tainted"');

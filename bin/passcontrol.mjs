@@ -3018,7 +3018,7 @@ function configureCodexSubscription(opts = {}) {
   }
   step(`Start the sidecar before Codex: ${cliCommand(port === 8788 ? "sidecar" : `sidecar --port ${port}`)}`);
   step("Your ChatGPT login stays between Codex and OpenAI. PassControl never sees it or sits in the path.");
-  step("What Codex's tools return is also scanned on this machine for the injection guard (the PostToolUse hook). That hook never blocks a tool or changes what it returned.");
+  step("For the injection guard, the tool output Codex hands its PostToolUse hook is also checked on this machine; some built-in or hosted tools may not hand theirs over. That hook never blocks a tool or changes what it returned.");
   step("What it does: a suspended agent, or the kill switch, blocks the next prompt and refuses tools. The agent's tool rules refuse what they deny; an \"ask the owner\" rule waits for the owner's answer.");
   step("What it cannot do, plainly:");
   step("  Codex has no strict hook mode. If the sidecar is not running, or a hook fails, Codex goes ahead (with a warning when the sidecar is down).");

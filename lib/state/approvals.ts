@@ -57,7 +57,8 @@ const k = {
   pollOffset: (uid: string) => `apvtg:off:${uid}`,
 };
 
-export type ApprovalHold = "injection_tainted" | "injection_unknown";
+// `injection_incomplete` (1.7.1): held because tool output could not be fully checked.
+export type ApprovalHold = "injection_tainted" | "injection_incomplete" | "injection_unknown";
 
 export interface ApprovalRequest {
   hold?: ApprovalHold;
@@ -301,7 +302,7 @@ function toApproval(id: string, raw: Record<string, unknown> | null): Approval |
   return {
     id,
     state,
-    ...(raw.hold === "injection_tainted" || raw.hold === "injection_unknown" ? { hold: raw.hold } : {}),
+    ...(raw.hold === "injection_tainted" || raw.hold === "injection_incomplete" || raw.hold === "injection_unknown" ? { hold: raw.hold } : {}),
     agentId: text("agid"),
     service: text("svc"),
     method: text("method"),

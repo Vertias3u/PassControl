@@ -134,17 +134,19 @@ async function loadReportedCalls(db: SupabaseClient, userId: string): Promise<un
   }
 }
 
-// What the injection guard found (0089), and the tool a sidecar finding names (0090).
-// Scoped by user_id by hand: the export client may be the service role, which bypasses
-// RLS. A database before 0089 has nothing to export; one at 0089 has no `tool_name`, and
-// is read without it, as the tables above fall back a column at a time.
-const INJECTION_FINDING_COLUMNS =
-  "id,user_id,agent_id,created_at,surface,source,path,families,severity,detector,normalization_version,content_hmac,provider,model,tool_name";
-const INJECTION_FINDING_COLUMNS_0089 = INJECTION_FINDING_COLUMNS.replace(/,tool_name$/, "");
+// What the injection guard found (0089), the tool a sidecar finding names (0090), and
+// why output was not fully checked (0091). Scoped by user_id by hand: the export client
+// may be the service role, which bypasses RLS. A database before 0089 has nothing to
+// export; an older one is read without the columns it lacks, a column at a time, as the
+// tables above fall back.
+const INJECTION_FINDING_COLUMNS_0089 =
+  "id,user_id,agent_id,created_at,surface,source,path,families,severity,detector,normalization_version,content_hmac,provider,model";
+const INJECTION_FINDING_COLUMNS_BY_AGE = [`${INJECTION_FINDING_COLUMNS_0089},tool_name,gap`, `${INJECTION_FINDING_COLUMNS_0089},tool_name`, INJECTION_FINDING_COLUMNS_0089];
 
 async function loadInjectionFindings(db: SupabaseClient, userId: string): Promise<unknown[]> {
   const rows: unknown[] = [];
-  let columns = INJECTION_FINDING_COLUMNS;
+  let age = 0;
+  let columns = INJECTION_FINDING_COLUMNS_BY_AGE[age]!;
   for (let start = 0; ; start += PAGE_SIZE) {
     const page_ = (select: string) =>
       db
@@ -155,8 +157,8 @@ async function loadInjectionFindings(db: SupabaseClient, userId: string): Promis
         .order("id", { ascending: true })
         .range(start, start + PAGE_SIZE - 1) as unknown as Promise<{ data: unknown[] | null; error: { code?: string } | null }>;
     let { data, error } = await page_(columns);
-    if (["42703", "PGRST204"].includes(error?.code ?? "") && columns !== INJECTION_FINDING_COLUMNS_0089) {
-      columns = INJECTION_FINDING_COLUMNS_0089;
+    while (["42703", "PGRST204"].includes(error?.code ?? "") && age < INJECTION_FINDING_COLUMNS_BY_AGE.length - 1) {
+      columns = INJECTION_FINDING_COLUMNS_BY_AGE[++age]!;
       ({ data, error } = await page_(columns));
     }
     if (error) {

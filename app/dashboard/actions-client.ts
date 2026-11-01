@@ -19,6 +19,7 @@ function client<A extends unknown[], T>(
 
 export const setMasterKill = client(actions.setMasterKill);
 export const observeMasterKill = client(actions.observeMasterKill);
+export const revokeAgent = client(actions.revokeAgent);
 export const setAgentSuspended = client(actions.setAgentSuspended);
 export const observeAgentControl = client(actions.observeAgentControl);
 export const createAgent = client(actions.createAgent);

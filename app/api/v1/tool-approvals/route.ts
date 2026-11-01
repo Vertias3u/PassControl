@@ -43,7 +43,7 @@ import { APPROVAL_PREVIEW_MAX } from "@/lib/state/approvals";
 import { readKillState } from "@/lib/state/killswitch";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { isSuspended } from "@/lib/state/redis";
-import { HELD_TAINTED, HELD_UNKNOWN, injectionHoldReason } from "@/lib/injection-hold";
+import { HELD_INCOMPLETE, HELD_TAINTED, HELD_UNKNOWN, injectionHoldReason } from "@/lib/injection-hold";
 import { injectionGuardMode } from "@/lib/scope";
 
 const TOOL_APPROVAL_RATE_LIMIT = Number(process.env.TOOL_APPROVAL_RATE_LIMIT ?? "30");
@@ -169,6 +169,7 @@ export async function POST(req: Request): Promise<Response> {
   const request = {
     userId, agentId, service: "claude-code", method: "TOOL", path: toolName, preview, fingerprint,
     ...(heldBecause === HELD_TAINTED ? { hold: "injection_tainted" as const }
+      : heldBecause === HELD_INCOMPLETE ? { hold: "injection_incomplete" as const }
       : heldBecause === HELD_UNKNOWN ? { hold: "injection_unknown" as const } : {}),
   };
   const approval = !asks ? await existingApproval(request) : await awaitApproval({
@@ -183,7 +184,7 @@ export async function POST(req: Request): Promise<Response> {
       // The store holds a question 15 minutes, but the sidecar refuses the tool at
       // the agent's own wait: say that one.
       waitNote: `The tool waits up to ${rules.ok ? rules.approvalWaitS : 0} seconds for your answer, then is refused.`,
-      ...(heldBecause ? { heldBecause, offerClear: heldBecause === HELD_TAINTED } : {}),
+      ...(heldBecause ? { heldBecause, offerClear: heldBecause === HELD_TAINTED || heldBecause === HELD_INCOMPLETE } : {}),
     },
     waitMs: approvalWaitMs(),
   });

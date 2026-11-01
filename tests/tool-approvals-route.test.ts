@@ -290,6 +290,15 @@ describe("held because the agent is tainted", () => {
     expect(asked().prompt.offerClear).toBe(true);
   });
 
+  // 1.7.1: a hold for output that could not be fully checked says so, and offers Clear.
+  it("a gap-only taint: says the output could not be fully checked, tags it, offers Clear", async () => {
+    inj.readTaint.mockResolvedValue({ since: T, until: T + 1_800_000, families: [], incomplete: true, surface: "sidecar" });
+    expect((await post(ask({ tool_input: { command: "git push" } }))).status).toBe(200);
+    expect(String(asked().prompt.heldBecause)).toMatch(/could not fully check/);
+    expect(asked().request).toHaveProperty("hold", "injection_incomplete");
+    expect(asked().prompt.offerClear).toBe(true);
+  });
+
   it.each(["Write", "Edit", "WebFetch", "mcp__github__create_pull_request"])("holds %s too", async (tool) => {
     tainted();
     expect((await post(ask({ tool_name: tool, tool_input: { file_path: "/repo/a", url: "https://x.test" } }))).status).toBe(200);

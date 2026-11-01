@@ -23,6 +23,8 @@ const MIGRATION_URL = new URL("../db/migrations/0089_injection_findings.sql", im
 const MIGRATION = existsSync(MIGRATION_URL) ? readFileSync(MIGRATION_URL, "utf8") : "select 'missing 0089' :: int;";
 const SIDECAR_URL = new URL("../db/migrations/0090_injection_findings_sidecar.sql", import.meta.url);
 const SIDECAR = existsSync(SIDECAR_URL) ? readFileSync(SIDECAR_URL, "utf8") : "select 'missing 0090' :: int;";
+const GAPS_URL = new URL("../db/migrations/0091_injection_findings_gaps.sql", import.meta.url);
+const GAPS = existsSync(GAPS_URL) ? readFileSync(GAPS_URL, "utf8") : "select 'missing 0091' :: int;";
 
 const LOCK_BUSY = /could not obtain lock|deadlock detected/;
 
@@ -53,11 +55,11 @@ const STOCK_DEFAULTS =
 
 const TABLE = "public.injection_findings";
 
-function inMigrated(body: string, { stock = false, sidecar = false } = {}) {
+function inMigrated(body: string, { stock = false, sidecar = false, gaps = false } = {}) {
   return psql(
     `begin;\nset local client_min_messages = warning;\n` +
       `lock table public.users, public.agents in share row exclusive mode nowait;\n${stock ? STOCK_DEFAULTS : ""}` +
-      `drop table if exists ${TABLE};\n${MIGRATION}\n${sidecar ? `${SIDECAR}\n` : ""}` +
+      `drop table if exists ${TABLE};\n${MIGRATION}\n${sidecar || gaps ? `${SIDECAR}\n` : ""}${gaps ? `${GAPS}\n` : ""}` +
       `create temp table t_agent on commit drop as select id as agent_id, user_id from public.agents where user_id is not null order by created_at limit 1;\n` +
       `${body}\nrollback;\n`
   );
@@ -217,6 +219,61 @@ describe.skipIf(!live)("0090 sidecar findings, on a real Postgres", () => {
       `${SIDECAR}\nselect string_agg(r || ':' || p || ':' || has_column_privilege(r, '${TABLE}', 'tool_name', p)::text, ',' order by r, p)
          from unnest(array['anon','authenticated','service_role']) r, unnest(array['SELECT','INSERT','UPDATE']) p;`,
       { sidecar: true, stock: true }
+    );
+    expect(r).toMatchObject({ ok: true });
+    expect(r.out).toBe(
+      [
+        "anon:INSERT:false", "anon:SELECT:false", "anon:UPDATE:false",
+        "authenticated:INSERT:false", "authenticated:SELECT:true", "authenticated:UPDATE:false",
+        "service_role:INSERT:true", "service_role:SELECT:true", "service_role:UPDATE:false",
+      ].join(",")
+    );
+  });
+});
+
+// 1.7.1 (external review P1): output the guard could not fully check is a row of its own
+// kind, never an empty tell, and never a gap without its reason.
+describe.skipIf(!live)("0091 gaps, on a real Postgres", () => {
+  const COLS_GAP = `${COLS}, gap`;
+  const row = (surface: string, severity: string, families: string, gap: string) =>
+    `insert into ${TABLE} (user_id, agent_id, ${COLS_GAP}) select user_id, agent_id, ${surface}, 'request', 'body', ${families}, ${severity}, 'pc-heuristic-1', 1, ${HMAC}, null, null, ${gap} from t_agent;`;
+
+  it("refuses a gap row before 0091, and holds one after it", () => {
+    const gapRow = row("'proxy'", "'incomplete'", "array[]::text[]", "'too_many_blocks'");
+    expect(inMigrated(gapRow, { sidecar: true }).ok).toBe(false);
+    const r = inMigrated(`${gapRow}\nselect severity || ':' || gap || ':' || cardinality(families) from ${TABLE};`, { gaps: true });
+    expect(r).toMatchObject({ ok: true, out: "incomplete:too_many_blocks:0" });
+  });
+
+  it("holds each gap on the surface that can see it", () => {
+    for (const [surface, gap] of [["proxy", "too_large"], ["proxy", "scan_failed"], ["proxy", "too_deep"], ["sidecar", "too_large"], ["sidecar", "scan_failed"]]) {
+      const r = inMigrated(row(`'${surface}'`, "'incomplete'", "array[]::text[]", `'${gap}'`), { gaps: true });
+      expect(r.ok, `${surface}:${gap}: ${r.out}`).toBe(true);
+    }
+  });
+
+  it("still holds a tell, with no gap", () => {
+    expect(inMigrated(`${insert()}\nselect severity || ':' || coalesce(gap, '-') from ${TABLE};`, { gaps: true })).toMatchObject({ ok: true, out: "high:-" });
+  });
+
+  it.each([
+    ["an incomplete row with no gap", row("'proxy'", "'incomplete'", "array[]::text[]", "null")],
+    ["an incomplete row with families", row("'proxy'", "'incomplete'", "array['role_markup']", "'scan_failed'")],
+    ["a tell with a gap", row("'proxy'", "'high'", "array['role_markup']", "'scan_failed'")],
+    ["a tell with no families", row("'proxy'", "'high'", "array[]::text[]", "null")],
+    ["an unknown gap", row("'proxy'", "'incomplete'", "array[]::text[]", "'lazy'")],
+    ["a gap only the gateway can see, from the sidecar", row("'sidecar'", "'incomplete'", "array[]::text[]", "'too_many_blocks'")],
+  ])("refuses %s", (_name, sql) => {
+    const r = inMigrated(sql, { gaps: true });
+    expect(r.ok, sql).toBe(false);
+    expect(r.out).toMatch(/check constraint/);
+  });
+
+  it("applies twice without error, and changes no grant", () => {
+    const r = inMigrated(
+      `${GAPS}\nselect string_agg(r || ':' || p || ':' || has_column_privilege(r, '${TABLE}', 'gap', p)::text, ',' order by r, p)
+         from unnest(array['anon','authenticated','service_role']) r, unnest(array['SELECT','INSERT','UPDATE']) p;`,
+      { gaps: true, stock: true }
     );
     expect(r).toMatchObject({ ok: true });
     expect(r.out).toBe(

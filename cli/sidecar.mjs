@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import { Readable } from "node:stream";
@@ -8,7 +8,7 @@ import { createVisaClient } from "./visa-client.mjs";
 import { declaredLineage, declaredSession } from "./declared-session.mjs";
 import { defaultJournalDir, openJournal } from "./journal.mjs";
 import { heldUnderTaint } from "./injection-hold.mjs";
-import { findingsFromHook } from "./injection-sidecar.mjs";
+import { findingsFromHook, gapFromOversizedHook } from "./injection-sidecar.mjs";
 import { answer, createWatchFeed, isNotACall, isLocalCaller, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
 import { createStopGate, HOOK_PATH, SELF_READ_TIMEOUT_MS, selfAnswerState } from "./subscription-gate.mjs";
 import { createToolGate } from "./tool-gate.mjs";
@@ -59,9 +59,13 @@ const OTLP_BODY_LIMIT = 4 * 1024 * 1024;
 // counted a second time. Bounded: the oldest is forgotten first.
 const RELAYED_SESSIONS_MAX = 1000;
 
-// Claude Code's hook input carries the tool's input (a whole file for Write), so it
-// is not small; past this it is refused rather than buffered.
-const HOOK_BODY_LIMIT = 1024 * 1024;
+// Claude Code's hook input carries the tool's input (a whole file for Write), and a
+// post-tool hook carries the tool's output, so it is not small; past this it is refused
+// rather than buffered. Above the scan budget (8 MB, cli/injection-sidecar.mjs), so a
+// body near it is still read; past it, a post-tool body is a gap, never clean (1.7.1).
+const HOOK_BODY_LIMIT = 10 * 1024 * 1024;
+// How much of a refused body is kept, to see which hook sent it.
+const HOOK_PEEK_BYTES = 64 * 1024;
 
 // How long Claude Code waits for the hook, as configure wrote it into the URL
 // (`?t=600`); null for a hook that does not say (a Phase 1 install).
@@ -290,6 +294,19 @@ export function createSidecar({
     const body = await response.json().catch(() => ({}));
     return { status: response.status, error: body?.error, retryAfterS: Number(response.headers.get("retry-after")) };
   }
+  // 1.7.1 F2: a self-hosted gateway is a dev server that compiles each route on its first
+  // request, which outlasted the hooks' short wait, so a held agent's first tools after a
+  // start went ahead with the warning. Asked once, after the visa works: /self as the hooks
+  // ask it, and the two POST routes with a GET and no credential, which loads them, asks
+  // the owner nothing and uploads nothing. Never throws.
+  const WARM_ROUTE_TIMEOUT_MS = 60_000;
+  async function warmRoutes() {
+    const touch = (path) =>
+      fetch(`${origin}${path}`, { method: "GET", signal: AbortSignal.timeout(WARM_ROUTE_TIMEOUT_MS) })
+        .then((response) => response.body?.cancel())
+        .catch(() => {});
+    await Promise.all([readSelf(null).catch(() => {}), touch(TOOL_APPROVALS_PATH), touch(CLIENT_EVENTS_PATH)]);
+  }
   const injectionSeen = new Set();
   const uploader = reportCalls ? createCallUploader({ send: sendReportedCalls }) : null;
   // Its decisions reach the agent's page with the reported calls (same opt-out).
@@ -437,14 +454,34 @@ export function createSidecar({
     }
     const chunks = [];
     let size = 0;
-    let tooBig = false;
+    // Past the limit: only a hash of the whole body and its start are kept.
+    let digest = null;
+    let head = "";
     req.on("data", (c) => {
       size += c.length;
-      if (size > HOOK_BODY_LIMIT) tooBig = true;
-      else chunks.push(c);
+      if (digest) return void digest.update(c);
+      chunks.push(c);
+      if (size <= HOOK_BODY_LIMIT) return;
+      digest = createHash("sha256");
+      for (const chunk of chunks) digest.update(chunk);
+      head = Buffer.concat(chunks).subarray(0, HOOK_PEEK_BYTES).toString("utf8");
+      chunks.length = 0;
     });
     req.on("end", async () => {
-      if (tooBig) return answer(res, 413, "hook_too_large", "Hook input over 1 MB.");
+      if (digest) {
+        // Synchronous, like the scan below: the next PreToolUse already knows.
+        try {
+          const gap = gapFromOversizedHook(head, digest.digest("hex"), { seen: injectionSeen });
+          if (gap) {
+            highVersion++;
+            feed.injection(gap);
+            uploader?.add(gap);
+          }
+        } catch {
+          // Local telemetry must never change the hook answer.
+        }
+        return answer(res, 413, "hook_too_large", "Hook input over 10 MB.");
+      }
       let input;
       try {
         input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -453,6 +490,26 @@ export function createSidecar({
       }
       if (!input || typeof input !== "object" || Array.isArray(input)) {
         return answer(res, 400, "hook_not_json", "Expected Claude Code's hook input, a JSON object.");
+      }
+      // Injection tells in what the tools returned (plans/injection-guard.md §2b). Before
+      // the answer and before any await (1.7.1, external review P4): the event loop runs
+      // nothing else meanwhile, so no PreToolUse can be decided before a finding here has
+      // bumped highVersion, which makes it flush the upload and re-read the taint first.
+      // Bounded by HOOK_BODY_LIMIT; 8 MB of hostile text scans in under half a second
+      // (measured 2026-10-31). Only the upload is asynchronous.
+      if (input.hook_event_name === "PostToolBatch" || input.hook_event_name === "PostToolUse") {
+        try {
+          for (const event of findingsFromHook(input, { seen: injectionSeen })) {
+            // A gap holds like a strong finding (1.7.1).
+            if (event.severity === "high" || event.kind === "injection_incomplete") highVersion++;
+            feed.injection(event);
+            // With the reported calls (same opt-out). The gateway records it only while
+            // the owner has the guard on, and never says which.
+            uploader?.add(event);
+          }
+        } catch {
+          // Local telemetry must never change the hook answer.
+        }
       }
       let out;
       try {
@@ -476,23 +533,6 @@ export function createSidecar({
       const body = JSON.stringify(out);
       res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
       res.end(body);
-      // Injection tells in what the tools returned (plans/injection-guard.md §2b): after
-      // the answer is written, so the scan never delays or changes it.
-      if (input.hook_event_name === "PostToolBatch" || input.hook_event_name === "PostToolUse") {
-        setImmediate(() => {
-          try {
-            for (const event of findingsFromHook(input, { seen: injectionSeen })) {
-              if (event.severity === "high") highVersion++;
-              feed.injection(event);
-              // With the reported calls (same opt-out). The gateway records it only while
-              // the owner has the guard on, and never says which.
-              uploader?.add(event);
-            }
-          } catch {
-            // Local telemetry must never change or delay the hook answer.
-          }
-        });
-      }
     });
     req.on("error", () => res.destroy());
   }
@@ -738,7 +778,7 @@ export function createSidecar({
   });
 
   server.on("close", () => uploader?.close());
-  return { server, ollamaServer, getVisa: visas.getVisa, runId, feed, uploader };
+  return { server, ollamaServer, getVisa: visas.getVisa, warmRoutes, runId, feed, uploader };
 }
 
 /**
@@ -771,7 +811,7 @@ export function startSidecar(opts) {
         onError: (e) =>
           warn(`journal: could not write ${journal.path} (${e.message}). Calls are unaffected; this run is no longer being recorded.`),
       });
-  const { server, ollamaServer, getVisa, feed } = createSidecar({ ...opts, runId, journal });
+  const { server, ollamaServer, getVisa, warmRoutes, feed } = createSidecar({ ...opts, runId, journal });
   if (ollamaPort != null) {
     ollamaServer.listen(ollamaPort, host, () => {
       step(`Ollama API (local models) on http://${host}:${ollamaPort}: set OLLAMA_HOST=${host}:${ollamaPort}`);
@@ -817,6 +857,8 @@ export function startSidecar(opts) {
         if (ollamaServer.listening) ollamaServer.close();
         setTimeout(() => process.exit(1), 1000).unref();
       },
+    }).then((warmed) => {
+      if (warmed) void warmRoutes();
     });
   });
   return server;

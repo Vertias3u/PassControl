@@ -165,7 +165,7 @@ describe("injection holds", () => {
     const { g, askOwner, onDecision } = gate({ onHold });
     const out = await g.decide(bash("SECRET"), entry, 600, "tainted");
     expect(askOwner).toHaveBeenCalledOnce();
-    expect(out.systemMessage).toMatch(/held by the injection guard because the agent recently read something that looked like a prompt injection/);
+    expect(out.systemMessage).toMatch(/held by the injection guard: something the agent recently read looked like a prompt injection, or could not be fully checked/);
     expect(onDecision).toHaveBeenCalledWith({ session: "sess-1", agent: null, tool: "Bash", decision: "owner_approved", ruleIndex: null, waitMs: 0 });
     expect(onHold).toHaveBeenCalledWith({ tool: "Bash", outcome: "approved" });
     expect(JSON.stringify(onHold.mock.calls)).not.toContain("SECRET");
@@ -219,6 +219,6 @@ describe("injection holds", () => {
     const { g } = gate({ askOwner: async () => ({ state }) });
     const out = await g.decide(bash("x"), none, 600, "tainted");
     expect(decision(out)).toBe("deny");
-    expect(out.hookSpecificOutput.permissionDecisionReason).toContain("held by the injection guard because the agent recently read something that looked like a prompt injection");
+    expect(out.hookSpecificOutput.permissionDecisionReason).toContain("held by the injection guard: something the agent recently read looked like a prompt injection, or could not be fully checked");
   });
 });

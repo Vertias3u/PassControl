@@ -37,7 +37,8 @@ import { pauseLine, pauseMessage, pauseReached, readPauseView, type PauseLine } 
 import { claimStopPoll, pausePromptOpen, readPauseLift, stopPromptOpen } from "@/lib/state/pause";
 import { seal, open } from "@/lib/crypto/aesgcm";
 import { serviceClient } from "@/lib/supabase";
-import { findInjectionTells, injectionHmacKey, injectionReceiptClaim, type InjectionFinding } from "@/lib/injection-guard";
+import { noteUnknownCoverage } from "@/lib/injection-coverage";
+import { findInjectionTells, injectionHmacKey, injectionReceiptClaim, injectionScanFailed, type InjectionFinding } from "@/lib/injection-guard";
 import { PROXY_TAINT_WAIT_MS } from "@/lib/injection-hold";
 import { recordInjectionFindings, redisSeenStore, type FindingsDb } from "@/lib/injection-findings";
 import { taintFromFindings } from "@/lib/state/taint";
@@ -124,7 +125,7 @@ import {
 } from "@/lib/providers/endpoint";
 import { rateLimit } from "@/lib/ratelimit";
 import { readBoundedBody } from "@/lib/http/bounded-body";
-import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
+import { captureError, captureGuardEvent, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 import { alertForGatewayStatus, notifyWorkspace } from "@/lib/alerts/workspace";
 import { pollTelegramDecisions } from "@/lib/alerts/approvals";
 import { noteSessionSpend } from "@/lib/alerts/session-spend";
@@ -1470,10 +1471,15 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const scan = (async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
       try {
-        return findInjectionTells(scanned, injectionHmacKey(userId));
+        return findInjectionTells(scanned, injectionHmacKey(userId), {
+          raw: rawBody,
+          // Fire and forget: a format with no rule is the operator's news, never the call's.
+          onUnknownTypes: (types) => waitUntil(noteUnknownCoverage(agentId, types)),
+        });
       } catch {
-        // A sensor fault never touches the call, nor its receipt.
-        return [];
+        // A sensor fault never touches the call, nor its receipt; it is a gap (1.7.1), so
+        // hold mode treats it as not checked rather than clean.
+        return [injectionScanFailed(scanned, injectionHmacKey(userId), rawBody)];
       }
     })();
     injectionScan = scan;
@@ -1493,13 +1499,13 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           try {
             const taint = await taintFromFindings({ agentId, mode, outcome, surface: "proxy", now: Date.now() });
             if (taint) {
-              await captureSecurityEvent("proxy.injection_taint", {
+              await captureGuardEvent("proxy.injection_taint", {
                 route: "api.proxy",
                 method: req.method,
                 provider,
                 agentId,
                 jti,
-                code: `tainted:${taint.families.join(",")}`,
+                code: `tainted:${[...taint.families, ...(taint.incomplete ? ["incomplete"] : [])].join(",")}`,
               });
             }
           } catch (error) {
@@ -1508,14 +1514,28 @@ async function handle(req: Request, params: { provider: string; path: string[] }
           }
           if (outcome.state !== "recorded") return;
           const families = [...new Set(outcome.recorded.flatMap((f) => f.families))];
-          await captureSecurityEvent("proxy.injection_tell", {
-            route: "api.proxy",
-            method: req.method,
-            provider,
-            agentId,
-            jti,
-            code: `recorded:${families.join(",")}`,
-          });
+          if (families.length > 0) {
+            await captureGuardEvent("proxy.injection_tell", {
+              route: "api.proxy",
+              method: req.method,
+              provider,
+              agentId,
+              jti,
+              code: `recorded:${families.join(",")}`,
+            });
+          }
+          // What could not be fully checked (external review P10): the gap's kind only.
+          const gaps = [...new Set(outcome.recorded.flatMap((f) => (f.gap ? [f.gap] : [])))];
+          if (gaps.length > 0) {
+            await captureGuardEvent("proxy.injection_incomplete", {
+              route: "api.proxy",
+              method: req.method,
+              provider,
+              agentId,
+              jti,
+              code: `incomplete:${gaps.join(",")}`,
+            });
+          }
         } catch {
           // A sensor fault never touches the call.
         }
@@ -1524,10 +1544,19 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     if (mode === "hold") {
       awaitInjectionTaint = async () => {
         const findings = await scan;
-        if (!findings.some((f) => f.severity === "high")) return;
+        // A strong finding, or output it could not fully check (1.7.1): either taints.
+        if (!findings.some((f) => f.severity === "high" || f.severity === "incomplete")) return;
         let timer: ReturnType<typeof setTimeout> | undefined;
-        await Promise.race([recordAndTaint, new Promise<void>((resolve) => (timer = setTimeout(resolve, PROXY_TAINT_WAIT_MS)))]);
+        const expired = await Promise.race([
+          recordAndTaint.then(() => false),
+          new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(true), PROXY_TAINT_WAIT_MS))),
+        ]);
         clearTimeout(timer);
+        // The bounded fail-open (external review P5): the answer goes, the taint lands
+        // behind it. Said, so how often a hold runs late is something the operator can see.
+        if (expired) {
+          await captureGuardEvent("proxy.injection_wait_expired", { route: "api.proxy", method: req.method, provider, agentId, jti }).catch(() => {});
+        }
       };
     }
   }

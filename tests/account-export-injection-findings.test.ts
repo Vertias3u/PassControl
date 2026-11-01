@@ -46,9 +46,11 @@ describe("the account export carries injection findings", () => {
     const sql = readFileSync(new URL("../db/migrations/0089_injection_findings.sql", import.meta.url), "utf8");
     const body = sql.slice(sql.indexOf("create table if not exists public.injection_findings"));
     const columns = [...body.slice(0, body.indexOf("constraint")).matchAll(/^\s{2}([a-z_]+)\s+(?:uuid|text(?:\[\])?|bigint|integer|smallint|timestamptz)(?=\s|,)/gm)].map((m) => m[1]);
-    const later = readFileSync(new URL("../db/migrations/0090_injection_findings_sidecar.sql", import.meta.url), "utf8");
-    columns.push(...[...later.matchAll(/add column if not exists ([a-z_]+)/g)].map((m) => m[1]));
-    expect(columns).toEqual(expect.arrayContaining(["families", "content_hmac", "normalization_version", "tool_name"]));
+    for (const file of ["0090_injection_findings_sidecar.sql", "0091_injection_findings_gaps.sql"]) {
+      const later = readFileSync(new URL(`../db/migrations/${file}`, import.meta.url), "utf8");
+      columns.push(...[...later.matchAll(/add column if not exists ([a-z_]+)/g)].map((m) => m[1]));
+    }
+    expect(columns).toEqual(expect.arrayContaining(["families", "content_hmac", "normalization_version", "tool_name", "gap"]));
     expect(read.select!.split(",").sort()).toEqual([...columns].sort());
   });
 
@@ -67,6 +69,17 @@ describe("the account export carries injection findings", () => {
     const reads = calls.filter((c) => c.table === "injection_findings");
     expect(reads.at(-1)!.select).not.toContain("tool_name");
     expect(reads.every((c) => c.eq.some(([column, value]) => column === "user_id" && value === "u1"))).toBe(true);
+  });
+
+  it("still exports a database at 0090, before 0091's gap", async () => {
+    const { client, calls } = accountDb((select) =>
+      select.includes("gap") ? { data: null, error: { code: "42703" } } : { data: [ROW], error: null }
+    );
+    const out = await loadAccountExport(client, user, client);
+    expect(out.data.injectionFindings).toEqual([ROW]);
+    const last = calls.filter((c) => c.table === "injection_findings").at(-1)!.select!;
+    expect(last).toContain("tool_name");
+    expect(last).not.toContain("gap");
   });
 
   it("refuses rather than export a silent gap on any other failure", async () => {

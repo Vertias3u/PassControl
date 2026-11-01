@@ -42,7 +42,7 @@ import { PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S } from "@/lib/gateway/limits";
 import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
 import { isSuspended } from "@/lib/state/redis";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
-import { HELD_TAINTED, HELD_UNKNOWN, injectionHoldReason } from "@/lib/injection-hold";
+import { HELD_INCOMPLETE, HELD_TAINTED, HELD_UNKNOWN, injectionHoldReason } from "@/lib/injection-hold";
 import { injectionGuardMode } from "@/lib/scope";
 import { evaluateGate } from "@/lib/gate";
 import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
@@ -481,6 +481,7 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     const request = {
       userId, agentId, service, method, path: upstreamPath, preview, fingerprint,
       ...(heldBecause === HELD_TAINTED ? { hold: "injection_tainted" as const }
+      : heldBecause === HELD_INCOMPLETE ? { hold: "injection_incomplete" as const }
         : heldBecause === HELD_UNKNOWN ? { hold: "injection_unknown" as const } : {}),
     };
     const approval = asks ? await awaitApproval({
@@ -492,7 +493,7 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
         path: upstreamPath,
         preview,
         dashboardUrl: `${requestUrl.origin}/dashboard/approvals`,
-        ...(heldBecause ? { heldBecause, offerClear: heldBecause === HELD_TAINTED } : {}),
+        ...(heldBecause ? { heldBecause, offerClear: heldBecause === HELD_TAINTED || heldBecause === HELD_INCOMPLETE } : {}),
       },
       waitMs: approvalWaitMs(),
     }) : tooLarge ? { state: "none" as const } : await existingApproval(request);

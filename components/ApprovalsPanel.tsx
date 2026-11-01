@@ -4,13 +4,13 @@
 // What the owner reads here is what they approve: the method and path the
 // gateway will send and the start of the body. Everything shown is agent-
 // chosen text, rendered as text by React, never as markup.
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Check, RefreshCw, X } from "lucide-react";
 
 import { clearInjectionTaint } from "@/app/dashboard/agents/[id]/injection-actions";
 import { useHydratedNow } from "@/components/dashboard/useHydratedNow";
-import { HELD_TAINTED, HELD_UNKNOWN } from "@/lib/injection-hold";
+import { HELD_INCOMPLETE, HELD_TAINTED, HELD_UNKNOWN } from "@/lib/injection-hold";
 import { decideApprovalAction, type DecideResult } from "@/app/dashboard/approvals/actions";
 
 export interface PendingApprovalView {
@@ -25,7 +25,7 @@ export interface PendingApprovalView {
   onTelegram: boolean;
   /** A tool on the agent's machine (Claude Code or Codex), held by the sidecar rather than the gateway. */
   tool?: boolean;
-  hold?: "tainted" | "cleared" | "unknown" | null;
+  hold?: "tainted" | "unchecked" | "cleared" | "unknown" | null;
 }
 
 type Outcome = { ok: boolean; text: string };
@@ -51,6 +51,8 @@ function ago(createdAt: number, now: number): string {
 
 export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null }) {
   const router = useRouter();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
   const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({});
   const [clearErrors, setClearErrors] = useState<Record<string, string>>({});
   const [pending, start] = useTransition();
@@ -130,11 +132,11 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
                 {item.hold ? (
                   <p className="pc-inline-notice">{item.hold === "cleared"
                     ? "Held by the injection guard when it was asked. The hold has since been cleared; this request still waits for Approve or Deny."
-                    : item.hold === "tainted" ? HELD_TAINTED : HELD_UNKNOWN}</p>
+                    : item.hold === "tainted" ? HELD_TAINTED : item.hold === "unchecked" ? HELD_INCOMPLETE : HELD_UNKNOWN}</p>
                 ) : null}
-                {item.hold === "tainted" ? (
+                {item.hold === "tainted" || item.hold === "unchecked" ? (
                   <div className="grid gap-2">
-                    <button type="button" className="ghost justify-self-start" disabled={pending} onClick={() => clear(item)} data-action="clear-hold">
+                    <button type="button" className="ghost justify-self-start" disabled={!mounted || pending} onClick={() => clear(item)} data-action="clear-hold">
                       Clear the hold
                     </button>
                     <p className="text-sm text-muted-foreground">
@@ -162,7 +164,7 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
                     <button
                       type="button"
                       className="inline-flex items-center gap-2"
-                      disabled={pending}
+                      disabled={!mounted || pending}
                       onClick={() => answer(item.id, "approved", item.tool === true)}
                       data-action="approve"
                     >
@@ -171,7 +173,7 @@ export function ApprovalsPanel({ items }: { items: PendingApprovalView[] | null 
                     <button
                       type="button"
                       className="ghost inline-flex items-center gap-2"
-                      disabled={pending}
+                      disabled={!mounted || pending}
                       onClick={() => answer(item.id, "denied", item.tool === true)}
                       data-action="deny"
                     >

@@ -183,7 +183,7 @@ export function AgentFleetTable({
   };
   const [editing, setEditing] = useState<{ id: string; kind: EditorKind } | null>(null);
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState<"all" | "active" | "suspended" | "revoked" | "attention">("all");
+  const [status, setStatus] = useState<"live" | "all" | "active" | "suspended" | "revoked" | "attention">("live");
   const [sort, setSort] = useState<"name" | "activity" | "spend" | "risk">("activity");
   const { format } = useDashboardTime();
   const toggle = (id: string, kind: EditorKind) =>
@@ -201,6 +201,7 @@ export function AgentFleetTable({
         if (needle && ![agent.name, agent.passport_pubkey ?? "direct agent key"].some((value) => value.toLowerCase().includes(needle))) {
           return false;
         }
+        if (status === "live") return agent.status !== "revoked";
         if (status === "attention") return agent.status !== "active" || risk(agent) >= BUDGET_ATTENTION_RATIO;
         return status === "all" || agent.status === status;
       })
@@ -249,6 +250,7 @@ export function AgentFleetTable({
           <SlidersHorizontal aria-hidden="true" />
           <span className="sr-only">Filter agent status</span>
           <select value={status} onChange={(event) => setStatus(event.target.value as typeof status)}>
+            <option value="live">Not revoked</option>
             <option value="all">All states</option>
             <option value="active">Active</option>
             <option value="suspended">Suspended</option>

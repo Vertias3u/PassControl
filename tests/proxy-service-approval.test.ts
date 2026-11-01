@@ -428,6 +428,14 @@ describe("a write while the agent is tainted (injection guard, hold)", () => {
     h.fetch.mockResolvedValue(new Response("{}", { status: 201 }));
   });
 
+  it("a gap-only taint: held, tagged incomplete, says so, and offers Clear", async () => {
+    inj.readTaint.mockResolvedValue({ since: Date.now(), until: Date.now() + 1_800_000, families: [], incomplete: true, surface: "proxy" });
+    expect((await post()).status).toBe(409);
+    expectNothingSent();
+    expect(h.checkApproval.mock.calls.at(-1)![0]).toHaveProperty("hold", "injection_incomplete");
+    expect(h.sendApprovalPrompt).toHaveBeenCalledWith(TENANT, expect.objectContaining({ heldBecause: expect.stringMatching(/could not fully check/), offerClear: true }));
+  });
+
   it("holds an admitted write for the owner, says why, and decrypts and sends nothing", async () => {
     tainted();
     const res = await post();

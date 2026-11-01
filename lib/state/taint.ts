@@ -1,6 +1,7 @@
 // Injection guard Phase 2, `hold`: the taint (plans/injection-guard.md §4).
 //
-// A new high finding in hold mode marks the agent tainted for 30 minutes. While it is,
+// A new high finding in hold mode marks the agent tainted for 30 minutes, and so does
+// tool output the guard could not fully check (1.7.1, `incomplete`). While it is,
 // reading goes on (model calls, Read, Grep) and acting waits for the owner: a /svc write
 // and the sidecar's risky tools go through "Ask me first". One key per agent with a TTL,
 // so a taint ends on its own; keyed on the agent, never on a declared session id, which
@@ -30,6 +31,8 @@ export interface Taint {
   families: InjectionFamily[];
   /** Where the latest tainting block was seen. */
   surface: "proxy" | "sidecar";
+  /** 1.7.1: some tool output since `since` could not be fully checked. */
+  incomplete?: true;
 }
 
 function parse(raw: unknown): Taint {
@@ -41,11 +44,13 @@ function parse(raw: unknown): Taint {
     typeof t.until !== "number" ||
     !Array.isArray(t.families) ||
     !t.families.every((f) => INJECTION_FAMILIES.includes(f as InjectionFamily)) ||
-    (t.surface !== "proxy" && t.surface !== "sidecar")
+    (t.surface !== "proxy" && t.surface !== "sidecar") ||
+    (t.incomplete !== undefined && t.incomplete !== true)
   ) {
     throw new Error("unreadable taint");
   }
-  return { since: t.since, until: t.until, families: t.families as InjectionFamily[], surface: t.surface };
+  const taint: Taint = { since: t.since, until: t.until, families: t.families as InjectionFamily[], surface: t.surface };
+  return t.incomplete ? { ...taint, incomplete: true } : taint;
 }
 
 /** The agent's taint, or null. Throws when Redis cannot answer or the value is not ours. */
@@ -59,7 +64,7 @@ export async function readTaint(agentId: string, nowMs: number): Promise<Taint |
 /** Taint (or extend) for TAINT_TTL_S from now. Keeps the start and adds the families. */
 export async function taintAgent(
   agentId: string,
-  found: { families: readonly InjectionFamily[]; surface: "proxy" | "sidecar" },
+  found: { families: readonly InjectionFamily[]; surface: "proxy" | "sidecar"; incomplete?: boolean },
   nowMs: number
 ): Promise<Taint> {
   let current: Taint | null = null;
@@ -74,6 +79,7 @@ export async function taintAgent(
     until: nowMs + TAINT_TTL_S * 1000,
     families: INJECTION_FAMILIES.filter((f) => families.has(f)),
     surface: found.surface,
+    ...(current?.incomplete || found.incomplete ? { incomplete: true as const } : {}),
   };
   await redis().set(taintKey(agentId), JSON.stringify(taint), { ex: TAINT_TTL_S });
   return taint;
@@ -85,7 +91,8 @@ export async function clearTaint(agentId: string): Promise<boolean> {
 }
 
 /**
- * The step after recordInjectionFindings: in hold mode, a new high finding taints.
+ * The step after recordInjectionFindings: in hold mode, a new high finding taints, and so
+ * does new output that could not be fully checked (a gap, 1.7.1).
  * Returns the taint it set, or null. A write the table could not take still taints on
  * its findings, so a database fault does not switch the hold off; the cost is that the
  * same block, retried while the table is down, can taint again after a Clear.
@@ -103,6 +110,7 @@ export async function taintFromFindings(input: {
   const candidates =
     outcome.state === "recorded" ? outcome.recorded : outcome.state === "failed" || outcome.state === "unavailable" ? outcome.unrecorded : [];
   const high = candidates.filter((f) => f.severity === "high");
-  if (high.length === 0) return null;
-  return taintAgent(input.agentId, { families: high.flatMap((f) => f.families), surface: input.surface }, input.now);
+  const gaps = candidates.some((f) => f.severity === "incomplete");
+  if (high.length === 0 && !gaps) return null;
+  return taintAgent(input.agentId, { families: high.flatMap((f) => f.families), surface: input.surface, incomplete: gaps }, input.now);
 }

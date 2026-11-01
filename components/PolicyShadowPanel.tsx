@@ -276,12 +276,12 @@ const INJECTION_GUARD_CHOICES = [
   {
     value: "monitor",
     label: "Record what it finds",
-    help: "Nothing is refused and nothing in the call changes. Each new finding is listed on this agent's page: where in the request it was, which kind of tell, and how strong. The text itself is never stored.",
+    help: "Nothing is refused and nothing in the call changes. Each new finding is listed on this agent's page: where it was, which kind of tell and how strong, or why that output could not be fully checked. The text itself is never stored.",
   },
   {
     value: "hold",
-    label: "Record, and hold risky actions after a strong finding",
-    help: "Records the same way. After a strong finding, for 30 minutes: this agent's service writes wait for your yes, and so do Claude Code's commands, file edits, fetches and MCP tools wherever PassControl's tool hook is installed (passcontrol configure claude-code, on a login or an API key). Reading and model calls go on. You can clear the hold from this agent's page or the Telegram prompt; approving one action does not clear it.",
+    label: "Record, and hold risky actions after a strong finding or an incomplete check",
+    help: "Records the same way. After a strong finding, or tool output too large to check or that the check failed on, for 30 minutes: this agent's service writes through PassControl wait for your yes. Claude Code's and Codex's commands, file edits, fetches and MCP tools wait too wherever PassControl's tool hook is installed (passcontrol configure claude-code or codex), but go ahead with a warning if the sidecar or the dashboard cannot answer in time. Reading and model calls go on. You can clear the hold from this agent's page or the Telegram prompt; approving one action does not clear it.",
   },
 ] as const;
 
@@ -301,13 +301,15 @@ export function InjectionGuardField({
 }) {
   return (
     <fieldset className="m-0 grid gap-3 border-0 border-t border-border p-0 pt-4" data-policy-field="injection_guard">
-      <legend className="m-0 p-0 text-sm font-semibold text-foreground">Injected instructions</legend>
+      <legend className="m-0 p-0 text-sm font-semibold text-foreground">Injection guard</legend>
       <p className="m-0 text-xs leading-5 text-muted-foreground">
         A web page, file or tool result the agent reads can carry instructions meant for the model. PassControl can
         look for the usual tells in tool output (an &ldquo;ignore previous instructions&rdquo;, fake system markup,
-        a request to send keys somewhere, hidden text). It reads only what tools returned, never your own prompt. A
-        tell is a hint, not proof: a careful attack has none. Takes effect when promoted; shadow mode does not
-        measure it.
+        a request to send keys somewhere, hidden text), with fixed rules: no model, and nothing it learns. The
+        gateway checks the tool output inside model calls that go through it; on a Pro, Max or ChatGPT login, the
+        sidecar checks what Claude Code or Codex hands its hook, and some built-in or hosted tools may not hand
+        theirs over. It never reads your own prompt. A tell is a hint, not proof: a careful attack has none.
+        Takes effect when promoted; shadow mode does not measure it.
       </p>
       {INJECTION_GUARD_CHOICES.map((choice) => (
         <label key={choice.value || "off"} className="flex items-start gap-2 text-sm">

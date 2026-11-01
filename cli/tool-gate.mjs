@@ -116,7 +116,8 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
     const original = evaluateToolRules(parsed, input);
     const hit = injection === "tainted" ? underTaint(original, input.tool_name) : original;
     const escalated = hit.reason === "injection_taint";
-    const guardText = "This tool was held by the injection guard because the agent recently read something that looked like a prompt injection.";
+    // `/self` says only that the agent is tainted, not why: a tell, or output not fully checked (1.7.1).
+    const guardText = "This tool was held by the injection guard: something the agent recently read looked like a prompt injection, or could not be fully checked.";
     let warning = {};
     if (injection === "unknown" && (injectionWarnedAt === null || now() - injectionWarnedAt >= WARN_EVERY_MS)) {
       injectionWarnedAt = now();

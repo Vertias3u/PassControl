@@ -168,6 +168,53 @@ describe("call uploader: what it sends", () => {
     });
   });
 
+  // 1.7.1: output the sidecar could not fully check. Its own kind, never a model call.
+  it("sends a gap with its contract's fields only, never as a model call", async () => {
+    const { uploader, sent, advance } = harness([{ status: 200 }], { flushMs: 1_000 });
+    uploader.add({
+      kind: "injection_incomplete",
+      at: 1_700_000_000_000,
+      source: "tool_result",
+      path: "tool_calls[0].tool_response",
+      tool: "Read",
+      gap: "too_large",
+      detector: "pc-heuristic-1",
+      normalization_version: 1,
+      block_sha256: "cd".repeat(32),
+      families: ["role_markup"],
+      text: "never sent",
+    });
+    await advance(1_000);
+    const [wire] = sent[0];
+    expect(wire).toEqual({
+      key: wire.key,
+      kind: "injection_incomplete",
+      at: 1_700_000_000_000,
+      source: "tool_result",
+      path: "tool_calls[0].tool_response",
+      tool: "Read",
+      gap: "too_large",
+      detector: "pc-heuristic-1",
+      normalization_version: 1,
+      block_sha256: "cd".repeat(32),
+    });
+  });
+
+  // Version skew: a 1.7.0 gateway does not know injection_incomplete, and answers 200
+  // with it counted as rejected. The batch is done; nothing waits behind it.
+  it("a gateway that rejects a gap still answers 200, and the queue moves on", async () => {
+    const { uploader, sent, advance } = harness([{ status: 200, body: { accepted: 1, rejected: 1 } }], { flushMs: 1_000 });
+    uploader.add({ kind: "injection_incomplete", at: 1, source: "tool_result", path: "tool_response", gap: "too_large", detector: "pc-heuristic-1", normalization_version: 1, block_sha256: "ef".repeat(32) });
+    uploader.add(event());
+    await advance(1_000);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].map((e) => e.kind)).toEqual(["injection_incomplete", "model_call"]);
+    uploader.add(event());
+    await advance(1_000);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].map((e) => e.kind)).toEqual(["model_call"]);
+  });
+
   it("gives every event its own key", async () => {
     const { uploader, sent, advance } = harness([{ status: 200 }], { flushMs: 1_000 });
     for (let i = 0; i < 20; i++) uploader.add(event());
