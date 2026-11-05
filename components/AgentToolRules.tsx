@@ -110,7 +110,9 @@ export function AgentToolRules({
         For Claude Code through <code>passcontrol sidecar</code>, on a Claude Pro or Max login or an API key. The sidecar
         checks each tool call against these rules before it runs: the strictest matching rule wins, and a tool
         no rule names is left to Claude Code&apos;s own permissions. They work inside Claude Code, through its
-        hooks: a guard rail for your own sessions, not a wall against a client that skips them. Set up with{" "}
+        hooks: a guard rail for your own sessions, not a wall against a client that skips them. A command rule
+        checks each part of a command line, split at <code>;</code>, <code>&amp;&amp;</code>, <code>|</code>,{" "}
+        <code>&amp;</code> and brackets; it cannot see inside a script, an alias or <code>sh -c</code>. Set up with{" "}
         <code>passcontrol configure claude-code --subscription --write</code> for a login, or{" "}
         <code>passcontrol configure claude-code --write</code> for an API key (re-run it if you set that up
         before this release). Codex on a ChatGPT plan gets

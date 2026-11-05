@@ -71,10 +71,13 @@ function fakeDb(opts: {
   rpc?: { spent_tokens: number; spent_microcents: number };
   rpcError?: boolean;
   updateError?: boolean;
+  /** Rows an update matches (default 1). 0 = the attempt id is not this tenant's. */
+  updateRows?: number;
   /** Postgres error the ledger insert should fail with, e.g. { code: "23505" }. */
   insertError?: { code?: string; message?: string };
 }) {
   const updates: Record<string, unknown>[] = [];
+  const updateFilters: Record<string, unknown>[] = [];
   const inserts: Record<string, unknown>[] = [];
   const rpcCalls: any[] = [];
   const stored: Record<string, unknown> = {
@@ -108,8 +111,18 @@ function fakeDb(opts: {
         updates.push(values);
         // The update builder is awaited directly after .eq(), so the chain link
         // has to be thenable rather than another builder.
+        const filters: Record<string, unknown> = {};
+        updateFilters.push(filters);
+        const rows = Array.from({ length: opts.updateRows ?? 1 }, () => ({ attempt_id: filters.attempt_id }));
+        const result = () =>
+          Promise.resolve(opts.updateError ? { data: null, error: { message: "boom" } } : { data: rows, error: null });
         const u: any = {
-          eq: () => Promise.resolve(opts.updateError ? { error: { message: "boom" } } : { error: null }),
+          select: () => u,
+          eq: (column: string, value: unknown) => {
+            filters[column] = value;
+            return u;
+          },
+          then: (ok: any, bad: any) => result().then(ok, bad),
         };
         return u;
       },
@@ -128,6 +141,7 @@ function fakeDb(opts: {
       },
     },
     updates,
+    updateFilters,
     rpcCalls,
   };
 }
@@ -797,6 +811,26 @@ describe("POST /holds/{attemptId}/resolve — a dispatched hold cannot be releas
     expect(fake.updates, "a corrected resolve must overwrite the mistyped figure").toEqual([
       { tokens: 19412, microcents: 2156000 },
     ]);
+  });
+
+  // Cloud review 2026-11-03, hardening note: on a degraded resolve the hold is gone,
+  // so nothing upstream proves the attempt id is this agent's. The correction must not
+  // be able to overwrite another tenant's ledger row that happens to share it.
+  it("scopes the correction to this tenant's agent", async () => {
+    const fake = fakeDb({ insertError: { code: "23505", message: "duplicate key" } });
+    db.current = fake.client;
+    resolveHold.mockResolvedValue({ applied: false, appliedTokens: 1, appliedMicrocents: 1, degraded: true });
+    await resolveRoute(post(url, { outcome: "spent", tokens: 5, microcents: 5 }), ctx(params));
+    expect(fake.updateFilters.at(-1)).toEqual({ attempt_id: ATTEMPT, agent_id: AGENT, user_id: USER });
+  });
+
+  it("does not report a correction recorded when the attempt id is another tenant's", async () => {
+    const fake = fakeDb({ insertError: { code: "23505", message: "duplicate key" }, updateRows: 0 });
+    db.current = fake.client;
+    resolveHold.mockResolvedValue({ applied: false, appliedTokens: 1, appliedMicrocents: 1, degraded: true });
+    const res = await resolveRoute(post(url, { outcome: "spent", tokens: 5, microcents: 5 }), ctx(params));
+    const body = (await res.json()) as { data: Record<string, unknown> };
+    expect(body.data).toMatchObject({ ledger_recorded: false, ledger_corrected: false });
   });
 
   it("reports a ledger write that genuinely failed instead of swallowing it", async () => {

@@ -15,11 +15,14 @@
 // every agent depends on, is untouched by this one.
 export const runtime = "edge";
 
+import { readBoundedBody } from "@/lib/http/bounded-body";
+import { clientIp } from "@/lib/http/client-ip";
 import { waitUntil } from "@vercel/functions";
 import { NextResponse } from "next/server";
 import { base64urlToBytes, bytesToUtf8 } from "@/lib/encoding";
 import { passportIdToPublicKey, verifySignature } from "@/lib/crypto/ed25519";
 import { claimNonce, touchLastSeen } from "@/lib/state/redis";
+import { wrongProofPurpose } from "@/lib/auth/proof-purpose";
 import { serviceClient } from "@/lib/supabase";
 import { mintDelegatedVisa, type ScopeEntry } from "@/lib/auth/visa";
 import { findAuthenticatablePassport } from "@/lib/auth/passport";
@@ -72,7 +75,7 @@ export async function POST(req: Request) {
 
 async function handlePost(req: Request) {
   // 0. Per-IP limit before any work, keyed by a keyed hash as the challenge's is.
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || "unknown";
+  const ip = clientIp(req);
   let fingerprint: string | null = null;
   try {
     rateLimitHmacKey ??= authHmacKey(AUTH_HMAC_LABELS.challengeRateLimit);
@@ -94,9 +97,9 @@ async function handlePost(req: Request) {
   if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return fail(413, "payload_too_large");
   let body: { payload?: unknown; signature?: unknown; chain?: unknown };
   try {
-    const raw = await req.text();
-    if (raw.length > MAX_BODY_BYTES) return fail(413, "payload_too_large");
-    body = JSON.parse(raw);
+    const bounded = await readBoundedBody(req, MAX_BODY_BYTES);
+    if (!bounded.ok) return fail(413, "payload_too_large");
+    body = JSON.parse(bounded.text);
   } catch {
     return fail(400, "invalid_json");
   }
@@ -119,6 +122,10 @@ async function handlePost(req: Request) {
   }
   if (typeof payload.passport_id !== "string" || typeof payload.nonce !== "string" || typeof payload.ts !== "number") {
     return fail(400, "invalid_payload");
+  }
+  // A proof made for another passport door is refused (cloud review CP5).
+  if (wrongProofPurpose(payload as Record<string, unknown>, "delegated")) {
+    return securityFail(401, "wrong_purpose");
   }
   const workerKey = payload.passport_id;
 
@@ -234,7 +241,7 @@ async function handlePost(req: Request) {
     chainHash: verdict.chainHash,
     links: links.map((l) => ({ dlg: l.jti, cap: l.cap, iat: l.iat, exp: l.exp })),
   });
-  await touchLastSeen(agent.id);
+  waitUntil(Promise.resolve(touchLastSeen(agent.id)).catch(() => undefined));
 
   return NextResponse.json({
     visa: token,

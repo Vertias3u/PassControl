@@ -115,6 +115,8 @@ describe("PassControl.fromDelegation and delegate()", () => {
         expect(body.chain).toEqual([l1]);
         const payload = Buffer.from(body.payload, "base64url");
         expect(JSON.parse(payload.toString()).passport_id).toBe(w1.publicKey);
+        // Signed for this door only (cloud review CP5).
+        expect(JSON.parse(payload.toString()).purpose).toBe("delegated");
         expect(ed25519.verify(Buffer.from(body.signature, "base64url"), payload, Buffer.from(w1.publicKey, "base64url"))).toBe(true);
         return new Response(JSON.stringify({ visa: "worker-visa", expires_in: 300 }), { status: 200 });
       }

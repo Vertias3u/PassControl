@@ -28,6 +28,7 @@ import { redis } from "./redis";
 
 const k = {
   code: (userCode: string) => `devauth:code:${userCode}`,
+  codeAttempts: (userCode: string) => `devauth:code-attempts:${userCode}`,
   device: (deviceCodeHash: string) => `devauth:device:${deviceCodeHash}`,
   grant: (deviceCodeHash: string) => `devauth:grant:${deviceCodeHash}`,
 };
@@ -126,7 +127,13 @@ export async function resolveUserCode(
   // pressed Approve, surfacing as "that code is not valid". Measured, not guessed.
   if (!count) return pending;
 
-  const attempts = (pending.attempts ?? 0) + 1;
+  const attempts = await redis().incr(k.codeAttempts(userCode));
+  const ttl = await redis().ttl(k.code(userCode));
+  if (ttl <= 0) {
+    await destroyDeviceAuthorization(userCode, pending.deviceCodeHash);
+    return null;
+  }
+  await redis().expire(k.codeAttempts(userCode), ttl);
   if (attempts > MAX_CODE_ATTEMPTS) {
     // Destroy rather than lock: a login nobody can complete is a login an
     // attacker cannot complete either, and the operator simply re-runs the
@@ -146,9 +153,8 @@ export async function resolveUserCode(
   }
   // Preserve the original TTL rather than restarting it — a caller hammering
   // this must not be able to keep a login alive indefinitely.
-  const ttl = await redis().ttl(k.code(userCode));
   await redis().set(k.code(userCode), JSON.stringify({ ...pending, attempts }), {
-    ex: ttl > 0 ? ttl : DEVICE_CODE_TTL_S,
+    ex: ttl,
   });
   return { ...pending, attempts };
 }
@@ -191,6 +197,7 @@ export async function destroyDeviceAuthorization(
   deviceCodeHash: string
 ): Promise<void> {
   await redis().del(k.code(userCode));
+  await redis().del(k.codeAttempts(userCode));
   await redis().del(k.device(deviceCodeHash));
   await redis().del(k.grant(deviceCodeHash));
 }

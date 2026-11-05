@@ -15,20 +15,22 @@ import { bytesToBase64url, utf8ToBytes } from "@/lib/encoding";
 
 const h = vi.hoisted(() => ({
   recordMock: vi.fn(),
+  rateLimitMock: vi.fn(),
+  touchLastSeenMock: vi.fn(),
   claimNonceMock: vi.fn(),
   rows: [] as Record<string, unknown>[],
 }));
 
 vi.mock("@vercel/functions", () => ({ waitUntil: vi.fn() }));
-vi.mock("@/lib/ratelimit", () => ({ rateLimit: async () => ({ success: true, remaining: 10 }) }));
+vi.mock("@/lib/ratelimit", () => ({ rateLimit: (...a: unknown[]) => h.rateLimitMock(...a) }));
 vi.mock("@/lib/state/redis", () => ({
   claimNonce: (...a: unknown[]) => h.claimNonceMock(...a),
   redis: () => ({ fake: true }),
-  touchLastSeen: vi.fn(),
+  touchLastSeen: (...a: unknown[]) => h.touchLastSeenMock(...a),
 }));
 vi.mock("@/lib/passport-source-observation", () => ({
   observePassportSource: async () => null,
-  passportSourceFingerprint: async (_scope: string, ip: string) => `hashed-${ip.length}`,
+  passportSourceFingerprint: async (_scope: string, ip: string) => `hashed-${ip}`,
 }));
 vi.mock("@/lib/passport-key-storage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/passport-key-storage")>()),
@@ -101,6 +103,8 @@ beforeEach(() => {
   h.recordMock.mockReset().mockResolvedValue(undefined);
   h.claimNonceMock.mockReset().mockResolvedValue(true);
   h.rows = [agentRow()];
+  h.rateLimitMock.mockReset().mockResolvedValue({ success: true, remaining: 10 });
+  h.touchLastSeenMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("recording what a passport declares about its own key storage", () => {
@@ -144,5 +148,81 @@ describe("recording what a passport declares about its own key storage", () => {
     const res = await post({ key_storage: { store: "os" } });
     expect(res.status).toBe(200);
     expect(await res.json()).toHaveProperty("visa");
+  });
+});
+
+
+// Cloud review 2026-11-03, CP5: one signed {passport_id, ts, nonce} was good at all
+// three passport doors, so a relay that saw an agent-token body could take it to
+// this route and mint a VISA instead. A proof now says what it is for.
+describe("a passport proof is good only for the door it names (CP5)", () => {
+  it("refuses an agent-token proof (it carries aud), without burning its nonce", async () => {
+    const res = await post({ aud: "billing-service" });
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe("wrong_purpose");
+    expect(h.claimNonceMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["agent-token", "delegated", "", 7])("refuses a proof signed for purpose %j", async (purpose) => {
+    const res = await post({ purpose });
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe("wrong_purpose");
+  });
+
+  it("mints for a proof signed for this door, and for one that names none (older clients)", async () => {
+    expect((await post({ purpose: "challenge" })).status).toBe(200);
+    expect((await post({})).status).toBe(200);
+  });
+});
+
+describe("challenge perimeter regressions", () => {
+  it("keeps the trusted CF IP in the same limiter bucket despite forged XFF", async () => {
+    vi.stubEnv("PASSCONTROL_TRUST_CF_CONNECTING_IP", "true");
+    try {
+      for (const xff of ["198.51.100.1", "192.0.2.222"]) {
+        await challenge(new Request("https://gw.example.com/api/auth/challenge", {
+          method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.4", "x-forwarded-for": xff }, body: "{}",
+        }));
+      }
+      expect(h.rateLimitMock).toHaveBeenCalledTimes(2);
+      expect(h.rateLimitMock.mock.calls[0]![0]).toBe(h.rateLimitMock.mock.calls[1]![0]);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("cancels an oversized stream without content-length before draining it", async () => {
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("x".repeat(8193)));
+        controller.enqueue(new TextEncoder().encode("unread trailing data"));
+        controller.close();
+      }, cancel,
+    });
+    const req = new Request("https://gw.example.com/api/auth/challenge", {
+      method: "POST", headers: { "content-type": "application/json" }, body: stream, duplex: "half",
+    } as RequestInit);
+    expect(req.headers.has("content-length")).toBe(false);
+    const res = await challenge(req);
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: "payload_too_large" });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("bounds UTF-8 bytes rather than JSON string length", async () => {
+    const body = JSON.stringify({ padding: "界".repeat(3000) });
+    expect(body.length).toBeLessThan(8192);
+    expect(new TextEncoder().encode(body).length).toBeGreaterThan(8192);
+    const res = await challenge(new Request("https://gw.example.com/api/auth/challenge", {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+    }));
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: "payload_too_large" });
+  });
+
+  it("returns the minted visa when last-seen rejects", async () => {
+    h.touchLastSeenMock.mockRejectedValueOnce(new Error("Redis unavailable"));
+    const res = await post({});
+    expect(res.status).toBe(200);
+    expect((await res.json()).visa).toEqual(expect.any(String));
   });
 });

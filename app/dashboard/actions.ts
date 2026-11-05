@@ -49,6 +49,7 @@ import {
 } from "@/lib/state/device-auth";
 import { normalizeUserCode } from "@/lib/device-codes";
 import { open, seal } from "@/lib/crypto/aesgcm";
+import { sealContext } from "@/lib/crypto/seal-context";
 import { stashKeyImport, takeKeyImport } from "@/lib/state/redis";
 import * as fleet from "@/lib/fleet";
 import {
@@ -1112,7 +1113,7 @@ async function probeProviderKeyBody(input: {
       provider,
       key: clean.key,
       expiresAt: Date.now() + KEY_IMPORT_HANDOFF_TTL_MS,
-    })),
+    }), sealContext.keyImport(user.id, handoff)),
     KEY_IMPORT_HANDOFF_TTL_S
   );
   return { ok: true, provider, mode, models, modelsTotal, handoff };
@@ -1160,7 +1161,7 @@ async function redeemKeyImport(
   const sealed = token.length > 0 && token.length <= 200
     ? await takeKeyImport(user.id, token)
     : null;
-  const handoff = sealed ? parseKeyImportHandoff(await open(sealed)) : null;
+  const handoff = sealed ? parseKeyImportHandoff(await open(sealed, sealContext.keyImport(user.id, token))) : null;
   if (
     !handoff ||
     handoff.userId !== user.id ||
@@ -1873,7 +1874,8 @@ async function approveCliDeviceBody(rawCode: string): Promise<{ clientName: stri
         token: minted.token,
         prefix: minted.prefix,
         expiresAt: Date.now() + GRANT_TTL_S * 1000,
-      })
+      }),
+      sealContext.deviceGrant(found.pending.deviceCodeHash)
     ),
   });
 

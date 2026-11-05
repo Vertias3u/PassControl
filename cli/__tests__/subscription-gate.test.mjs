@@ -302,13 +302,31 @@ describe("stop gate: the tool rules that come with each answer", () => {
     expect(await selfAnswerState(new Response("not json", { status: 200 }))).toEqual({ state: "open" });
   });
 
-  it("keeps the latest rules, and stops trusting them once they are stale", async () => {
+  // Cloud review 2026-11-03, SC-B: rules that lapsed after `maxStaleMs` let every tool
+  // through, and failing every read was enough to make them lapse. Owner, 2026-11-04:
+  // the last rules known stay in force until the gateway gives others.
+  it("keeps the latest rules, however old, until the gateway gives others", async () => {
     const { gate, clock } = gateWith([{ state: "open", toolRules: RULES }], { maxStaleMs: 60_000 });
     expect(gate.toolRules()).toBeNull();
     await gate.decide(input("PreToolUse"));
     expect(gate.toolRules()).toMatchObject({ read: RULES });
-    clock.advance(60_001);
-    expect(gate.toolRules()).toBeNull();
+    clock.advance(60 * 60_000);
+    expect(gate.toolRules()).toMatchObject({ read: RULES });
+  });
+
+  it("a stale taint still reads as tainted until the end the gateway named; a stale clear is unknown", async () => {
+    // The test clock starts at 1_000_000 ms: the taint's end is on that clock.
+    const until = (ms) => new Date(1_000_000 + ms).toISOString();
+    const tainted = gateWith([{ state: "open", injection: { mode: "hold", readable: true, tainted_until: until(30 * 60_000) } }], { maxStaleMs: 60_000 });
+    await tainted.gate.decide(input("PreToolUse"));
+    tainted.clock.advance(5 * 60_000);
+    expect(tainted.gate.injection()).toBe("tainted");
+    tainted.clock.advance(26 * 60_000);
+    expect(tainted.gate.injection()).toBe("unknown");
+    const clear = gateWith([{ state: "open", injection: { mode: "hold", readable: true, tainted_until: null } }], { maxStaleMs: 60_000 });
+    await clear.gate.decide(input("PreToolUse"));
+    clear.clock.advance(60_001);
+    expect(clear.gate.injection()).toBe("unknown");
   });
 
   it("reads an open answer without rules as a gateway that has none (one from before Phase 2)", async () => {

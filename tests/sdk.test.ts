@@ -70,6 +70,8 @@ describe("PassControl.getVisa — minting", () => {
     expect(claims.passport_id).toBe(PASSPORT_ID);
     expect(typeof claims.ts).toBe("number");
     expect(typeof claims.nonce).toBe("string");
+    // Signed, so a relay cannot spend it at another passport door (cloud review CP5).
+    expect(claims.purpose).toBe("challenge");
   });
 
   it("caches the visa and does not re-mint while it is fresh", async () => {

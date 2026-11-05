@@ -603,6 +603,9 @@ describe("refusals, none of which decrypt the token or reach GitHub", () => {
     const res = await call("GET", "/user");
     expect(res.status).toBe(503);
     expect((await res.json()).error).toBe("credential_unavailable");
+    // Its own row (A3), not the endpoint lookup's: that copy says the gateway could
+    // not read where the credential goes, which is not what failed here.
+    expect(lastLog()).toMatchObject({ status: "credential_unavailable", callKind: "service" });
     expect(h.fetch).not.toHaveBeenCalled();
   });
 
@@ -738,6 +741,27 @@ describe("Telegram", () => {
     const res = await tg("POST", "sendMessage", "", { headers: { "content-type": "multipart/form-data; boundary=x" }, body: "--x--" });
     expect(res.status).toBe(415);
     expectNothingSent();
+  });
+
+  // Cloud review 2026-11-03, B5: the check was a substring match, so a multipart
+  // upload naming an allowed type in a parameter passed it. The MEDIA TYPE decides.
+  it.each([
+    "multipart/form-data; boundary=x; a=application/json",
+    "multipart/form-data; boundary=application/x-www-form-urlencoded",
+    "text/plain+application/json",
+    "application/jsonx",
+  ])("judges the media type, not a substring of the header: %s", async (contentType) => {
+    const res = await tg("POST", "sendMessage", "", { headers: { "content-type": contentType }, body: "--x--" });
+    expect(res.status).toBe(415);
+    expectNothingSent();
+  });
+
+  it("still admits an allowed type with parameters, in any casing", async () => {
+    const res = await tg("POST", "sendMessage", "", {
+      headers: { "content-type": "Application/JSON ; charset=utf-8" },
+      body: '{"chat_id":42,"text":"hi"}',
+    });
+    expect(res.status).toBe(200);
   });
 
   it("refuses setWebhook even with a rule for it, in any casing", async () => {

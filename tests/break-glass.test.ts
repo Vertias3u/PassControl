@@ -41,6 +41,12 @@ vi.mock("@/lib/ratelimit", () => ({ rateLimit: (...a: unknown[]) => h.rateLimitM
 vi.mock("@/lib/state/redis", () => ({
   claimNonce: (...a: unknown[]) => h.claimNonceMock(...a),
   touchLastSeen: (...a: unknown[]) => h.touchLastSeenMock(...a),
+  // CP1: agent-token reads the kill switch and Redis suspend before minting.
+  isSuspended: async () => false,
+}));
+vi.mock("@/lib/state/killswitch", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/state/killswitch")>()),
+  readKillState: async () => ({ platformKill: false, userKill: false, denylist: [] }),
 }));
 vi.mock("@/lib/owner/current", () => ({
   readCurrentOwner: (...a: unknown[]) => h.readCurrentOwnerMock(...a),

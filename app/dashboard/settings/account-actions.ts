@@ -3,7 +3,7 @@
 import { mfaAuthorizedUser } from "@/lib/mfa";
 import { serviceClient } from "@/lib/supabase";
 import { userClient } from "@/lib/supabase/server";
-import { armTenantKill } from "@/lib/state/killswitch";
+import { armTenantKill, observeKillState } from "@/lib/state/killswitch";
 import { redis } from "@/lib/state/redis";
 import { purgeAccountRuntimeState } from "@/lib/account-lifecycle";
 import { captureError } from "@/lib/observability";
@@ -54,6 +54,14 @@ export async function deleteAccount(confirmation: string): Promise<DeleteAccount
   // no request can use a still-cached provider credential during erasure. The
   // database function captures every cleanup id only after taking the profile
   // lock, so a concurrent child insert cannot be omitted from the inventory.
+  //
+  // Look first (cloud review 2026-11-03, A5): if the erasure fails, the stop is put
+  // back as it was found. An operator's own master kill must never be lifted by a
+  // failed delete, and "could not tell" counts as armed.
+  const killBefore = await observeKillState(user.id).then(
+    (state) => state.tenant,
+    () => null
+  );
   try {
     await armTenantKill(user.id, true);
   } catch {
@@ -82,7 +90,7 @@ export async function deleteAccount(confirmation: string): Promise<DeleteAccount
     p_user_id: user.id,
   });
   if (databaseError) {
-    await armTenantKill(user.id, false).catch(() => {});
+    if (killBefore === false) await armTenantKill(user.id, false).catch(() => {});
     return { ok: false, error: "Account data could not be deleted. Please try again." };
   }
   const inventory = parseDeletionInventory(deletionData);

@@ -204,6 +204,86 @@ describe("cost", () => {
     findSecrets(body);
     expect(performance.now() - started).toBeLessThan(1_500);
   });
+
+  // Cloud review 2026-11-03, B3, measured on this file's own findSecrets before the fix:
+  // 1.1 MB of private-key headers with no END took 4,651 ms (each header's lazy block
+  // search read up to 16 KB ahead), and 1.05 MB of one AWS key repeated took 3,219 ms and
+  // 2.1 MB took 8,498 ms (every match was compared with every earlier one). Tool output
+  // stays in the conversation, so one hostile result slowed every later call.
+  const BEGIN = ["-----BEGIN ", "PRIVATE KEY-----"].join("");
+  const END = ["-----END ", "PRIVATE KEY-----"].join("");
+  it("scans 1.1 MB of private-key headers with no END quickly", () => {
+    const text = `${BEGIN}\n`.repeat(39_286);
+    const started = performance.now();
+    const found = findSecrets(prompt(text));
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(found).toHaveLength(39_286);
+  });
+  it("scans 2.1 MB of one real-looking key repeated quickly, through the redactor too", () => {
+    const key = KEYS.aws();
+    const text = `${key} `.repeat(100_000);
+    let started = performance.now();
+    expect(findSecrets(prompt(text))).toHaveLength(100_000);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    started = performance.now();
+    expect(redactSecrets(prompt(text), "k").findings).toHaveLength(100_000);
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+  it("many keys of several kinds, interleaved, quickly", () => {
+    const keys = [KEYS.aws(), KEYS.github(), KEYS.google(), KEYS.telegram(), KEYS.passcontrol_control()];
+    const text = Array.from({ length: 60_000 }, (_, i) => keys[i % keys.length]).join(" ");
+    const started = performance.now();
+    expect(findSecrets(prompt(text))).toHaveLength(60_000);
+    expect(performance.now() - started).toBeLessThan(1_500);
+  });
+});
+
+// B3's fix finds a private key's block without the lazy regex; these pin what that
+// regex meant, so the faster search keeps it exactly.
+describe("a private key block's extent", () => {
+  const BEGIN = (v = "") => ["-----BEGIN ", v, "PRIVATE KEY-----"].join("");
+  const END = (v = "") => ["-----END ", v, "PRIVATE KEY-----"].join("");
+  const redact = (text: string) => redactSecretsInText(text, "k");
+  it("takes the block up to the first END of any variant", () => {
+    const r = redact(`a ${BEGIN("RSA ")}\n${pick(B62, 64)}\n${END("EC ")} b ${END()} c`);
+    expect(r.findings).toEqual(["private_key"]);
+    expect(r.text).toMatch(/^a \[SECRET_REDACTED:private_key:[0-9a-f]{8}\] b -----END PRIVATE KEY----- c$/);
+  });
+  it("an END exactly 16,384 characters after the header is inside the block; one further is not", () => {
+    // Lower-case letters only: no other rule's prefix can appear in the filler.
+    const filler = (n: number) => pick("abcdefghijklmnopqrstuvwxyz \n", n);
+    const inside = redact(`${BEGIN()}${filler(16_384)}${END()}!`);
+    expect(inside.text).toMatch(/^\[SECRET_REDACTED:private_key:[0-9a-f]{8}\]!$/);
+    const far = filler(16_385);
+    const outside = redact(`${BEGIN()}${far}${END()}!`);
+    expect(outside.findings).toEqual(["private_key"]);
+    expect(outside.text).toMatch(/^\[SECRET_REDACTED:private_key:[0-9a-f]{8}\]/);
+    expect(outside.text.endsWith(`${far}${END()}!`)).toBe(true);
+  });
+  it("two headers before one END are one block", () => {
+    const r = redact(`${BEGIN()}\nAAA\n${BEGIN("EC ")}\nBBB\n${END()}`);
+    expect(r.findings).toEqual(["private_key"]);
+  });
+  it("a header right before an END's dashes, then a later END", () => {
+    // `…KEY-----END PRIVATE KEY-----` shares its dashes with the header, so the regex
+    // never saw an END there; the block runs to the next one.
+    const r = redact(`${BEGIN()}END PRIVATE KEY----- mid ${END()} tail`);
+    expect(r.findings).toEqual(["private_key"]);
+    expect(r.text).toMatch(/^\[SECRET_REDACTED:private_key:[0-9a-f]{8}\] tail$/);
+  });
+  it("a header after a block that ended starts its own", () => {
+    const r = redact(`${BEGIN()}\nA\n${END()} ${BEGIN()} ${pick(B62, 10)}`);
+    expect(r.findings).toEqual(["private_key", "private_key"]);
+  });
+  it("an earlier rule's key inside a block wins the overlap, as it always has", () => {
+    // The private-key rule is last, and a later rule's match that overlaps an earlier
+    // one's is dropped. So the key inside is redacted and the block is not. Kept as is
+    // by B3, which changes how fast, never what.
+    const aws = KEYS.aws();
+    const r = redact(`${BEGIN()}\n${aws}\n${END()} ${aws}`);
+    expect(r.findings).toEqual(["aws", "aws"]);
+    expect(r.text.startsWith(BEGIN())).toBe(true);
+  });
 });
 
 describe("createSecretWatchStream (a streamed answer, end to end)", () => {

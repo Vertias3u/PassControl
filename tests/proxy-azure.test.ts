@@ -449,12 +449,18 @@ describe("azure as a fallback", () => {
     readFallbacksMock.mockResolvedValue([{ provider: "azure", model: "gpt-4o-mini" }]);
     readProvidersWithKeysMock.mockResolvedValue(["openai", "azure"]);
   });
+  // Cloud review A1: the primary's endpoint is read too, so the cache answers per
+  // provider: the OpenAI key has no stored address, the Azure one has its resource.
+  const azureResourceOnly = () =>
+    getCachedEndpointMock.mockImplementation(async (_agent: unknown, provider: unknown) =>
+      provider === "azure" ? `${CRED}|${RESOURCE}` : "|"
+    );
   afterEach(() => {
     readFallbacksMock.mockResolvedValue([]);
   });
 
   it("fails over into the stored resource", async () => {
-    getCachedEndpointMock.mockResolvedValue(`${CRED}|${RESOURCE}`);
+    azureResourceOnly();
     fetchMock.mockResolvedValueOnce(overloaded()).mockResolvedValueOnce(ok());
     const res = await primaryCall();
     await res.text();
@@ -475,7 +481,7 @@ describe("azure as a fallback", () => {
   });
 
   it("does not fail over into Azure under a dollar limit, and does not answer 402 for it", async () => {
-    getCachedEndpointMock.mockResolvedValue(`${CRED}|${RESOURCE}`);
+    azureResourceOnly();
     fetchMock.mockResolvedValue(overloaded());
     const res = await primaryCall({ bc: 500 });
 

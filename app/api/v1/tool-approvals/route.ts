@@ -144,18 +144,31 @@ export async function POST(req: Request): Promise<Response> {
     return err(503, "tool_rules_unavailable");
   }
   const rules = parseToolRules(rawRules);
-  const verdict = rules.ok ? evaluateToolRules(rules, { tool_name: toolName, tool_input: toolInput, cwd }) : { effect: null };
+  // Two matches (SC-E). `verdict` is exact, whatever this server runs on: it decides
+  // whether a rule pre-empts the taint hold below. A Mac or Windows sidecar matches
+  // paths without case, so its ask about a case variant is admitted by `askOwnerAnyCase`,
+  // which reads ONLY the ask_owner rules. Never let a caseless DENY skip the hold: a
+  // Linux sidecar matched that rule exactly, missed it, and asks under taint, and a
+  // 409 here would let the tool run unasked.
+  const call = { tool_name: toolName, tool_input: toolInput, cwd };
+  const verdict = rules.ok ? evaluateToolRules(rules, call, { caseless: false }) : { effect: null };
+  const askOwnerAnyCase =
+    verdict.effect === "ask_owner" ||
+    (rules.ok &&
+      verdict.effect !== "deny" &&
+      evaluateToolRules({ ...rules, rules: rules.rules.filter((r) => r.effect === "ask_owner") }, call, { caseless: true })
+        .effect === "ask_owner");
   // Once a hold is cleared, the sidecar's next ask about a tool still waiting finds the
   // question the hold asked: Approvals tells the owner it still waits for Approve or
   // Deny, so their answer decides it (1.7.0 e2e, F3).
   let heldBecause: string | undefined;
   let askedBefore = false;
-  if (rules.ok && verdict.effect !== "ask_owner" && verdict.effect !== "deny" && heldUnderTaint(toolName)) {
+  if (rules.ok && !askOwnerAnyCase && verdict.effect !== "deny" && heldUnderTaint(toolName)) {
     policy ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
     heldBecause = await injectionHoldReason(policy.policy, agentId, Date.now());
     askedBefore = !heldBecause && injectionGuardMode(policy.policy) === "hold";
   }
-  const asks = verdict.effect === "ask_owner" || heldBecause !== undefined;
+  const asks = askOwnerAnyCase || heldBecause !== undefined;
   const notAsked = () => errMessage(409, "not_ask_owner", "This agent's tool rules do not put this tool call to its owner.");
   if (!asks && !askedBefore) return notAsked();
 

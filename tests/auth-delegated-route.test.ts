@@ -120,6 +120,22 @@ describe("POST /api/auth/delegated: the exchange", () => {
     expect(m.recordFirst).not.toHaveBeenCalled();
   });
 
+  // Cloud review 2026-11-03, CP5: a proof says which door it is for.
+  it.each([
+    ["an agent-token proof (aud)", { aud: "billing-service" }],
+    ["a proof signed for the challenge", { purpose: "challenge" }],
+    ["a proof signed for agent-token", { purpose: "agent-token" }],
+  ])("refuses %s", async (_, over) => {
+    const res = await post({ ...challenge(worker.priv, worker.id, over), chain: [link1()] });
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe("wrong_purpose");
+  });
+
+  it("mints for a proof signed for delegated", async () => {
+    const res = await post({ ...challenge(worker.priv, worker.id, { purpose: "delegated" }), chain: [link1()] });
+    expect(res.status).toBe(200);
+  });
+
   it("burns the nonce and checks the clock, as the challenge does", async () => {
     m.claimNonce.mockResolvedValueOnce(false);
     expect(await (await post({ ...challenge(worker.priv, worker.id), chain: [link1()] })).json()).toEqual({ error: "replay_detected" });
@@ -176,4 +192,12 @@ describe("POST /api/auth/delegated: the exchange", () => {
     expect(three.status).toBe(400);
     expect(m.find).not.toHaveBeenCalled();
   });
+});
+
+
+it("returns the delegated visa when last-seen rejects", async () => {
+  m.touchLastSeen.mockRejectedValueOnce(new Error("Redis unavailable"));
+  const res = await post({ ...challenge(worker.priv, worker.id), chain: [link1()] });
+  expect(res.status).toBe(200);
+  expect((await res.json()).visa).toEqual(expect.any(String));
 });

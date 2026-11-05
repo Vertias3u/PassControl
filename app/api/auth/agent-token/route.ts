@@ -2,7 +2,7 @@
 // not this gateway.
 //
 // POST /api/auth/agent-token
-// body: { payload: base64url(JSON{passport_id, ts, nonce, aud, ttl?}), signature }
+// body: { payload: base64url(JSON{passport_id, ts, nonce, aud, ttl?, purpose?: "agent-token"}), signature }
 //
 // ── Why this is not the visa ────────────────────────────────────────────────
 //
@@ -22,12 +22,16 @@
 // nonces regardless — there is no round trip to save by merging them.
 export const runtime = "edge";
 
+import { readBoundedBody } from "@/lib/http/bounded-body";
+import { clientIp } from "@/lib/http/client-ip";
 import { waitUntil } from "@vercel/functions";
 import { NextResponse } from "next/server";
 
 import { base64urlToBytes, bytesToUtf8 } from "@/lib/encoding";
+import { wrongProofPurpose } from "@/lib/auth/proof-purpose";
 import { verifySignature, passportIdToPublicKey } from "@/lib/crypto/ed25519";
-import { claimNonce, touchLastSeen } from "@/lib/state/redis";
+import { claimNonce, isSuspended, touchLastSeen } from "@/lib/state/redis";
+import { isBlocked, readKillState } from "@/lib/state/killswitch";
 import { serviceClient } from "@/lib/supabase";
 import { instanceIssuer, loadInstanceSigner } from "@/lib/crypto/instanceKey";
 import { AGENT_TOKEN_TYP, AGENT_TOKEN_VER, signCompactJws } from "@/lib/crypto/jws";
@@ -94,10 +98,7 @@ export async function POST(req: Request) {
 async function handlePost(req: Request) {
   // Mirrors the challenge route's ordering exactly: IP limit → content-type →
   // body cap → parse → skew → burn nonce → agent → signature → mint.
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown";
+  const ip = clientIp(req);
   const rl = await rateLimit(`agent-token:${ip}`, TOKEN_LIMIT, TOKEN_WINDOW_S);
   if (!rl.success) {
     return NextResponse.json(
@@ -115,9 +116,9 @@ async function handlePost(req: Request) {
 
   let body: { payload?: string; signature?: string };
   try {
-    const raw = await req.text();
-    if (raw.length > MAX_BODY_BYTES) return securityFail(413, "payload_too_large");
-    body = JSON.parse(raw);
+    const bounded = await readBoundedBody(req, MAX_BODY_BYTES);
+    if (!bounded.ok) return securityFail(413, "payload_too_large");
+    body = JSON.parse(bounded.text);
   } catch {
     return fail(400, "invalid_json");
   }
@@ -131,6 +132,10 @@ async function handlePost(req: Request) {
   }
   if (!payload.passport_id || !payload.nonce || typeof payload.ts !== "number") {
     return fail(400, "invalid_payload");
+  }
+  // A proof made for another passport door is refused (cloud review CP5).
+  if (wrongProofPurpose(payload as unknown as Record<string, unknown>, "agent-token")) {
+    return securityFail(401, "wrong_purpose");
   }
 
   // The audience lives INSIDE the signed payload. This is the security-critical
@@ -179,6 +184,19 @@ async function handlePost(req: Request) {
   );
   if (!verified) return securityFail(401, "bad_signature", { agentId: agent.id });
 
+  // The kill switch, at minting time (cloud review 2026-11-03, CP1). The proxy
+  // enforces it on every visa call, but this token never comes back through the
+  // proxy: a third party verifies it offline for up to MAX_TTL_S. Same reads, same
+  // fail posture (KILL_SWITCH_FAIL_CLOSED) and the same single opaque code as the
+  // proxy. After the signature, so only the key holder learns it was stopped.
+  const [kill, suspended] = await Promise.all([
+    readKillState(agent.user_id as string),
+    isSuspended(agent.id),
+  ]);
+  if (isBlocked(kill, agent.id) || suspended) {
+    return securityFail(403, "blocked_suspended", { agentId: agent.id });
+  }
+
   const ttl = clampTtl(payload.ttl);
   const now = Math.floor(Date.now() / 1000);
   const jti = crypto.randomUUID();
@@ -204,7 +222,7 @@ async function handlePost(req: Request) {
     },
   });
 
-  await touchLastSeen(agent.id);
+  waitUntil(Promise.resolve(touchLastSeen(agent.id)).catch(() => undefined));
 
   return NextResponse.json({
     token,

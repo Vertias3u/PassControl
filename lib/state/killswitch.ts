@@ -30,7 +30,20 @@ const KEY = {
   denylist: "killswitch:denylist",
   // Present once this tenant's stops have been loaded from the durable record.
   loaded: (userId: string) => `killswitch:loaded:${userId}`,
+  // Bumped by every durable DISARM, after its record row is gone (A9, below).
+  generation: (userId: string) => `killswitch:gen:${userId}`,
 };
+
+// The reload's write-back, applied only if no disarm happened since the reload
+// read the generation. KEYS[1] generation, KEYS[2] loaded marker, KEYS[3..] stops;
+// ARGV[1] the generation as read ("" for none).
+const WRITE_BACK_LUA = `
+local g = redis.call('GET', KEYS[1])
+if not g then g = '' end
+if g ~= ARGV[1] then return 0 end
+for i = 3, #KEYS do redis.call('SET', KEYS[i], 1) end
+redis.call('SET', KEYS[2], 1)
+return 1`;
 
 function recordKey(userId: string, stop: KillRecord): string {
   if (stop.kind === "tenant") return KEY.tenant(userId);
@@ -45,16 +58,43 @@ type RedisClient = ReturnType<typeof redis>;
  * mark the tenant loaded. Throws only when the RECORD cannot be read (the
  * caller's fail posture decides); a failed write-back is swallowed and leaves
  * the marker unset, so the next call loads again. Adds keys, never deletes one.
+ *
+ * Cloud review 2026-11-03, A9: a disarm can land between reading the record and
+ * writing it back. Unguarded, the write-back then re-armed the stop the disarm
+ * had just cleared AND set the marker, so the stop stayed in force with no row
+ * behind it and nothing ever read the record again. So the generation is read
+ * BEFORE the record, and the write-back (one script) happens only if it is
+ * unchanged. A disarm deletes its row, THEN bumps the generation, THEN clears
+ * Redis: a reload that saw the old row saw the old generation too, and stands
+ * down. One that stands down leaves the marker unset, so the next call reloads
+ * from the (now correct) record. Arms never bump it: a stop is only ever added.
  */
 async function reloadFromRecord(r: RedisClient, userId: string): Promise<KillRecord[]> {
+  const generation = await Promise.resolve()
+    .then(() => r.get(KEY.generation(userId)))
+    .then((g) => (g === null || g === undefined ? "" : String(g)), () => null);
   const stops = await loadKillRecords(userId);
+  // Unreadable generation: no write-back can be guarded, so none is made; the
+  // stops still decide this call, and the next one loads again.
+  if (generation === null) return stops;
   try {
-    await Promise.all(stops.map((stop) => r.set(recordKey(userId, stop), 1)));
-    await r.set(KEY.loaded(userId), 1);
+    await r.eval(
+      WRITE_BACK_LUA,
+      [KEY.generation(userId), KEY.loaded(userId), ...stops.map((stop) => recordKey(userId, stop))],
+      [generation]
+    );
   } catch {
     // The stops still decide this call; the next one tries the write-back again.
   }
   return stops;
+}
+
+/**
+ * Tell any reload in flight for this tenant that a stop was just lifted. Call it
+ * AFTER the record row is deleted and BEFORE the Redis key is (see above).
+ */
+export async function bumpKillGeneration(userId: string): Promise<void> {
+  await redis().incr(KEY.generation(userId));
 }
 
 export interface KillState {
@@ -323,9 +363,10 @@ export interface DurableKillResult {
 /**
  * The dashboard's and the control API's master kill: Redis AND the record.
  * Arm writes Redis first, so the stop is in force at once, then the record.
- * Disarm clears the record first, then Redis: a reload that lands in between
- * finds Redis still armed, so the worst it can do is re-arm. A Redis failure
- * throws, as before: nothing claims a stop that is not in force.
+ * Disarm clears the record first, bumps the kill generation, then clears Redis:
+ * a reload that read the record before the delete stands down instead of
+ * re-arming (A9, see reloadFromRecord). A Redis failure throws, as before:
+ * nothing claims a stop that is not in force.
  * Not for the demo's self-expiring arm or the account-erasure guard, which stay
  * Redis-only through `armTenantKill`.
  */
@@ -336,6 +377,7 @@ export async function setTenantKillDurably(userId: string, on: boolean): Promise
     return { durable: await saveKillRecord(userId, stop) };
   }
   const durable = await deleteKillRecord(userId, stop);
+  await bumpKillGeneration(userId);
   await armTenantKill(userId, false);
   return { durable };
 }
@@ -348,6 +390,7 @@ export async function setServiceKillDurably(userId: string, service: string, on:
     return { durable: await saveKillRecord(userId, stop) };
   }
   const durable = await deleteKillRecord(userId, stop);
+  await bumpKillGeneration(userId);
   await armServiceKill(userId, service, false);
   return { durable };
 }

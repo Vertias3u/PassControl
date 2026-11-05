@@ -12,26 +12,22 @@
 // because that wrapper demands the key this route exists to deliver.
 export const runtime = "edge";
 
+import { readBoundedBody } from "@/lib/http/bounded-body";
+import { clientIp } from "@/lib/http/client-ip";
 import { NextResponse } from "next/server";
 import { open } from "@/lib/crypto/aesgcm";
+import { sealContext } from "@/lib/crypto/seal-context";
 import { hashDeviceCode, isDeviceCodeFormat } from "@/lib/device-codes";
 import { captureSecurityEvent } from "@/lib/observability";
-import { rateLimitFailClosed } from "@/lib/ratelimit";
+import { rateLimit, rateLimitFailClosed } from "@/lib/ratelimit";
 import { readDeviceStatus, takeDeviceGrant } from "@/lib/state/device-auth";
 
 // The CLI is told to poll at 1/s; allow headroom for jitter and retries, then
 // answer slow_down rather than doing work.
+const DEVICE_TOKEN_IP_LIMIT = 300;
 const POLL_LIMIT = 120;
 const POLL_WINDOW_S = 60;
 const MAX_BODY_BYTES = 4 * 1024;
-
-function clientIp(req: Request): string {
-  return (
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown"
-  );
-}
 
 interface Grant {
   version: number;
@@ -58,10 +54,11 @@ export async function POST(req: Request): Promise<Response> {
   if (ct && !ct.includes("application/json")) {
     return NextResponse.json({ error: "unsupported_media_type" }, { status: 415 });
   }
-  const raw = await req.text();
-  if (raw.length > MAX_BODY_BYTES) {
+  const bounded = await readBoundedBody(req, MAX_BODY_BYTES);
+  if (!bounded.ok) {
     return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
   }
+  const raw = bounded.text;
   let body: { device_code?: unknown } = {};
   try {
     body = raw ? JSON.parse(raw) : {};
@@ -73,6 +70,14 @@ export async function POST(req: Request): Promise<Response> {
   // Shape check before the hash, so a megabyte of junk never reaches SHA-256.
   if (!isDeviceCodeFormat(deviceCode)) {
     return NextResponse.json({ error: "expired_token" }, { status: 400 });
+  }
+  // Cloud review 2026-11-03, CP4: the per-code limit below never sees a flood of
+  // fresh codes, each of which costs a Redis read. This per-IP ceiling, far above one
+  // CLI's 1/s poll, clips that flood; it fails open, so the per-code limit stays the
+  // fairness limit for many CLIs behind one CGNAT address.
+  const ipLimit = await rateLimit(`device-token-ip:${clientIp(req)}`, DEVICE_TOKEN_IP_LIMIT, POLL_WINDOW_S);
+  if (!ipLimit.success) {
+    return NextResponse.json({ error: "slow_down" }, { status: 429 });
   }
   const hash = await hashDeviceCode(deviceCode);
 
@@ -98,7 +103,7 @@ export async function POST(req: Request): Promise<Response> {
   // Atomic. `getdel` and not get-then-del: two concurrent redemptions of one
   // captured device_code must not both succeed. See the note in device-auth.ts.
   const sealed = await takeDeviceGrant(hash);
-  const grant = parseGrant(sealed ? await open(sealed) : null);
+  const grant = parseGrant(sealed ? await open(sealed, sealContext.deviceGrant(hash)) : null);
   if (!grant) {
     // Approved but nothing to collect: already redeemed, or the 120s window
     // lapsed. Both are "run login again", and neither should say which — the

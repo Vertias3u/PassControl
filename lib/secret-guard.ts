@@ -15,8 +15,10 @@
 // the redacted body's placeholder, which carries a keyed 32-bit fingerprint (so two keys
 // can be told apart) and never the key.
 //
-// Patterns are anchored on a fixed prefix with bounded quantifiers, so the scan stays
-// linear on the attacker-controlled bodies it reads (a 4 MB prompt is tested).
+// Patterns are anchored on a fixed prefix with bounded quantifiers. That alone did not
+// keep the scan linear (cloud review 2026-11-03, B3): the private-key rule read 16 KB
+// past every bare header, and every match was compared with every earlier one. Both are
+// now found in one pass; `tests/secret-guard.test.ts` times the hostile shapes.
 import { hmac } from "@noble/hashes/hmac";
 import { sha256 } from "@noble/hashes/sha256";
 import { publiclyCommittedDemoValues } from "@/lib/demo/identity";
@@ -68,7 +70,8 @@ const RULES: readonly (readonly [SecretKind, RegExp])[] = [
   ["passport_secret", /PASSPORT_SECRET\s{0,4}[=:]\s{0,4}["']?[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g],
   ["telegram", /\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b/g],
   ["notion", /\b(?:secret_|ntn_)[A-Za-z0-9]{43,50}\b/g],
-  // Detection is the header; redaction takes the whole block (bounded).
+  // Detection is the header; redaction takes the whole block (bounded). The regex is
+  // the definition; `privateKeyMatches` finds what it would, without its cost.
   ["private_key", /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----(?:[\s\S]{0,16384}?-----END (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----)?/g],
 ];
 
@@ -118,21 +121,85 @@ function isPublic(match: string): boolean {
   return PUBLIC_VALUES.some((value) => match.includes(value));
 }
 
-/** Every real-looking secret in one string, in order. */
-function matchesIn(text: string): { kind: SecretKind; start: number; end: number; value: string }[] {
-  const out: { kind: SecretKind; start: number; end: number; value: string }[] = [];
+// The private-key rule's two halves, for `privateKeyMatches` below.
+const PEM_HEADER = /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----/g;
+const PEM_END = /-----END (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----/g;
+const PEM_REACH = 16_384;
+
+/**
+ * What `text.matchAll` gives for the private-key rule in RULES, found without it.
+ *
+ * The rule's lazy `[\s\S]{0,16384}?` read up to 16 KB ahead of EVERY header that had no
+ * END, so a body of bare headers cost 16 KB a header: 4.65 s for 1.1 MB (cloud review
+ * 2026-11-03, B3). The block's end is the first END of any variant that starts within
+ * 16,384 characters of the header's end. That first END is found by one search and
+ * reused for every header before it, so each part of the text is searched about once.
+ * Same matches, same order, same non-overlap: `tests/secret-guard.test.ts` pins the edges.
+ */
+function* privateKeyMatches(text: string): Generator<{ value: string; index: number }> {
+  PEM_HEADER.lastIndex = 0;
+  // The first END at or after `endFrom`: its start, or -1 for none left in the text.
+  let endFrom = -1;
+  let endAt = -1;
+  let endLength = 0;
+  for (let h = PEM_HEADER.exec(text); h; h = PEM_HEADER.exec(text)) {
+    const headerEnd = h.index + h[0].length;
+    if (endFrom === -1 || (endAt !== -1 && endAt < headerEnd)) {
+      PEM_END.lastIndex = headerEnd;
+      const e = PEM_END.exec(text);
+      endFrom = headerEnd;
+      endAt = e ? e.index : -1;
+      endLength = e ? e[0].length : 0;
+    }
+    const end = endAt !== -1 && endAt - headerEnd <= PEM_REACH ? endAt + endLength : headerEnd;
+    yield { value: text.slice(h.index, end), index: h.index };
+    PEM_HEADER.lastIndex = end;
+  }
+}
+
+interface Match { kind: SecretKind; start: number; end: number; value: string }
+
+/**
+ * Every real-looking secret in one string, in order.
+ *
+ * A later rule's match that overlaps an earlier rule's is the same secret, and is
+ * dropped. That was a comparison with every match so far, which made 100,000 repeats
+ * of one key cost 8.5 s (B3). One rule's matches arrive in order and never overlap
+ * each other, so each is checked against the sorted matches of the rules before it
+ * with one moving cursor, then merged in: linear per rule, same answer.
+ */
+function matchesIn(text: string): Match[] {
+  let kept: Match[] = [];
   for (const [kind, re] of RULES) {
     re.lastIndex = 0;
-    for (const m of text.matchAll(re)) {
-      const value = m[0];
+    const found = kind === "private_key" ? privateKeyMatches(text) : text.matchAll(re);
+    const added: Match[] = [];
+    let cursor = 0;
+    for (const m of found) {
+      const value = "value" in m ? m.value : m[0];
       if (isPublic(value) || looksMadeUp(value)) continue;
       const start = m.index ?? 0;
-      // A later rule matching inside an earlier one's span is the same secret.
-      if (out.some((o) => start < o.end && start + value.length > o.start)) continue;
-      out.push({ kind, start, end: start + value.length, value });
+      const end = start + value.length;
+      // Earlier rules' matches are disjoint and sorted, so their ends ascend too: skip
+      // those that end at or before this start; the next one overlaps iff it starts
+      // before this end.
+      while (cursor < kept.length && kept[cursor]!.end <= start) cursor++;
+      if (cursor < kept.length && kept[cursor]!.start < end) continue;
+      added.push({ kind, start, end, value });
     }
+    if (added.length) kept = mergeByStart(kept, added);
   }
-  return out.sort((a, b) => a.start - b.start);
+  return kept;
+}
+
+function mergeByStart(a: Match[], b: Match[]): Match[] {
+  const out: Match[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) out.push(a[i]!.start <= b[j]!.start ? a[i++]! : b[j++]!);
+  while (i < a.length) out.push(a[i++]!);
+  while (j < b.length) out.push(b[j++]!);
+  return out;
 }
 
 /** A string that is base64 media, not text: never scanned, never changed. */

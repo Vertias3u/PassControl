@@ -4,7 +4,17 @@
 // a gateway key held ONLY in the Edge env (CACHE_ENC_KEY) before being written
 // to Redis. Redis therefore never holds plaintext — a Redis-only compromise
 // yields ciphertext + IV but no usable key. Uses Web Crypto (edge-available).
+//
+// Every value is sealed FOR something: its context goes in as GCM's additional
+// authenticated data, and it opens only for the same context. Without it (until
+// cloud review 2026-11-03, A2) a Redis writer could not read a key but could MOVE
+// one: copy tenant A's sealed provider key to their own agent's cache entry, and
+// the gateway decrypted it and sent A's key on their calls. A value sealed before
+// contexts existed opens for none, which every caller already reads as a miss.
 import { bytesToBase64url, base64urlToBytes, utf8ToBytes, bytesToUtf8 } from "../encoding";
+import type { SealContext } from "./seal-context";
+
+export { sealContext, type SealContext } from "./seal-context";
 
 const IV_BYTES = 12;
 
@@ -37,25 +47,33 @@ function importKey(): Promise<CryptoKey> {
   return cachedKey;
 }
 
-/** Encrypt plaintext -> "base64url(iv).base64url(ciphertext+tag)". */
-export async function seal(plaintext: string): Promise<string> {
+/** Encrypt plaintext for `ctx` -> "base64url(iv).base64url(ciphertext+tag)". */
+export async function seal(plaintext: string, ctx: SealContext): Promise<string> {
   const key = await importKey();
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: ab(iv) }, key, ab(utf8ToBytes(plaintext)))
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: ab(iv), additionalData: ab(utf8ToBytes(ctx)) },
+      key,
+      ab(utf8ToBytes(plaintext))
+    )
   );
   return `${bytesToBase64url(iv)}.${bytesToBase64url(ct)}`;
 }
 
-/** Decrypt a value produced by seal(). Returns null on any failure. */
-export async function open(token: string): Promise<string | null> {
+/** Decrypt a value seal() produced for the same `ctx`. Returns null on any failure. */
+export async function open(token: string, ctx: SealContext): Promise<string | null> {
   try {
     const [ivPart, ctPart] = token.split(".");
     if (!ivPart || !ctPart) return null;
     const key = await importKey();
     const iv = base64urlToBytes(ivPart);
     const ct = base64urlToBytes(ctPart);
-    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ab(iv) }, key, ab(ct));
+    const pt = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: ab(iv), additionalData: ab(utf8ToBytes(ctx)) },
+      key,
+      ab(ct)
+    );
     return bytesToUtf8(new Uint8Array(pt));
   } catch {
     return null;

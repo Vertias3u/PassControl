@@ -11,6 +11,8 @@
 // limiter below as the whole perimeter, because it is.
 export const runtime = "edge";
 
+import { readBoundedBody } from "@/lib/http/bounded-body";
+import { clientIp } from "@/lib/http/client-ip";
 import { NextResponse } from "next/server";
 import { generateDeviceCode, generateUserCode, hashDeviceCode } from "@/lib/device-codes";
 import { rateLimitFailClosed } from "@/lib/ratelimit";
@@ -25,14 +27,6 @@ const START_WINDOW_S = 60;
 const POLL_INTERVAL_S = 1;
 const MAX_BODY_BYTES = 4 * 1024;
 const CLIENT_NAME_MAX = 60;
-
-function clientIp(req: Request): string {
-  return (
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown"
-  );
-}
 
 /**
  * The client name is shown on the approval screen, so it is attacker-controlled
@@ -69,10 +63,11 @@ export async function POST(req: Request): Promise<Response> {
   if (ct && !ct.includes("application/json")) {
     return NextResponse.json({ error: "unsupported_media_type" }, { status: 415 });
   }
-  const raw = await req.text();
-  if (raw.length > MAX_BODY_BYTES) {
+  const bounded = await readBoundedBody(req, MAX_BODY_BYTES);
+  if (!bounded.ok) {
     return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
   }
+  const raw = bounded.text;
   let body: { client_name?: unknown } = {};
   if (raw) {
     try {

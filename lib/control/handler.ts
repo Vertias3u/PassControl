@@ -3,6 +3,8 @@
 // the handler → catch and generically report errors. Handlers get a ctx with the
 // authenticated userId (which they MUST scope every query by — the service-role
 // client bypasses RLS, so `.eq("user_id", ctx.userId)` is the tenant boundary).
+import { readBoundedBody } from "@/lib/http/bounded-body";
+import { clientIp } from "@/lib/http/client-ip";
 import { waitUntil } from "@vercel/functions";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { serviceClient } from "@/lib/supabase";
@@ -26,20 +28,14 @@ export interface ControlCtx {
 const READ_LIMIT = 600;
 const WRITE_LIMIT = 120;
 const WINDOW_S = 60;
+/** The same cap lib/control/body.ts applies; control payloads are tiny. */
+const CONTROL_BODY_MAX_BYTES = 64 * 1024;
 // Pre-auth, per-IP flood guard: bounds requests bearing missing/invalid keys so an
 // attacker can't force an unbounded SHA-256 + key-lookup per request. Generous —
 // legit single-client traffic stays well under it; it only clips floods.
 const IP_LIMIT = Number(process.env.CONTROL_IP_LIMIT ?? "1000");
 
 type RouteCtx = { params?: Promise<Record<string, string>> };
-
-function clientIp(req: Request): string {
-  return (
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown"
-  );
-}
 
 export function control(
   required: Scope,
@@ -96,9 +92,9 @@ export function control(
         return errorResponse(429, "rate_limited", requestId, { "retry-after": String(WINDOW_S) });
       }
       const params = routeCtx?.params ? await routeCtx.params : {};
-      const exec = () =>
+      const exec = (request: Request = req) =>
         fn({
-          req,
+          req: request,
           userId: auth.userId,
           scope: auth.scope,
           keyId: auth.keyId,
@@ -116,7 +112,24 @@ export function control(
           captureControlSecurity("invalid_idempotency_key", 400);
           return errorResponse(400, "invalid_idempotency_key", requestId);
         }
-        return await runIdempotent(auth.keyId, idem, requestId, exec);
+        // Cloud review 2026-11-03, CP6: the key is bound to the request it was first
+        // sent with. Read the body once, under the control plane's 64 KiB cap, and
+        // hand the handler a request rebuilt from those bytes (no tee to cancel).
+        const body = await readBoundedBody(req, CONTROL_BODY_MAX_BYTES);
+        if (!body.ok) return errorResponse(413, "payload_too_large", requestId);
+        const replayable = new Request(req.url, {
+          method: req.method,
+          headers: req.headers,
+          body: body.text === "" ? undefined : body.text,
+        });
+        const url = new URL(req.url);
+        // Web Crypto, not node:crypto: every control route runs on the edge runtime.
+        const digest = await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode([req.method, url.pathname + url.search, body.text].join("\n"))
+        );
+        const fp = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+        return await runIdempotent(auth.keyId, idem, requestId, () => exec(replayable), fp);
       }
       return await exec();
     } catch (e) {

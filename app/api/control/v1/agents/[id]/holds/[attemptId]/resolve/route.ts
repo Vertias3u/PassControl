@@ -152,7 +152,7 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId, 
       tokens,
       microcents,
     };
-    let { error: ledgerError } = await db.from("agent_spend_adjustments").insert(decision);
+    let { error: ledgerError }: { error: unknown } = await db.from("agent_spend_adjustments").insert(decision);
     // 23505 is the unique violation: this attempt already has a decision. That
     // is not a failure and it is not necessarily a no-op either — it is either
     // the same operator clicking twice, or one correcting a figure they got
@@ -160,12 +160,21 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId, 
     // is idempotent for the first and the only remedy for the second: nothing
     // else can reach this row, and until a rebuild runs it is the ONLY record
     // of what that attempt cost. Every version is in `admin_audit`.
+    //
+    // Scoped to this tenant's agent (cloud review 2026-11-03): on this degraded path
+    // the hold is gone, so nothing above proves the attempt id is this agent's, and
+    // `attempt_id` is the table's global key. A foreign id matches no row here, which
+    // reads as not recorded rather than as a correction.
     if ((ledgerError as { code?: string } | null)?.code === "23505") {
-      ledgerCorrected = true;
-      ({ error: ledgerError } = await db
+      const { data: corrected, error: updateError } = await db
         .from("agent_spend_adjustments")
         .update({ tokens, microcents })
-        .eq("attempt_id", attemptId));
+        .eq("attempt_id", attemptId)
+        .eq("agent_id", id)
+        .eq("user_id", userId)
+        .select("attempt_id");
+      ledgerCorrected = !updateError && Array.isArray(corrected) && corrected.length > 0;
+      ledgerError = updateError ?? (ledgerCorrected ? null : new Error("ledger_row_not_this_agent"));
     }
     ledgerRecorded = !ledgerError;
     if (!ledgerRecorded) {

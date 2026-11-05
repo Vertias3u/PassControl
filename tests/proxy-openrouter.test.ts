@@ -71,6 +71,9 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
   return { ...actual, readKillState: (...args: unknown[]) => readKillStateMock(...args) };
 });
 vi.mock("@/lib/state/redis", () => ({
+  // Cloud review A1: the proxy reads the stored endpoint on every deployment now.
+  // A warm "no stored address" answer keeps this file on the plain key path.
+  getCachedEndpoint: async () => "|",
   // OpenRouter's price cache (lib/providers/openrouter-price.ts), as a Map.
   redis: () => ({
     get: async (key: string) => priceCache.get(key) ?? null,

@@ -107,7 +107,9 @@ export function isProbePath(pathname: string): boolean {
   return PROBE_PATTERNS.some((re) => re.test(p));
 }
 
+
 export async function middleware(request: NextRequest) {
+
   // One nonce per request. Setting the policy on the REQUEST headers as well as
   // the response is what makes Next stamp the same nonce onto the scripts it
   // renders; without it 'strict-dynamic' would block the framework's own
@@ -228,7 +230,12 @@ export const config = {
   // /avatars/<key> without also excluding some future /avatarsomething page. An
   // avatar is an <img src> on a page strangers read, so gating it would 302 the
   // image to /login and render as a broken picture with no clue why.
+  //
+  // `learn/map` is the hosted site's generated map, exact on both of its addresses.
+  // It carries its own sandbox policy (next.config.mjs). The nonce policy from here
+  // would be enforced alongside it, and the map's inline scripts have no nonce, so
+  // the page would load blank. scripts/__tests__/public-map-hosting.test.ts pins it.
   matcher: [
-    "/((?!api|\\.well-known|avatars/|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|llms.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api|\\.well-known|avatars/|learn/map(?:\\.html)?$|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|llms.txt|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

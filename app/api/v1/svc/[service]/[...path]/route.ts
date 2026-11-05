@@ -54,7 +54,7 @@ import { forwardableUpstreamSearch } from "@/lib/providers/endpoint";
 import { readBoundedBody } from "@/lib/http/bounded-body";
 import { approvalFingerprint, approvalPreview } from "@/lib/approvals/fingerprint";
 import { approvalWaitMs, awaitApproval, existingApproval } from "@/lib/approvals/gate";
-import { APPROVAL_PREVIEW_MAX } from "@/lib/state/approvals";
+import { APPROVAL_PATH_MAX, APPROVAL_PREVIEW_MAX } from "@/lib/state/approvals";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 import type { SenderProofObservation } from "@/lib/sender-constraint";
 import { SERVICE_CATALOG, isServiceId, serviceRefusal } from "@/lib/services/catalog";
@@ -405,7 +405,10 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   const isWrite = method !== "GET" && method !== "HEAD";
   if (isWrite) {
     const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
-    if (contentType && !entry.bodyTypes.some((type) => contentType.includes(type))) {
+    // The MEDIA TYPE, before any parameter (cloud review 2026-11-03, B5): a substring
+    // match let `multipart/form-data; a=application/json` through as JSON.
+    const mediaType = contentType.split(";", 1)[0]!.trim();
+    if (contentType && !entry.bodyTypes.includes(mediaType)) {
       record("blocked_endpoint", 415);
       return governed(err(415, "unsupported_media_type"));
     }
@@ -442,9 +445,17 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   // Once a hold is cleared, a hold-mode agent's write may still be a question the hold
   // asked. Approvals tells the owner that request still waits for Approve or Deny, so
   // their answer, or its absence, decides it until the question expires (1.7.0 e2e, F3).
+  //
+  // What the hold counts as a write is wider than `isWrite`, which is about reading a
+  // body. On a service whose rules name methods (Telegram), any method runs over GET
+  // with its parameters in the query, so GET sendMessage?text=… is a write; there the
+  // method NAME decides, as the catalog's isWriteRule says (cloud review 2026-11-03,
+  // B1). Every non-GET stays a write, so this only ever adds a hold.
+  const holdsAsWrite =
+    isWrite || (entry.ruleShape === "call" && entry.isWriteRule({ method: "CALL", path: segments[0] ?? "" }));
   let heldBecause: string | undefined;
   let askedBefore = false;
-  if (isWrite) {
+  if (holdsAsWrite) {
     policySnapshot ??= await readCurrentAgentPolicyAndShadow(db, userId, agentId);
     heldBecause = await injectionHoldReason(policySnapshot.policy, agentId, Date.now());
     askedBefore = !heldBecause && injectionGuardMode(policySnapshot.policy) === "hold";
@@ -456,7 +467,20 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     // The owner approves what they can read, so a request too large to show
     // in full is not asked about at all: approving the start of a body would
     // admit whatever follows it. For the same reason none was asked before.
-    const tooLarge = preview.length > APPROVAL_PREVIEW_MAX;
+    // The path too (cloud review B4): a cut path kept its Approve button.
+    const pathTooLong = upstreamPath.length > APPROVAL_PATH_MAX;
+    const tooLarge = preview.length > APPROVAL_PREVIEW_MAX || pathTooLong;
+    if (pathTooLong && asks) {
+      record("blocked_policy", 414);
+      captureBlocked("approval_path_too_long", 414);
+      return governed(
+        errMessage(
+          414,
+          "approval_path_too_long",
+          `This ${entry.label} call needs the owner's approval, and its path is too long for them to read in full (over ${APPROVAL_PATH_MAX} characters). Use a shorter path.`
+        )
+      );
+    }
     if (tooLarge && asks) {
       record("blocked_policy", 413);
       captureBlocked("approval_body_too_large", 413);
@@ -547,7 +571,7 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     // Not "no token": a read that failed says nothing about what is stored, and
     // telling an operator to add a token that is already there sends them the
     // wrong way. The service never saw this call.
-    record("endpoint_unavailable", 503);
+    record("credential_unavailable", 503);
     return governed(err(503, "credential_unavailable"));
   }
   if (!token) {

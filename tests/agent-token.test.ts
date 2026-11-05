@@ -9,6 +9,8 @@ const h = vi.hoisted(() => ({
   touchLastSeenMock: vi.fn(),
   maybeSingleMock: vi.fn(),
   readCurrentOwnerMock: vi.fn(),
+  readKillStateMock: vi.fn(),
+  isSuspendedMock: vi.fn(),
 }));
 
 vi.mock("@vercel/functions", () => ({ waitUntil: vi.fn() }));
@@ -16,6 +18,11 @@ vi.mock("@/lib/ratelimit", () => ({ rateLimit: (...a: unknown[]) => h.rateLimitM
 vi.mock("@/lib/state/redis", () => ({
   claimNonce: (...a: unknown[]) => h.claimNonceMock(...a),
   touchLastSeen: (...a: unknown[]) => h.touchLastSeenMock(...a),
+  isSuspended: (...a: unknown[]) => h.isSuspendedMock(...a),
+}));
+vi.mock("@/lib/state/killswitch", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/state/killswitch")>()),
+  readKillState: (...a: unknown[]) => h.readKillStateMock(...a),
 }));
 vi.mock("@/lib/owner/current", () => ({
   readCurrentOwner: (...a: unknown[]) => h.readCurrentOwnerMock(...a),
@@ -73,6 +80,8 @@ beforeEach(() => {
   h.claimNonceMock.mockResolvedValue(true);
   h.touchLastSeenMock.mockResolvedValue(undefined);
   h.readCurrentOwnerMock.mockResolvedValue(null);
+  h.readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
+  h.isSuspendedMock.mockResolvedValue(false);
   h.maybeSingleMock.mockResolvedValue({
     data: { id: "agent-1", user_id: "user-1", status: "active" },
     error: null,
@@ -210,6 +219,19 @@ describe("the same guarantees as the challenge route", () => {
     expect(h.maybeSingleMock).not.toHaveBeenCalled();
   });
 
+  // Cloud review 2026-11-03, CP5: a proof says which door it is for. (A challenge
+  // proof has no aud, so it never got this far; one that names its purpose is
+  // refused for saying so.)
+  it.each(["challenge", "delegated"])("refuses a proof signed for %s", async (purpose) => {
+    const res = await POST(signedRequest({ purpose }));
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe("wrong_purpose");
+  });
+
+  it("mints for a proof signed for agent-token", async () => {
+    expect((await POST(signedRequest({ purpose: "agent-token" }))).status).toBe(200);
+  });
+
   it("rejects a stale timestamp", async () => {
     const res = await POST(signedRequest({ ts: Date.now() - 200_000 }));
     expect((await res.json()).error).toBe("stale_timestamp");
@@ -273,6 +295,52 @@ describe("the same guarantees as the challenge route", () => {
   });
 });
 
+// Cloud review 2026-11-03, CP1: the token is verified OFFLINE by a third party for up
+// to 900 s, so the kill switch has to stop it at minting time; the proxy never sees it.
+// Suspend and revoke already did (they change agents.status); the platform kill, the
+// tenant kill and the denylist did not.
+describe("the kill switch stops minting", () => {
+  const killed = (state: Record<string, unknown>) =>
+    h.readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [], ...state });
+
+  it.each([
+    ["the platform kill", { platformKill: true }],
+    ["the tenant's master kill", { userKill: true }],
+    ["the denylist", { denylist: ["agent-1"] }],
+  ])("refuses under %s, with the proxy's opaque code", async (_name, state) => {
+    killed(state);
+    const res = await POST(signedRequest());
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body).toEqual({ error: "blocked_suspended" });
+    expect(body.token).toBeUndefined();
+  });
+
+  it("refuses an agent suspended in Redis", async () => {
+    h.isSuspendedMock.mockResolvedValue(true);
+    const res = await POST(signedRequest());
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "blocked_suspended" });
+  });
+
+  it("reads the kill state of the agent's own tenant", async () => {
+    await POST(signedRequest());
+    expect(h.readKillStateMock).toHaveBeenCalledWith("user-1");
+    expect(h.isSuspendedMock).toHaveBeenCalledWith("agent-1");
+  });
+
+  it("another agent on the denylist does not stop this one", async () => {
+    killed({ denylist: ["agent-2"] });
+    expect((await POST(signedRequest())).status).toBe(200);
+  });
+
+  it("says nothing about the kill state to a caller without the key", async () => {
+    killed({ userKill: true });
+    const res = await POST(signedRequest({}, { tamper: (p) => ({ ...p, aud: "swapped" }) }));
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("the existing challenge contract is untouched", () => {
   // Every SDK, the CLI, the examples and the tests depend on this shape. It is
   // the drop-in contract, and this is the change that would have broken it.
@@ -288,4 +356,12 @@ describe("the existing challenge contract is untouched", () => {
     // contract asserted above.
     expect(source).toMatch(/\.\.\.\(passportExpiry \? \{ passport_expiry: passportExpiry \} : \{\}\)/);
   });
+});
+
+
+it("returns the minted token when last-seen rejects", async () => {
+  h.touchLastSeenMock.mockRejectedValueOnce(new Error("Redis unavailable"));
+  const res = await POST(signedRequest());
+  expect(res.status).toBe(200);
+  expect((await res.json()).token).toEqual(expect.any(String));
 });

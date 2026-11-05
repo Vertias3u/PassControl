@@ -116,7 +116,7 @@ export async function peekText(body, limit = REFUSAL_PEEK_BYTES) {
 const LOOPBACK_PEER = /^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|::ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3})$/;
 const LOOPBACK_NAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
-function hostIsThisListener(hostHeader, port) {
+export function hostIsThisListener(hostHeader, port) {
   if (typeof hostHeader !== "string") return false;
   const match = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(hostHeader.trim().toLowerCase());
   return Boolean(match && LOOPBACK_NAMES.has(match[1]) && Number(match[2]) === port);

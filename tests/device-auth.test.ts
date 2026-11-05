@@ -34,7 +34,16 @@ const { store, fakeRedis, calls } = vi.hoisted(() => {
       log.push(`del ${key}`);
       return values.delete(key) ? 1 : 0;
     },
-    async ttl(key: string) {
+    async incr(key: string) {
+      const next = Number(values.get(key) ?? 0) + 1;
+      values.set(key, String(next));
+      return next;
+    },
+    async expire(key: string, ttl: number) {
+      log.push(`expire ${key} ${ttl}`);
+      return values.has(key) ? 1 : 0;
+    },
+    async ttl(key: string): Promise<number> {
       return values.has(key) ? 600 : -2;
     },
     // The whole point: read and delete resolved inside ONE async call, with no
@@ -60,6 +69,7 @@ import {
   MAX_CODE_ATTEMPTS,
   approveDeviceAuthorization,
   denyDeviceAuthorization,
+  destroyDeviceAuthorization,
   readDeviceStatus,
   resolveUserCode,
   startDeviceAuthorization,
@@ -309,5 +319,30 @@ describe("a Redis fault fails CLOSED", () => {
     await expect(takeDeviceGrant("h")).rejects.toThrow();
     await expect(readDeviceStatus("h")).rejects.toThrow();
     for (const spy of spies) spy.mockRestore();
+  });
+});
+
+describe("atomic probe budget", () => {
+  it("bounds simultaneous resolutions after every reader has seen the code", async () => {
+    await open();
+    const results = await Promise.all(Array.from({ length: MAX_CODE_ATTEMPTS + 3 }, () => resolveUserCode("FKDR8T2W")));
+    expect(results.filter(Boolean).length).toBeLessThanOrEqual(MAX_CODE_ATTEMPTS);
+    expect(results.filter(Boolean).map(r => r!.attempts)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("expires the counter with the remaining code TTL", async () => {
+    await open();
+    const ttl = vi.spyOn(fakeRedis, "ttl").mockResolvedValue(37);
+    try {
+      await resolveUserCode("FKDR8T2W");
+      expect(calls).toContain("expire devauth:code-attempts:FKDR8T2W 37");
+    } finally { ttl.mockRestore(); }
+  });
+
+  it("destroys the counter too", async () => {
+    await open();
+    store.set("devauth:code-attempts:FKDR8T2W", "3");
+    await destroyDeviceAuthorization("FKDR8T2W", "hash-a");
+    expect(store.has("devauth:code-attempts:FKDR8T2W")).toBe(false);
   });
 });

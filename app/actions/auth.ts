@@ -3,6 +3,7 @@
 // reuses PassControl's userClient(), English copy, invite-gated signup, no OAuth,
 // no user-audit hook. Each action returns { error } for the form to display, or
 // redirect()s on success.
+import { clientIpFrom } from "@/lib/http/client-ip";
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { cookies } from "next/headers";
@@ -31,15 +32,6 @@ const LOGIN_WINDOW_S = 300; // 5-minute fixed window
 const PASSWORD_RESET_EMAIL_LIMIT = 3;
 const PASSWORD_RESET_WINDOW_S = 15 * 60;
 
-async function clientIp(): Promise<string> {
-  const h = await headers();
-  return (
-    h.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    h.get("x-real-ip") ||
-    "unknown"
-  );
-}
-
 /** Honeypot: real users never fill this; bots usually do. Empty for humans. */
 function botDetected(formData: FormData): boolean {
   return String(formData.get("contact_phone") ?? "").trim() !== "";
@@ -55,7 +47,7 @@ export async function login(_prev: FormState, formData: FormData): Promise<FormS
   // Rate-limit by both source IP and the targeted account so neither
   // credential-stuffing (many accounts from one IP) nor a focused brute force
   // (one account from many IPs) gets unlimited tries. Generic message either way.
-  const ip = await clientIp();
+  const ip = clientIpFrom(await headers());
   const [ipRl, emailRl] = await Promise.all([
     rateLimit(`login:ip:${ip}`, LOGIN_IP_LIMIT, LOGIN_WINDOW_S),
     email
@@ -124,7 +116,7 @@ export async function signup(_prev: FormState, formData: FormData): Promise<Form
 
   // Throttle signup by IP (invite-gated already, but stops automated probing of
   // the invite code and email-send abuse).
-  const ip = await clientIp();
+  const ip = clientIpFrom(await headers());
   const rl = await rateLimit(`signup:ip:${ip}`, LOGIN_IP_LIMIT, LOGIN_WINDOW_S);
   if (!rl.success) {
     return { error: "Too many attempts. Please wait a few minutes and try again." };
@@ -182,7 +174,7 @@ export async function requestPasswordReset(
   if (botDetected(formData)) return { success: genericSuccess };
 
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
-  const ip = await clientIp();
+  const ip = clientIpFrom(await headers());
   const [ipRl, emailRl] = await Promise.all([
     rateLimit(`password-reset:ip:${ip}`, LOGIN_IP_LIMIT, LOGIN_WINDOW_S),
     email
@@ -235,7 +227,7 @@ export async function resetPassword(
   if (pwError) return { error: pwError };
   if (password !== confirmation) return { error: "Passwords do not match." };
 
-  const ip = await clientIp();
+  const ip = clientIpFrom(await headers());
   const rl = await rateLimit(`password-update:ip:${ip}`, LOGIN_EMAIL_LIMIT, LOGIN_WINDOW_S);
   if (!rl.success) {
     return { error: "Too many attempts. Please wait a few minutes and try again." };

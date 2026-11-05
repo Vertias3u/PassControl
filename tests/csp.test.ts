@@ -292,6 +292,10 @@ describe("next.config", () => {
   it("keeps a script-free policy for the API", async () => {
     const source = await readFile(new URL("../next.config.mjs", import.meta.url), "utf8");
     expect(source).toMatch(/source:\s*"\/api\/:path\*"/);
-    expect(source).not.toContain("script-src");
+    // Scoped to the API's own policy: the hosted /learn/map policy in this file
+    // legitimately has a script-src, and is pinned in its own test.
+    const apiPolicy = source.match(/const apiCsp = \[([\s\S]*?)\n\]/)?.[1] ?? "";
+    expect(apiPolicy.length).toBeGreaterThan(0);
+    expect(apiPolicy).not.toContain("script-src");
   });
 });

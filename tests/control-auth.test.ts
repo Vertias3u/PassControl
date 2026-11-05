@@ -44,6 +44,15 @@ describe("authenticateApiKey", () => {
     });
   });
 
+  // Cloud review 2026-11-03, hardening note: trust boundary 1 says a Direct Agent Key
+  // is never accepted on the control plane. It was refused only because its hash is
+  // not in api_keys; now its shape is refused before any lookup.
+  it("401 invalid_api_key for a Direct Agent Key, before any lookup", async () => {
+    lookup = { data: { id: "k1", user_id: "u1", scope: "write", revoked_at: null }, error: null };
+    const dak = "pc_agent_" + "b".repeat(43);
+    expect(await authenticateApiKey(req("Bearer " + dak))).toMatchObject({ ok: false, status: 401, code: "invalid_api_key" });
+  });
+
   it("401 invalid_api_key when the key hash isn't found", async () => {
     lookup = { data: null, error: null };
     expect(await authenticateApiKey(req("Bearer " + VALID))).toMatchObject({ ok: false, code: "invalid_api_key" });

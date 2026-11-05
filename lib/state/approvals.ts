@@ -40,8 +40,13 @@ export const APPROVED_TTL_S = 10 * 60;
 export const DENIED_TTL_S = 15 * 60;
 /** Open questions per workspace. A legitimate burst is a handful. */
 export const MAX_PENDING_APPROVALS = 20;
-/** Longest stored path. */
-export const APPROVAL_PATH_MAX = 300;
+/**
+ * Longest path the owner is asked about: what every prompt shows in full, and what
+ * is stored. The gateway refuses a longer one rather than ask about its start
+ * (cloud review 2026-11-03, B4): the store kept 300 and the prompts 200, so the end of
+ * a path matched by a `*` could fall out of sight and still be approved.
+ */
+export const APPROVAL_PATH_MAX = 200;
 /**
  * Longest query-and-body the owner is asked about, stored whole so the
  * Approvals page shows ALL of it. The gateway refuses a larger request rather

@@ -127,7 +127,16 @@ vi.mock("@/lib/state/holds", () => {
   };
 });
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
-vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
+// The real sealContext, so a test can say which context each call site seals for.
+const aes = vi.hoisted(() => ({
+  seal: vi.fn(async (_v: string, _ctx: string) => "sealed"),
+  open: vi.fn(async (v: string, _ctx: string): Promise<string | null> => v),
+}));
+vi.mock("@/lib/crypto/aesgcm", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/crypto/aesgcm")>()),
+  seal: (v: string, ctx: string) => aes.seal(v, ctx),
+  open: (v: string, ctx: string) => aes.open(v, ctx),
+}));
 vi.mock("@/lib/log", () => ({
   writeLog: (...args: unknown[]) => writeLogMock(...args),
   mirrorSpend: (...args: unknown[]) => mirrorSpendMock(...args),
@@ -235,6 +244,14 @@ async function getProxy(provider: string, path: string[]) {
   return GET(getReq(), { params: Promise.resolve({ provider, path }) });
 }
 
+/** A provider_credentials read that answers: one credential, no stored address. */
+function noAddressRow() {
+  const chain: Record<string, unknown> = {};
+  for (const m of ["select", "eq", "order", "limit"]) chain[m] = () => chain;
+  chain.maybeSingle = async () => ({ data: { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", endpoint_base_url: null }, error: null });
+  return chain;
+}
+
 beforeEach(() => {
   verifyVisaMock.mockReset();
   serviceClientMock.mockReset();
@@ -257,6 +274,9 @@ beforeEach(() => {
 
   serviceClientMock.mockReturnValue({
     rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
+    // The endpoint read, which since A1 happens with the gate off too: no stored
+    // address, as for almost every tenant.
+    from: () => noAddressRow(),
   });
   openHoldMock.mockResolvedValue({ ok: true, reserved: 1 });
   settleHoldMock.mockResolvedValue(undefined);
@@ -589,14 +609,38 @@ describe("custom provider endpoints", () => {
 
   const target = () => String(fetchMock.mock.calls.at(-1)?.[0]);
 
-  it("ignores a stored endpoint entirely while the gate is off", async () => {
+  // Cloud review 2026-11-03, A1 (owner: "read it, refuse"). A key saved with its own
+  // address (a LiteLLM or vLLM server) was sent to api.openai.com while the gate was
+  // off, because off never read the address. That key belongs to someone else's
+  // server; the public host is the wrong destination, not a safe default.
+  it("refuses a key whose stored address the gate (off) does not admit, before the key is read", async () => {
     getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
+    const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "endpoint_not_allowed" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(getCachedKeyMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(writeLogMock).toHaveBeenCalled());
+    expect((writeLogMock.mock.calls.at(-1)?.[0] as Record<string, unknown>).status).toBe("endpoint_not_allowed");
+    expect(settleHoldMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "not_dispatched" }));
+  });
+
+  it("still sends a key with no stored address to the provider's own host while the gate is off", async () => {
+    getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|");
+    const rpc = vi.fn(async () => ({ data: "provider-key", error: null }));
+    serviceClientMock.mockReturnValue({ rpc, from: () => noAddressRow() });
     const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
 
     expect(res.status).toBe(200);
     expect(target()).toBe("https://api.openai.com/v1/chat/completions");
-    // Not merely disabled — the feature is absent, so it costs no read at all.
-    expect(getCachedEndpointMock).not.toHaveBeenCalled();
+    // This is hosted Cloud's path since A1: the key is fetched for the credential the
+    // address decision was made about, not re-picked by get_provider_key.
+    expect(rpc).toHaveBeenCalledWith("get_provider_key_for_credential", {
+      p_agent_id: "agent-id",
+      p_provider: "openai",
+      p_credential_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
   });
 
   it("sends the call to a self-hosted endpoint, base path and all", async () => {
@@ -613,13 +657,15 @@ describe("custom provider endpoints", () => {
 
   // Re-validated on read, not trusted from the row. An operator who narrows the
   // gate must not keep serving endpoints that were legal when they were stored.
-  it("falls back to the built-in host when the stored value is no longer admitted", async () => {
+  // A1: it used to fall back to the built-in host here, with the private key.
+  it("refuses, never falls back, when the stored value is no longer admitted", async () => {
     process.env.PROVIDER_ENDPOINT_MODE = "gateway.company.com";
     getCachedEndpointMock.mockResolvedValue("cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1");
     const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
 
-    expect(res.status).toBe(200);
-    expect(target()).toBe("https://api.openai.com/v1/chat/completions");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "endpoint_not_allowed" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("still speaks the credential's own protocol, not the endpoint's", async () => {
@@ -952,7 +998,10 @@ describe("when the endpoint read does not answer", () => {
 
   /** Records which RPC the proxy reached for, and answers it by name. */
   const dbPairing = (row: unknown, answers: Record<string, unknown>) => {
-    const rpc = vi.fn(async (name: string) => ({ data: answers[name] ?? null, error: null }));
+    const rpc = vi.fn(async (name: string): Promise<{ data: unknown; error: { message: string } | null }> => ({
+      data: answers[name] ?? null,
+      error: null,
+    }));
     const chain: Record<string, unknown> = {};
     chain.select = () => chain;
     chain.eq = () => chain;
@@ -1108,6 +1157,56 @@ describe("when the endpoint read does not answer", () => {
     );
     expect(headers + init).toContain("sk-real-a");
     expect(headers + init).not.toContain("sk-stale-b");
+  });
+
+  // Cloud review 2026-11-03, A2: the cache value is sealed FOR its entry, so a value
+  // a Redis writer copies in from another agent's entry does not open there.
+  it("seals and opens the cached key for this agent, provider and credential", async () => {
+    const { sealContext } = await vi.importActual<typeof import("@/lib/crypto/aesgcm")>("@/lib/crypto/aesgcm");
+    process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    getCachedKeyMock.mockResolvedValue(JSON.stringify({ c: CREDENTIAL_A, k: "sealed-a" }));
+    aes.open.mockResolvedValueOnce(null);
+    const db = dbPairing({ id: CREDENTIAL_A, endpoint_base_url: ENDPOINT_A }, { get_provider_key_for_credential: "sk-real-a" });
+    serviceClientMock.mockReturnValue(db);
+    await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+    const ctx = sealContext.providerKey("agent-id", "openai", CREDENTIAL_A);
+    expect(aes.open).toHaveBeenCalledWith("sealed-a", ctx);
+    // It did not open for this entry, so it is a miss: the key comes from the vault.
+    expect(db.rpc).toHaveBeenCalledWith("get_provider_key_for_credential", expect.anything());
+    await vi.waitFor(() => expect(aes.seal).toHaveBeenCalledWith("sk-real-a", ctx));
+  });
+
+  it("binds the unbound path to this agent and provider too", async () => {
+    const { sealContext } = await vi.importActual<typeof import("@/lib/crypto/aesgcm")>("@/lib/crypto/aesgcm");
+    // Unbound only when the tenant has no credential row at all (since A1 every mode
+    // reads it).
+    getCachedEndpointMock.mockResolvedValue("|");
+    getCachedKeyMock.mockResolvedValue("sealed-plain");
+    await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+    expect(aes.open).toHaveBeenCalledWith("sealed-plain", sealContext.providerKey("agent-id", "openai", null));
+  });
+
+  // Cloud review 2026-11-03, A3: the decrypt RPC's error was dropped, so a database
+  // failure answered 409 no_provider_key and logged it: "store a key", for a key
+  // that was stored all along. It is a PassControl-side read failure.
+  it.each([
+    ["unbound", null, "get_provider_key"],
+    ["bound", { id: CREDENTIAL_A, endpoint_base_url: ENDPOINT_A }, "get_provider_key_for_credential"],
+  ] as const)("answers a failed %s decrypt read with 503, never no_provider_key", async (_, row, rpcName) => {
+    if (row) process.env.PROVIDER_ENDPOINT_MODE = "selfhost";
+    const db = dbPairing(row, {});
+    db.rpc.mockImplementation(async (name: string) =>
+      name === rpcName ? { data: null, error: { message: "connection reset" } } : { data: null, error: null }
+    );
+    serviceClientMock.mockReturnValue(db);
+    const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("credential_unavailable");
+    await vi.waitFor(() =>
+      expect(writeLogMock.mock.calls.at(-1)?.[0]).toMatchObject({ status: "credential_unavailable" })
+    );
   });
 
   it("leaves the gate-off path on the unbound RPC, exactly as it was", async () => {
@@ -1309,15 +1408,16 @@ describe("when the endpoint read does not answer", () => {
     expect(logged.costMicrocents).toBe(0);
   });
 
-  it("does not read the database at all while the gate is off", async () => {
-    const db = dbReturning(READ_FAILED);
-    serviceClientMock.mockReturnValue(db);
+  // A1: the gate being off no longer means "never read", because a stored address
+  // must be refused there too. So off refuses an unreadable address like every mode:
+  // not knowing where a key goes is a reason not to fetch it.
+  it("refuses when the endpoint read fails, with the gate off too", async () => {
+    serviceClientMock.mockReturnValue(dbReturning(READ_FAILED));
     const res = await callProxy("openai", ["v1", "chat", "completions"], "gpt-4o-mini");
 
-    // A deployment that never opted in cannot be refused by a feature it does
-    // not have. This is the default, and it is Cloud today.
-    expect(res.status).toBe(200);
-    expect(target()).toBe("https://api.openai.com/v1/chat/completions");
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "endpoint_unavailable" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

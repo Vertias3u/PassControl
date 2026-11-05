@@ -101,7 +101,11 @@ vi.mock("@/lib/fleet", () => ({
   updateAgent: vi.fn(),
 }));
 vi.mock("@/lib/ratelimit", () => ({ rateLimit: mocks.rateLimit }));
-vi.mock("@/lib/crypto/aesgcm", () => ({ seal: mocks.seal, open: mocks.open }));
+vi.mock("@/lib/crypto/aesgcm", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/crypto/aesgcm")>()),
+  seal: mocks.seal,
+  open: mocks.open,
+}));
 vi.mock("@/lib/state/redis", () => ({
   stashKeyImport: mocks.stashKeyImport,
   takeKeyImport: mocks.takeKeyImport,
@@ -133,6 +137,7 @@ import {
   rankDiscoveredModels,
 } from "@/lib/agent-connect";
 import { scopeAllows } from "@/lib/scope";
+import { sealContext } from "@/lib/crypto/aesgcm";
 import { LIMITS, validateScopes } from "@/lib/validate";
 
 beforeEach(() => {
@@ -440,7 +445,8 @@ describe("key import secret and tenant boundaries", () => {
       models: ["claude-a"],
     });
     await expect(pending).rejects.toThrow("This key import has expired. Start again.");
-    expect(mocks.open).toHaveBeenCalledWith("sealed-foreign-payload");
+    // Opened for this user and this handoff id only (cloud review A2).
+    expect(mocks.open).toHaveBeenCalledWith("sealed-foreign-payload", sealContext.keyImport("tenant-a", handoffId));
     expect(mocks.rpc).not.toHaveBeenCalled();
     expect(mocks.createAgent).not.toHaveBeenCalled();
   });
@@ -498,6 +504,9 @@ describe("key import secret and tenant boundaries", () => {
       "opaque-encrypted-handoff",
       expect.any(Number)
     );
+    // Sealed FOR this user and handoff id (cloud review A2), so a sealed value moved
+    // to another user's or another handoff's slot in Redis does not open there.
+    expect(mocks.seal).toHaveBeenCalledWith(expect.any(String), sealContext.keyImport("tenant-a", probed.handoff));
 
     const args = {
       handoff: probed.handoff,

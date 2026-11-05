@@ -14,7 +14,7 @@ import {
   type SenderConstraintMode,
 } from "./sender-constraint";
 import { purgeAgentPolicy } from "./state/redis";
-import { setTenantKillDurably } from "@/lib/state/killswitch";
+import { bumpKillGeneration, setTenantKillDurably } from "@/lib/state/killswitch";
 import { deleteKillRecord, saveKillRecord } from "@/lib/state/kill-record";
 import { suspendAgent, unsuspendAgent, purgeAgentCaches, stopSession, resumeSession } from "@/lib/state/redis";
 // The scope bounds an elevation is checked against now live with the union that
@@ -529,6 +529,8 @@ export async function setSessionStopped(
     durable = await saveKillRecord(userId, stop);
   } else {
     durable = await deleteKillRecord(userId, stop);
+    // A reload that read the row before the delete must not write it back (A9).
+    await bumpKillGeneration(userId);
     await resumeSession(agentId, sessionId);
   }
   return { ok: true, value: { id: agentId, sessionId, stopped, durable } };

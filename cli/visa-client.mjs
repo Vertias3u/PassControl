@@ -39,6 +39,9 @@ export function createVisaClient({
       passport_id: passportId,
       ts: now(),
       nonce: randomUUID(),
+      // Signed, so this proof is good at the challenge door only (cloud review
+      // CP5). An older gateway ignores the field.
+      purpose: "challenge",
       // Omitted, never guessed at: every older client, the SDK and the examples
       // mint without one, and an absent claim is a state the dashboard says out
       // loud rather than a tier it assumes.

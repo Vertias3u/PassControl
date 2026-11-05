@@ -47,8 +47,10 @@ const STATUS: Record<LogEntry["status"], { explanation: string }> = {
   upstream_error: { explanation: "PassControl allowed the attempt, but the upstream provider returned an error." },
   provider_exhausted: { explanation: "PassControl allowed the attempt; the provider account, not the PassControl budget, had no credit." },
   no_provider_key: { explanation: "PassControl refused before forwarding: no key is stored for this provider, so there was nothing to inject. The provider never received this call — store a key for it and retry." },
+  credential_unavailable: { explanation: "PassControl refused before forwarding because the read of this provider key from its vault failed: the database did not answer. That says nothing about whether a key is stored, so do not add a second one. The provider never received this call. This is a PassControl-side read failure, so retry it; if it persists, check System health." },
   credential_state_unavailable: { explanation: "PassControl re-checks, immediately before sending, that the address and the secret still come from the same version of your credential. Here that check could not be completed — its own state store did not answer. This is NOT a report that anything changed: nothing was observed either way, and the call was refused rather than sent on an unverified pair. The provider never received it. Retry it; if it persists, check the gateway's Redis." },
   endpoint_required: { explanation: "PassControl refused before forwarding: this provider key is stored, but not the address of the resource it belongs to. An Azure key has no provider host to fall back to, so PassControl never guesses one. The provider never received this call. Set the key's resource address under Settings, Provider credentials, Endpoint. Do not add a second key." },
+  endpoint_not_allowed: { explanation: "PassControl refused before forwarding: this provider key is stored with its own address (a server such as LiteLLM or vLLM), and this deployment's PROVIDER_ENDPOINT_MODE does not allow that address. The key was made for that server, so PassControl does not send it to the provider's own host instead. The provider never received this call. Allow the address in PROVIDER_ENDPOINT_MODE, or remove it from the key under Settings, Provider credentials, Endpoint." },
   endpoint_unavailable: { explanation: "PassControl refused before forwarding because it could not read which endpoint this credential is meant to reach. It does not send the key to the provider's own host on a guess: a credential set up for your own server may not belong there. The provider never received this call — this is a PassControl-side read failure, so retry it." },
   blocked_unpriced_endpoint: { explanation: "This agent has a spending cap in dollars, and this call was bound for a custom endpoint whose price PassControl cannot know \u2014 a gateway you run may mark up, re-route, or answer to a familiar model name with something else entirely. Enforcing the cap against the built-in provider's retail price would be enforcing a number unrelated to the bill, so the call was refused instead. The provider never received it and nothing was charged. Either remove the dollar cap for this agent (a token cap still works, because token counts are real wherever the call goes) or route it through an endpoint PassControl prices." },
   blocked_secret: { explanation: "The request carried something that looks like a key (a provider key, a GitHub or cloud token, a private key, a PassControl key), and this agent\u2019s policy refuses such requests. Nothing was sent and nothing was charged. The key itself is not recorded anywhere. A coding agent re-sends the whole conversation on every call, so remove the key from the history (in Claude Code, /rewind or /clear), or switch the agent\u2019s secret guard to replace keys with a placeholder." },
@@ -157,6 +159,7 @@ export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null)
       break;
     case "no_provider_key":
     case "endpoint_required":
+    case "endpoint_not_allowed":
     case "provider_exhausted":
       actions.push(providers);
       break;
@@ -176,6 +179,7 @@ export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null)
       break;
     case "endpoint_unavailable":
     case "credential_state_unavailable":
+    case "credential_unavailable":
     case "blocked_budget_state":
     case "dispatch_unavailable":
       actions.push({ href: "/dashboard/system", label: "System health" });

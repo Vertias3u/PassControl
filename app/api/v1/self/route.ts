@@ -38,7 +38,8 @@
 // Code's tools for a taint it cannot see, and a hold is visible to the agent anyway. It
 // says until when the agent is tainted, never what was found: naming the pattern would
 // teach an attacker which wording got through. Monitor mode and off add nothing, so an
-// agent cannot learn it is watched; an unreadable policy applies no guard, as on the proxy.
+// agent cannot learn it is watched. A policy that is refused or unreadable reports only a
+// live taint (B2's "held on a live taint"; see injectionView), and nothing otherwise.
 export const runtime = "edge";
 
 import { budgetPace } from "@/lib/budget-pace";
@@ -53,7 +54,7 @@ import {
 } from "@/lib/gateway/authenticate";
 import { readClientLineage, sessionStoppedMessage } from "@/lib/client-lineage";
 import { POLICY_UNREADABLE } from "@/lib/gate";
-import { injectionGuardMode } from "@/lib/scope";
+import { injectionGuardMode, policyRefused } from "@/lib/scope";
 import { readTaint } from "@/lib/state/taint";
 import { err, errMessage } from "@/lib/gateway/responses";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
@@ -180,7 +181,16 @@ async function injectionView(
   agentId: string,
   nowMs: number
 ): Promise<{ mode: "hold"; readable: boolean; tainted_until: string | null } | null> {
-  if (policy === POLICY_UNREADABLE || injectionGuardMode(policy) !== "hold") return null;
+  // A policy that is refused or could not be read is unknown, and the owner's B2 answer
+  // for an unknown policy is "held on a live taint", as /svc and tool-approvals do. The
+  // sidecar asks tool-approvals only once this says the agent is tainted, so saying
+  // nothing let Claude Code's tools through (1.7.2 E2E F3). A taint is only written in
+  // hold mode, so naming one tells an agent nothing it was not already held for.
+  if (policy === POLICY_UNREADABLE || policyRefused(policy)) {
+    const taint = await readTaint(agentId, nowMs).catch(() => null);
+    return taint ? { mode: "hold", readable: true, tainted_until: new Date(taint.until).toISOString() } : null;
+  }
+  if (injectionGuardMode(policy) !== "hold") return null;
   try {
     const taint = await readTaint(agentId, nowMs);
     return { mode: "hold", readable: true, tainted_until: taint ? new Date(taint.until).toISOString() : null };

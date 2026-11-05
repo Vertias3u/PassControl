@@ -9,6 +9,7 @@ import {
   redactingStream,
   secretsToRedact,
 } from "@/lib/providers/secret-redaction";
+import { LOCAL_NO_KEY } from "@/lib/providers";
 
 const KEY = "sk-proj-Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z-ECHO_TEST";
 const enc = new TextEncoder();
@@ -39,6 +40,29 @@ describe("secretsToRedact", () => {
     // Replacing a short string everywhere would corrupt ordinary output.
     expect(secretsToRedact("short")).toEqual([]);
     expect(secretsToRedact(null)).toEqual([]);
+  });
+});
+
+// Cloud review 2026-11-03, A8: keys under 16 characters were never redacted, but the
+// gateway stores keys of any length, and LiteLLM documents `sk-1234` as a master key.
+// An upstream that echoed it handed it to the agent (invariant 4). The floor is now 6:
+// still too short to scramble output on a 1–5 character value, never a real key.
+describe("short stored keys (A8)", () => {
+  it.each(["sk-1234", "abc123", "vllm-key-1"])("redacts %s", (key) => {
+    expect(secretsToRedact(key)).toEqual([key]);
+    const echoed = JSON.stringify({ error: `bad key: Bearer ${key}` });
+    const out = redactSecretsInText(echoed, secretsToRedact(key));
+    expect(out.redacted).toBe(true);
+    expect(out.text).not.toContain(key);
+  });
+
+  it("leaves the keyless-local marker alone: it is not a secret and is never sent", () => {
+    expect(secretsToRedact(LOCAL_NO_KEY)).toEqual([]);
+  });
+
+  it("redacts a short key split across stream chunks", async () => {
+    const out = await pipe(["err: Bearer sk-1", "234 end"], secretsToRedact("sk-1234"));
+    expect(out.join("")).toBe(`err: Bearer ${PROVIDER_KEY_REDACTION} end`);
   });
 });
 

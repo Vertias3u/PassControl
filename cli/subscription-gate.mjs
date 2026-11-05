@@ -237,21 +237,35 @@ export function createStopGate({
     return warnOnce(session ?? "", reason ?? "no answer");
   }
 
-  /** The tool rules from the latest answer, or null once they are older than `maxStaleMs`. */
+  /**
+   * The tool rules from the latest answer, however old; null only before the first.
+   *
+   * They used to lapse after `maxStaleMs`, and lapsed rules let every tool through. A
+   * read fails when /self's own rate limit is spent, which anything on the machine can
+   * do through the sidecar, so "the reads fail" switched the rules off on demand (cloud
+   * review 2026-11-03, SC-B). The last rules the gateway gave stay in force until it
+   * gives others (owner, 2026-11-04: option 1). Stops are not kept this way: those are
+   * the gateway's to enforce, and it does, ahead of the rate limit.
+   */
   function toolRules() {
-    return rules && age(rules) <= maxStaleMs ? rules : null;
+    return rules;
   }
 
   function injection() {
     if (!injectionEntry || injectionEntry.value === undefined) return "off";
-    if (age(injectionEntry) > maxStaleMs) return "unknown";
     const value = injectionEntry.value;
-    if (!value || value.mode !== "hold" || value.readable !== true) return "unknown";
-    if (value.tainted_until === null) return "clear";
-    if (typeof value.tainted_until !== "string") return "unknown";
-    const until = Date.parse(value.tainted_until);
-    if (!Number.isFinite(until)) return "unknown";
-    return until > now() ? "tainted" : "clear";
+    let state = "unknown";
+    if (value && value.mode === "hold" && value.readable === true) {
+      if (value.tainted_until === null) state = "clear";
+      else if (typeof value.tainted_until === "string") {
+        const until = Date.parse(value.tainted_until);
+        if (Number.isFinite(until)) state = until > now() ? "tainted" : "clear";
+      }
+    }
+    // A taint the gateway named holds until the end it named, read or no read (SC-B,
+    // as above). Any other state is only as good as its age.
+    if (age(injectionEntry) > maxStaleMs && state !== "tainted") return "unknown";
+    return state;
   }
 
   // Keep the last known mode even after max-stale: a fresh read may recover it.

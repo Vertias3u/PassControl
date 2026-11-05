@@ -2,7 +2,7 @@
 // Codex session signed in with a ChatGPT plan, through Codex's command hooks.
 //
 // Three ways this fails OPEN without anyone seeing it, each pinned here:
-//   * Codex's hooks.json is shared (Peras writes into it on this very machine), so
+//   * Codex's hooks.json is shared (other tools write their own hooks into it), so
 //     setup and removal touch only PassControl's own entries;
 //   * on PreToolUse, Codex treats `continue`, `stopReason`, `suppressOutput` and
 //     `permissionDecision: "ask"` as a FAILED hook and runs the tool. The sidecar's

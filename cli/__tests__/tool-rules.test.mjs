@@ -74,6 +74,58 @@ describe("parseToolRules", () => {
 });
 
 describe("evaluateToolRules", () => {
+  it.each([
+    "true & git push", "(git push)", "echo $(git push)", "echo `git push`",
+    "FOO=1 git push", "FOO=1 BAR=two git push", "FOO='two words' git push",
+    'FOO="two words" BAR=1 git push', "git  push", "git\t push",
+  ])("denies the cheap Bash form %s", (command) => {
+    expect(evaluateToolRules(parsed([{ tool: "Bash", command: "git push*", effect: "deny" }]), bash(command)))
+      .toMatchObject({ effect: "deny", subject: "git push" });
+  });
+
+  it("keeps the strictest rule across newly split command pieces", () => {
+    const rules = parsed([
+      { tool: "Bash", command: "npm test*", effect: "ask" },
+      { tool: "Bash", command: "rm *", effect: "deny" },
+    ]);
+    expect(evaluateToolRules(rules, bash("npm test & rm -rf ~")))
+      .toMatchObject({ effect: "deny", subject: "rm -rf ~" });
+  });
+
+  it.each(["npm test & rm -rf ~", "npm test; rm -rf ~"])(
+    "rejects an allow document so an unmatched piece cannot ride it: %s", async (command) => {
+      const document = { rules: [{ tool: "Bash", command: "npm test*", effect: "allow" }] };
+      expect(parseToolRules(document)).toEqual({ ok: false });
+      const { createToolGate } = await import("../tool-gate.mjs");
+      const gate = createToolGate({ askOwner: async () => { throw new Error("must not ask"); } });
+      const result = await gate.decide({ ...bash(command), hook_event_name: "PreToolUse" }, {
+        read: { state: "ok", document }, at: Date.now(),
+      }, 600);
+      expect(result.hookSpecificOutput.permissionDecision).toBe("deny");
+    }
+  );
+
+  it.todo("known gap: git push* does not catch git -C . push (Git global options)");
+
+  it.each([
+    ["evil.com", "evil.com."],
+    ["evil.com", "EVIL.COM."],
+    ["*.evil.com", "evil.com."],
+    ["*.evil.com", "EVIL.COM."],
+    ["*.evil.com", "sub.evil.com."],
+  ])("denies trailing-dot host %s / %s", (domain, host) => {
+    expect(evaluateToolRules(parsed([{ tool: "WebFetch", domain, effect: "deny" }]), {
+      tool_name: "WebFetch", tool_input: { url: `https://${host}/x` },
+    })).toMatchObject({ effect: "deny", subject: host.toLowerCase().slice(0, -1) });
+  });
+
+  it("keeps domain boundaries and rejects stored trailing-dot rules", () => {
+    expect(evaluateToolRules(parsed([{ tool: "WebFetch", domain: "evil.com", effect: "deny" }]), {
+      tool_name: "WebFetch", tool_input: { url: "https://notevil.com./x" },
+    })).toEqual({ effect: null });
+    expect(parseToolRules({ rules: [{ tool: "WebFetch", domain: "evil.com.", effect: "deny" }] })).toEqual({ ok: false });
+  });
+
   it("lets through what no rule names", () => {
     expect(evaluateToolRules(parsed([{ tool: "Bash", command: "git push*", effect: "deny" }]), bash("git status"))).toEqual({
       effect: null,
@@ -139,5 +191,37 @@ describe("evaluateToolRules", () => {
     ]);
     expect(evaluateToolRules(rules, { tool_name: "Bash", tool_input: {} })).toMatchObject({ effect: "deny" });
     expect(evaluateToolRules(rules, { tool_name: "WebFetch", tool_input: { url: "not a url" } })).toMatchObject({ effect: "deny" });
+  });
+});
+
+// Cloud review 2026-11-03, SC-E: macOS (APFS) and Windows (NTFS) ignore case by
+// default, so `/users/NAS/.SSH/id_ed25519` opens the same file as `/Users/nas/.ssh/id_ed25519`
+// and a deny written for one did not match the other. Every effect is restrictive, so
+// ignoring case can only make the gate stricter, never looser.
+describe("path rules on a filesystem that ignores case (SC-E)", () => {
+  const rules = parsed([{ tool: "Read", path: "/Users/nas/.ssh/*", effect: "deny" }]);
+  const read = (file_path) => ({ tool_name: "Read", tool_input: { file_path } });
+
+  it.each(["/users/NAS/.SSH/id_ed25519", "/USERS/nas/.ssh/ID_ED25519", "/Users/nas/.SSH/../.ssh/id_ed25519"])(
+    "denies %s on macOS and Windows",
+    (file) => {
+      for (const platform of ["darwin", "win32"]) {
+        expect(evaluateToolRules(rules, read(file), { platform }).effect, platform).toBe("deny");
+      }
+    }
+  );
+
+  it("keeps Linux exact: a different case is a different file there", () => {
+    expect(evaluateToolRules(rules, read("/users/NAS/.SSH/id_ed25519"), { platform: "linux" }).effect).toBeNull();
+    expect(evaluateToolRules(rules, read("/Users/nas/.ssh/id_ed25519"), { platform: "linux" }).effect).toBe("deny");
+  });
+
+  it("reports the path as the agent wrote it, not lower-cased", () => {
+    expect(evaluateToolRules(rules, read("/users/NAS/.SSH/key"), { platform: "darwin" }).subject).toBe("/users/NAS/.SSH/key");
+  });
+
+  it("defaults to the platform it runs on", () => {
+    const hit = evaluateToolRules(rules, read("/users/NAS/.SSH/id_ed25519")).effect;
+    expect(hit).toBe(process.platform === "darwin" || process.platform === "win32" ? "deny" : null);
   });
 });

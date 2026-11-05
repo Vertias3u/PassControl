@@ -28,6 +28,21 @@ const { store, sets, redisMock, logFailOpenMock, record } = vi.hoisted(() => {
       return n;
     }),
     smembers: vi.fn(async (k: string) => [...(sets.get(k) ?? [])]),
+    incr: vi.fn(async (k: string) => {
+      const n = Number(store.get(k) ?? 0) + 1;
+      store.set(k, n);
+      return n;
+    }),
+    // The reload's guarded write-back (A9), as its Lua does it: KEYS[1] is the
+    // tenant's kill generation, KEYS[2] the loaded marker, the rest the stops;
+    // ARGV[1] the generation read before the record. Changed since: write nothing.
+    eval: vi.fn(async (_script: string, keys: string[], args: string[]) => {
+      const g = store.get(keys[0]!);
+      if ((g === undefined || g === null ? "" : String(g)) !== args[0]) return 0;
+      for (const k of keys.slice(2)) store.set(k, 1);
+      store.set(keys[1]!, 1);
+      return 1;
+    }),
   };
   const record = {
     rows: [] as Array<Record<string, string>>,
@@ -219,6 +234,61 @@ describe("arming and disarming write the record", () => {
     expect(redisAtDelete).toBeTruthy();
     expect(store.has(`killswitch:tenant:${U}`)).toBe(false);
     expect(record.deleteKillRecord).toHaveBeenCalledWith(U, { kind: "tenant" });
+  });
+
+  // Cloud review 2026-11-03, A9. A reload that read the record BEFORE a disarm
+  // deleted it used to write the stop back AFTER the disarm cleared Redis, and set
+  // the loaded marker: the stop stayed armed with no record behind it, and nothing
+  // ever looked at the record again. The dashboard had said "disarmed".
+  describe("a disarm that lands inside a reload is not undone by it (A9)", () => {
+    const disarmDuringReload = (disarm: () => Promise<unknown>) => {
+      record.loadKillRecords.mockImplementationOnce(async () => {
+        const read = [...record.rows];
+        await disarm();
+        return read;
+      });
+    };
+
+    beforeEach(() => {
+      record.deleteKillRecord.mockImplementation(async (_u: string, stop: Record<string, string>) => {
+        record.rows = record.rows.filter((row) => JSON.stringify(row) !== JSON.stringify(stop));
+        return true;
+      });
+    });
+
+    it("the master kill", async () => {
+      record.rows = [{ kind: "tenant" }];
+      disarmDuringReload(() => setTenantKillDurably(U, false));
+      // This call was decided before the disarm took effect, and that is fine.
+      expect((await readKillState(U)).userKill).toBe(true);
+      // What matters is what is LEFT: nothing armed, and the next call is clear.
+      expect(store.has(`killswitch:tenant:${U}`)).toBe(false);
+      expect((await readKillState(U)).userKill).toBe(false);
+    });
+
+    it("a per-service kill", async () => {
+      record.rows = [{ kind: "service", service: "github" }];
+      disarmDuringReload(() => setServiceKillDurably(U, "github", false));
+      await readKillState(U, { service: "github" });
+      expect(store.has(`killswitch:tenant:${U}:svc:github`)).toBe(false);
+      expect((await readKillState(U, { service: "github" })).serviceKill).toBe(false);
+    });
+
+    it("the reload still writes back, and marks the tenant loaded, when nothing changed", async () => {
+      record.rows = [{ kind: "tenant" }];
+      await readKillState(U);
+      expect(store.get(`killswitch:tenant:${U}`)).toBeTruthy();
+      expect(store.get(LOADED(U))).toBeTruthy();
+    });
+
+    it("an ARM during a reload is never lost: arming does not touch the generation", async () => {
+      record.loadKillRecords.mockImplementationOnce(async () => {
+        await setTenantKillDurably(U, true);
+        return [];
+      });
+      await readKillState(U);
+      expect(store.get(`killswitch:tenant:${U}`)).toBeTruthy();
+    });
   });
 
   it("a disarm whose record could not be cleared still disarms, and says it may come back", async () => {

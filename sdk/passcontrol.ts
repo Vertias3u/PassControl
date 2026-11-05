@@ -170,7 +170,14 @@ export class PassControl {
 
   /** Sign a fresh challenge and exchange it for a visa. */
   private async mint(): Promise<{ token: string; expiresAt: number }> {
-    const payloadObj = { passport_id: this.passportId, ts: Date.now(), nonce: crypto.randomUUID() };
+    // `purpose` is signed, so this proof is good at one passport door only (cloud
+    // review CP5). An older gateway ignores the field.
+    const payloadObj = {
+      passport_id: this.passportId,
+      ts: Date.now(),
+      nonce: crypto.randomUUID(),
+      purpose: this.delegationChain ? "delegated" : "challenge",
+    };
     const payloadBytes = new TextEncoder().encode(JSON.stringify(payloadObj));
     const payload = bytesToB64url(payloadBytes);
     const signature = bytesToB64url(ed25519.sign(payloadBytes, this.secret));

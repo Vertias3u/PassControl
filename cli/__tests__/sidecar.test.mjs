@@ -21,7 +21,13 @@ let received;
 let passportId;
 
 async function listen(server) {
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
   return server.address().port;
 }
 
@@ -130,6 +136,44 @@ describe("sidecar credential stripping", () => {
 // sidecar: Octokit would follow page 2 straight to the gateway without the visa
 // only the sidecar adds. So the sidecar points those URLs back at itself.
 describe("service URLs in responses (any-API)", () => {
+  it("hands a 307 to the agent without sending credentials or body to its target", async () => {
+    const stolen = [];
+    const target = http.createServer((req, res) => {
+      stolen.push({ headers: req.headers, url: req.url });
+      req.resume();
+      res.end("stolen");
+    });
+    const targetPort = await listen(target);
+    const location = `http://127.0.0.1:${targetPort}/steal`;
+    gateway.removeAllListeners("request");
+    gateway.on("request", (req, res) => {
+      req.resume();
+      if (req.url === "/api/auth/challenge") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ visa: "fake.visa.token", expires_in: 300 }));
+        return;
+      }
+      received.push({ url: req.url, headers: req.headers });
+      res.writeHead(307, { location });
+      res.end();
+    });
+    try {
+      const port = await listen(sidecar.server);
+      const response = await fetch(`http://127.0.0.1:${port}/api/v1/anthropic/v1/messages`, {
+        method: "POST", redirect: "manual",
+        headers: { "content-type": "application/json" }, body: '{"secret":"body"}',
+      });
+      await response.text();
+      expect(stolen.some((hit) => hit.headers.authorization !== undefined)).toBe(false);
+      expect(stolen).toEqual([]);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toBe(location);
+      expect(received.at(-1).headers.authorization).toBe("Bearer fake.visa.token");
+    } finally {
+      await new Promise((resolve) => target.close(resolve));
+    }
+  });
+
   it("rewrites a gateway Link and Location to the sidecar, and leaves other hosts alone", async () => {
     let gatewayOrigin = "";
     const svcGateway = http.createServer((req, res) => {
@@ -175,6 +219,84 @@ describe("service URLs in responses (any-API)", () => {
 // port, so the main sidecar's forward-proxy handling is untouched, and an
 // absolute-form request (a forward-proxy request for some other host) is refused
 // rather than turned into a governed local call.
+// Cloud review 2026-11-03, SC-A: the proxy listeners attached the visa to whatever
+// reached them, so any web page the user opened could spend the agent's budget blind,
+// and a DNS-rebound page (Host: evil.example:<port>) could read the answers. Browsers
+// mark their requests (Origin, Sec-Fetch-Site); agent clients never send either.
+// Node's own fetch sends `sec-fetch-mode: cors`, so that one is NOT a browser marker.
+describe("a browser or a rebound page is refused, before any visa", () => {
+  async function raw(server, { method = "POST", path = "/api/v1/anthropic/v1/messages", headers = {} } = {}) {
+    const port = server.listening ? server.address().port : await listen(server);
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { host: "127.0.0.1", port, method, path, headers: { "content-type": "application/json", host: `127.0.0.1:${port}`, ...headers } },
+        (res) => {
+          let body = "";
+          res.on("data", (c) => (body += c));
+          res.on("end", () => resolve({ status: res.statusCode, body, port }));
+        }
+      );
+      req.on("error", reject);
+      req.end(method === "POST" ? "{}" : undefined);
+    });
+  }
+  const portOf = (server) => (server.listening ? server.address().port : null);
+
+  it.each([
+    ["a cross-site page (Origin)", { origin: "http://evil.example" }],
+    ["a no-cors request from a page (Sec-Fetch-Site, no Origin)", { "sec-fetch-site": "cross-site" }],
+    ["even a same-site page", { "sec-fetch-site": "same-origin" }],
+  ])("main listener: %s gets 403 and the gateway sees nothing", async (_why, headers) => {
+    const res = await raw(sidecar.server, { headers });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toBe("sidecar_browser_refused");
+    expect(received).toHaveLength(0);
+  });
+
+  it("main listener: a GET to /self from a page is refused too", async () => {
+    const res = await raw(sidecar.server, { method: "GET", path: "/api/v1/self", headers: { "sec-fetch-site": "cross-site" } });
+    expect(res.status).toBe(403);
+    expect(received).toHaveLength(0);
+  });
+
+  it("main listener: a DNS-rebound Host is refused", async () => {
+    await listen(sidecar.server);
+    const res = await raw(sidecar.server, { headers: { host: `evil.example:${portOf(sidecar.server)}` } });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toBe("sidecar_host_refused");
+    expect(received).toHaveLength(0);
+  });
+
+  it.each(["127.0.0.1", "localhost", "[::1]"])("main listener: Host %s:<port> is served", async (name) => {
+    await listen(sidecar.server);
+    const res = await raw(sidecar.server, { headers: { host: `${name}:${portOf(sidecar.server)}`, "sec-fetch-mode": "cors" } });
+    expect(res.status).toBe(200);
+    expect(received.at(-1).headers.authorization).toBe("Bearer fake.visa.token");
+  });
+
+  it("main listener: a forward-proxy request (absolute form) still reaches the classifier, not the Host check", async () => {
+    const res = await raw(sidecar.server, { path: "http://api.anthropic.com/v1/messages", headers: { host: "api.anthropic.com" } });
+    expect(JSON.parse(res.body).error).not.toBe("sidecar_host_refused");
+  });
+
+  it.each([
+    ["Origin", { origin: "http://evil.example" }, "sidecar_browser_refused"],
+    ["Sec-Fetch-Site", { "sec-fetch-site": "cross-site" }, "sidecar_browser_refused"],
+    ["a rebound Host", { host: "evil.example:11434" }, "sidecar_host_refused"],
+  ])("Ollama listener: %s gets 403 and the gateway sees nothing", async (_why, headers, code) => {
+    const res = await raw(sidecar.ollamaServer, { path: "/api/chat", headers });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toBe(code);
+    expect(received).toHaveLength(0);
+  });
+
+  it("Ollama listener: a local client is still served", async () => {
+    const res = await raw(sidecar.ollamaServer, { path: "/api/chat", headers: { "sec-fetch-mode": "cors" } });
+    expect(res.status).toBe(200);
+    expect(received.at(-1).url).toBe("/api/v1/local/api/chat");
+  });
+});
+
 describe("the Ollama listener", () => {
   async function ollamaCall(method, path, { absolute = false } = {}) {
     const port = sidecar.ollamaServer.listening ? sidecar.ollamaServer.address().port : await listen(sidecar.ollamaServer);

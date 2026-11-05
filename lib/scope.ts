@@ -511,6 +511,19 @@ export function injectionGuardMode(value: unknown): InjectionGuardMode | null {
 }
 
 /**
+ * Whether this stored policy is one the reader refuses: present, but not a policy.
+ *
+ * The LLM route denies such a policy (`policy:malformed`), so the guard's null there
+ * is moot. A door without a policy step, /svc and the tool hold, must not read the
+ * same null as "the guard is off": what the owner set cannot be known, which is an
+ * unreadable policy (cloud review 2026-11-03, B2). No policy at all (null, or a
+ * caller that passes none) is not refused.
+ */
+export function policyRefused(value: unknown): boolean {
+  return value !== null && value !== undefined && parsePolicy(value) === null;
+}
+
+/**
  * The sub-agent model allowlist a live policy sets, or null for "no restriction".
  *
  * null also for a document the reader refuses: a malformed live policy is denied

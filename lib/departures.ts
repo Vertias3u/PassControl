@@ -100,8 +100,10 @@ export const DEPARTURE_VERDICT: Record<
   // Not NO ADDRESS: that one could not READ the address. Here the read answered
   // and no address is stored with the key, so the fix is to set one.
   endpoint_required: { word: "UNADDRESSED", tone: "held" },
+  endpoint_not_allowed: { word: "ADDRESS", tone: "held" },
   // Not "ROTATED". Nothing was observed to rotate — the check itself did not run.
   credential_state_unavailable: { word: "UNCHECKED", tone: "held" },
+  credential_unavailable: { word: "KEY READ", tone: "held" },
   credential_changed: { word: "ROTATED", tone: "held" },
   blocked_unpriced_endpoint: { word: "NO PRICE", tone: "held" },
   blocked_unpriced_model: { word: "UNPRICED", tone: "held" },

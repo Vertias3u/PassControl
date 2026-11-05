@@ -24,7 +24,7 @@ const fromB64url = (s) => new Uint8Array(Buffer.from(s.replace(/-/g, "+").replac
 
 // ── 1. Mint a work-visa (sign a challenge with the passport) ──────────────────
 async function mintVisa() {
-  const obj = { passport_id: PASSPORT_ID, ts: Date.now(), nonce: crypto.randomUUID() };
+  const obj = { passport_id: PASSPORT_ID, ts: Date.now(), nonce: crypto.randomUUID(), purpose: "challenge" };
   const payload = b64url(new TextEncoder().encode(JSON.stringify(obj)));
   const signature = b64url(ed25519.sign(fromB64url(payload), fromB64url(PASSPORT_SECRET)));
   const res = await fetch(`${GATEWAY}/api/auth/challenge`, {

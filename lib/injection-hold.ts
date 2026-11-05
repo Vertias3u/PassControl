@@ -10,8 +10,10 @@
 //    2026-10-30, "1b"), and a live taint is that knowledge: one exists only in hold
 //    mode. No taint, or no taint store either, and the action goes, POLICY_FAIL_CLOSED
 //    or not: a policy outage must not put every tenant's writes to their owners.
+//    A stored policy the reader refuses is read the same way (cloud review B2): it
+//    used to mean "the guard is off", which turned a live hold off.
 import { POLICY_UNREADABLE } from "@/lib/gate";
-import { injectionGuardMode } from "@/lib/scope";
+import { injectionGuardMode, policyRefused } from "@/lib/scope";
 import { readTaint, type Taint } from "@/lib/state/taint";
 
 export const HELD_TAINTED =
@@ -26,7 +28,7 @@ const heldFor = (taint: Taint | null) => (!taint ? undefined : taint.families.le
 
 /** The owner-facing reason the hold applies, or undefined when it does not. */
 export async function injectionHoldReason(policy: unknown, agentId: string, nowMs: number): Promise<string | undefined> {
-  if (policy === POLICY_UNREADABLE) {
+  if (policy === POLICY_UNREADABLE || policyRefused(policy)) {
     try {
       return heldFor(await readTaint(agentId, nowMs));
     } catch {

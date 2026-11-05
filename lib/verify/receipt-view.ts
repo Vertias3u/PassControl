@@ -523,10 +523,22 @@ const VERDICTS: Record<string, VerdictPresentation> = {
       "Before sending, the gateway re-checks that the destination and the secret still come from the same version of the credential. That check could not be completed — not because anything had changed, but because the gateway could not read its own record of it. It refused rather than send on an unchecked pair. The provider never received this request, and this says nothing about the credential itself.",
     tone: "held",
   },
+  credential_unavailable: {
+    label: "Refused — the gateway could not read the provider key",
+    detail:
+      "The gateway reads the provider key from its vault only at the last step before sending. Here that read failed: the vault did not answer, so the gateway could not tell whether a key was stored. It refused rather than guess. The provider never received this request, and this says nothing about whether a key is stored.",
+    tone: "held",
+  },
   endpoint_required: {
     label: "Refused — the credential has no destination",
     detail:
       "This provider has no fixed address: each customer's resource is its own, and the address is stored with the credential. None was stored, so the gateway refused the call rather than send the credential somewhere it chose. The provider never received this request.",
+    tone: "held",
+  },
+  endpoint_not_allowed: {
+    label: "Refused — the credential's own address is not allowed here",
+    detail:
+      "The credential was stored with its own address, a server other than the provider's, and this gateway's settings do not allow that address. The credential was made for that server, so the gateway refused rather than send it to the provider's own host instead. The provider never received this request.",
     tone: "held",
   },
   endpoint_unavailable: {

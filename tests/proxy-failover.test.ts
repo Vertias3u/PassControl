@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const establishBudgetStateMock = vi.fn();
 import { bytesToBase64url } from "@/lib/encoding";
 
@@ -54,7 +54,13 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/state/killswitch")>()),
   readKillState: (...args: unknown[]) => readKillStateMock(...args),
 }));
+// Per test: which provider's credential has a stored address. Default: none.
+let endpointFor: (agentId: string, provider: string) => Promise<string | null> = async () => "|";
+
 vi.mock("@/lib/state/redis", () => ({
+  // Cloud review A1: the proxy reads the stored endpoint on every deployment now.
+  // A warm "no stored address" answer keeps this file on the plain key path.
+  getCachedEndpoint: (agentId: string, provider: string) => endpointFor(agentId, provider),
   purgeAgentPolicy: vi.fn(),
   // The proxy reads this before the endpoint row and again before dispatch.
   // Omitted, it is undefined, the call throws, and the route 500s.
@@ -377,6 +383,53 @@ describe("a fallback is re-checked, never trusted", () => {
     // not the fallback's missing-key problem.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(res.status).toBe(402);
+  });
+});
+
+// Cloud review 2026-11-03, A3: the decrypt RPC's `error` was ignored, so a database
+// that failed to answer read as "no key stored". The fallback was then skipped under a
+// row that told the operator to go and add a key they already had.
+// Cloud review 2026-11-03, A1: a fallback whose key was saved with an address this
+// deployment does not admit is skipped, never sent to its provider's own host, and
+// its key is never read.
+describe("a fallback with a stored address the gate refuses (A1)", () => {
+  afterEach(() => {
+    endpointFor = async () => "|";
+  });
+
+  it("is skipped, and the client gets the primary's answer", async () => {
+    endpointFor = async (_agent, provider) =>
+      provider === "groq" ? "cccccccc-cccc-4ccc-8ccc-cccccccccccc|http://10.1.2.3:8000/v1" : "|";
+    const rpc = vi.fn(async () => ({ data: "provider-key", error: null }));
+    serviceClientMock.mockReturnValue({ rpc });
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
+
+    const res = await callProxy();
+
+    expect(res.status).toBe(402);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("groq");
+    // Only the primary's key was fetched.
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a decrypt read that fails is not a missing key (A3)", () => {
+  it("still skips the fallback, but records the read failure, not no_provider_key", async () => {
+    serviceClientMock.mockReturnValue({
+      rpc: vi
+        .fn()
+        .mockResolvedValueOnce({ data: "provider-key", error: null })
+        .mockResolvedValue({ data: null, error: { message: "connection reset" } }),
+    });
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
+
+    const res = await callProxy();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(402);
+    await vi.waitFor(() => expect(loggedStatuses()).toContain("credential_unavailable"));
+    expect(loggedStatuses()).not.toContain("no_provider_key");
   });
 });
 

@@ -214,7 +214,8 @@ beforeEach(() => {
   openHoldMock.mockResolvedValue({ ok: true, reserved: 1 });
   settleHoldMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue(null);
-  getCachedEndpointMock.mockResolvedValue(null);
+  // Cloud review A1: read on every deployment; a warm "no stored address" answer.
+  getCachedEndpointMock.mockResolvedValue("|");
   setCachedEndpointMock.mockResolvedValue(undefined);
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));

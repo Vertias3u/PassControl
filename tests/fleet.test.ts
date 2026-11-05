@@ -21,7 +21,7 @@ vi.mock("@/lib/state/redis", () => ({
 }));
 // fleet.setTenantKill goes through the durable setter (0083); `armTenantKill`
 // names the mock for the Redis-and-record write it stands for.
-vi.mock("@/lib/state/killswitch", () => ({ setTenantKillDurably: armTenantKill }));
+vi.mock("@/lib/state/killswitch", () => ({ setTenantKillDurably: armTenantKill, bumpKillGeneration: vi.fn(async () => undefined) }));
 vi.mock("@/lib/state/kill-record", () => ({ saveKillRecord: vi.fn(async () => true), deleteKillRecord: vi.fn(async () => true) }));
 
 import {

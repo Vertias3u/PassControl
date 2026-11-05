@@ -216,6 +216,25 @@ describe("asking", () => {
     expect(asked().prompt.waitNote).toBe("The tool waits up to 300 seconds for your answer, then is refused.");
   });
 
+  // Cloud review 2026-11-03, SC-E: a Mac or Windows sidecar matches path rules without
+  // case and asks; this server runs on Linux and must not answer not_ask_owner.
+  it("admits a Mac sidecar's ask about a path in a different case", async () => {
+    h.agentRow.mockResolvedValue({
+      data: { tool_rules: { rules: [{ tool: "Read", path: "/Users/nas/.ssh/*", effect: "ask_owner" }] }, name: "x" },
+      error: null,
+    });
+    // As on Vercel: this machine may be a Mac, which would hide the bug.
+    const real = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "linux" });
+    try {
+      await post(ask({ tool_name: "Read", tool_input: { file_path: "/users/NAS/.SSH/id_ed25519" } }));
+    } finally {
+      Object.defineProperty(process, "platform", real);
+    }
+    expect(h.awaitApproval).toHaveBeenCalled();
+    expect(asked().request).toMatchObject({ path: "Read" });
+  });
+
   it("shows another tool's whole input", async () => {
     h.agentRow.mockResolvedValue({ data: { tool_rules: { rules: [{ tool: "mcp__github__*", effect: "ask_owner" }] }, name: "x" }, error: null });
     await post(ask({ tool_name: "mcp__github__create_issue", tool_input: { title: "t", body: "b" } }));
@@ -316,6 +335,18 @@ describe("held because the agent is tainted", () => {
     h.agentRow.mockResolvedValue({ data: { tool_rules: { rules: [{ tool: "Bash", command: "git push*", effect: "deny" }] }, name: "x" }, error: null });
     expect((await post(ask())).status).toBe(409);
     expect(h.awaitApproval).not.toHaveBeenCalled();
+  });
+
+  // SC-E follow-up: the server matches paths without case to admit a Mac sidecar's
+  // ask, but a deny it finds that way must not skip the hold. A Linux sidecar matched
+  // the deny exactly and missed it, so it asks under taint; a 409 there lets the tool
+  // run on its own rules, unasked.
+  it("holds a case-variant path that only a caseless deny would match", async () => {
+    tainted();
+    h.agentRow.mockResolvedValue({ data: { tool_rules: { rules: [{ tool: "Write", path: "/Users/nas/.ssh/*", effect: "deny" }] }, name: "x" }, error: null });
+    const res = await post(ask({ tool_name: "Write", tool_input: { file_path: "/users/NAS/.SSH/authorized_keys" } }));
+    expect(res.status).toBe(200);
+    expect(asked().request).toHaveProperty("hold", "injection_tainted");
   });
 
   it("rules this build cannot read still refuse: the sidecar denies every tool for them", async () => {

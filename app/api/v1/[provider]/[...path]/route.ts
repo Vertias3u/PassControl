@@ -36,6 +36,7 @@ import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { pauseLine, pauseMessage, pauseReached, readPauseView, type PauseLine } from "@/lib/budget-pause";
 import { claimStopPoll, pausePromptOpen, readPauseLift, stopPromptOpen } from "@/lib/state/pause";
 import { seal, open } from "@/lib/crypto/aesgcm";
+import { sealContext } from "@/lib/crypto/seal-context";
 import { serviceClient } from "@/lib/supabase";
 import { noteUnknownCoverage } from "@/lib/injection-coverage";
 import { findInjectionTells, injectionHmacKey, injectionReceiptClaim, injectionScanFailed, type InjectionFinding } from "@/lib/injection-guard";
@@ -222,19 +223,25 @@ type EndpointResolution =
    * A real answer: the endpoint to use (null meaning the provider's own host),
    * and WHICH credential said so. That id is what step 6 fetches the secret for,
    * so the key and the address cannot come from two different rows. It is null
-   * when the gate is off (no read happened) or when the tenant has no credential
-   * for this provider at all.
+   * when the tenant has no credential for this provider at all.
    */
   | {
       known: true;
       endpoint: string | null;
+      /**
+       * The credential HAS a stored address and the current policy does not admit
+       * it. `endpoint` is then null, and that null must NOT be read as "use the
+       * provider's own host": the key belongs to that other server (cloud review
+       * 2026-11-03, A1). The call is refused before the key is fetched.
+       */
+      refused: boolean;
       credentialId: string | null;
       /**
        * The credential invalidation fence as it stood when this resolution
        * began. Two jobs: it conditions the cache fill, and step 6 re-reads it
        * before dispatch so a rotation landing between the address and the secret
-       * refuses the call instead of pairing them. Null when the gate is off,
-       * where there is no second address for a secret to reach.
+       * refuses the call instead of pairing them. Read in every mode since A1;
+       * null when the fence itself could not be read.
        */
       fence: string | null;
     }
@@ -266,13 +273,13 @@ async function resolveEndpoint(
   provider: string
 ): Promise<EndpointResolution> {
   const policy = endpointPolicy();
-  // Off means no custom endpoints — except for a provider with no host of its
-  // own (Azure), whose stored address is the only destination there is. That one
-  // is read on every deployment, and admitted only by its own Microsoft-suffix
-  // rule (`isEndpointAllowedFor`), never by this gate.
-  if (policy.kind === "off" && !(isProvider(provider) && providerRequiresEndpoint(provider))) {
-    return { known: true, endpoint: null, credentialId: null, fence: null };
-  }
+  // Read on EVERY deployment, the gate off included (cloud review 2026-11-03, A1,
+  // owner's call). Off used to short-circuit here with "no endpoint" and never read
+  // the row, so a key saved with its own address (stored while the gate was on, or
+  // under a wider mode) went to the provider's public host instead. Off admits no
+  // address except Azure's own suffixes (`isEndpointAllowedFor`); a stored one it
+  // does not admit is now `refused`. The cost is the gate-on cost: the fence and
+  // the endpoint cache, and one query on a miss.
 
   // Read FIRST, before the cache and before the row, because this value has to
   // predate everything it will later be compared against. Taken on the hit path
@@ -288,12 +295,10 @@ async function resolveEndpoint(
     fence = null;
   }
 
-  const admit = (value: string | null, credentialId: string | null): EndpointResolution => ({
-    known: true,
-    endpoint: value && isEndpointAllowedFor(provider, value, policy) ? value : null,
-    credentialId,
-    fence,
-  });
+  const admit = (value: string | null, credentialId: string | null): EndpointResolution => {
+    const allowed = Boolean(value) && isEndpointAllowedFor(provider, value, policy);
+    return { known: true, endpoint: allowed ? value : null, refused: Boolean(value) && !allowed, credentialId, fence };
+  };
 
   try {
     const cached = await getCachedEndpoint(agentId, provider);
@@ -1916,11 +1921,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // caught as a 500 where a 402 belonged. Nothing it reads is a secret: the key
     // is still fetched at step 6, after every refusal.
     //
-    // `resolveEndpoint` returns null for every deployment that has not opted in,
-    // which is the default — so on Cloud this is one short-circuit and no reads,
-    // for every provider except Azure, whose stored address is always read. It
-    // re-validates rather than trusting the row: a value stored
-    // while the gate was wider must not be reached after an operator narrowed it.
+    // `resolveEndpoint` reads the stored address on every deployment (A1) and
+    // re-validates it rather than trusting the row: a value stored while the gate
+    // was wider must not be reached after an operator narrowed it, and must not
+    // send its key to the provider's own host either (step 5a refuses it).
     const resolvedEndpoint = await resolveEndpoint(db, userId, agentId, attemptProvider);
     // Null both when there is genuinely no endpoint and when the read failed —
     // the failure is refused below, and pricing an unsent call is moot either way.
@@ -2536,6 +2540,24 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       );
     }
 
+    // ── 5a. A stored address the current policy does not admit ─────────────────
+    //
+    // Cloud review 2026-11-03, A1. The key was saved for that address: a LiteLLM or
+    // vLLM master key, an internal gateway's token. Sending it to the provider's own
+    // host instead hands it to the wrong party, so the call is refused, before the
+    // key is decrypted. Azure and `local` keep their own refusal below, whose copy
+    // tells the operator the fix for a key that has no host of ours at all.
+    if (resolvedEndpoint.refused && !providerRequiresEndpoint(attemptProvider)) {
+      const settle = reconcile(NO_USAGE, "endpoint_not_allowed", "not_dispatched", 409);
+      // A fallback that cannot run is skipped, like one with no stored key.
+      if (!primary) {
+        await settle.released;
+        waitUntil(settle.done);
+        return { kind: "skipped" };
+      }
+      return terminal(errR(409, "endpoint_not_allowed"), settle);
+    }
+
     // ── 5a'. A credential whose address is part of it, and missing ─────────────
     //
     // Azure has no host of ours. A key with no stored address — or one that its
@@ -2630,14 +2652,18 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // the fix; there is deliberately no fallback to the unbound read, because a
     // fallback is just the old pairing with an extra step.
     //
-    // With the endpoint gate off there is no id, no second address to disagree
-    // with, and nothing to bind — so that path stays byte-for-byte what it was.
+    // Since A1 the gate-off path binds too: it reads the row like every mode, so
+    // the id is there, and the key is fetched for the credential the address
+    // decision was made about. Null only when the tenant has no credential at all.
     let providerKey: string | null = null;
     const boundCredentialId = resolvedEndpoint.known ? resolvedEndpoint.credentialId : null;
+    // Sealed FOR this agent, provider and credential (cloud review A2): a value
+    // copied here from another agent's entry does not open, and is a miss.
+    const keyContext = sealContext.providerKey(agentId, attemptProvider, boundCredentialId);
     const cached = await getCachedKey(agentId, attemptProvider, boundCredentialId ?? undefined);
     if (cached) {
       const sealed = boundCredentialId ? unbindCachedKey(cached, boundCredentialId) : cached;
-      if (sealed) providerKey = await open(sealed);
+      if (sealed) providerKey = await open(sealed, keyContext);
     }
     if (!providerKey) {
       // The fence for the FILL, read immediately before the authoritative
@@ -2656,7 +2682,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         // `.catch()` would not see it.
         fillFence = null;
       }
-      const { data: keyData } = boundCredentialId
+      const { data: keyData, error: keyError } = boundCredentialId
         ? await db.rpc("get_provider_key_for_credential", {
             p_agent_id: agentId,
             p_provider: attemptProvider,
@@ -2666,12 +2692,35 @@ async function handle(req: Request, params: { provider: string; path: string[] }
             p_agent_id: agentId,
             p_provider: attemptProvider,
           });
+      if (keyError) {
+        // Cloud review 2026-11-03, A3: the read FAILED, which says nothing about what
+        // is stored. Not no_provider_key, whose row tells the operator to add a key
+        // they may already have: a PassControl-side read failure, 503, like the
+        // service route. Nothing was sent. A fallback still steps aside, under a
+        // row that says why, and the failure is reported.
+        waitUntil(
+          captureError(new Error("provider key read failed"), {
+            route: "api.proxy",
+            method: req.method,
+            status: 503,
+            provider: attemptProvider,
+            code: "credential_unavailable",
+          })
+        );
+        const settle = reconcile(NO_USAGE, "credential_unavailable", "not_dispatched", 503);
+        if (!primary) {
+          await settle.released;
+          waitUntil(settle.done);
+          return { kind: "skipped" };
+        }
+        return terminal(errR(503, "credential_unavailable"), settle);
+      }
       providerKey = typeof keyData === "string" ? keyData : null;
       if (providerKey) {
         // store ciphertext only, and — when bound — the id it belongs to
         const key = providerKey;
         waitUntil(
-          seal(key).then((s) =>
+          seal(key, keyContext).then((s) =>
             setCachedKey(
               agentId,
               attemptProvider,

@@ -375,6 +375,42 @@ describe("what decides that a call is held, and what the owner is shown", () => 
     expect(h.checkApproval).not.toHaveBeenCalled();
     expectNothingSent();
   });
+
+  // Cloud review 2026-11-03, B4: the size guard covered the query and body only. A path
+  // was cut silently, at 200 characters in the prompt (which kept its Approve button) and
+  // 300 in the store, so a rule ending in `*` let the part that mattered fall out of
+  // sight: the owner approved a prefix, and the approval admitted the hidden end.
+  describe("a path too long to show in full", () => {
+    const DOCS_RULES = {
+      github: { allow: [{ method: "PUT", path: "/repos/acme/web/contents/docs/*", ask: true }] },
+    };
+    const PREFIX = "/repos/acme/web/contents/docs/";
+    const put = (name: string) =>
+      call("PUT", `${PREFIX}${name}`, "", { headers: { "content-type": "application/json" }, body: "{}" });
+    beforeEach(() => {
+      h.rulesRead.mockResolvedValue({ data: { service_rules: DOCS_RULES, name: "release-bot" }, error: null });
+    });
+
+    it("is not asked about", async () => {
+      const name = `${"a".repeat(200 - PREFIX.length)}-then-the-real-target.md`;
+      const res = await put(name);
+      expect(res.status).toBe(414);
+      const body = await res.json();
+      expect(body.error).toBe("approval_path_too_long");
+      expect(body.message).toMatch(/200/);
+      expect(h.checkApproval).not.toHaveBeenCalled();
+      expect(h.sendApprovalPrompt).not.toHaveBeenCalled();
+      expectNothingSent();
+    });
+
+    it("one that fits is asked about whole, in the store and the prompt", async () => {
+      h.checkApproval.mockResolvedValue({ state: "created", id: "AbCdEfGhIjKlMnOpQrStUv" });
+      const name = `${"b".repeat(200 - PREFIX.length - 3)}.md`;
+      expect((await put(name)).status).toBe(409);
+      expect((h.checkApproval.mock.calls.at(-1)![0] as { path: string }).path).toBe(`${PREFIX}${name}`);
+      expect((h.sendApprovalPrompt.mock.calls.at(-1)![1] as { path: string }).path).toBe(`${PREFIX}${name}`);
+    });
+  });
 });
 
 describe("a call no rule admits", () => {
@@ -537,6 +573,90 @@ describe("a write while the agent is tainted (injection guard, hold)", () => {
     expect(h.checkApproval).not.toHaveBeenCalled();
   });
 
+  // Cloud review 2026-11-03, B1. Telegram runs any Bot API method over GET or POST,
+  // parameters in the query string, so "GET means read" does not hold there: a held
+  // POST sendMessage re-sent as GET sendMessage?text=… went out unheld. On a service
+  // whose rules name methods, the method NAME says whether a call writes.
+  describe("Telegram: a Bot API write is a write whatever the HTTP method", () => {
+    const TG = "123456789:AAH4dGVzdC10b2tlbi1mb3ItcGFzc2NvbnRyb2w";
+    const TG_RULES = { telegram: { allow: [{ call: "sendMessage" }, { call: "getMe" }] } };
+    const SECRET_TEXT = "chat_id=42&text=the%20deploy%20key%20is%20hunter2";
+
+    /** Shaped as Next delivers it: the route's own params re-appended to the client's query. */
+    function tg(method: "GET" | "POST", name: string, clientQuery = "", init: { headers?: Record<string, string>; body?: string } = {}) {
+      const injected = ["service=telegram", `path=${name}`].join("&");
+      const query = [clientQuery, injected].filter(Boolean).join("&");
+      const req = new Request(`${ORIGIN}/api/v1/svc/telegram/${name}?${query}`, {
+        method,
+        headers: { authorization: `Bearer ${VISA}`, ...(init.headers ?? {}) },
+        ...(init.body !== undefined ? { body: init.body } : {}),
+      });
+      return (method === "GET" ? GET : POST)(req, { params: Promise.resolve({ service: "telegram", path: [name] }) });
+    }
+
+    beforeEach(() => {
+      h.rulesRead.mockResolvedValue({ data: { service_rules: TG_RULES, name: "release-bot" }, error: null });
+      h.rpc.mockResolvedValue({ data: TG, error: null });
+      h.fetch.mockImplementation(
+        async () => new Response(JSON.stringify({ ok: true, result: {} }), { status: 200, headers: { "content-type": "application/json" } })
+      );
+    });
+
+    it("tainted: GET sendMessage with its text in the query is held, and the owner is shown that text", async () => {
+      tainted();
+      const res = await tg("GET", "sendMessage", SECRET_TEXT);
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("approval_pending");
+      expectNothingSent();
+      expect(inj.readTaint).toHaveBeenCalledWith(AGENT, expect.any(Number));
+      expect(h.checkApproval.mock.calls.at(-1)![0]).toHaveProperty("hold", "injection_tainted");
+      const prompt = h.sendApprovalPrompt.mock.calls.at(-1)![1] as { preview: string };
+      expect(prompt.preview).toContain("hunter2");
+      expect(prompt.preview).not.toContain("service=telegram");
+    });
+
+    it("the method name decides in any case, as Telegram's own matching does", async () => {
+      tainted();
+      expect((await tg("GET", "SendMessage", SECRET_TEXT)).status).toBe(409);
+      expectNothingSent();
+    });
+
+    it("tainted: a get… method over GET is a read, and the taint is never read for it", async () => {
+      tainted();
+      expect((await tg("GET", "getMe")).status).toBe(200);
+      expect(inj.readTaint).not.toHaveBeenCalled();
+      expect(h.checkApproval).not.toHaveBeenCalled();
+    });
+
+    it("tainted: a get… method over POST is still held, as every POST is", async () => {
+      tainted();
+      const res = await tg("POST", "getMe", "", { headers: { "content-type": "application/json" }, body: "{}" });
+      expect(res.status).toBe(409);
+      expectNothingSent();
+    });
+
+    it("after a Clear, a saved Deny on the GET write still refuses it", async () => {
+      h.checkApproval.mockResolvedValue({ state: "denied", id: "AbCdEfGhIjKlMnOpQrStUv" });
+      const res = await tg("GET", "sendMessage", SECRET_TEXT);
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("approval_denied");
+      expectNothingSent();
+    });
+
+    it("approved: sends exactly the approved query, and nothing of the router's", async () => {
+      tainted();
+      h.checkApproval.mockResolvedValue({ state: "approved", id: "AbCdEfGhIjKlMnOpQrStUv" });
+      expect((await tg("GET", "sendMessage", SECRET_TEXT)).status).toBe(200);
+      expect(upstreamCalls()[0]![0]).toBe(`https://api.telegram.org/bot${TG}/sendMessage?${SECRET_TEXT}`);
+    });
+
+    it("not tainted: the GET write goes straight through, and no question is opened", async () => {
+      h.checkApproval.mockResolvedValue({ state: "none" });
+      expect((await tg("GET", "sendMessage", SECRET_TEXT)).status).toBe(200);
+      expect(h.sendApprovalPrompt).not.toHaveBeenCalled();
+    });
+  });
+
   describe("a Direct Agent Key, whose policy /svc reads only for this", () => {
     const dak = () => {
       h.authenticateDirectAgentKey.mockResolvedValue({
@@ -592,6 +712,37 @@ describe("a write while the agent is tainted (injection guard, hold)", () => {
       unreadable();
       expect((await dakPost()).status).toBe(201);
       expect(h.checkApproval).not.toHaveBeenCalled();
+    });
+
+    // Cloud review 2026-11-03, B2: a stored policy the reader refuses read as "the guard
+    // is off", so a live taint was never looked at. The LLM route denies such a policy
+    // outright (`policy:malformed`); /svc has no policy step, so there the hold simply
+    // stopped. A refused policy is a policy that could not be read: the "1b" posture.
+    const malformed = (policy: unknown) =>
+      h.readPolicy.mockResolvedValue({ policy, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+
+    it.each([
+      ["an unknown key", { injection_guard: { mode: "hold" }, surprise: true }],
+      ["an unknown guard mode", { injection_guard: { mode: "hold-harder" } }],
+      ["not an object", "hold"],
+    ])("a refused policy (%s) with a live hold still holds", async (_why, policy) => {
+      tainted();
+      malformed(policy);
+      expect((await dakPost()).status).toBe(409);
+      expect(h.sendApprovalPrompt).toHaveBeenCalledWith(TENANT, expect.objectContaining({ heldBecause: expect.stringMatching(/recently read/) }));
+      expectNothingSent();
+    });
+
+    it("a refused policy with no live hold: the write goes", async () => {
+      malformed({ injection_guard: { mode: "hold" }, surprise: true });
+      expect((await dakPost()).status).toBe(201);
+      expect(h.checkApproval).not.toHaveBeenCalled();
+    });
+
+    it("no policy at all stays cheap: no taint read", async () => {
+      malformed(null);
+      expect((await dakPost()).status).toBe(201);
+      expect(inj.readTaint).not.toHaveBeenCalled();
     });
   });
 });

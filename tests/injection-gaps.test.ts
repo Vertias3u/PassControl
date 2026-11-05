@@ -142,6 +142,13 @@ describe("the owner-facing reason", () => {
     await see(t, [high()], "hold", T0 + 1);
     expect(await injectionHoldReason(HOLD, AGENT, T0 + 2)).toBe(HELD_TAINTED);
   });
+
+  it("a stored policy the reader refuses is read as unreadable, not as off (cloud review B2)", async () => {
+    // Both doors that hold, /svc and POST /api/v1/tool-approvals, ask this function.
+    await see(table(), [gap()]);
+    expect(await injectionHoldReason({ injection_guard: { mode: "hold" }, surprise: 1 }, AGENT, T0)).toBe(HELD_INCOMPLETE);
+    expect(await injectionHoldReason(null, AGENT, T0)).toBeUndefined();
+  });
 });
 
 describe("the sidecar's report of a gap", () => {

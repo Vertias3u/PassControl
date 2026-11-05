@@ -36,12 +36,25 @@ function fromRow(row: Row): KillRecord | null {
  * the record" must reach the caller's fail posture, never pass as "nothing armed".
  */
 export async function loadKillRecords(userId: string): Promise<KillRecord[]> {
-  const { data, error } = await serviceClient()
-    .from(TABLE)
-    .select("kind, service, agent_id, session_id")
-    .eq("user_id", userId);
+  const db = serviceClient();
+  const columns = "kind, service, agent_id, session_id";
+  const pageSize = 1000;
+  const rows: Row[] = [];
+  const { data, error } = await db.from(TABLE).select(columns)
+    .eq("user_id", userId).in("kind", ["tenant", "service"]);
   if (error || !Array.isArray(data)) throw new Error("kill_record_read_failed");
-  return (data as Row[]).map(fromRow).filter((r): r is KillRecord => r !== null);
+  rows.push(...data as Row[]);
+  // Keep broad stops independent of the potentially large session collection.
+  // The primary-key id (0083) gives each page a stable, unique ordering.
+  for (let offset = 0; ; offset += pageSize) {
+    const { data: page, error: pageError } = await db.from(TABLE).select(columns)
+      .eq("user_id", userId).eq("kind", "session")
+      .order("id").range(offset, offset + pageSize - 1);
+    if (pageError || !Array.isArray(page)) throw new Error("kill_record_read_failed");
+    rows.push(...page as Row[]);
+    if (page.length < pageSize) break;
+  }
+  return rows.map(fromRow).filter((r): r is KillRecord => r !== null);
 }
 
 /**

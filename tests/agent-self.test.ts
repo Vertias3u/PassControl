@@ -561,8 +561,40 @@ describe("GET /api/v1/self, the injection guard", () => {
     expect((await res.json()).injection).toEqual({ mode: "hold", readable: false, tainted_until: null });
   });
 
-  it("an unreadable policy: no injection field (no guard is applied)", async () => {
+  it("an unreadable policy, not tainted: no injection field (no guard is applied)", async () => {
     withPolicy(POLICY_UNREADABLE);
     expect(await (await get()).json()).not.toHaveProperty("injection");
+  });
+
+  // 1.7.2 E2E F3 (B2's door the fix missed). A policy the reader refuses, or one that
+  // could not be read, is unknown, and the owner's B2 answer ("1b") is: held on a live
+  // taint. /svc and tool-approvals did that, but the sidecar only asks tool-approvals
+  // once /self says the agent is tainted, and /self said nothing, so Claude Code's
+  // Bash ran. A taint is only ever written in hold mode, so reporting one reveals
+  // nothing to an agent that was never held. No taint, or no reading: still silent.
+  describe.each([
+    ["a refused policy", { e2e_invalid_policy: true }],
+    ["an unreadable policy", POLICY_UNREADABLE],
+  ])("%s", (_name, policy) => {
+    it("with a live taint: reports it, so the sidecar keeps holding", async () => {
+      withPolicy(policy);
+      inj.readTaint.mockResolvedValue({ since: T, until: T + 30 * 60_000, families: ["instruction_override"], surface: "sidecar" });
+      const body = await (await get()).json();
+      expect(body.injection).toEqual({ mode: "hold", readable: true, tainted_until: new Date(T + 30 * 60_000).toISOString() });
+      expect(JSON.stringify(body)).not.toMatch(/instruction_override|sidecar"|since/);
+    });
+
+    it("not tainted: no injection field", async () => {
+      withPolicy(policy);
+      expect(await (await get()).json()).not.toHaveProperty("injection");
+    });
+
+    it("the taint unreadable: no injection field, and /self still answers", async () => {
+      withPolicy(policy);
+      inj.readTaint.mockRejectedValue(new Error("redis down"));
+      const res = await get();
+      expect(res.status).toBe(200);
+      expect(await res.json()).not.toHaveProperty("injection");
+    });
   });
 });

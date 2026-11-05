@@ -25,6 +25,8 @@
 // Honest limit: these are guard rails for the owner's own sessions. `sh -c`, an alias,
 // a script file or a different tool gets round a command rule.
 
+import { normalizeHostname } from "./proxy-policy.mjs";
+
 export const TOOL_RULE_EFFECTS = ["deny", "ask_owner", "ask"];
 const STRICTNESS = { deny: 3, ask_owner: 2, ask: 1 };
 
@@ -144,10 +146,17 @@ function normalisePath(raw) {
 }
 
 function commandPieces(command) {
+  // Cheap shell forms only, not a Bash parser: quoting, escapes, wrappers and
+  // program-specific options can still evade these guard rails.
   return command
-    .split(/&&|\|\||[;|\n]/)
+    .split(/&&|\|\||\$\(|[;&|\n()`]/)
     .map((piece) => piece.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .flatMap((piece) => {
+      const stripped = piece.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s'"]*)\s+)+/, "");
+      return stripped === piece ? [piece] : [piece, stripped];
+    })
+    .map((piece) => piece.replace(/\s+/g, " "));
 }
 
 function toolMatches(pattern, name) {
@@ -161,14 +170,22 @@ function toolMatches(pattern, name) {
  *
  * Input a rule needs but cannot read (no command, a URL that does not parse) counts as
  * matching that rule: a rule the owner wrote is not skipped because the input was odd.
+ *
+ * Path rules ignore case where the filesystem does (cloud review 2026-11-03, SC-E):
+ * macOS and Windows by default, so `/users/NAS/.SSH/key` meets a deny on
+ * `/Users/nas/.ssh/*`. Every effect is restrictive, so this only ever makes the gate
+ * stricter for the sidecar. `caseless` overrides the platform; the gateway passes it
+ * both ways (see app/api/v1/tool-approvals), since a caseless deny must not pre-empt
+ * its taint hold.
  */
-export function evaluateToolRules(parsed, input) {
+export function evaluateToolRules(parsed, input, { platform = typeof process === "undefined" ? "" : process.platform, caseless } = {}) {
+  const ignoreCase = caseless ?? (platform === "darwin" || platform === "win32");
   const name = typeof input?.tool_name === "string" ? input.tool_name : "";
   const toolInput = isRecord(input?.tool_input) ? input.tool_input : {};
   let best = null;
   parsed.rules.forEach((rule, ruleIndex) => {
     if (!toolMatches(rule.tool, name)) return;
-    const subject = subjectFor(rule, name, toolInput, input);
+    const subject = subjectFor(rule, name, toolInput, input, ignoreCase);
     if (subject === undefined) return;
     if (!best || STRICTNESS[rule.effect] > STRICTNESS[best.effect]) best = { effect: rule.effect, ruleIndex, subject };
   });
@@ -176,7 +193,7 @@ export function evaluateToolRules(parsed, input) {
 }
 
 // The matched text, `undefined` when the rule does not apply to this input.
-function subjectFor(rule, name, toolInput, input) {
+function subjectFor(rule, name, toolInput, input, ignoreCase) {
   if (rule.command !== undefined) {
     if (typeof toolInput.command !== "string") return "";
     return commandPieces(toolInput.command).find((piece) => globMatch(rule.command, piece));
@@ -187,20 +204,22 @@ function subjectFor(rule, name, toolInput, input) {
     if (raw === undefined && SEARCH_TOOLS.has(name) && typeof input?.cwd === "string") raw = input.cwd;
     if (raw === undefined) return "";
     const path = normalisePath(raw);
-    return globMatch(rule.path, path) ? path : undefined;
+    const hit = ignoreCase ? globMatch(rule.path.toLowerCase(), path.toLowerCase()) : globMatch(rule.path, path);
+    return hit ? path : undefined;
   }
   if (rule.domain !== undefined) {
     let host;
     try {
-      host = new URL(String(toolInput.url)).hostname.toLowerCase();
+      host = normalizeHostname(new URL(String(toolInput.url)).hostname);
     } catch {
       return "";
     }
-    if (rule.domain.startsWith("*.")) {
-      const base = rule.domain.slice(2);
+    const domain = normalizeHostname(rule.domain);
+    if (domain.startsWith("*.")) {
+      const base = domain.slice(2);
       return host === base || host.endsWith(`.${base}`) ? host : undefined;
     }
-    return host === rule.domain ? host : undefined;
+    return host === domain ? host : undefined;
   }
   return name;
 }

@@ -96,7 +96,7 @@ const NOT_IN_A_HOSTNAME = /[\s/\\@?#]/;
  * `api.anthropic.com`, so a string comparison that treats them as different
  * hosts is a one-character bypass of the provider refusal below.
  */
-function normalizeHostname(value) {
+export function normalizeHostname(value) {
   let host = String(value ?? "").trim().toLowerCase();
   if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
   if (host.endsWith(".")) host = host.slice(0, -1);

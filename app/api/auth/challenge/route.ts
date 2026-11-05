@@ -2,13 +2,16 @@
 // passport private key and receives a short-lived work visa.
 //
 // POST /api/auth/challenge
-// body: { payload: base64url(JSON{passport_id, ts, nonce}), signature: base64url }
+// body: { payload: base64url(JSON{passport_id, ts, nonce, purpose?: "challenge"}), signature: base64url }
 export const runtime = "edge";
 
+import { readBoundedBody } from "@/lib/http/bounded-body";
+import { clientIp } from "@/lib/http/client-ip";
 import { waitUntil } from "@vercel/functions";
 import { NextResponse } from "next/server";
 import { base64urlToBytes, bytesToUtf8 } from "@/lib/encoding";
 import { verifySignature, passportIdToPublicKey } from "@/lib/crypto/ed25519";
+import { wrongProofPurpose } from "@/lib/auth/proof-purpose";
 import { claimNonce, redis, touchLastSeen } from "@/lib/state/redis";
 import { serviceClient } from "@/lib/supabase";
 import { mintVisa, type ScopeEntry } from "@/lib/auth/visa";
@@ -152,10 +155,7 @@ function presentedSignatureStatus(
 
 async function handlePost(req: Request) {
   // 0. Rate limit by client IP before any work — cheapest possible rejection.
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown";
+  const ip = clientIp(req);
   // The limiter is Redis-backed too, so its key must not undo the detector's
   // privacy boundary by persisting the raw address. If the keyed hash cannot be
   // produced, preserve the limiter's existing fail-open posture.
@@ -199,9 +199,9 @@ async function handlePost(req: Request) {
   }
   let body: { payload?: string; signature?: string };
   try {
-    const raw = await req.text();
-    if (raw.length > MAX_BODY_BYTES) return securityFail(413, "payload_too_large");
-    body = JSON.parse(raw);
+    const bounded = await readBoundedBody(req, MAX_BODY_BYTES);
+    if (!bounded.ok) return securityFail(413, "payload_too_large");
+    body = JSON.parse(bounded.text);
   } catch {
     return fail(400, "invalid_json");
   }
@@ -216,6 +216,11 @@ async function handlePost(req: Request) {
   }
   if (!payload.passport_id || !payload.nonce || typeof payload.ts !== "number") {
     return fail(400, "invalid_payload");
+  }
+  // A proof made for another passport door is refused, before its nonce is spent
+  // (cloud review CP5, lib/auth/proof-purpose.ts).
+  if (wrongProofPurpose(payload as unknown as Record<string, unknown>, "challenge")) {
+    return securityFail(401, "wrong_purpose");
   }
 
   // 2. Clock-skew window.
@@ -346,7 +351,7 @@ async function handlePost(req: Request) {
   });
 
   // Coalesced last-seen (flushed to Postgres by the reconcile cron).
-  await touchLastSeen(agent.id);
+  waitUntil(Promise.resolve(touchLastSeen(agent.id)).catch(() => undefined));
 
   // Evidence about custody, recorded only now — after step 5 proved the caller
   // holds the key. A passport id is public (`/verify/[passportId]`, the

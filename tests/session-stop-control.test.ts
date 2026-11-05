@@ -32,7 +32,12 @@ vi.mock("@/lib/state/redis", () => ({
   purgeAgentCaches: vi.fn(),
   purgeAgentPolicy: vi.fn(),
 }));
-vi.mock("@/lib/state/killswitch", () => ({ setTenantKillDurably: vi.fn() }));
+vi.mock("@/lib/state/killswitch", () => ({
+  setTenantKillDurably: vi.fn(),
+  bumpKillGeneration: vi.fn(async () => {
+    order.push("generation.bump");
+  }),
+}));
 vi.mock("@/lib/state/kill-record", () => ({ saveKillRecord, deleteKillRecord }));
 
 import { setSessionStopped } from "@/lib/fleet";
@@ -80,7 +85,9 @@ describe("setSessionStopped", () => {
     expect(saveKillRecord).toHaveBeenCalledWith("u1", { kind: "session", agentId: AGENT, sessionId: "sess-1" });
     await setSessionStopped(db({ id: AGENT, status: "active" }).client, "u1", AGENT, "sess-1", false);
     expect(deleteKillRecord).toHaveBeenCalledWith("u1", { kind: "session", agentId: AGENT, sessionId: "sess-1" });
-    expect(order).toEqual(["redis.stop", "record.save", "record.delete", "redis.resume"]);
+    // The bump sits between the two (cloud review A9): a reload that read the row
+    // before its delete stands down rather than writing the stop back.
+    expect(order).toEqual(["redis.stop", "record.save", "record.delete", "generation.bump", "redis.resume"]);
   });
 
   it("a stop the record refused is still in force, and says it was not saved", async () => {

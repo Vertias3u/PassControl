@@ -121,6 +121,11 @@ interface LogEntryBase {
     // second key. Not endpoint_unavailable: the read answered; the answer was
     // "none". The gateway never guesses a host for such a key.
     | "endpoint_required"
+    // The key has its own stored address (a LiteLLM or vLLM server, an internal
+    // gateway) and this deployment's PROVIDER_ENDPOINT_MODE does not admit it. Not
+    // sent anywhere: the provider's own host is the wrong destination for a key
+    // made for another server. 409, nothing sent. Cloud review 2026-11-03, A1.
+    | "endpoint_not_allowed"
     | "upstream_error"
     // The call was forwarded and MAY have been billed, but no usage ever
     // arrived — a stream that broke, a stream that closed cleanly without ever
@@ -177,6 +182,11 @@ interface LogEntryBase {
     // 503, not 409: nothing about the tenant's configuration is wrong, and a
     // retry once Redis answers will succeed.
     | "credential_state_unavailable"
+    // The provider key's own read failed (the decrypt RPC errored), so the gateway
+    // does not know whether one is stored. Not no_provider_key, which tells the
+    // operator to add one. 503, nothing sent; a retry once the database answers
+    // succeeds. Cloud review 2026-11-03, A3.
+    | "credential_unavailable"
     // Refused before forwarding because the agent has a DOLLAR cap and the call
     // was bound for an endpoint PassControl cannot price. Never sent.
     //

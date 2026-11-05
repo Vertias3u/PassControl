@@ -41,6 +41,7 @@ import {
   type WorkspaceAlert,
 } from "@/lib/alerts/destination";
 import {
+  APPROVAL_PATH_MAX,
   PENDING_TTL_S,
   approvalAgentForTap,
   attachTelegramMessage,
@@ -66,7 +67,6 @@ const SEND_TIMEOUT_MS = 3000;
 // yes is never given to text the owner did not see.
 const TELEGRAM_PREVIEW_MAX = 1500;
 const WEBHOOK_PREVIEW_MAX = 900;
-const PATH_MAX = 200;
 /** Telegram's own ceiling on a long-poll is 50 seconds; ours is far below it. */
 const MAX_POLL_SECONDS = 20;
 
@@ -96,7 +96,7 @@ export interface ApprovalPromptInfo {
 
 /** A path as a path: anything else shows as `?`, so it cannot start a link or a mention. */
 function inertPath(value: string): string {
-  return value.replace(/[^A-Za-z0-9._~:/?&=%+,-]/gu, "?").slice(0, PATH_MAX) || "/";
+  return value.replace(/[^A-Za-z0-9._~:/?&=%+,-]/gu, "?").slice(0, APPROVAL_PATH_MAX) || "/";
 }
 
 /** The preview as one block of text, and how much of it was left out. */

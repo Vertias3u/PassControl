@@ -26,18 +26,24 @@
 // ends in "\n\n", which begins no provider key, so ordinary output passes with
 // no added delay and only a genuine partial match waits for the next chunk.
 
+import { LOCAL_NO_KEY } from "@/lib/providers";
+
 /** What an echoed key becomes. No quotes or backslashes, so JSON stays valid. */
 export const PROVIDER_KEY_REDACTION = "[REDACTED_PROVIDER_KEY]";
 
 /**
- * Shorter than any provider key PassControl stores. Replacing a short value
- * everywhere would corrupt ordinary output, and nothing that short is a key.
+ * The shortest value treated as a key. Stored keys can be any length (custom and
+ * `local` endpoints take whatever the server was started with), and LiteLLM
+ * documents `sk-1234` as a master key, so this was 16 and let exactly those
+ * through (cloud review 2026-11-03, A8). Below 6, replacing the value everywhere
+ * would scramble ordinary output, and a key that short is guessable anyway.
  */
-const MIN_SECRET_LENGTH = 16;
+const MIN_SECRET_LENGTH = 6;
 
 /** The spellings of `key` to remove: itself, plus its JSON-escaped form if different. */
 export function secretsToRedact(key: string | null | undefined): string[] {
-  if (typeof key !== "string" || key.length < MIN_SECRET_LENGTH) return [];
+  // The keyless-local marker is a fixed public string, never sent upstream.
+  if (typeof key !== "string" || key.length < MIN_SECRET_LENGTH || key === LOCAL_NO_KEY) return [];
   const escaped = JSON.stringify(key).slice(1, -1).replaceAll("/", "\\/");
   return escaped === key ? [key] : [key, escaped];
 }

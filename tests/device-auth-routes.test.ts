@@ -10,6 +10,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
+  ipLimitMock: vi.fn(),
   limitMock: vi.fn(async (..._a: unknown[]) => ({ success: true, remaining: 10, unreadable: false })),
   started: [] as unknown[],
   status: null as string | null,
@@ -18,6 +19,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/ratelimit", () => ({
+  rateLimit: (...a: unknown[]) => h.ipLimitMock(...a),
   rateLimitFailClosed: (...a: unknown[]) => h.limitMock(...a),
 }));
 
@@ -35,15 +37,19 @@ vi.mock("@/lib/state/device-auth", () => ({
   },
 }));
 
-vi.mock("@/lib/crypto/aesgcm", () => ({
-  open: async (sealed: string) => sealed,
-  seal: async (plain: string) => plain,
+// Opens only what was sealed for the hash the route asks with, like the real one
+// (cloud review A2): a grant is stored as `<context>\n<plaintext>`.
+vi.mock("@/lib/crypto/aesgcm", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/crypto/aesgcm")>()),
+  open: async (sealed: string, ctx: string) => (sealed.startsWith(`${ctx}\n`) ? sealed.slice(ctx.length + 1) : null),
+  seal: async (plain: string, ctx: string) => `${ctx}\n${plain}`,
 }));
 
 import { POST as startRoute } from "@/app/api/auth/device/start/route";
 import { POST as tokenRoute } from "@/app/api/auth/device/token/route";
 
 beforeEach(() => {
+  h.ipLimitMock.mockReset().mockResolvedValue({ success: true, remaining: 300 });
   h.limitMock.mockReset();
   h.limitMock.mockResolvedValue({ success: true, remaining: 10, unreadable: false });
   h.started.length = 0;
@@ -60,6 +66,12 @@ const post = (url: string, body: unknown, headers: Record<string, string> = {}) 
   });
 
 const GOOD_DEVICE_CODE = "d".repeat(43);
+/** A grant as the approve action seals it: FOR the device code's hash (A2). */
+const sealedFor = async (deviceCode: string, plain: string) => {
+  const { sealContext } = await vi.importActual<typeof import("@/lib/crypto/aesgcm")>("@/lib/crypto/aesgcm");
+  const { hashDeviceCode } = await vi.importActual<typeof import("@/lib/device-codes")>("@/lib/device-codes");
+  return `${sealContext.deviceGrant(await hashDeviceCode(deviceCode))}\n${plain}`;
+};
 const validGrant = () =>
   JSON.stringify({
     version: 1,
@@ -165,7 +177,7 @@ describe("POST /api/auth/device/token", () => {
 
   it("returns the key exactly once", async () => {
     h.status = "approved";
-    h.grant = validGrant();
+    h.grant = await sealedFor(GOOD_DEVICE_CODE, validGrant());
     const first = await tokenRoute(
       post("https://gw.example/api/auth/device/token", { device_code: GOOD_DEVICE_CODE })
     );
@@ -182,9 +194,19 @@ describe("POST /api/auth/device/token", () => {
     expect((await second.json()).error).toBe("expired_token");
   });
 
+  // Cloud review 2026-11-03, A2: a grant opens only for the device code it was sealed
+  // for, so a Redis writer cannot move one login's control key to their own code.
+  it("refuses a grant sealed for another device code", async () => {
+    h.status = "approved";
+    h.grant = await sealedFor("e".repeat(43), validGrant());
+    const res = await tokenRoute(post("https://gw.example/api/auth/device/token", { device_code: GOOD_DEVICE_CODE }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("expired_token");
+  });
+
   it("refuses a grant whose own expiry has passed", async () => {
     h.status = "approved";
-    h.grant = JSON.stringify({ version: 1, userId: "u", token: "pc_x", prefix: "pc_x", expiresAt: Date.now() - 1 });
+    h.grant = await sealedFor(GOOD_DEVICE_CODE, JSON.stringify({ version: 1, userId: "u", token: "pc_x", prefix: "pc_x", expiresAt: Date.now() - 1 }));
     const res = await tokenRoute(
       post("https://gw.example/api/auth/device/token", { device_code: GOOD_DEVICE_CODE })
     );
@@ -195,7 +217,7 @@ describe("POST /api/auth/device/token", () => {
   it("answers slow_down without touching the store", async () => {
     h.limitMock.mockResolvedValue({ success: false, remaining: 0, unreadable: false });
     h.status = "approved";
-    h.grant = validGrant();
+    h.grant = await sealedFor(GOOD_DEVICE_CODE, validGrant());
     const res = await tokenRoute(
       post("https://gw.example/api/auth/device/token", { device_code: GOOD_DEVICE_CODE })
     );
@@ -232,11 +254,44 @@ describe("POST /api/auth/device/token", () => {
   it("accepts no session cookie as a substitute for the device code", async () => {
     // These routes gate themselves. A cookie means nothing here, and must not.
     h.status = "approved";
-    h.grant = validGrant();
+    h.grant = await sealedFor(GOOD_DEVICE_CODE, validGrant());
     const res = await tokenRoute(
       post("https://gw.example/api/auth/device/token", { device_code: "wrong" }, { cookie: "sb-access-token=whatever" })
     );
     expect(res.status).toBe(400);
     expect(h.taken).toBe(0);
   });
+});
+
+
+it("clips fresh-code floods at 300 per IP while keeping different IPs independent", async () => {
+  const counts = new Map<string, number>();
+  h.ipLimitMock.mockImplementation(async (key: string, limit: number, window: number) => {
+    expect(limit).toBe(300);
+    expect(window).toBe(60);
+    const count = (counts.get(key) ?? 0) + 1;
+    counts.set(key, count);
+    return { success: count <= limit, remaining: Math.max(0, limit - count) };
+  });
+  h.status = "pending";
+  const call = (i: number, ip: string) => tokenRoute(post("https://gw.example/api/auth/device/token",
+    { device_code: i.toString(16).padStart(43, "a") }, { "x-forwarded-for": ip }));
+  for (let i = 0; i < 300; i++) expect((await call(i, "203.0.113.1")).status).toBe(202);
+  const blocked = await call(300, "203.0.113.1");
+  expect(blocked.status).toBe(429);
+  expect(await blocked.json()).toEqual({ error: "slow_down" });
+  expect(h.limitMock).toHaveBeenCalledTimes(300);
+  expect((await call(301, "203.0.113.2")).status).toBe(202);
+  expect(counts.get("device-token-ip:203.0.113.1")).toBe(301);
+  expect(counts.get("device-token-ip:203.0.113.2")).toBe(1);
+});
+
+
+it("gives a second IP its own flood allowance", async () => {
+  h.ipLimitMock.mockImplementation(async (key: string) => ({ success: key !== "device-token-ip:203.0.113.1", remaining: 0 }));
+  h.status = "pending";
+  const call = (ip: string) => tokenRoute(post("https://gw.example/api/auth/device/token", { device_code: GOOD_DEVICE_CODE }, { "x-forwarded-for": ip }));
+  expect((await call("203.0.113.1")).status).toBe(429);
+  expect((await call("203.0.113.2")).status).toBe(202);
+  expect(h.ipLimitMock.mock.calls.map(([key]) => key)).toEqual(["device-token-ip:203.0.113.1", "device-token-ip:203.0.113.2"]);
 });

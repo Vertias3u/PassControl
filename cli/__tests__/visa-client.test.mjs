@@ -69,3 +69,22 @@ describe("shared visa client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("the signed challenge names its door (cloud review CP5)", () => {
+  it("signs purpose: challenge inside the payload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(visaResponse("visa"));
+    const visas = createVisaClient({
+      gateway: GATEWAY,
+      passportId: PASSPORT_ID,
+      passportSecret: PASSPORT_SECRET,
+      fetch: fetchMock,
+      now: () => 1_000,
+      randomUUID: () => "n",
+      refreshSkewSeconds: 30,
+    });
+    await visas.getVisa();
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const claims = JSON.parse(Buffer.from(body.payload, "base64url").toString("utf8"));
+    expect(claims.purpose).toBe("challenge");
+  });
+});

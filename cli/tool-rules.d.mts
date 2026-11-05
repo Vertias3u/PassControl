@@ -25,4 +25,8 @@ export const TOOL_RULE_LIMITS: {
 };
 export function globMatch(pattern: string, text: string): boolean;
 export function parseToolRules(value: unknown): ParsedToolRules;
-export function evaluateToolRules(parsed: { rules: ToolRule[] }, input: ToolRuleInput): ToolRuleVerdict;
+export function evaluateToolRules(
+  parsed: { rules: ToolRule[] },
+  input: ToolRuleInput,
+  options?: { platform?: string; caseless?: boolean }
+): ToolRuleVerdict;

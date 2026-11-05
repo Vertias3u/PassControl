@@ -74,6 +74,9 @@ vi.mock("@/lib/state/killswitch", async (importOriginal) => {
   return { ...actual, readKillState: (...args: unknown[]) => readKillStateMock(...args) };
 });
 vi.mock("@/lib/state/redis", () => ({
+  // Cloud review A1: the proxy reads the stored endpoint on every deployment now.
+  // A warm "no stored address" answer keeps this file on the plain key path.
+  getCachedEndpoint: async () => "|",
   purgeAgentPolicy: vi.fn(),
   // The proxy reads this before the endpoint row and again before dispatch.
   // Omitted, it is undefined, the call throws, and the route 500s.

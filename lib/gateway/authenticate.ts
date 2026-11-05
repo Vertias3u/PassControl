@@ -5,6 +5,8 @@
 // route (app/api/v1/svc/...) authenticates through exactly the same code rather
 // than a second copy that could drift. Nothing here knows which destination a
 // call is for: `provider` and `route` are used only for logging.
+import { clientIp } from "@/lib/http/client-ip";
+export { clientIp } from "@/lib/http/client-ip";
 import { waitUntil } from "@vercel/functions";
 import {
   verifyVisa,
@@ -198,21 +200,6 @@ export async function enforceSenderConstraint(
     default:
       return { ok: false, response: err(401, "invalid_sender_proof") };
   }
-}
-
-export function clientIp(req: Request): string {
-  // Cloudflare overwrites this header at its edge, but other hosts may pass a
-  // client-supplied value through. Trust it only in the Workers deployment,
-  // whose committed configuration explicitly opts in.
-  const cloudflareIp = process.env.PASSCONTROL_TRUST_CF_CONNECTING_IP === "true"
-    ? req.headers.get("cf-connecting-ip")?.trim()
-    : undefined;
-  return (
-    cloudflareIp ||
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip")?.trim() ||
-    "unknown"
-  );
 }
 
 /**

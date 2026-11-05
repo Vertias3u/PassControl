@@ -9,7 +9,7 @@ import { declaredLineage, declaredSession } from "./declared-session.mjs";
 import { defaultJournalDir, openJournal } from "./journal.mjs";
 import { heldUnderTaint } from "./injection-hold.mjs";
 import { findingsFromHook, gapFromOversizedHook } from "./injection-sidecar.mjs";
-import { answer, createWatchFeed, isNotACall, isLocalCaller, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
+import { answer, createWatchFeed, hostIsThisListener, isNotACall, isLocalCaller, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
 import { createStopGate, HOOK_PATH, SELF_READ_TIMEOUT_MS, selfAnswerState } from "./subscription-gate.mjs";
 import { createToolGate } from "./tool-gate.mjs";
 import { OTLP_LOGS_PATH, readClaudeCodeEvents } from "./otlp-logs.mjs";
@@ -212,7 +212,7 @@ export function createSidecar({
           "accept-encoding": "identity",
         };
         if (session) headers["x-claude-code-session-id"] = session;
-        return fetch(`${origin}${path}`, { headers, signal });
+        return fetch(`${origin}${path}`, { headers, signal, redirect: "manual" });
       })]);
       const answer = await Promise.race([deadline, selfAnswerState(response)]);
       if (answer.state === "open") {
@@ -253,6 +253,7 @@ export function createSidecar({
           if (session) headers["x-claude-code-session-id"] = session;
           return fetch(`${origin}${TOOL_APPROVALS_PATH}`, {
             method: "POST",
+            redirect: "manual",
             headers,
             body,
             signal: AbortSignal.timeout(Math.min(APPROVAL_REQUEST_TIMEOUT_MS, Math.max(1_000, deadline - Date.now()))),
@@ -280,6 +281,7 @@ export function createSidecar({
     const response = await visas.fetchWithVisa((visa) =>
       fetch(`${origin}${CLIENT_EVENTS_PATH}`, {
         method: "POST",
+        redirect: "manual",
         headers: {
           "content-type": "application/json",
           authorization: `Bearer ${visa}`,
@@ -523,7 +525,13 @@ export function createSidecar({
       if (out.continue !== false && input.hook_event_name === "PreToolUse") {
         let tool;
         try {
-          tool = await toolGate.decide(input, stopGate.toolRules(), hookTimeoutS(req.url), stopGate.injection());
+          // A strong local finding the gateway has not yet been read after (the read
+          // just failed) puts a held tool to the gateway's own taint, whatever the cached
+          // "clear" says: an agent that floods /self straight after reading an injection
+          // must not outrun its taint (cloud review 2026-11-03, SC-B). The gateway then
+          // decides: no taint there answers `not_ask_owner`, and the tool goes.
+          const unconfirmed = stopGate.injectionHoldMode() && heldUnderTaint(input.tool_name) && highVersion > readHighVersion;
+          tool = await toolGate.decide(input, stopGate.toolRules(), hookTimeoutS(req.url), unconfirmed ? "tainted" : stopGate.injection());
         } catch {
           tool = {};
         }
@@ -561,7 +569,8 @@ export function createSidecar({
     headers["x-passcontrol-run"] = runId;
     headers["x-passcontrol-proof"] = visas.createProof(visa, req.method, new URL(path, origin));
     headers["accept-encoding"] = "identity";
-    return fetch(`${origin}${path}`, { method: req.method, headers, body: body ?? undefined });
+    // Hand redirects to the agent; never replay the visa, proof or body at Location.
+    return fetch(`${origin}${path}`, { method: req.method, headers, body: body ?? undefined, redirect: "manual" });
   }
 
   // A service call's pagination `link` and same-origin `location` name the
@@ -654,7 +663,32 @@ export function createSidecar({
     }
   }
 
+  // A proxied call carries this run's visa, so a web page must never get one
+  // (cloud review 2026-11-03, SC-A). Browsers mark what they send: an Origin on a
+  // cross-origin or non-GET request, and Sec-Fetch-Site on every request
+  // (Chrome, Firefox, Safari 16.4+). Agent clients send neither. Node's own fetch
+  // does send `sec-fetch-mode: cors`, so that header proves nothing and is not read.
+  // A DNS-rebound page sends no Origin, but its Host names the attacker's domain:
+  // an origin-form request on a loopback bind must name this listener exactly. A
+  // forward-proxy request (absolute form) names its target and goes to the classifier;
+  // a page cannot send one. Off loopback (an explicit opt-in) the Host is whatever the
+  // network calls this machine, so only the browser check applies there.
+  const checksHost = isLoopbackBindHost(host);
+  function refuseBrowserCaller(req, res, port) {
+    const browser = req.headers.origin !== undefined || req.headers["sec-fetch-site"] !== undefined;
+    const rebound = checksHost && String(req.url ?? "").startsWith("/") && !hostIsThisListener(req.headers.host, port);
+    if (!browser && !rebound) return false;
+    req.resume();
+    if (browser) {
+      answer(res, 403, "sidecar_browser_refused", "The PassControl sidecar serves agents on this machine, not web pages.");
+    } else {
+      answer(res, 403, "sidecar_host_refused", `Address the sidecar as 127.0.0.1:${port} or localhost:${port}.`);
+    }
+    return true;
+  }
+
   const server = http.createServer(async (req, res) => {
+    if (refuseBrowserCaller(req, res, server.address()?.port)) return;
     // The sidecar's own paths: answered here, never forwarded with a visa.
     if (String(req.url ?? "").startsWith(LOCAL_PREFIX)) {
       const localPath = String(req.url).split("?")[0];
@@ -702,6 +736,7 @@ export function createSidecar({
   // is not answered here: it goes to the gateway as `/api/version`, so an app
   // sees the gateway's real answer, including a refusal where `local` is off.
   const ollamaServer = http.createServer(async (req, res) => {
+    if (refuseBrowserCaller(req, res, ollamaServer.address()?.port)) return;
     if (!String(req.url ?? "").startsWith("/")) {
       req.resume();
       res.writeHead(400, { "content-type": "application/json" });

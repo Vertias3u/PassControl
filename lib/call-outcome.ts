@@ -79,7 +79,9 @@ export const CALL_OUTCOME: Record<LogEntry["status"], { category: OutcomeCategor
   no_provider_key: { category: "setup_incomplete", label: "No provider key stored" },
   endpoint_unavailable: { category: "passcontrol_side", label: "Not sent: endpoint lookup failed" },
   endpoint_required: { category: "setup_incomplete", label: "Not sent: this key has no resource address" },
+  endpoint_not_allowed: { category: "setup_incomplete", label: "Not sent: the address saved with this key is not allowed here" },
   credential_state_unavailable: { category: "passcontrol_side", label: "Not sent: credential check unavailable" },
+  credential_unavailable: { category: "passcontrol_side", label: "Not sent: provider key could not be read" },
   // An observation, not a failure: an operator changed the credential while
   // this call was being assembled. A retry gets a matching pair.
   credential_changed: { category: "passcontrol_side", label: "Not sent: credential changed mid-call" },

@@ -5,6 +5,7 @@
 // generic 401 (no enumeration). On success we record last-used best-effort.
 import { serviceClient } from "@/lib/supabase";
 import { hashApiKey, isApiKeyFormat } from "@/lib/apikeys";
+import { isDirectAgentKey } from "@/lib/auth/direct-key";
 
 export type Scope = "read" | "write";
 
@@ -28,7 +29,9 @@ export async function authenticateApiKey(req: Request): Promise<AuthResult> {
   const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
   if (!token) return { ok: false, status: 401, code: "missing_api_key" };
   // Cheap shape filter before the hash + DB lookup.
-  if (!isApiKeyFormat(token)) return { ok: false, status: 401, code: "invalid_api_key" };
+  // A Direct Agent Key is never a control credential (trust boundary 1). Its shape
+  // also passes the filter below, so refuse it by name rather than by a missing hash.
+  if (!isApiKeyFormat(token) || isDirectAgentKey(token)) return { ok: false, status: 401, code: "invalid_api_key" };
 
   const hash = await hashApiKey(token);
   const db = serviceClient();
