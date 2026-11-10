@@ -1,0 +1,5 @@
+name = "budget"
+defaultTargets = ["Budget"]
+
+[[lean_lib]]
+name = "Budget"
