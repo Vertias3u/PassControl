@@ -2512,6 +2512,44 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       return { kind: "response", response };
     };
 
+    // ── The final gate is a backstop, not only a budget check ───────────────────
+    //
+    // `finalGate` re-checks all six steps, but until 2026-11-10 only its budget
+    // answer was acted on: kill, suspension, scope, endpoint and policy relied on
+    // the earlier checks alone. proofs/stops proves those checks and this gate
+    // cannot disagree, so nothing got through — but removing an earlier check would
+    // have let a killed or out-of-scope call reach the key while this gate said
+    // "denied". Any denial here now refuses, before step 6 fetches the credential.
+    // Nothing was sent, so the hold is released in full. Should never fire; if it
+    // does, an earlier check has drifted, which is why it is also reported.
+    //
+    // `deniedBy`, not `complete`: a gate still waiting for an input is not acted
+    // on here, as before (the fallback and model-switch checks read it the same way).
+    if (finalGate.deniedBy) {
+      const step = finalGate.deniedBy;
+      const status =
+        step === "kill" ? "blocked_killed"
+        : step === "suspend" ? "blocked_suspended"
+        : step === "scope" ? "blocked_scope"
+        : step === "endpoint" ? "blocked_endpoint"
+        : "blocked_policy";
+      // Kill and suspension keep the single opaque wire code, as at the top.
+      const wire = step === "kill" || step === "suspend" ? "blocked_suspended" : status;
+      waitUntil(
+        captureError(new Error(`final gate denied by ${step} after the earlier checks passed`), {
+          route: "api.proxy",
+          method: req.method,
+          status: 403,
+          provider: attemptProvider,
+          agentId,
+          jti,
+          code: "final_gate_backstop",
+        })
+      );
+      captureBlocked(status, 403);
+      return terminal(errR(403, wire), reconcile(NO_USAGE, status, "not_dispatched", 403));
+    }
+
     // The endpoint read gave no answer. Refuse HERE — before step 6 fetches the
     // credential — because if we do not know where a key is going there is no
     // reason to go and get it, and `get_provider_key` is the only decrypt path

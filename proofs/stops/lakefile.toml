@@ -1,0 +1,5 @@
+name = "stops"
+defaultTargets = ["Stops"]
+
+[[lean_lib]]
+name = "Stops"
