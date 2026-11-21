@@ -38,6 +38,8 @@ const CONFIG: Record<StatusType, { Icon: typeof CheckCircle2; tone: Tone }> = {
   blocked_budget_pause: { Icon: AlertCircle, tone: "calm" },
   blocked_budget_subagent: { Icon: AlertCircle, tone: "calm" },
   blocked_budget_delegation: { Icon: AlertCircle, tone: "calm" },
+  blocked_loop: { Icon: AlertCircle, tone: "calm" },
+  blocked_session_cap: { Icon: AlertCircle, tone: "calm" },
   blocked_delegation_revoked: { Icon: AlertCircle, tone: "calm" },
   blocked_delegation_unavailable: { Icon: AlertCircle, tone: "warning" },
   blocked_scope: { Icon: AlertCircle, tone: "calm" },

@@ -34,7 +34,7 @@ export const runtime = "edge";
 
 import { control } from "@/lib/control/handler";
 import { jsonResponse, errorResponse } from "@/lib/control/respond";
-import { rebuildBudgetState } from "@/lib/state/holds";
+import { countOpenHolds, REBUILD_HOLD_SCAN_LIMIT, TooManyOpenHoldsError, rebuildBudgetState } from "@/lib/state/holds";
 import { periodStart, type PeriodKind } from "@/lib/period";
 import { MICROCENTS_PER_CENT } from "@/lib/pricing";
 import { purgeAgentPolicy } from "@/lib/state/redis";
@@ -69,6 +69,12 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId }
   const { data: agent, error: lookupError } = lookup;
   if (lookupError) return errorResponse(500, "query_failed", requestId);
   if (!agent) return errorResponse(404, "not_found", requestId);
+
+  // The ledger rebuild RPC writes checkpoints too. Refuse an oversized index
+  // before it or the epoch update can mutate either store.
+  if (await countOpenHolds(id) > REBUILD_HOLD_SCAN_LIMIT) {
+    return errorResponse(409, "too_many_open_holds", requestId);
+  }
 
   const { data: rebuilt, error: rpcError } = await db.rpc("rebuild_agent_spend", { p_agent_id: id });
   if (rpcError) return errorResponse(500, "query_failed", requestId);
@@ -123,13 +129,21 @@ const handler = control("write", async ({ userId, db, params, keyId, requestId }
     .eq("id", id);
   if (writeError) return errorResponse(500, "query_failed", requestId);
 
-  const state = await rebuildBudgetState({
-    agentId: id,
-    epoch,
-    spentTokens,
-    spentMicrocents,
-    ...(period ? { period, nowMs } : {}),
-  });
+  let state: Awaited<ReturnType<typeof rebuildBudgetState>>;
+  try {
+    state = await rebuildBudgetState({
+      agentId: id,
+      epoch,
+      spentTokens,
+      spentMicrocents,
+      ...(period ? { period, nowMs } : {}),
+    });
+  } catch (error) {
+    // A hold may arrive after preflight. Redis is still untouched; Postgres
+    // retains the new epoch, so a retry after resolving holds completes recovery.
+    if (error instanceof TooManyOpenHoldsError) return errorResponse(409, "too_many_open_holds", requestId);
+    throw error;
+  }
 
   // MANDATORY. The cached policy carries the epoch the proxy compares against,
   // so leaving a stale entry means every call keeps failing the check this

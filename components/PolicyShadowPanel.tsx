@@ -71,6 +71,12 @@ interface Draft {
   secretGuard: "" | "block" | "redact";
   /** `injection_guard.mode`, or "" for off. */
   injectionGuard: "" | "monitor" | "hold";
+  /** `loop_breaker.repeats` (1.9.0), as typed; "" means off. */
+  loopRepeats: string;
+  /** `session_caps` (1.9.0), as typed: money in DOLLARS, calls, minutes. Each "" is off. */
+  sessionCapDollars: string;
+  sessionCapCalls: string;
+  sessionCapMinutes: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -119,7 +125,20 @@ export function toDraft(policy: unknown): Draft {
   const alertCents = source.session_alert_cents;
   const sessionAlert =
     typeof alertCents === "number" && Number.isSafeInteger(alertCents) && alertCents >= 1 ? (alertCents / 100).toFixed(2) : "";
-  return { deny, windows, cap, ceiling, subagentRules, subagentNone, subagentCap, sessionAlert, secretGuard, injectionGuard };
+  // Round-tripped for the same reason as the ceiling.
+  const loop = isRecord(source.loop_breaker) ? source.loop_breaker.repeats : undefined;
+  const loopRepeats = typeof loop === "number" && Number.isSafeInteger(loop) ? String(loop) : "";
+  // Round-tripped for the same reason as the ceiling.
+  const caps = isRecord(source.session_caps) ? source.session_caps : {};
+  const whole = (n: unknown) => (typeof n === "number" && Number.isSafeInteger(n) && n >= 1 ? n : null);
+  const capCentsWhole = whole(caps.cents);
+  const sessionCapDollars = capCentsWhole == null ? "" : (capCentsWhole / 100).toFixed(2);
+  const sessionCapCalls = whole(caps.calls) == null ? "" : String(caps.calls);
+  const sessionCapMinutes = whole(caps.minutes) == null ? "" : String(caps.minutes);
+  return {
+    deny, windows, cap, ceiling, subagentRules, subagentNone, subagentCap, sessionAlert, secretGuard, injectionGuard, loopRepeats,
+    sessionCapDollars, sessionCapCalls, sessionCapMinutes,
+  };
 }
 
 /**
@@ -211,6 +230,34 @@ export function toPolicy(draft: Draft): unknown {
 
   if (draft.secretGuard) policy.secret_guard = { mode: draft.secretGuard };
   if (draft.injectionGuard) policy.injection_guard = { mode: draft.injectionGuard };
+
+  // A whole number inside the reader's bounds, or the key is left out (off).
+  const loopText = draft.loopRepeats.trim();
+  if (/^\d+$/.test(loopText)) {
+    const repeats = Number(loopText);
+    if (repeats >= POLICY_LIMITS.loopRepeatsMin && repeats <= POLICY_LIMITS.loopRepeatsMax) {
+      policy.loop_breaker = { repeats };
+    }
+  }
+
+  // Each cap inside the reader's bounds, or left out; the key only when one is set.
+  const sessionCaps: Record<string, number> = {};
+  const dollarsText = draft.sessionCapDollars.trim().replace(/^\$/, "");
+  if (/^\d+(\.\d{1,2})?$/.test(dollarsText)) {
+    const cents = Math.round(Number(dollarsText) * 100);
+    if (Number.isSafeInteger(cents) && cents >= 1 && cents <= POLICY_LIMITS.subagentSessionCapCents) sessionCaps.cents = cents;
+  }
+  const callsText = draft.sessionCapCalls.trim();
+  if (/^\d+$/.test(callsText)) {
+    const calls = Number(callsText);
+    if (calls >= 1 && calls <= POLICY_LIMITS.sessionCalls) sessionCaps.calls = calls;
+  }
+  const minutesText = draft.sessionCapMinutes.trim();
+  if (/^\d+$/.test(minutesText)) {
+    const minutes = Number(minutesText);
+    if (minutes >= 1 && minutes <= POLICY_LIMITS.sessionMinutes) sessionCaps.minutes = minutes;
+  }
+  if (Object.keys(sessionCaps).length > 0) policy.session_caps = sessionCaps;
 
   return Object.keys(policy).length === 0 ? null : policy;
 }
@@ -328,6 +375,79 @@ export function InjectionGuardField({
         </label>
       ))}
     </fieldset>
+  );
+}
+
+/** `session_caps` (1.9.0, lib/runaway.ts): what one declared session may spend, call and last. */
+export function SessionCapsField({
+  draft,
+  setDraft,
+  pending,
+}: {
+  draft: Draft;
+  setDraft: (update: (prev: Draft) => Draft) => void;
+  pending: boolean;
+}) {
+  const input = (field: "sessionCapDollars" | "sessionCapCalls" | "sessionCapMinutes", label: string, placeholder: string, mode: "decimal" | "numeric") => (
+    <label className="grid gap-1 text-sm">
+      <span className="text-sm font-semibold text-foreground">{label}</span>
+      <input
+        value={draft[field]}
+        onChange={(e) => setDraft((prev) => ({ ...prev, [field]: e.target.value }))}
+        inputMode={mode}
+        placeholder={placeholder}
+        disabled={pending}
+        className="h-10 max-w-xs rounded-lg border border-border bg-background px-3 text-sm"
+      />
+    </label>
+  );
+  return (
+    <div className="grid gap-2 border-t border-border pt-4" data-policy-field="session_caps">
+      <span className="text-sm font-semibold text-foreground">Caps for one session</span>
+      {input("sessionCapDollars", "Money per session (dollars)", "Leave empty for no cap", "decimal")}
+      {input("sessionCapCalls", "Model calls per session", "Leave empty for no cap", "numeric")}
+      {input("sessionCapMinutes", "Minutes per session, from its first call (up to 1440)", "Leave empty for no cap", "numeric")}
+      <p className="m-0 text-xs leading-5 text-muted-foreground">
+        One Claude Code or Codex session of this agent, its sub-agents included, may spend this much, make this many
+        model calls and run this long. Past a cap, that session&rsquo;s calls are refused and the agent&rsquo;s other
+        sessions keep running; a new session starts with fresh caps. Sessions are declared by the client, so a call
+        with no session is not capped, and this agent&rsquo;s own limits stay the hard ones. Shadow mode does not
+        count it; it takes effect once promoted.
+      </p>
+    </div>
+  );
+}
+
+/** `loop_breaker` (1.9.0, lib/runaway.ts): pause an agent that keeps sending the same request. */
+export function LoopBreakerField({
+  draft,
+  setDraft,
+  pending,
+}: {
+  draft: Draft;
+  setDraft: (update: (prev: Draft) => Draft) => void;
+  pending: boolean;
+}) {
+  return (
+    <div className="grid gap-1 border-t border-border pt-4" data-policy-field="loop_breaker">
+      <label className="grid gap-1 text-sm">
+        <span className="text-sm font-semibold text-foreground">Loop breaker: pause after this many repeats</span>
+        <input
+          value={draft.loopRepeats}
+          onChange={(e) => setDraft((prev) => ({ ...prev, loopRepeats: e.target.value }))}
+          inputMode="numeric"
+          placeholder="Leave empty for off (3 to 100)"
+          disabled={pending}
+          className="h-10 max-w-xs rounded-lg border border-border bg-background px-3 text-sm"
+        />
+      </label>
+      <p className="m-0 text-xs leading-5 text-muted-foreground">
+        When this agent sends the same request this many times within 10 minutes (the same last message, even as
+        the conversation grows), PassControl pauses its model calls for 15 minutes and sends a refused-call alert.
+        The pause lifts by itself. It does not judge whether repeats are useful: an eval that samples one prompt
+        many times trips it too. Shadow mode does not count it; it takes effect once promoted.
+      </p>
+    </div>
   );
 }
 
@@ -901,6 +1021,10 @@ export function PolicyShadowPanel({
           <SubagentCapField draft={draft} setDraft={setDraft} pending={pending} />
 
           <SessionAlertField draft={draft} setDraft={setDraft} pending={pending} />
+
+          <LoopBreakerField draft={draft} setDraft={setDraft} pending={pending} />
+
+          <SessionCapsField draft={draft} setDraft={setDraft} pending={pending} />
 
           <SecretGuardField draft={draft} setDraft={setDraft} pending={pending} />
 

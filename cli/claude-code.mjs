@@ -2,9 +2,11 @@
 //
 // Claude Code reads an `env` block from its settings files wherever it is
 // started (verified 2026-10-07, Claude Code 2.1.292): ANTHROPIC_BASE_URL sends
-// its calls to the sidecar, and ANTHROPIC_AUTH_TOKEN, a placeholder, rides as a
-// Bearer token with no "use this API key?" prompt. The sidecar strips it and the
-// gateway injects the real key, so Claude Code never holds one.
+// its calls to the sidecar, and ANTHROPIC_AUTH_TOKEN rides as a Bearer token with
+// no "use this API key?" prompt. That token is the sidecar's own key (review C-03,
+// cli/sidecar-token.mjs): it opens the sidecar on this machine and nothing else.
+// The sidecar strips it and the gateway injects the real key, so Claude Code never
+// holds one.
 //
 // The settings file belongs to the user. The env keys and tool hook, and with
 // --statusline a `statusLine` running `passcontrol statusline`, are written or
@@ -16,12 +18,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { GATE_HOOK_TIMEOUT_S } from "./subscription-gate.mjs";
+import { isSidecarKey } from "./sidecar-token.mjs";
 
-/** Not a secret: the sidecar discards whatever arrives in this header. */
+/**
+ * What this command wrote before review C-03. Public, so the sidecar refuses it now;
+ * kept only to recognise (and replace or remove) settings an older version wrote.
+ */
 export const CLAUDE_CODE_AUTH_PLACEHOLDER = "passcontrol-sidecar";
 
-export function claudeCodeEnv(baseUrl) {
-  return { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: CLAUDE_CODE_AUTH_PLACEHOLDER };
+/** A token this command wrote: today's sidecar key, or the old placeholder. */
+export function isOurAuthToken(value) {
+  return value === CLAUDE_CODE_AUTH_PLACEHOLDER || isSidecarKey(value);
+}
+
+export function claudeCodeEnv(baseUrl, sidecarKey) {
+  return { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: sidecarKey };
 }
 
 /**
@@ -70,7 +81,7 @@ function save(target, value, exists) {
  * `hooks` with API mode's note-only prompt hook for `port`, or without it when `port`
  * is null. Every other hook, subscription mode's included, is left as it is.
  */
-function withNoteOnlyHook(hooks, port) {
+function withNoteOnlyHook(hooks, port, key) {
   const isNoteOnly = (h) => isObject(h) && h.type === "http" && typeof h.url === "string" && OUR_NOTE_ONLY_URL.test(h.url);
   const base = isObject(hooks) ? hooks : null;
   const groups = Array.isArray(base?.UserPromptSubmit) ? base.UserPromptSubmit : [];
@@ -82,7 +93,7 @@ function withNoteOnlyHook(hooks, port) {
       if (rest.length) kept.push({ ...group, hooks: rest });
     }
   }
-  const ours = { hooks: [{ type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?note=only`, timeout: GATE_HOOK_TIMEOUT_S }] };
+  const ours = { hooks: [{ type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?note=only`, ...keyHeaders(key), timeout: GATE_HOOK_TIMEOUT_S }] };
   if (port !== null && groups.length === kept.length + 1 && groups.some((g) => same(g, ours))) return hooks;
   if (port !== null) kept.push(ours);
   if (!base && !kept.length) return hooks;
@@ -96,18 +107,19 @@ function withNoteOnlyHook(hooks, port) {
  * The env keys, and with `statusLineCommand` the status line too, in ONE save:
  * two saves would back up the first save's output and lose the user's original.
  */
-export function writeClaudeCodeSettings({ target, baseUrl, force = false, statusLineCommand = null, noteHookPort = null, toolHookPort = null }) {
+export function writeClaudeCodeSettings({ target, baseUrl, sidecarKey, force = false, statusLineCommand = null, noteHookPort = null, toolHookPort = null }) {
+  if (!isSidecarKey(sidecarKey)) throw new Error("No sidecar key to write: run `passcontrol login` first.");
   const { exists, value } = readSettings(target);
   const env = typeof value.env === "object" && value.env !== null && !Array.isArray(value.env) ? value.env : {};
   const rawKeyFound = typeof env.ANTHROPIC_API_KEY === "string" && env.ANTHROPIC_API_KEY.length > 0;
   const current = env.ANTHROPIC_BASE_URL;
-  const envDone = current === baseUrl && env.ANTHROPIC_AUTH_TOKEN === CLAUDE_CODE_AUTH_PLACEHOLDER;
+  const envDone = current === baseUrl && env.ANTHROPIC_AUTH_TOKEN === sidecarKey;
   if (!envDone && typeof current === "string" && current && current !== baseUrl && !force) {
     throw new Error(
       `${target} already points Claude Code at ${current}. Re-run with --force to replace that address with PassControl's.`
     );
   }
-  let next = envDone ? value : { ...value, env: { ...env, ...claudeCodeEnv(baseUrl) } };
+  let next = envDone ? value : { ...value, env: { ...env, ...claudeCodeEnv(baseUrl, sidecarKey) } };
   let statusLine;
   if (statusLineCommand) {
     const line = withStatusLine(next, statusLineCommand);
@@ -115,7 +127,7 @@ export function writeClaudeCodeSettings({ target, baseUrl, force = false, status
     statusLine = line.existing !== undefined ? { changed: false, existing: line.existing } : { changed: line.changed };
   }
   // configure passes the sidecar's port; URL.port is "" for :80, which would write a hook to nowhere.
-  const hooks = withApiTools(withNoteOnlyHook(value.hooks, noteHookPort), toolHookPort ?? (new URL(baseUrl).port || 80));
+  const hooks = withApiTools(withNoteOnlyHook(value.hooks, noteHookPort, sidecarKey), toolHookPort ?? (new URL(baseUrl).port || 80), sidecarKey);
   const hooksChanged = !same(hooks ?? null, value.hooks ?? null);
   if (hooksChanged) {
     next = { ...next };
@@ -135,7 +147,7 @@ export function removeClaudeCodeSettings({ target }) {
   const env = typeof value.env === "object" && value.env !== null && !Array.isArray(value.env) ? value.env : null;
   // Only an address this command could have written: a gateway someone else set
   // up is not ours to remove.
-  if (env && env.ANTHROPIC_AUTH_TOKEN === CLAUDE_CODE_AUTH_PLACEHOLDER) {
+  if (env && isOurAuthToken(env.ANTHROPIC_AUTH_TOKEN)) {
     const { ANTHROPIC_BASE_URL: _url, ANTHROPIC_AUTH_TOKEN: _token, ...rest } = env;
     next = { ...value };
     if (Object.keys(rest).length) next.env = rest;
@@ -231,17 +243,28 @@ const LOGS_ENV = {
   OTEL_LOGS_EXPORT_INTERVAL: "1000",
 };
 
-export function subscriptionEnv(port) {
+// Review C-03 follow-up: the sidecar's own paths ask for its key too, so each hook and
+// the logs export carry it. Claude Code sends hook `headers` as written (it only
+// interpolates `$VAR`, which a pcs_ key never contains) and merges
+// OTEL_EXPORTER_OTLP_LOGS_HEADERS into the logs export.
+function keyHeaders(key) {
+  return isSidecarKey(key) ? { headers: { Authorization: `Bearer ${key}` } } : {};
+}
+const OUR_LOGS_HEADERS = /^Authorization=Bearer pcs_[A-Za-z0-9_-]{43}$/;
+
+/** Without a key (a preview on a machine with no passport) the headers line is left out; the writer refuses. */
+export function subscriptionEnv(port, key = null) {
   return {
     CLAUDE_CODE_ENABLE_TELEMETRY: "1",
     ...LOGS_ENV,
     OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${LOOPBACK_BASE}${port}/_passcontrol/otlp/v1/logs`,
+    ...(isSidecarKey(key) ? { OTEL_EXPORTER_OTLP_LOGS_HEADERS: `Authorization=Bearer ${key}` } : {}),
     PASSCONTROL_SIDECAR_URL: `${LOOPBACK_BASE}${port}`,
   };
 }
 
-function gateHook(port, note = false) {
-  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook${note ? "?note=1" : ""}`, timeout: GATE_HOOK_TIMEOUT_S };
+function gateHook(port, note = false, key = null) {
+  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook${note ? "?note=1" : ""}`, ...keyHeaders(key), timeout: GATE_HOOK_TIMEOUT_S };
 }
 
 // PreToolUse may hold a tool while the owner is asked (Phase 2), and Claude Code lets
@@ -250,13 +273,13 @@ function gateHook(port, note = false) {
 // told, and a Phase 1 hook (no `t`, 5 s) refuses a tool that would need the owner
 // instead of letting it through on the timeout.
 export const TOOL_HOOK_TIMEOUT_S = 600;
-function toolHook(port, api = false) {
-  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?t=${TOOL_HOOK_TIMEOUT_S}${api ? "&mode=api" : ""}`, timeout: TOOL_HOOK_TIMEOUT_S };
+function toolHook(port, api = false, key = null) {
+  return { type: "http", url: `${LOOPBACK_BASE}${port}/_passcontrol/hook?t=${TOOL_HOOK_TIMEOUT_S}${api ? "&mode=api" : ""}`, ...keyHeaders(key), timeout: TOOL_HOOK_TIMEOUT_S };
 }
 
 /** API mode always asks the sidecar before a tool. */
-export function apiToolHooks(port) {
-  return { PreToolUse: [{ matcher: "*", hooks: [toolHook(port, true)] }] };
+export function apiToolHooks(port, key = null) {
+  return { PreToolUse: [{ matcher: "*", hooks: [toolHook(port, true, key)] }] };
 }
 
 const OUR_API_TOOL_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook\?t=\d{1,4}&mode=api$/;
@@ -265,12 +288,12 @@ const OUR_API_TOOL_URL = /^http:\/\/127\.0\.0\.1:\d{1,5}\/_passcontrol\/hook\?t=
 // an API setup replaces subscription mode's tool hook instead of adding a second one.
 // Removing (port null): only API mode's own hook. Subscription mode's stays, or a Pro/Max
 // setup would keep its prompt and batch hooks and lose its tool rules.
-function withApiTools(hooks, port) {
+function withApiTools(hooks, port, key) {
   const base = isObject(hooks) ? hooks : {};
   const tools = Object.hasOwn(base, "PreToolUse") ? { PreToolUse: base.PreToolUse } : {};
   const next = { ...base };
   delete next.PreToolUse;
-  if (port !== null) return { ...next, ...withOurHooks(tools, port, false, apiToolHooks(port)) };
+  if (port !== null) return { ...next, ...withOurHooks(tools, port, false, apiToolHooks(port, key)) };
   if (!Array.isArray(tools.PreToolUse)) return isObject(hooks) ? { ...next, ...tools } : hooks;
   const isApiTool = (h) => isObject(h) && h.type === "http" && typeof h.url === "string" && OUR_API_TOOL_URL.test(h.url);
   const kept = [];
@@ -285,11 +308,11 @@ function withApiTools(hooks, port) {
 }
 
 /** `note`: the agent's opt-in note rides on the prompt hook (`--agent-note`). */
-export function subscriptionHooks(port, { note = false } = {}) {
-  const hook = gateHook(port);
+export function subscriptionHooks(port, { note = false, key = null } = {}) {
+  const hook = gateHook(port, false, key);
   return {
-    UserPromptSubmit: [{ hooks: [gateHook(port, note)] }],
-    PreToolUse: [{ matcher: "*", hooks: [toolHook(port)] }],
+    UserPromptSubmit: [{ hooks: [gateHook(port, note, key)] }],
+    PreToolUse: [{ matcher: "*", hooks: [toolHook(port, false, key)] }],
     PostToolBatch: [{ hooks: [hook] }],
   };
 }
@@ -323,6 +346,7 @@ function withoutOurHooks(hooks) {
 
 /** `hooks` with exactly this port's gate hooks, leaving them where they are when already right. */
 function withOurHooks(hooks, port, note = false, ours = subscriptionHooks(port, { note })) {
+  // An old hook of ours (no key header) is not `same` as the new one, so it is replaced.
   const base = isObject(hooks) ? hooks : {};
   const next = withoutOurHooks(base);
   for (const event of Object.keys(ours)) {
@@ -347,7 +371,8 @@ function urlAllowed(patterns, url) {
  * Subscription mode's settings, in one save. Throws, writing nothing, when the
  * user already exports Claude Code's logs somewhere else and `force` is not set.
  */
-export function writeClaudeCodeSubscription({ target, port, statusLineCommand, force = false, note = false }) {
+export function writeClaudeCodeSubscription({ target, port, sidecarKey, statusLineCommand, force = false, note = false }) {
+  if (!isSidecarKey(sidecarKey)) throw new Error("No sidecar key to write: run `passcontrol login` first.");
   const { exists, value } = readSettings(target);
   const env = isObject(value.env) ? value.env : {};
   const endpoint = env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
@@ -360,7 +385,7 @@ export function writeClaudeCodeSubscription({ target, port, statusLineCommand, f
       `${target} already exports Claude Code's logs (${theirs.join(", ")}). Subscription mode would send them to the sidecar instead. Re-run with --force to do that; nothing was written.`
     );
   }
-  let next = { ...value, env: { ...env, ...subscriptionEnv(port) }, hooks: withOurHooks(value.hooks, port, note) };
+  let next = { ...value, env: { ...env, ...subscriptionEnv(port, sidecarKey) }, hooks: withOurHooks(value.hooks, port, note, subscriptionHooks(port, { note, key: sidecarKey })) };
   let statusLine;
   if (statusLineCommand) {
     const line = withStatusLine(next, statusLineCommand);
@@ -375,7 +400,7 @@ export function writeClaudeCodeSubscription({ target, port, statusLineCommand, f
     backupPath,
     ...(statusLine ? { statusLine } : {}),
     hookUrlsBlocked: Boolean(allowlist && [gateHook(port), gateHook(port, note), toolHook(port)].some((h) => !urlAllowed(allowlist, h.url))),
-    routed: env.ANTHROPIC_AUTH_TOKEN === CLAUDE_CODE_AUTH_PLACEHOLDER && typeof env.ANTHROPIC_BASE_URL === "string",
+    routed: isOurAuthToken(env.ANTHROPIC_AUTH_TOKEN) && typeof env.ANTHROPIC_BASE_URL === "string",
   };
 }
 
@@ -392,6 +417,7 @@ export function removeClaudeCodeSubscription({ target }) {
     const env = { ...value.env };
     if (typeof env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT === "string" && OUR_LOGS_ENDPOINT.test(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT)) {
       delete env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+      if (typeof env.OTEL_EXPORTER_OTLP_LOGS_HEADERS === "string" && OUR_LOGS_HEADERS.test(env.OTEL_EXPORTER_OTLP_LOGS_HEADERS)) delete env.OTEL_EXPORTER_OTLP_LOGS_HEADERS;
       for (const [key, ours] of Object.entries(LOGS_ENV)) if (env[key] === ours) delete env[key];
       if (env.CLAUDE_CODE_ENABLE_TELEMETRY === "1" && !Object.keys(env).some((k) => k.startsWith("OTEL_"))) {
         delete env.CLAUDE_CODE_ENABLE_TELEMETRY;

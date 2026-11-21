@@ -52,6 +52,7 @@ import {
   warn,
 } from "./config.mjs";
 import { defaultAllowedModelForProvider } from "./integration-defaults.mjs";
+import { loweredKeysFile, rememberReadKey } from "./lowered-keys.mjs";
 import { proveItWorks } from "./selftest.mjs";
 
 export { CLOUD_GATEWAY };
@@ -397,28 +398,46 @@ export function gatewaySource(
   return { from: "default" };
 }
 
-export async function loginCommand(opts = {}, deps = {}) {
-  const fetchImpl = deps.fetch ?? fetch;
-  const openUrl = deps.openUrl ?? (() => {});
-  const confirm = deps.confirmYes ?? (async (_q, o = {}) => o.default !== false);
-  const promptLine = deps.promptLine ?? (async (_q, fallback) => fallback);
-  // Only the poll loop reads these, and only a test passes them. Kept on `deps`
-  // beside `fetch` rather than on `opts`, because they are seams for the caller,
-  // not options for the operator — there is no flag that makes login lie about
-  // the time.
-  const now = deps.now ?? Date.now;
-  const wait = deps.sleep ?? sleep;
+/**
+ * Lower the login's key to read, and return it for saving; or revoke it and return
+ * "" when it could not be lowered. A write key is never handed back for saving.
+ */
+async function keepReadOnly(origin, apiKey, fetchImpl, clientName) {
+  try {
+    await control(origin, apiKey, "POST", "/keys/self/downgrade", null, fetchImpl);
+    ok("this machine keeps a read-only control key");
+    return apiKey;
+  } catch {
+    const revoked = await revokeOwnKey(origin, apiKey, fetchImpl);
+    warn("Could not make the control key read-only, so it was not saved.");
+    if (!revoked) step(`It is STILL LIVE with write scope: revoke "CLI on ${clientName}" in Settings → API keys.`);
+    step("Status, spend and audit commands need a key: create a read-only one in Settings.");
+    return "";
+  }
+}
 
-  // Validate the destination BEFORE anything is requested — the ordering mintVisa
-  // uses. A rejected gateway must cost zero sockets.
-  const origin = resolveLoginGateway(opts);
+/** Self-revoke, best effort. True when the key can no longer be used. */
+async function revokeOwnKey(origin, apiKey, fetchImpl) {
+  try {
+    await control(origin, apiKey, "POST", "/keys/self/revoke", null, fetchImpl);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  const clientName = String(opts.name || os.hostname() || "this machine");
+/**
+ * The browser approval both `login` and a one-command write use: start a device
+ * authorization, show the code, wait for the operator to approve it in the dashboard
+ * (which needs their second factor), and return the grant. Nothing is saved here.
+ */
+export async function approveInBrowser(origin, { clientName, title = "Approve this machine", oneCommand = false, opts = {}, fetchImpl = fetch, openUrl = () => {}, now = Date.now, wait = sleep }) {
   let started;
   try {
     started = await postJson(
       `${origin}/api/auth/device/start`,
-      { client_name: clientName },
+      // `one_command`: the gateway gives that key a fixed 15-minute life (review C-01).
+      oneCommand ? { client_name: clientName, one_command: true } : { client_name: clientName },
       { fetchImpl }
     );
   } catch (error) {
@@ -466,7 +485,7 @@ export async function loginCommand(opts = {}, deps = {}) {
   // worse than one that never mentioned a clipboard at all.
   const copied = await copyToClipboard(userCode);
   console.log("");
-  console.log(heading("Approve this machine"));
+  console.log(heading(title));
   console.log(`  Code: ${formatCode(userCode)}${copied ? "   (copied to your clipboard)" : ""}`);
   console.log(`  Open: ${verificationUri}`);
   console.log("");
@@ -481,6 +500,27 @@ export async function loginCommand(opts = {}, deps = {}) {
     wait,
   });
   ok("approved");
+  return grant;
+}
+
+export async function loginCommand(opts = {}, deps = {}) {
+  const fetchImpl = deps.fetch ?? fetch;
+  const openUrl = deps.openUrl ?? (() => {});
+  const confirm = deps.confirmYes ?? (async (_q, o = {}) => o.default !== false);
+  const promptLine = deps.promptLine ?? (async (_q, fallback) => fallback);
+  // Only the poll loop reads these, and only a test passes them. Kept on `deps`
+  // beside `fetch` rather than on `opts`, because they are seams for the caller,
+  // not options for the operator — there is no flag that makes login lie about
+  // the time.
+  const now = deps.now ?? Date.now;
+  const wait = deps.sleep ?? sleep;
+
+  // Validate the destination BEFORE anything is requested — the ordering mintVisa
+  // uses. A rejected gateway must cost zero sockets.
+  const origin = resolveLoginGateway(opts);
+
+  const clientName = String(opts.name || os.hostname() || "this machine");
+  const grant = await approveInBrowser(origin, { clientName, opts, fetchImpl, openUrl, now, wait });
 
   // ── Provision a passport for this machine ─────────────────────────────────
   //
@@ -541,17 +581,32 @@ export async function loginCommand(opts = {}, deps = {}) {
     // rather than pretending nothing happened. Leaving the operator with an
     // orphaned agent AND no explanation would be the worse failure.
     warn("Left the existing config unchanged.");
-    step(`The new passport was NOT saved. Agent ${agentId ?? "(unknown)"} and the key`);
-    step(`"CLI on ${clientName}" now exist unused — revoke them in Settings.`);
+    const revoked = await revokeOwnKey(origin, grant.api_key, fetchImpl);
+    step(`The new passport was NOT saved. Agent ${agentId ?? "(unknown)"} now exists unused;`);
+    step(revoked
+      ? `revoke it in the Control Tower. The key "CLI on ${clientName}" was revoked.`
+      : `revoke it and the key "CLI on ${clientName}" in the Control Tower.`);
     return { agentId, passportId, target: null };
   }
+  // ── What stays on disk can look, not act (review C-01) ───────────────────
+  //
+  // The key was minted with write scope because creating the agent and registering
+  // its passport need it. That need ends here. The file below also holds the
+  // passport, and the governed agent can read it, so a write key saved there would
+  // let the agent act as its owner: lift the tenant stop, resume itself, raise its
+  // own budget, create an agent with no limits. So the key is lowered to read FIRST,
+  // and saved only if that worked. A write command later asks for a one-command
+  // key, approved in the browser (cli/write-approval.mjs).
+  const keptKey = await keepReadOnly(origin, grant.api_key, fetchImpl, clientName);
   mergeConfigFile(target, {
     PASSCONTROL_GATEWAY: origin,
     PASSPORT_ID: passportId,
     PASSPORT_SECRET: passportSecret,
     PASSPORT_KEY_STORAGE: "",
-    PASSCONTROL_API_KEY: grant.api_key,
+    PASSCONTROL_API_KEY: keptKey,
   });
+  // Known read-only, so later commands do not ask the gateway to lower it again.
+  rememberReadKey(keptKey, loweredKeysFile(globalConfigPath()));
   ok(`wrote ${target}`);
   warnIfShadowed(target);
 
@@ -568,7 +623,7 @@ export async function loginCommand(opts = {}, deps = {}) {
     origin,
     passportId,
     passportSecret,
-    apiKey: grant.api_key,
+    apiKey: keptKey,
     fetchImpl,
     // The receipt read waits out the gateway's background write. Injected from
     // the same seam the poll loop uses, so a test drives the retry without
@@ -577,6 +632,9 @@ export async function loginCommand(opts = {}, deps = {}) {
   });
 
   step("");
-  step(`The key is listed in Settings as "CLI on ${clientName}" and can be revoked there.`);
+  if (keptKey) {
+    step(`Its read-only key is listed in Settings as "CLI on ${clientName}" and can be revoked there.`);
+    step("Commands that change something (kill off, resume, new agents) ask you to approve them in the browser.");
+  }
   return { agentId, passportId, target, proof };
 }

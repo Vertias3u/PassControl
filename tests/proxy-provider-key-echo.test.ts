@@ -259,7 +259,7 @@ beforeEach(() => {
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   setCachedAgentPolicyMock.mockResolvedValue(undefined);
-  readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
+  readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   writeLogMock.mockResolvedValue(undefined);
   mirrorSpendMock.mockResolvedValue(undefined);
@@ -381,6 +381,42 @@ describe("the proxy does not return the provider key an upstream echoes", () => 
     expect(text).toContain("data: [DONE]");
     // The usage transform still saw the provider's report.
     expect(text).toContain('"prompt_tokens":5');
+  });
+
+  // Credential-isolation benchmark, `leaks/stream-split`: the key in 7-character text
+  // deltas, one per event, the way a model streams. No event holds 12 characters of it;
+  // the agent's SDK joins them. The redactor's own tests (tests/secret-redaction-sse.test.ts)
+  // cover the shapes; this proves the wiring through the real handler, usage included.
+  it("redacts a key streamed 7 characters per SSE event, and keeps the usage event", async () => {
+    const event = (o: object) => `data: ${JSON.stringify(o)}\n\n`;
+    const pieces = PROVIDER_KEY.match(/.{1,7}/g) ?? [];
+    fetchMock.mockResolvedValueOnce(
+      streamOf(
+        [
+          event({ choices: [{ index: 0, delta: { role: "assistant", content: "key: " } }] }),
+          ...pieces.map((p) => event({ choices: [{ index: 0, delta: { content: p } }] })),
+          event({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+          event({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }),
+          "data: [DONE]\n\n",
+        ],
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      )
+    );
+    const res = await callProxy();
+    const text = await bodyOf(res);
+    const chunks = text
+      .split("\n\n")
+      .filter((e) => e.startsWith("data: {"))
+      .map((e) => JSON.parse(e.slice("data: ".length)));
+    const joined = chunks.map((c) => c.choices?.[0]?.delta?.content ?? "").join("");
+    expect(joined).toBe("key: [REDACTED_PROVIDER_KEY]");
+    for (let i = 0; i + 12 <= PROVIDER_KEY.length; i++) expect(text).not.toContain(PROVIDER_KEY.slice(i, i + 12));
+    // Every event arrived, in order, and the usage transform still saw the provider's report.
+    expect(chunks).toHaveLength(pieces.length + 3);
+    expect(text).toContain('"finish_reason":"stop"');
+    expect(text).toContain('"prompt_tokens":5');
+    expect(text).toContain("data: [DONE]");
+    expect(captureSecurityEventMock).toHaveBeenCalledWith("proxy.provider_key_reflected", expect.anything());
   });
 
   it("leaves a response that never mentions the key byte-identical and raises no event", async () => {

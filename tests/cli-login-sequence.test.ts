@@ -3,6 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({ agent: null as any, logs: [] as any[], tasks: [] as Promise<unknown>[], writeBarrier: null as Promise<void> | null }));
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/mission/store")>()),
+  readActiveMissionForAgent: async () => ({ kind: "none" }),
+}));
 vi.mock('server-only', () => ({}));
 vi.mock('@vercel/functions', () => ({ waitUntil: (p: Promise<unknown>) => { h.tasks.push(p); } }));
 vi.mock('@/lib/control/auth', () => ({ authenticateApiKey: async () => ({ok:true,userId:'test-tenant',keyId:'test-key',scope:'write'}) }));
@@ -10,7 +15,7 @@ vi.mock('@/lib/ratelimit', () => ({ rateLimit: async () => ({success:true,remain
 vi.mock('@/lib/audit', () => ({ recordAdminAction: async () => {} }));
 vi.mock('@/lib/observability', () => ({ captureError: async () => {}, captureSecurityEvent: async () => {}, logFailOpen: () => {} }));
 vi.mock('@/lib/owner/current', () => ({ readCurrentOwner: async () => null }));
-vi.mock('@/lib/state/killswitch', async (original) => ({...await original<any>(), readKillState: async () => ({platformKill:false,tenantKill:false,denylist:[]})}));
+vi.mock('@/lib/state/killswitch', async (original) => ({...await original<any>(), readKillState: async () => ({platformKill:false,userKill: false,denylist:[]})}));
 vi.mock('@/lib/state/redis', () => ({
  claimNonce: async () => true, touchLastSeen: async () => {}, redis: () => ({}),
  isSuspended: async () => false, getCachedAgentPolicy: async () => JSON.stringify({p:{},s:null}),
@@ -61,6 +66,8 @@ it.each([false, true])('login verifies its receipt after real creation (receipt 
   if(p==='/api/auth/device/start') return Response.json({device_code:'d'.repeat(43),user_code:'FKDR8T2W',verification_uri:origin+'/dashboard/cli',expires_in:600,interval:1});
   if(p==='/api/auth/device/token') return Response.json({api_key:'pc_'+ 'k'.repeat(43)});
   if(p==='/api/control/v1/agents' && init.method==='GET') return Response.json({data:[]});
+  // Review C-01: login lowers its key to read before saving it.
+  if(p==='/api/control/v1/keys/self/downgrade') return Response.json({data:{scope:'read',prefix:'pc_kkkkkkkk'}});
   const req=new Request(url,init);
   if(p==='/api/control/v1/agents') return create(req);
   if(p==='/api/auth/challenge') return challenge(req);

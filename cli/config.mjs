@@ -478,7 +478,7 @@ export function requireControlApiKey(current = config) {
   assertConfigLoaded();
   if (!current.apiKey) {
     die(
-      "No control-plane API key configured. Run `passcontrol init`, set PASSCONTROL_API_KEY in .passcontrol, or pass it as env."
+      "No control-plane API key configured. Run `passcontrol login` (it keeps a read-only key), set PASSCONTROL_API_KEY in .passcontrol, or pass it as env."
     );
   }
   return current.apiKey;
@@ -654,6 +654,9 @@ export function formatChallengeError(status, body) {
   if (status === 403 && detail.includes("agent_not_active")) {
     return "Challenge failed: this agent is suspended or revoked. Re-enable it in the dashboard, or run `passcontrol agent resume <id>`.";
   }
+  if (status === 409 && detail.includes("agent_scope_invalid")) {
+    return "Challenge failed: this agent's scope list is malformed, so no visa can be minted for it. The passport itself is fine. Open the agent in the dashboard and save its scopes again.";
+  }
   if (status === 401) {
     return `Challenge failed: 401 ${detail}. Check PASSPORT_ID/PASSPORT_SECRET, then retry.`;
   }
@@ -676,6 +679,12 @@ export function formatProxyError(status, body) {
   const blocked = `Proxy blocked the call with ${status}: ${detail}`;
   if (status === 402 && error === "blocked_budget_period") {
     return `${blocked}\n→ The agent's daily or monthly limit is spent; it resets at the next UTC day or month (see the retry-after header).\n→ Fix: wait for the reset, or raise the limit in the dashboard.`;
+  }
+  if ((status === 402 || status === 403) && error === "blocked_session_cap") {
+    return `${blocked}\n→ This session reached one of the session's caps the agent's policy sets (money, calls or minutes). The agent's other sessions keep running.\n→ Fix: start a new session, or raise session_caps in the agent's policy.`;
+  }
+  if (status === 429 && error === "blocked_loop") {
+    return `${blocked}\n→ The agent sent the same request over and over, which looks like a loop, so PassControl paused its model calls. The pause lifts by itself (see the retry-after header).\n→ Fix: find what the agent is stuck on, or raise loop_breaker.repeats in the agent's policy if the repeats are intended.`;
   }
   if (status === 402 && error === "blocked_budget_pause") {
     return `${blocked}\n→ The agent reached the pause line its owner set on its spending limit; the limit itself is not used up.\n→ Fix: let it go on for an hour from the agent's page in the dashboard, or raise the pause line.`;

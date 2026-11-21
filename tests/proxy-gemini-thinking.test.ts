@@ -262,7 +262,7 @@ beforeEach(() => {
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   setCachedAgentPolicyMock.mockResolvedValue(undefined);
-  readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
+  readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   writeLogMock.mockResolvedValue(undefined);
   mirrorSpendMock.mockResolvedValue(undefined);

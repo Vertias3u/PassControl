@@ -6,7 +6,7 @@
 // @noble/curves bundles SHA-512, so verify works synchronously with no globals.
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha256";
-import { base64urlToBytes, bytesToBase64url, utf8ToBytes } from "../encoding";
+import { canonicalBase64urlToBytes, bytesToBase64url, utf8ToBytes } from "../encoding";
 
 /** RFC 7638 thumbprint of an Ed25519 public JWK, whose required members are
  *  serialised in lexicographic order with no whitespace. */
@@ -21,17 +21,26 @@ export function verifySignature(
   publicKey: Uint8Array
 ): boolean {
   try {
-    return ed25519.verify(signature, message, publicKey);
+    if (ed25519.Point.fromHex(publicKey, false).isSmallOrder()) return false;
+    return ed25519.verify(signature, message, publicKey, { zip215: false });
   } catch {
     return false;
   }
 }
 
-/** Decode a base64url passport_id into its raw 32-byte public key. */
+/** Decode a canonical 32-byte passport_id, refusing small-order points. */
 export function passportIdToPublicKey(passportId: string): Uint8Array | null {
   try {
-    const key = base64urlToBytes(passportId);
-    return key.length === 32 ? key : null;
+    const key = canonicalBase64urlToBytes(passportId);
+    if (key.length !== 32) return null;
+    try {
+      // Recognize even ZIP215 aliases of small-order points at registration.
+      if (ed25519.Point.fromHex(key, true).isSmallOrder()) return null;
+    } catch {
+      // Registration historically accepts arbitrary 32-byte values. Preserve
+      // that boundary; strict RFC 8032 verification still refuses non-points.
+    }
+    return key;
   } catch {
     return null;
   }

@@ -51,7 +51,7 @@ export const SERVICE_ENV = {
       "# GitHub REST through PassControl. What this agent may do is set on its page in the",
       "# dashboard, under GitHub access; the workspace's GitHub token stays in PassControl.",
     ],
-    usage: "# Octokit: new Octokit({ baseUrl: process.env.GITHUB_API_URL }) — and no auth option.",
+    usage: "# Octokit: new Octokit({ baseUrl: process.env.GITHUB_API_URL, auth: process.env.PASSCONTROL_SIDECAR_KEY })",
   },
   telegram: {
     label: "Telegram",
@@ -60,7 +60,7 @@ export const SERVICE_ENV = {
       "# Telegram Bot API through PassControl. What this agent may do is set on its page in the",
       "# dashboard, under Telegram access; the bot token stays in PassControl.",
     ],
-    usage: '# Call a method by name, with no token in the URL: curl "$TELEGRAM_API_URL/getMe"',
+    usage: '# Call a method by name, with no bot token in the URL: curl -H "x-api-key: $PASSCONTROL_SIDECAR_KEY" "$TELEGRAM_API_URL/getMe"',
   },
   brave: {
     label: "Brave Search",
@@ -69,7 +69,7 @@ export const SERVICE_ENV = {
       "# Brave Search through PassControl. What this agent may search is set on its page in the",
       "# dashboard, under Brave Search access; the API key stays in PassControl. Brave bills per search.",
     ],
-    usage: '# Search with no key header: curl "$BRAVE_SEARCH_API_URL/web/search?q=passcontrol"',
+    usage: '# Search with the sidecar key, not a Brave key: curl -H "x-api-key: $PASSCONTROL_SIDECAR_KEY" "$BRAVE_SEARCH_API_URL/web/search?q=passcontrol"',
   },
   notion: {
     label: "Notion",
@@ -78,7 +78,7 @@ export const SERVICE_ENV = {
       "# Notion through PassControl. What this agent may do is set on its page in the dashboard,",
       "# under Notion access; the integration token stays in PassControl.",
     ],
-    usage: "# @notionhq/client: new Client({ baseUrl: process.env.NOTION_API_URL }) — and no auth option.",
+    usage: "# @notionhq/client: new Client({ baseUrl: process.env.NOTION_API_URL, auth: process.env.PASSCONTROL_SIDECAR_KEY })",
   },
   discord: {
     label: "Discord",
@@ -87,7 +87,7 @@ export const SERVICE_ENV = {
       "# Discord's bot API through PassControl. What this agent may do is set on its page in the",
       "# dashboard, under Discord access; the bot token stays in PassControl.",
     ],
-    usage: '# discord.js: new REST({ api: process.env.DISCORD_API_URL, version: "10" }).setToken("sidecar") — any token; the sidecar replaces it.',
+    usage: '# discord.js: new REST({ api: process.env.DISCORD_API_URL, version: "10" }).setToken(process.env.PASSCONTROL_SIDECAR_KEY)',
   },
 };
 

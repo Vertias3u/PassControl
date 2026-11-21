@@ -22,7 +22,14 @@ export default function robots(): MetadataRoute.Robots {
         // /@handle is the opposite case from /verify/<passportId> below: a
         // public operator profile is opt-in and exists precisely to be found,
         // so it is invited in rather than kept out.
-        allow: ["/", "/verify/receipt", "/@"],
+        // /verify/statement is the same kind of page: a paste box for the published
+        // statement format, listed in sitemap.xml and marked index:true in its own
+        // metadata. It was missing here, so robots.txt blocked the URL the sitemap
+        // submitted. `$` ends the match: without it the rule is a prefix and would also
+        // open /verify/statement/badge.svg and any passport id starting "statement".
+        // scripts/__tests__/site-seo-consistency.test.ts checks every sitemap URL
+        // against these rules.
+        allow: ["/", "/verify/receipt", "/verify/statement$", "/@"],
         // The rest of /verify/* is public and meant to be shared in a README or
         // a ticket, but shareable is not indexable: a crawlable index of every
         // passport id anyone ever linked to is not something to hand a search

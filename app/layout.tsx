@@ -99,7 +99,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       lang="en"
       className={`dark ${plexMono.variable} ${newsreader.variable} ${manrope.variable} ${dmMono.variable}`}
     >
-      <body>{children}</body>
+      <body>
+        {children}
+      </body>
     </html>
   );
 }

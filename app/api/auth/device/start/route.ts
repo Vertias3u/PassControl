@@ -68,7 +68,7 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
   }
   const raw = bounded.text;
-  let body: { client_name?: unknown } = {};
+  let body: { client_name?: unknown; one_command?: unknown } = {};
   if (raw) {
     try {
       body = JSON.parse(raw);
@@ -88,6 +88,9 @@ export async function POST(req: Request): Promise<Response> {
     deviceCodeHash: await hashDeviceCode(deviceCode),
     clientName: cleanClientName(body?.client_name),
     ip,
+    // A CLI asking for one command's write key (review C-01). Only a shorter life
+    // follows from it, so a client can only make its own key weaker.
+    oneCommand: body?.one_command === true,
   });
 
   const origin = new URL(req.url).origin;

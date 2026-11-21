@@ -5,6 +5,7 @@ import { ed25519 } from "@noble/curves/ed25519";
 
 import { createCallUploader, CLIENT_EVENTS_PATH } from "../client-events-upload.mjs";
 import { OTLP_LOGS_PATH } from "../otlp-logs.mjs";
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createSidecar } from "../sidecar.mjs";
 import { HOOK_PATH } from "../subscription-gate.mjs";
 
@@ -404,13 +405,17 @@ async function sidecarWithGateway(options = {}) {
     ...options,
   });
   const port = await listen(sidecar.server);
-  return { sidecar, port, uploads };
+  localKeys.set(port, sidecarKey(options.passportSecret ?? b64url(secret)));
+  return { sidecar, port, uploads, callerKey: sidecarKey(options.passportSecret ?? b64url(secret)) };
 }
+
+// The sidecar's own paths ask for its key (review C-03 follow-up).
+const localKeys = new Map();
 
 const postOtlp = (port, body, headers = {}) =>
   fetch(`http://127.0.0.1:${port}${OTLP_LOGS_PATH}`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", authorization: `Bearer ${localKeys.get(port)}`, ...headers },
     body: JSON.stringify(body),
   });
 
@@ -432,10 +437,10 @@ describe("the sidecar uploads what Claude Code reports", () => {
   });
 
   it("does not upload a session whose calls this sidecar relays: those already have receipts", async () => {
-    const { sidecar, port, uploads } = await sidecarWithGateway();
+    const { sidecar, port, uploads, callerKey } = await sidecarWithGateway();
     await fetch(`http://127.0.0.1:${port}/api/v1/anthropic/v1/messages`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-claude-code-session-id": FIXTURE_SESSION },
+      headers: { "content-type": "application/json", "x-claude-code-session-id": FIXTURE_SESSION, authorization: `Bearer ${callerKey}` },
       body: JSON.stringify({ model: "claude-haiku-5-5" }),
     });
     await postOtlp(port, FIXTURE);
@@ -444,7 +449,7 @@ describe("the sidecar uploads what Claude Code reports", () => {
   });
 
   it("uploads nothing when the operator turned it off", async () => {
-    const { sidecar, port, uploads } = await sidecarWithGateway({ reportCalls: false });
+    const { sidecar, port, uploads, callerKey } = await sidecarWithGateway({ reportCalls: false });
     await postOtlp(port, FIXTURE);
     expect(sidecar.uploader).toBeNull();
     await new Promise((r) => setTimeout(r, 50));
@@ -455,7 +460,7 @@ describe("the sidecar uploads what Claude Code reports", () => {
 describe("the sidecar uploads what its scan of a tool's output found (injection guard)", () => {
   const BATCH = JSON.parse(fs.readFileSync(new URL("../../tests/fixtures/claude-code/post-tool-batch.json", import.meta.url), "utf8"));
   const postHook = (port, body) =>
-    fetch(`http://127.0.0.1:${port}${HOOK_PATH}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    fetch(`http://127.0.0.1:${port}${HOOK_PATH}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${localKeys.get(port)}` }, body: JSON.stringify(body) });
   const settle = () => new Promise((r) => setImmediate(r));
 
   it("sends one finding for the real PostToolBatch payload, and none of the tool's text", async () => {
@@ -489,12 +494,12 @@ describe("the sidecar uploads what its scan of a tool's output found (injection 
 
 describe("an upload sent through the sidecar's own listener", () => {
   it("is forwarded, but never shown on the board as a call", async () => {
-    const { sidecar, port, uploads } = await sidecarWithGateway({ reportCalls: false });
+    const { sidecar, port, uploads, callerKey } = await sidecarWithGateway({ reportCalls: false });
     const rows = [];
     sidecar.feed.attach({ write: (line) => rows.push(JSON.parse(line)), on: () => {}, writableLength: 0 });
     const res = await fetch(`http://127.0.0.1:${port}${CLIENT_EVENTS_PATH}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: `Bearer ${callerKey}` },
       body: JSON.stringify({ source: "claude_code_otel", events: [] }),
     });
     expect(res.status).toBe(200);

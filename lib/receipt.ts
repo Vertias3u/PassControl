@@ -50,6 +50,8 @@ export const RECEIPT_VER = RECEIPT_PROTOCOL.maximum;
 export const DIRECT_KEY_RECEIPT_VER = 2;
 /** A worker's receipt (Bet D). See RECEIPT_PROTOCOL for why it is its own version. */
 export const DELEGATED_RECEIPT_VER = 3;
+/** The gateway ending a standing thing on the owner's stop, never an agent call. */
+export const GATEWAY_ENDING_RECEIPT_VER = 4;
 
 export interface OwnerClaim {
   kind: string;
@@ -146,6 +148,22 @@ interface ReceiptInputBase {
    * (lib/injection-guard.ts) gives them (plans/injection-guard.md §5). Absent when nothing was found.
    */
   injection?: InjectionReceiptClaim | null;
+  /**
+   * The mission this call was decided under (idea 11), signed as `msn`. Additive like
+   * `inj`: absent on a call with no mission, so every receipt issued before this
+   * existed, and every call without a mission, is byte-identical and `ver` does not
+   * move. `h` is the hash of the exact revision that decided the call, so a stranger
+   * holding the owner-signed document can check it; `d` is what the mission said.
+   */
+  mission?: ReceiptMission | null;
+}
+
+// `na`: the call was decided before any model was read (a refusal), so the mission had nothing to say.
+export type ReceiptMissionDecision = "in" | "out" | "approved" | "shadow_in" | "shadow_out" | "na";
+export interface ReceiptMission {
+  id: string;
+  hash: string;
+  decision: ReceiptMissionDecision;
 }
 
 type PassportReceiptIdentity = {
@@ -175,8 +193,22 @@ type DirectKeyReceiptIdentity = {
   credentialUseId: string;
 };
 
+type GatewayEndingReceiptIdentity = {
+  authMethod: "gateway_ending";
+  ending: {
+    thing: string; // standing_things.id
+    kind: string;
+    trigger: "kill_switch" | "session" | "service" | "mission_end" | "budget_pause";
+    stoppedAt: number; // Unix seconds
+  };
+  passportId?: never;
+  visaJti?: never;
+  agentAccessKeyId?: never;
+  credentialUseId?: never;
+};
+
 export type ReceiptInput = ReceiptInputBase &
-  (PassportReceiptIdentity | DelegatedReceiptIdentity | DirectKeyReceiptIdentity);
+  (PassportReceiptIdentity | DelegatedReceiptIdentity | DirectKeyReceiptIdentity | GatewayEndingReceiptIdentity);
 
 export interface RequestDigest {
   alg: "sha-256";
@@ -193,7 +225,9 @@ export function requestDigest(rawBody: string): RequestDigest {
 export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown> {
   const claims: Record<string, unknown> = {
     iss: instanceIssuer(),
-    sub: input.authMethod === "direct_key" ? input.agentId : input.passportId,
+    sub: input.authMethod === "gateway_ending"
+      ? "gateway"
+      : input.authMethod === "direct_key" ? input.agentId : input.passportId,
     jti: input.receiptId,
     iat: Math.floor(Date.now() / 1000),
     agid: input.agentId,
@@ -208,13 +242,13 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
     // within a supported version, which is exactly the mechanism that lets a
     // field be added without invalidating verifiers already in the field.
     // Bumping the version would reject every new receipt on an older verifier.
-    use: {
+    use: input.authMethod === "gateway_ending" ? { in: 0, out: 0 } : {
       in: input.inputTokens,
       out: input.outputTokens,
       ...(input.cacheReadTokens ? { cr: input.cacheReadTokens } : {}),
       ...(input.cacheWriteTokens ? { cw: input.cacheWriteTokens } : {}),
     },
-    cost: Math.round(input.costMicrocents),
+    cost: input.authMethod === "gateway_ending" ? 0 : Math.round(input.costMicrocents),
     // Optional, exactly like `cr` / `cw` above and for the same compatibility
     // reason: present only on the calls it describes, so a receipt for a priced
     // call is byte-identical to one issued before this existed and every
@@ -224,21 +258,30 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
     // as required, so dropping it would break published verifiers. The claim is
     // that the number is not meaningful, and this is what says so.
     ...(input.unpriced ? { unp: true } : {}),
-    ...(input.callClass ? { cls: input.callClass } : {}),
+    ...(input.authMethod === "gateway_ending" ? { cls: "svc" } : input.callClass ? { cls: input.callClass } : {}),
     res: { status: input.status, http: input.httpStatus },
     t0: input.startedAt,
     lat: input.latencyMs,
     // Passport receipts remain version 1 and retain their exact identity
     // claims. Version 2 exists specifically to say that a bearer Direct Agent
     // Key — not a passport signature — authenticated this call.
-    ver:
-      input.authMethod === "direct_key"
+    ver: input.authMethod === "gateway_ending"
+      ? GATEWAY_ENDING_RECEIPT_VER
+      : input.authMethod === "direct_key"
         ? DIRECT_KEY_RECEIPT_VER
         : input.authMethod === "delegated" || input.authMethod === "delegated_proof_per_request"
           ? DELEGATED_RECEIPT_VER
           : 1,
   };
-  if (input.authMethod === "delegated" || input.authMethod === "delegated_proof_per_request") {
+  if (input.authMethod === "gateway_ending") {
+    claims.auth = { kind: "gateway_ending" };
+    claims.end = {
+      thg: input.ending.thing,
+      knd: input.ending.kind,
+      trg: input.ending.trigger,
+      sat: input.ending.stoppedAt,
+    };
+  } else if (input.authMethod === "delegated" || input.authMethod === "delegated_proof_per_request") {
     // `sub` stays the root passport; who actually acted is the worker in `act`. A
     // stranger holding the chain checks it against `ch` (sdk/verify.ts).
     claims.vjti = input.visaJti;
@@ -305,6 +348,8 @@ export function buildReceiptClaims(input: ReceiptInput): Record<string, unknown>
   // path, an HMAC or a word of the block; the agent receives a receipt's id, never
   // the receipt, so it cannot read back which wording got through.
   if (input.injection) claims.inj = input.injection;
+  // Additive, `ver` unchanged (see ReceiptInputBase.mission).
+  if (input.mission) claims.msn = { id: input.mission.id, h: input.mission.hash, d: input.mission.decision };
   return claims;
 }
 

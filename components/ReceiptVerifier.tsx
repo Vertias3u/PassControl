@@ -454,7 +454,7 @@ function Inspection({
   );
 }
 
-function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
+export function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
   const verdict = describeVerdict(claims.res.status, claims.res.http);
   const authentication = describeReceiptAuthentication(claims);
   const owner = describeOwner(claims.own ?? null);
@@ -481,9 +481,11 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
           <Sigil
             passportId={authentication.keyId ?? authentication.subject}
             label={
-              authentication.keyId
-                ? "Mark derived from this Direct Agent Key identity"
-                : undefined
+              claims.auth?.kind === "gateway_ending"
+                ? "Mark for the gateway ending"
+                : authentication.keyId
+                  ? "Mark derived from this Direct Agent Key identity"
+                  : undefined
             }
           />
           <div className="min-w-0 flex-1">
@@ -513,7 +515,9 @@ function ReceiptDocument({ claims }: { claims: ReceiptClaims }) {
               </p>
             ) : null}
             <p className="mt-3 mb-0 text-sm leading-6 text-muted-foreground">
-              <strong className="font-semibold text-foreground">{authentication.label}.</strong>{" "}
+              {claims.auth?.kind !== "gateway_ending" ? (
+                <><strong className="font-semibold text-foreground">{authentication.label}.</strong>{" "}</>
+              ) : null}
               {authentication.detail}
             </p>
           </div>

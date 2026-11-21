@@ -115,3 +115,24 @@ describe("verifyVisa: the v3 branch", () => {
     expect(claims?.act).toBeUndefined();
   });
 });
+
+// Review #3 (1.9.0): verifyVisa refuses any scope claim validateScopes refuses, so a
+// mint that signs one hands the agent a visa that fails on every call and looks like
+// a broken passport. Both mints refuse to sign what verifyVisa would not accept.
+describe("a scope verifyVisa would refuse is never signed", () => {
+  const bad: [string, unknown][] = [
+    ["an unknown provider", [{ provider: "not-a-provider", models: ["m-1"] }]],
+    ["an unusable model pattern", [{ provider: "anthropic", models: [""] }]],
+    ["a non-array scope", { provider: "anthropic", models: ["claude-*"] }],
+  ];
+  it.each(bad)("mintVisa refuses %s", async (_label, scope) => {
+    await expect(mintVisa({ ...base, scope: scope as never })).rejects.toThrow("malformed scope for a visa");
+  });
+  it.each(bad)("mintDelegatedVisa refuses %s", async (_label, scope) => {
+    await expect(mintDelegatedVisa({ ...delegated, scope: scope as never })).rejects.toThrow("malformed scope for a visa");
+  });
+  it("still signs a well-formed scope that verifyVisa accepts", async () => {
+    const { token } = await mintVisa(base);
+    expect((await verifyVisa(token))?.scope).toEqual(base.scope);
+  });
+});

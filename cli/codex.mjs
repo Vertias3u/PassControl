@@ -4,9 +4,10 @@
 // `.codex/config.toml` cannot set one, and the old `profile = "..."` selector is
 // refused (verified 2026-10-07, Codex CLI 0.160.1). So this writes a profile file,
 // `$CODEX_HOME/passcontrol.config.toml`, which Codex layers over config.toml when
-// started with `codex --profile passcontrol`. With no key configured for the
-// provider, Codex sends no Authorization header at all (captured); the sidecar
-// adds the agent's credential and the gateway injects the real OpenAI key.
+// started with `codex --profile passcontrol`. The provider's bearer token is the
+// sidecar's own key (review C-03, cli/sidecar-token.mjs): it opens the sidecar on
+// this machine and nothing else. The sidecar strips it, adds the agent's
+// credential, and the gateway injects the real OpenAI key.
 //
 // config.toml is never opened: the Codex app shares it, and PassControl would
 // need a TOML parser to edit it safely. The profile file is PassControl's own,
@@ -45,7 +46,10 @@ export function codexStoresApiKey({ env = process.env } = {}) {
 // escapes, so a value cannot close its string and start a key of its own.
 const tomlString = (value) => JSON.stringify(String(value));
 
-export function codexProfileToml({ baseUrl, model }) {
+export function codexProfileToml({ baseUrl, model, sidecarKey }) {
+  if (typeof sidecarKey !== "string" || !sidecarKey) {
+    throw new Error("No sidecar key to write: run `passcontrol login` first.");
+  }
   let url;
   try {
     url = new URL(baseUrl);
@@ -66,6 +70,8 @@ export function codexProfileToml({ baseUrl, model }) {
     `[model_providers.${CODEX_PROFILE}]`,
     'name = "PassControl"',
     `base_url = ${tomlString(baseUrl)}`,
+    // Not an OpenAI key: the sidecar's own, which this 0600 file already sits beside.
+    `experimental_bearer_token = ${tomlString(sidecarKey)}`,
     'wire_api = "responses"',
     "",
   ].join("\n");
@@ -73,8 +79,8 @@ export function codexProfileToml({ baseUrl, model }) {
 
 const isOurs = (text) => text.startsWith(CODEX_PROFILE_MARKER);
 
-export function writeCodexProfile({ target, baseUrl, model, force = false }) {
-  const next = codexProfileToml({ baseUrl, model });
+export function writeCodexProfile({ target, baseUrl, model, sidecarKey, force = false }) {
+  const next = codexProfileToml({ baseUrl, model, sidecarKey });
   const exists = fs.existsSync(target);
   let backupPath = null;
   if (exists) {

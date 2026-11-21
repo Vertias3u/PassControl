@@ -13,8 +13,18 @@ import {
 } from "../encoding";
 import { jwkThumbprint, passportIdToPublicKey, verifySignature } from "../crypto/ed25519";
 
+import { instanceIssuer } from "../crypto/instanceKey";
+import { validateScopes } from "../validate";
+
 export const VISA_ISS = "passport.gateway";
 export const VISA_AUD = "llm-proxy";
+/** Use the configured deployment origin. Unconfigured self-hosts retain the legacy
+ * namespace; deployments sharing that fallback AND secrets are not isolated. */
+export function visaIdentity(): { issuer: string; audience: string } {
+  const issuer = instanceIssuer();
+  return issuer ? { issuer, audience: `${issuer}/${VISA_AUD}` } : { issuer: VISA_ISS, audience: VISA_AUD };
+}
+
 export const VISA_VER = 2;
 export const VISA_PREVIOUS_VER = 1;
 /**
@@ -25,6 +35,16 @@ export const VISA_PREVIOUS_VER = 1;
  * into an older version.
  */
 export const VISA_DELEGATED_VER = 3;
+/**
+ * A passport visa bound to an owner-approved MISSION (idea 11): the v2 layout plus
+ * `mid` (the mission's id) and `mis` (the SHA-256 of its current revision). Its own
+ * version so that a gateway that predates missions REFUSES it instead of accepting it
+ * and enforcing nothing; and a v1/v2/v3 visa carrying `mis` or `mid` is refused, so a
+ * mission can never ride on a version whose verifier ignores it.
+ */
+export const VISA_MISSION_VER = 4;
+const MISSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const MISSION_HASH_RE = /^[0-9a-f]{64}$/;
 export const SENDER_PROOF_HEADER = "x-passcontrol-proof";
 export const SENDER_PROOF_WINDOW_SECONDS = 30;
 
@@ -47,6 +67,8 @@ export interface VisaClaims extends JWTPayload {
   cnf?: { jkt: string }; // v2: thumbprint of the passport key; v3: of the WORKER's key (act.sub)
   act?: VisaActor; // v3 only: who actually acts
   dc?: VisaDelegationLink[]; // v3 only: every link's cap, root first
+  mid?: string; // v4 only: the mission's id
+  mis?: string; // v4 only: the SHA-256 (hex) of the mission revision this visa was minted under
 }
 
 /** v3: the worker acting under a delegation. */
@@ -76,14 +98,15 @@ function delegationClaimsValid(act: unknown, dc: unknown): act is VisaActor {
   if (typeof a.sub !== "string" || a.sub.length !== 43 || !passportIdToPublicKey(a.sub)) return false;
   if (typeof a.dlg !== "string" || !DELEGATION_JTI_RE.test(a.dlg)) return false;
   if (a.dep !== 1 && a.dep !== 2) return false;
-  if (typeof a.ch !== "string" || a.ch.length !== 43) return false;
+  if (typeof a.ch !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(a.ch)) return false;
   if (!Array.isArray(dc) || dc.length !== a.dep) return false;
   for (const link of dc) {
     if (typeof link !== "object" || link === null || Array.isArray(link)) return false;
     const l = link as Record<string, unknown>;
     if (Object.keys(l).length !== 4) return false;
     if (typeof l.dlg !== "string" || !DELEGATION_JTI_RE.test(l.dlg)) return false;
-    if (!isSafeInt(l.cap) || l.cap < 0 || !isSafeInt(l.iat) || !isSafeInt(l.exp)) return false;
+    if (!isSafeInt(l.cap) || l.cap < 0 || !isSafeInt(l.iat) || l.iat < 0 || !isSafeInt(l.exp)) return false;
+    if (l.exp <= Math.floor(Date.now() / 1000) || l.exp <= l.iat) return false;
   }
   return (dc[dc.length - 1] as VisaDelegationLink).dlg === a.dlg;
 }
@@ -281,10 +304,34 @@ export interface MintVisaInput {
   budgetCents: number | null;
   spentTokens: number;
   spentMicrocents: number;
+  /** An active mission this agent is bound to: mints ver 4. */
+  mission?: { id: string; hash: string };
+}
+
+/**
+ * Would verifyVisa accept this scope claim? Review #3 (1.9.0).
+ *
+ * verifyVisa runs validateScopes over `claims.scope` and refuses the whole visa on
+ * any throw. allowed_scopes is jsonb the service-role client reads back without that
+ * validator, so a malformed row used to mint a visa that failed on every call, which
+ * an operator reads as a broken passport. Both doors ask this first and refuse with
+ * `agent_scope_invalid`; both mints refuse to sign without it as a backstop.
+ */
+export function scopeIsMintable(scope: unknown): boolean {
+  try {
+    validateScopes(scope);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function mintVisa(input: MintVisaInput): Promise<{ token: string; expSeconds: number }> {
+  if (!scopeIsMintable(input.scope)) throw new Error("malformed scope for a visa");
   const ttl = visaTtlSeconds();
+  if (input.mission && (!MISSION_ID_RE.test(input.mission.id) || !MISSION_HASH_RE.test(input.mission.hash))) {
+    throw new Error("malformed mission for a visa");
+  }
   const token = await new SignJWT({
     agid: input.agentId,
     uid: input.userId,
@@ -293,12 +340,13 @@ export async function mintVisa(input: MintVisaInput): Promise<{ token: string; e
     bc: input.budgetCents,
     st: input.spentTokens,
     sc: input.spentMicrocents,
-    ver: VISA_VER,
+    ver: input.mission ? VISA_MISSION_VER : VISA_VER,
     cnf: { jkt: jwkThumbprint(input.passportId) },
+    ...(input.mission ? { mid: input.mission.id, mis: input.mission.hash } : {}),
   })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuer(VISA_ISS)
-    .setAudience(VISA_AUD)
+    .setIssuer(visaIdentity().issuer)
+    .setAudience(visaIdentity().audience)
     .setSubject(input.passportId)
     .setJti(input.jti)
     .setIssuedAt()
@@ -326,6 +374,7 @@ export async function mintDelegatedVisa(
 ): Promise<{ token: string; expSeconds: number }> {
   const act: VisaActor = { sub: input.actor, dlg: input.delegationJti, dep: input.depth, ch: input.chainHash };
   if (!delegationClaimsValid(act, input.links)) throw new Error("malformed delegation for a visa");
+  if (!scopeIsMintable(input.scope)) throw new Error("malformed scope for a visa");
   const now = Math.floor(Date.now() / 1000);
   const ttl = Math.min(visaTtlSeconds(), ...input.links.map((l) => l.exp - now));
   if (ttl <= 0) throw new Error("the delegation has expired");
@@ -343,8 +392,8 @@ export async function mintDelegatedVisa(
     dc: input.links.map((l) => ({ dlg: l.dlg, cap: l.cap, iat: l.iat, exp: l.exp })),
   })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuer(VISA_ISS)
-    .setAudience(VISA_AUD)
+    .setIssuer(visaIdentity().issuer)
+    .setAudience(visaIdentity().audience)
     .setSubject(input.passportId)
     .setJti(input.jti)
     .setIssuedAt(now)
@@ -358,26 +407,37 @@ export async function verifyVisa(token: string): Promise<VisaClaims | null> {
   for (const secret of acceptedSecrets()) {
     try {
       const { payload } = await jwtVerify(token, secret, {
-        issuer: VISA_ISS,
-        audience: VISA_AUD,
+        issuer: visaIdentity().issuer,
+        audience: visaIdentity().audience,
+        requiredClaims: ["exp"],
         algorithms: ["HS256"],
       });
       const claims = payload as VisaClaims;
       // Reject any token missing a required claim or carrying an unexpected
       // version (jose has already enforced signature, alg, iss, aud, exp/nbf).
-      if (!claims.sub || !claims.agid || !claims.uid || !claims.jti || !Array.isArray(claims.scope))
-        return null;
-      if (
-        typeof claims.st !== "number" ||
-        !Number.isFinite(claims.st) ||
-        typeof claims.sc !== "number" ||
-        !Number.isFinite(claims.sc)
-      )
-        return null;
-      if (!(claims.bt == null || (typeof claims.bt === "number" && Number.isFinite(claims.bt))))
-        return null;
-      if (!(claims.bc == null || (typeof claims.bc === "number" && Number.isFinite(claims.bc))))
-        return null;
+      // Identifiers are opaque safe strings (UUIDs in production; older callers
+      // also mint short IDs). Never coerce arrays/objects into identity keys.
+      const identifier = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(v);
+      if (!identifier(claims.sub) ||
+          !identifier(claims.agid) || !identifier(claims.uid) || !identifier(claims.jti)) return null;
+      // Reuse registration's provider/model validator. Its throws are caught here.
+      validateScopes(claims.scope);
+      const accounting = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+      if (!accounting(claims.st) || !accounting(claims.sc)) return null;
+      if (!(claims.bt === null || accounting(claims.bt))) return null;
+      if (!(claims.bc === null || accounting(claims.bc))) return null;
+      // The mission claims ride on ver 4 alone, both or neither, well-formed.
+      const carriesMission = "mis" in claims || "mid" in claims;
+      if (claims.ver === VISA_MISSION_VER) {
+        if ("act" in claims || "dc" in claims) return null;
+        if (typeof claims.mid !== "string" || !MISSION_ID_RE.test(claims.mid)) return null;
+        if (typeof claims.mis !== "string" || !MISSION_HASH_RE.test(claims.mis)) return null;
+        if (typeof claims.cnf !== "object" || claims.cnf === null || claims.cnf.jkt !== jwkThumbprint(claims.sub)) {
+          return null;
+        }
+        return claims;
+      }
+      if (carriesMission) return null;
       if (claims.ver === VISA_DELEGATED_VER) {
         // The worker's key, not the root's, is the one a sender proof must come from.
         if (!delegationClaimsValid(claims.act, claims.dc)) return null;

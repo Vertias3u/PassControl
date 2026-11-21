@@ -28,6 +28,7 @@ import {
   assertConfigLoaded,
   bareGatewayOrigin,
   config,
+  configInjectedKeys,
   configPathLabel,
   defaultModelForProvider,
   fail,
@@ -71,6 +72,7 @@ import {
   SERVICE_ENV,
   supportsWrite,
 } from "../cli/presets.mjs";
+import { plantTripwires, removeTripwires, tripwirePlacementChoices } from "../cli/tripwires.mjs";
 import { importCompletionMessage, noAgentCreateMessage } from "../cli/workspace-import-report.mjs";
 import { announcesAfter, checkForUpdate, fetchLatest, REGISTRY_URL } from "../cli/update-check.mjs";
 import {
@@ -123,6 +125,9 @@ import {
 } from "../cli/codex-hooks.mjs";
 import { waitForGateway as awaitGateway } from "../cli/gateway-wait.mjs";
 import { loginCommand } from "../cli/login.mjs";
+import { commandLabel, heldWriteKey, obtainWriteKey, releaseWriteKey } from "../cli/write-approval.mjs";
+import { loweredKeysFile, lowerStoredKeyOnce } from "../cli/lowered-keys.mjs";
+import { isSidecarKey, sidecarKey } from "../cli/sidecar-token.mjs";
 import { logoutCommand } from "../cli/logout.mjs";
 import { proveItWorks } from "../cli/selftest.mjs";
 import {
@@ -131,8 +136,9 @@ import {
   instanceKidFromSeed,
   retiredKeyEntry,
 } from "../cli/instance-key.mjs";
-import { FAILURE_REASONS, verifyAgentToken, verifyReceipt, verifySession, verifyStatement } from "../cli/verify.mjs";
+import { describeGatewayEnding, FAILURE_REASONS, verifyAgentToken, verifyReceipt, verifySession, verifyStatement } from "../cli/verify.mjs";
 import { compareProtocolSets } from "../cli/protocols.mjs";
+import { memoryReviewCommand } from "../cli/memory-review.mjs";
 import { defaultAllowedModelForProvider } from "../cli/integration-defaults.mjs";
 import {
   PASSPORT_KEY_STORAGE_OS,
@@ -274,6 +280,8 @@ ${heading("Manage")}
   ${cmd} statusline [--port 8788]   one line for Claude Code's status line (configure claude-code --statusline)
   ${cmd} statusline --panel [--session <id>]   the longer view the Claude Code plugin's /passcontrol shows
   ${cmd} watch [--port 8788]      a live board of each call the sidecar relays (read-only)
+  ${cmd} memory review [--port 8788] [--codex]
+                                 show the memory entries waiting at customs, with their text from this machine
   ${cmd} kill on|off              toggle the tenant kill switch
   ${cmd} export [--out FILE]      save a workspace configuration snapshot
   ${cmd} import <file> [--confirm IMPORT]
@@ -291,6 +299,8 @@ ${heading("Integrate")}
                                  a ChatGPT plan in Codex: stops and tool rules
   ${cmd} configure claude-code --write --agent-note
                                  tell the agent its own limits, only when they change
+  ${cmd} configure tripwires --agent <id> [--places ${tripwirePlacementChoices()}] [--dry-run] [--remove]
+                                 plant decoy keys for one agent outside any repo (rerun rotates)
   integrations: ${integrationChoices()}
 
 ${heading("Trust")}
@@ -2131,13 +2141,31 @@ async function callCommand(rest, opts) {
   ok("done - check the dashboard audit log + spend for this call.");
 }
 
+/** What api() needs to know about the command running (review C-01). */
+const writeContext = { command: "a command", storedKeyChecked: false };
+
 async function api(method, pathPart, body, { timeoutMs } = {}) {
   // Destination first, key second — same order and same reason as the SDK's
   // ControlClient. `config.gateway` is whatever PASSCONTROL_GATEWAY said, and
   // this is the one place a long-lived fleet-wide `pc_` key goes on the wire, so
   // the URL is built from the validated origin rather than from that string.
   const origin = requireControlGateway(config);
-  const apiKey = requireControlApiKey(config);
+  const storedKey = requireControlApiKey(config);
+  // Review C-01: the stored key is read-only since login lowers it. A change asks for a
+  // one-command key approved in the browser (cli/write-approval.mjs), and keeps using
+  // it for the rest of this command.
+  const held = heldWriteKey(origin);
+  // A key saved by an older login still has write scope: lowered before its first use
+  // (owner 2026-11-15). Only a key that came from a config file, never one from the shell.
+  if (!held && !writeContext.storedKeyChecked && configInjectedKeys.has("PASSCONTROL_API_KEY")) {
+    writeContext.storedKeyChecked = true;
+    const lowered = await lowerStoredKeyOnce({ origin, key: storedKey, stateFile: loweredKeysFile(globalConfigPath()) });
+    if (lowered.lowered) {
+      warn("This machine's saved control key could change things, so it is read-only now (an agent can read that file).");
+      step("A command that changes something asks you to approve it in the browser.");
+    }
+  }
+  const apiKey = held ?? storedKey;
   // Unbounded by default, deliberately: a fleet mutation must not be abandoned
   // halfway because a caller guessed a duration. `timeoutMs` is opt-in, for the
   // one kind of caller that is a REPORT — where a gateway that never answers is
@@ -2165,6 +2193,10 @@ async function api(method, pathPart, body, { timeoutMs } = {}) {
     json = text ? JSON.parse(text) : {};
   } catch {
     json = { error: { message: text || "non-JSON response" } };
+  }
+  if (!res.ok && res.status === 403 && json.error?.code === "insufficient_scope" && !held) {
+    await obtainWriteKey(origin, { command: writeContext.command, openUrl });
+    return api(method, pathPart, body, { timeoutMs });
   }
   if (!res.ok) {
     const e = json.error ?? {};
@@ -2565,8 +2597,10 @@ async function statuslineCommand(opts) {
       // the calls go to Anthropic directly; `configure claude-code --subscription`
       // names the sidecar the hooks and telemetry use instead.
       const reported = !route && opts.port === undefined ? sidecarFromBaseUrl(process.env.PASSCONTROL_SIDECAR_URL) : null;
+      const panelPort = route?.port ?? reported?.port ?? port;
       return await statusPanelText({
-        port: route?.port ?? reported?.port ?? port,
+        port: panelPort,
+        sidecarKey: sidecarKeyForPort(panelPort),
         gateway: config.gateway,
         session: typeof opts.session === "string" ? opts.session : null,
         subscription: Boolean(reported?.port),
@@ -2575,7 +2609,8 @@ async function statuslineCommand(opts) {
     const cacheFile = path.join(path.dirname(globalConfigPath()), `statusline-${port}.json`);
     // On a Pro/Max login Claude Code adds the usage window to its input (cli/usage-window.mjs).
     const input = await readStatusInput();
-    return await statuslineWithWindow({ input, port, budgetLine: () => statuslineText({ port, cacheFile }) });
+    const statusKey = sidecarKeyForPort(port);
+    return await statuslineWithWindow({ input, port, sidecarKey: statusKey, budgetLine: () => statuslineText({ port, cacheFile, sidecarKey: statusKey }) });
   } catch (error) {
     return `PassControl · ${error instanceof Error && /--port/.test(error.message) ? "bad --port" : "unavailable"}`;
   }
@@ -2588,6 +2623,35 @@ function statusLineSettingsCommand(port) {
   return `node ${JSON.stringify(CLI_ENTRY)} ${args}`;
 }
 
+/** Shown where the sidecar's key would be when this machine has no passport yet. */
+const NO_SIDECAR_KEY = "run-passcontrol-login-first";
+
+/**
+ * The key the sidecar on `port` asks its callers for (review C-03, cli/sidecar-token.mjs):
+ * derived from the passport that sidecar runs with. A dedicated tool profile that serves
+ * this port has its own passport (cli/profiles.mjs); otherwise it is this config's.
+ */
+function sidecarKeyForPort(port) {
+  for (const profile of listProfiles()) {
+    if (!profile.port || Number(profile.port) !== Number(port)) continue;
+    const secret = readProfile(profile.name)?.PASSPORT_SECRET;
+    if (secret) return sidecarKey(secret);
+  }
+  return sidecarKey(config.passportSecret);
+}
+
+/** A preview prints the key's first characters only: it lands in terminals and logs. */
+function maskSidecarKey(text, key) {
+  return isSidecarKey(key) ? String(text).split(key).join(`${key.slice(0, 8)}…`) : String(text);
+}
+
+function sidecarApiKey(port) {
+  const key = sidecarKeyForPort(port);
+  if (key) return key;
+  warn("No passport on this machine yet, so there is no sidecar key to print. Run `passcontrol login`, then this again.");
+  return NO_SIDECAR_KEY;
+}
+
 function sidecarBaseUrl(opts = {}) {
   const provider = String(opts.provider || config.provider);
   assertProvider(provider);
@@ -2596,7 +2660,11 @@ function sidecarBaseUrl(opts = {}) {
   return {
     provider,
     model: activeModel(provider, opts),
-    apiKey: "passcontrol",
+    // Review C-03: the sidecar's own key, not a placeholder. It opens the sidecar on
+    // this machine and nothing else; the sidecar strips it before forwarding.
+    get apiKey() {
+      return sidecarApiKey(port);
+    },
     baseUrl: `http://${host}:${port}/api/v1/${provider}`,
     port,
   };
@@ -2633,9 +2701,9 @@ function printMcpPreset(integration, opts = {}) {
   // configureMcpClient); the MCP clients below launch `passcontrol mcp`, which needs it.
   if (integration !== "claude-code") requireGlobalMcpPassport();
   if (integration === "claude-code") {
-    const { baseUrl } = sidecarBaseUrl({ ...opts, provider: "anthropic" });
+    const { baseUrl, apiKey } = sidecarBaseUrl({ ...opts, provider: "anthropic" });
     console.log("# Route Claude Code's model calls through the sidecar (start it first):");
-    printExports(Object.entries(claudeCodeEnv(baseUrl)));
+    printExports(Object.entries(claudeCodeEnv(baseUrl, apiKey)));
     console.log("# Optional: also add PassControl's chat tool to Claude Code:");
     console.log(`# ${CLAUDE_CODE_ADD_COMMAND}`);
     return;
@@ -2697,8 +2765,8 @@ function printAgentPreset(name = "generic", opts = {}) {
   console.log(`# Start the bridge first: ${sidecarStart}`);
 
   // Desktop / GUI clients: there is nothing to export, you type these into a
-  // settings form. The API-key field is required by the UI but ignored by the
-  // sidecar — that is the point. It is where your real provider key used to go.
+  // settings form. The API-key field takes the sidecar's own key (review C-03),
+  // where your real provider key used to go. It opens the sidecar, nothing else.
   if (isGuiPreset(preset)) {
     console.log(`# ${GUI_PRESET_LABELS[preset]} settings:`);
     console.log(`Base URL: ${baseUrl}`);
@@ -2716,7 +2784,7 @@ function printAgentPreset(name = "generic", opts = {}) {
       console.log("  provider: custom");
       console.log(`  base_url: ${JSON.stringify(`${baseUrl}/v1`)}`);
       console.log(`  api_key: ${JSON.stringify(apiKey)}`);
-      console.log("# The placeholder key is stripped by the sidecar. Keep `passcontrol sidecar` running.");
+      console.log("# That key only opens the sidecar on this machine; it is not a provider key. Keep `passcontrol sidecar` running.");
       break;
     case "openhands":
       console.log("# OpenHands / LiteLLM-compatible starting point:");
@@ -2757,7 +2825,8 @@ function printAgentPreset(name = "generic", opts = {}) {
 
 // A service preset has no provider and no model: the client is pointed at the
 // governed service route and sends no service token at all — the gateway
-// injects the workspace's, and only for calls the agent's rules admit.
+// injects the workspace's, and only for calls the agent's rules admit. It does
+// send the sidecar's own key (review C-03), which opens the sidecar and nothing else.
 function printServicePreset(service, opts = {}) {
   const host = String(opts.host ?? process.env.SIDECAR_HOST ?? "127.0.0.1");
   const port = sidecarPort(opts);
@@ -2768,7 +2837,10 @@ function printServicePreset(service, opts = {}) {
   const entry = Object.hasOwn(SERVICE_ENV, service) ? SERVICE_ENV[service] : null;
   if (!entry) throw new Error(`Usage: passcontrol env <${integrationChoices()}>`);
   for (const line of entry.about) console.log(line);
-  printExports([[entry.envVar, `http://${host}:${port}/api/v1/svc/${service}`]]);
+  printExports([
+    [entry.envVar, `http://${host}:${port}/api/v1/svc/${service}`],
+    ["PASSCONTROL_SIDECAR_KEY", sidecarApiKey(port)],
+  ]);
   console.log(entry.usage);
 }
 
@@ -2801,16 +2873,19 @@ function configureClaudeCode(opts = {}) {
     return;
   }
   const { baseUrl, port } = sidecarBaseUrl({ ...opts, provider: "anthropic" });
+  const sidecarKeyValue = sidecarApiKey(port);
   const note = Boolean(opts.agentNote);
-  const preview = { env: claudeCodeEnv(baseUrl), hooks: apiToolHooks(port) };
-  if (note) preview.hooks = { ...preview.hooks, UserPromptSubmit: [{ hooks: [{ type: "http", url: `http://127.0.0.1:${port}/_passcontrol/hook?note=only`, timeout: 5 }] }] };
-  console.log(`Preview: ${target}\n\n${JSON.stringify(preview, null, 2)}`);
+  // The preview prints the key's first characters only: it lands in terminals and logs.
+  const preview = { env: claudeCodeEnv(baseUrl, sidecarKeyValue), hooks: apiToolHooks(port, sidecarKeyValue) };
+  if (note) preview.hooks = { ...preview.hooks, UserPromptSubmit: [{ hooks: [{ type: "http", url: `http://127.0.0.1:${port}/_passcontrol/hook?note=only`, ...(isSidecarKey(sidecarKeyValue) ? { headers: { Authorization: `Bearer ${sidecarKeyValue}` } } : {}), timeout: 5 }] }] };
+  console.log(`Preview: ${target}\n\n${maskSidecarKey(JSON.stringify(preview, null, 2), sidecarKeyValue)}`);
   if (!opts.write) {
     step(`Dry run only. Re-run with \`--write\` to merge these env keys and the tool hook${scope === "project" ? " (or --write --global for every session)" : ""}.`);
   } else {
     const result = writeClaudeCodeSettings({
       target,
       baseUrl,
+      sidecarKey: sidecarKeyValue,
       force: Boolean(opts.force),
       statusLineCommand: opts.statusline ? statusLineSettingsCommand(port) : null,
       noteHookPort: note ? port : null,
@@ -2861,12 +2936,14 @@ function configureClaudeCodeSubscription(opts = {}) {
     return;
   }
   const note = Boolean(opts.agentNote);
-  const preview = { env: subscriptionEnv(port), hooks: subscriptionHooks(port, { note }), statusLine: { type: "command", command: statusLineSettingsCommand(port) } };
-  console.log(`Preview: ${target}\n\n${JSON.stringify(preview, null, 2)}`);
+  // Review C-03 follow-up: the hooks and the logs export carry the sidecar's key.
+  const subscriptionKey = opts.write ? sidecarApiKey(port) : sidecarKeyForPort(port);
+  const preview = { env: subscriptionEnv(port, subscriptionKey), hooks: subscriptionHooks(port, { note, key: subscriptionKey }), statusLine: { type: "command", command: statusLineSettingsCommand(port) } };
+  console.log(`Preview: ${target}\n\n${maskSidecarKey(JSON.stringify(preview, null, 2), subscriptionKey)}`);
   if (!opts.write) {
     step("Dry run only. Re-run with `--write` to merge these into your Claude Code user settings (anything of yours is kept).");
   } else {
-    const result = writeClaudeCodeSubscription({ target, port, statusLineCommand: statusLineSettingsCommand(port), force: Boolean(opts.force), note });
+    const result = writeClaudeCodeSubscription({ target, port, sidecarKey: subscriptionKey, statusLineCommand: statusLineSettingsCommand(port), force: Boolean(opts.force), note });
     if (!result.changed) ok(`${target} already has PassControl's subscription mode`);
     else {
       if (result.backupPath) step(`backed up ${result.backupPath}`);
@@ -2908,13 +2985,13 @@ function codexSettings(opts = {}) {
   }
   const { baseUrl, port } = sidecarBaseUrl({ ...opts, provider: "openai" });
   const model = typeof opts.model === "string" && opts.model ? opts.model : undefined;
-  return { baseUrl, port, model };
+  return { baseUrl, port, model, sidecarKey: sidecarApiKey(port) };
 }
 
 function printCodexPreset(opts = {}) {
-  const { baseUrl, model } = codexSettings(opts);
+  const { baseUrl, model, sidecarKey: key } = codexSettings(opts);
   console.log(`# Save as ${codexProfilePath()} (or run: ${cliCommand("configure codex --write")}):`);
-  console.log(codexProfileToml({ baseUrl, model }).trimEnd());
+  console.log(codexProfileToml({ baseUrl, model, sidecarKey: key }).trimEnd());
 }
 
 /**
@@ -3037,12 +3114,13 @@ function configureCodex(opts = {}) {
     else step(`${target} is not a profile PassControl wrote; nothing to remove.`);
     return;
   }
-  const { baseUrl, port, model } = codexSettings(opts);
-  console.log(`Preview: ${target}\n\n${codexProfileToml({ baseUrl, model })}`);
+  const { baseUrl, port, model, sidecarKey: key } = codexSettings(opts);
+  // The preview shows the key's first characters only: it lands in terminals and logs.
+  console.log(`Preview: ${target}\n\n${codexProfileToml({ baseUrl, model, sidecarKey: `${key.slice(0, 8)}…` })}`);
   if (!opts.write) {
     step("Dry run only. Re-run with `--write` to create this profile. Codex's config.toml is not touched.");
   } else {
-    const result = writeCodexProfile({ target, baseUrl, model, force: Boolean(opts.force) });
+    const result = writeCodexProfile({ target, baseUrl, model, sidecarKey: key, force: Boolean(opts.force) });
     if (!result.changed) ok(`${target} already routes Codex through PassControl`);
     else {
       if (result.backupPath) step(`backed up ${result.backupPath}`);
@@ -3085,8 +3163,46 @@ function configureMcpClient(integration, opts = {}) {
   ok(`wrote ${target}`);
 }
 
+// ── Tripwire decoys (idea 12) ───────────────────────────────────────────────
+//
+// `configure tripwires` plants decoy Direct Agent Keys for ONE agent outside any repo,
+// registers only their digests with the gateway, and keeps a digest manifest the sidecar
+// reads. Re-running rotates; --remove retires them and deletes the files this wrote. The
+// placements and their order come from cli/tripwires.mjs, never typed here.
+async function tripwiresCommand(opts = {}) {
+  const agentId = typeof opts.agent === "string" ? opts.agent : "";
+  if (!/^[0-9a-f-]{36}$/i.test(agentId)) {
+    throw new Error(`Usage: passcontrol configure tripwires --agent <agent-id> [--places ${tripwirePlacementChoices()}] [--dry-run] [--remove]`);
+  }
+  if (opts.remove) {
+    const r = await removeTripwires({ agentId, retire: () => api("DELETE", `/agents/${agentId}/tripwires`) });
+    ok(`retired this agent's decoys at the gateway (they stay armed 30 days in case a copy is still out there)`);
+    for (const file of r.removed) step(`removed ${file}`);
+    for (const file of r.kept) warn(`kept ${file}: it no longer holds the decoy this tool wrote`);
+    return;
+  }
+  const origin = requireControlGateway(config);
+  const placements = typeof opts.places === "string" ? opts.places.split(",").map((p) => p.trim()).filter(Boolean) : undefined;
+  const r = await plantTripwires({
+    agentId,
+    origin,
+    placements,
+    dryRun: Boolean(opts.dryRun),
+    register: (decoys, replace, retireDigests) =>
+      api("POST", `/agents/${agentId}/tripwires`, replace ? { decoys, replace, retire_digests: retireDigests } : { decoys, replace }),
+  });
+  for (const p of r.planted) step(`${r.dryRun ? "would plant" : "planted"} ${p.placement}: ${p.path}`);
+  if (r.dryRun) return;
+  ok(r.rotated ? "rotated this agent's tripwire decoys" : "planted tripwire decoys for this agent");
+  // Plain about what this is and is not (research/idea-12-tripwire/VERDICT.md).
+  step("A decoy presented to PassControl suspends the agent it names at once. A decoy seen in an agent's");
+  step("traffic is an alert. Silence proves nothing: an agent can avoid, encode or exfiltrate a decoy unobserved.");
+  step("Your own scanners may flag these files; that is expected. Do not copy them into a repository.");
+}
+
 async function configureCommand(rest, opts = {}) {
   const integration = String(rest[0] ?? "").toLowerCase();
+  if (integration === "tripwires") return tripwiresCommand(opts);
   if (!integration) {
     throw new Error(
       `Usage: passcontrol configure <${integrationChoices()}> [--write] [--force]`
@@ -3469,7 +3585,11 @@ async function verifyCommand(rest, opts) {
     step("would need every receipt in the window.");
     return;
   }
-  step(`Passport: ${c.sub}`);
+  if (what === "receipt" && c.auth?.kind === "gateway_ending") {
+    step(describeGatewayEnding(c.end));
+  } else {
+    step(`Passport: ${c.sub}`);
+  }
   if (what === "token") {
     step(`Audience: ${c.aud}`);
     step(`Expires:  ${new Date(c.exp * 1000).toISOString()}`);
@@ -4513,6 +4633,9 @@ async function settingsCommand() {
     } catch (error) {
       if (!chosen.returnToMenu) throw error;
       fail(error.message);
+    } finally {
+      // One approval covers one command, not the rest of the menu session (review C-01).
+      await releaseWriteKey();
     }
     recentIds = updateRecents(recentIds, chosen);
     if (!chosen.returnToMenu || !(await pauseForSettings())) return;
@@ -4522,6 +4645,7 @@ async function settingsCommand() {
 async function main(argv = process.argv.slice(2), runtime = {}) {
   const { opts, rest } = parseArgv(argv);
   const [command, ...commandRest] = rest;
+  writeContext.command = commandLabel(rest);
 
   // First, before the update check or anything else that could print or wait:
   // Claude Code shows this command's whole stdout as its status line, runs it
@@ -4539,7 +4663,7 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
     try {
       for await (const chunk of process.stdin) input += chunk;
       const port = sidecarPort(opts);
-      const out = await runCodexHook({ input, port });
+      const out = await runCodexHook({ input, port, sidecarKey: sidecarKeyForPort(port) });
       if (out) process.stdout.write(`${out}\n`);
     } catch {
       // Nothing: a hook that cannot run lets Codex go ahead, as a failed hook would.
@@ -4550,7 +4674,7 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
   // Also before the update check: a full-screen board owns the terminal from its
   // first frame, and the check's cache would be the one file `watch` ever wrote.
   if (command === "watch" && !opts.help) {
-    process.exit(await runWatch({ port: sidecarPort(opts) }));
+    process.exit(await runWatch({ port: sidecarPort(opts), sidecarKey: sidecarKeyForPort(sidecarPort(opts)) }));
   }
 
   // Started here and awaited at the very end, so the registry lookup overlaps
@@ -4691,6 +4815,13 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
     case "seal":
       await sealCommand(commandRest, opts);
       break;
+    case "memory": {
+      // Idea 13. Shows only; the decision is the owner's, on the agent's page.
+      if (commandRest[0] !== "review") throw new Error("Usage: passcontrol memory review [--port 8788] [--codex]");
+      const port = Number(opts.port ?? process.env.SIDECAR_PORT ?? 8788);
+      await memoryReviewCommand({ sidecarUrl: process.env.PASSCONTROL_SIDECAR_URL || `http://127.0.0.1:${port}`, sidecarKey: sidecarKeyForPort(port), client: opts.codex ? "codex" : "claude-code" });
+      break;
+    }
     case "kill":
       await killCommand(commandRest);
       break;
@@ -4722,7 +4853,17 @@ async function main(argv = process.argv.slice(2), runtime = {}) {
   await announceUpdate();
 }
 
-main().catch((error) => {
+/**
+ * After every command, whatever its outcome (review C-01): give back a one-command
+ * write key if one was approved, and say so once if the key stored in a config file
+ * turned out to have write scope (a login from before this release).
+ */
+async function afterCommand() {
+  await releaseWriteKey();
+}
+
+main().then(afterCommand, async (error) => {
+  await afterCommand().catch(() => undefined);
   fail(error.message);
   process.exit(1);
 });

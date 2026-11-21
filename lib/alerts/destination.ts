@@ -105,7 +105,33 @@ export function telegramTarget(destination: AlertDestination): { endpoint: strin
   return { endpoint: `https://${url.hostname}${url.pathname}`, chatId: url.searchParams.get("chat_id") ?? "" };
 }
 
-export type WorkspaceAlertType = "refused" | "budget" | "passport_rotated" | "break_glass" | "session_spend" | "recap" | "test";
+export type WorkspaceAlertType =
+  | "refused"
+  | "budget"
+  | "passport_rotated"
+  | "break_glass"
+  | "session_spend"
+  | "tripwire_used"
+  | "tripwire_seen"
+  | "mission_draft"
+  | "memory_arrival"
+  | "recap"
+  | "test";
+
+/** Idea 12: what a tripwire alert says. Server-computed; no decoy, no content. */
+export interface TripwireAlertDetail {
+  /** Whose decoy it was is `agentName`; this is who presented or carried it. */
+  presenter: "unauthenticated" | "this_workspace_agent" | "other_workspace_agent" | "carrier";
+  /** The presenter's name, when it is an agent of this workspace. */
+  presenterName?: string;
+  /** True on the copy sent to the PRESENTER's workspace (the decoy belongs elsewhere). */
+  presenterSide?: boolean;
+  flags: string[];
+  /** Outcome of the stop on the agent the decoy names, and on the presenter. */
+  namedStop?: string;
+  presenterStop?: string;
+}
+
 
 export interface WorkspaceAlert {
   type: WorkspaceAlertType;
@@ -125,6 +151,10 @@ export interface WorkspaceAlert {
   headsUp?: HeadsUpAlert;
   /** recap: C6's server-computed weekly text (one bounded part if needed). */
   recapText?: string;
+  /** tripwire_used / tripwire_seen (idea 12). */
+  tripwire?: TripwireAlertDetail;
+  /** memory_arrival (idea 13): how many entries wait, and which kinds of outside content. Counts and fixed words only: never entry text. */
+  memory?: { entries: number; origins: string[]; withheld?: boolean };
 }
 
 const dollars = (microcents: number) => `$${(Math.max(0, microcents) / 100_000_000).toFixed(2)}`;
@@ -148,6 +178,7 @@ const REFUSAL: Record<string, string> = {
   blocked_scope: "it is not allowed to use",
   blocked_endpoint: "that endpoint is not allowed for it",
   blocked_policy: "its policy refused the call",
+  blocked_loop: "it sent the same request over and over, so the loop breaker paused its model calls for 15 minutes",
 };
 
 function sentence(alert: WorkspaceAlert, code: (value: string) => string): string {
@@ -175,6 +206,8 @@ function sentence(alert: WorkspaceAlert, code: (value: string) => string): strin
           ? `${agent} reached the pause line you set on its spending limit. PassControl switched its calls to ${code(inertModel(alert.model ?? "?"))} instead of pausing it; its limits still apply.`
           : alert.status === "blocked_budget_subagent"
           ? `A sub-agent of ${agent} reached its per-session spending cap. Its calls are refused; the main agent and other sub-agents keep running.`
+          : alert.status === "blocked_session_cap"
+          ? `A session of ${agent} reached a cap its policy sets for one session (money, calls or minutes). That session's calls are refused; its other sessions keep running.`
           : alert.status === "blocked_budget_delegation"
             ? `A worker acting for ${agent} reached its delegation's spending cap. Its calls are refused; ${agent} keeps running.`
             : `${agent} ran out of budget. PassControl is refusing its calls until the budget is raised.`;
@@ -182,12 +215,90 @@ function sentence(alert: WorkspaceAlert, code: (value: string) => string): strin
       return `The passport for ${agent} was rotated. If you did not do this, suspend the agent now.`;
     case "break_glass":
       return `A break-glass grant was opened for ${agent}. If you did not do this, suspend the agent now.`;
+    case "tripwire_used":
+      return tripwireUsedSentence(agent, alert.tripwire, code);
+    case "tripwire_seen":
+      return tripwireSeenSentence(agent, alert.tripwire, code);
+    case "mission_draft":
+      // Idea 11. The link opens the approval screen; the button-less message is on
+      // purpose: a chat tap carries no owner key, so it cannot approve a mission.
+      return `${agent} drafted a mission and is waiting for your approval. Nothing runs under it until you approve it on the approval screen, which shows what is unusual about it first.`;
+    case "memory_arrival": {
+      const n = Math.max(0, Math.floor(alert.memory?.entries ?? 0));
+      const origins = (alert.memory?.origins ?? []).filter((o) => /^[a-z_]{1,32}$/.test(o)).slice(0, 6);
+      const why = origins.length ? ` (origin: ${origins.map((o) => code(o)).join(", ")})` : "";
+      return (
+        `${n} memory ${n === 1 ? "entry" : "entries"} of ${agent} wait at customs${why}: written while outside content was in its context, or with no custody record. ` +
+        (alert.memory?.withheld
+          ? `They are withheld from its API-mode sessions until you review them on its page; sessions PassControl cannot withhold from are held. Only memory files are covered.`
+          : `Its risky tools are held until you accept or reject them on its page. Only memory files are covered.`)
+      );
+    }
     case "session_spend":
       return (
         `A session of ${agent} passed ${dollars(alert.thresholdMicrocents ?? 0)}: ${dollars(alert.spentMicrocents ?? 0)} so far ` +
         `(session ${code(inertModel(alert.session ?? "?"))}). Nothing is paused. To stop it, use Stop on the agent's Sessions view.`
       );
   }
+}
+
+// Idea 12 copy rules (research/idea-12-tripwire/VERDICT.md, forbidden claims): never
+// "prevented", never "safe", never "proof of malice", never "this IP did it". Say what was
+// observed, what PassControl did, and whether the stop is confirmed.
+function tripwireUsedSentence(agent: string, t: TripwireAlertDetail | undefined, code: (value: string) => string): string {
+  const flags = new Set(t?.flags ?? []);
+  if (t?.presenterSide) {
+    const stopped = t.presenterStop === "suspended" || t.presenterStop === "already_stopped";
+    // R12-03: a decoy that is no longer armed stops no other workspace's agent.
+    const notTried = t.presenterStop === "not_attempted_disarmed";
+    return (
+      `${agent} presented a decoy credential that belongs to another workspace's tripwire. ` +
+      (stopped
+        ? "PassControl suspended it. "
+        : notTried
+          ? "That decoy was no longer armed, so PassControl did not suspend it. "
+          : "PassControl could NOT confirm suspending it: check it now. ") +
+      "Something in its environment handed it a credential it had no reason to use."
+    );
+  }
+  const by =
+    t?.presenter === "this_workspace_agent"
+      ? ` by another of your agents, ${code(inertName(t.presenterName ?? "unnamed agent"))}`
+      : t?.presenter === "other_workspace_agent"
+        ? " by an agent of another workspace"
+        : " without an agent credential";
+  const parts = [`A tripwire decoy assigned to ${agent} was presented as a credential${by}.`];
+  if (flags.has("replay_of_tripped")) parts.push(`That decoy was no longer armed (it had tripped, or was rotated out more than 30 days ago), so ${agent} was not suspended.`);
+  else if (t?.namedStop === "suspended" || t?.namedStop === "already_stopped") parts.push(`PassControl suspended ${agent}.`);
+  else parts.push(`PassControl could NOT confirm suspending ${agent}: suspend it yourself now.`);
+  if (t?.presenter === "this_workspace_agent") {
+    parts.push(t.presenterStop === "failed" ? "Suspending the presenting agent could NOT be confirmed." : "The presenting agent was suspended too.");
+  }
+  if (flags.has("left_machine")) parts.push("It came from a different address than the one the decoy was planted from: the decoy has likely left the machine.");
+  if (flags.has("event_write_failed")) parts.push("The event could not be saved; this alert is the only record.");
+  parts.push("This does not show who used it. Open the agent to see the event and how to recover.");
+  return parts.join(" ");
+}
+
+function tripwireSeenSentence(agent: string, t: TripwireAlertDetail | undefined, code: (value: string) => string): string {
+  const carrier =
+    t?.presenterSide || t?.presenter === "carrier"
+      ? t?.presenterName
+        ? `${code(inertName(t.presenterName))}'s traffic`
+        : "an agent's traffic"
+      : "another workspace's agent's traffic";
+  const head = t?.presenterSide
+    ? `A decoy credential from another workspace's tripwire appeared in ${carrier}.`
+    : `A tripwire decoy assigned to ${agent} appeared in ${carrier} through PassControl.`;
+  const hold = (t?.flags ?? []).includes("hold_started") ? " Its risky actions now wait for you (hold)." : "";
+  // R12-02: a decoy reaches another workspace only by leaving the machine it was planted on.
+  if (!t?.presenterSide && t?.presenter === "other_workspace_agent") {
+    return (
+      `${head} It reached another workspace's agent, so it has likely left the machine it was planted on, and whatever took it may have taken ${agent}'s real credential too. ` +
+      `Rotate ${agent}'s key or passport now. Nothing was suspended.`
+    );
+  }
+  return `${head} An agent read a value it had no task reason to read, or a broad search swept it up. Nothing was suspended.${hold}`;
 }
 
 function headsUpSentence(agent: string, h: HeadsUpAlert, code: (value: string) => string): string {

@@ -29,6 +29,8 @@ const h = vi.hoisted(() => ({
   notifyWorkspace: vi.fn(),
 }));
 
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/gate", () => ({ resolveCallMission: async () => ({ kind: "none" }) }));
 vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (promise: unknown) => promise }));
 vi.mock("@/lib/auth/visa", async (importOriginal) => ({
@@ -472,6 +474,17 @@ describe("a write while the agent is tainted (injection guard, hold)", () => {
     expect(h.sendApprovalPrompt).toHaveBeenCalledWith(TENANT, expect.objectContaining({ heldBecause: expect.stringMatching(/could not fully check/), offerClear: true }));
   });
 
+  it.each([null, { injection_guard: { mode: "monitor" } }])("a tripwire independently holds a service write under %j", async (policy) => {
+    h.readPolicy.mockResolvedValue({ policy, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+    inj.readTaint.mockResolvedValue({ since: T, until: T + 1_800_000, families: [], surface: "proxy", tripwire: true });
+    const res = await post();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("approval_pending");
+    expectNothingSent();
+    expect(h.checkApproval.mock.calls.at(-1)![0]).toMatchObject({ agentId: AGENT, userId: TENANT, hold: "injection_incomplete" });
+    expect(h.sendApprovalPrompt).toHaveBeenCalledWith(TENANT, expect.objectContaining({ offerClear: true }));
+  });
+
   it("holds an admitted write for the owner, says why, and decrypts and sends nothing", async () => {
     tainted();
     const res = await post();
@@ -739,10 +752,10 @@ describe("a write while the agent is tainted (injection guard, hold)", () => {
       expect(h.checkApproval).not.toHaveBeenCalled();
     });
 
-    it("no policy at all stays cheap: no taint read", async () => {
+    it("no policy and no tripwire hold: the write goes", async () => {
       malformed(null);
       expect((await dakPost()).status).toBe(201);
-      expect(inj.readTaint).not.toHaveBeenCalled();
+      expect(inj.readTaint).toHaveBeenCalledWith(AGENT, expect.any(Number));
     });
   });
 });

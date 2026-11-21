@@ -59,6 +59,8 @@ export interface PendingDevice {
   deviceCodeHash: string;
   clientName: string;
   ip: string;
+  /** One CLI command, not a machine login: its key gets a fixed 15-minute life (review C-01). */
+  oneCommand?: boolean;
   createdAt: number;
   attempts: number;
 }
@@ -86,11 +88,13 @@ export async function startDeviceAuthorization(input: {
   deviceCodeHash: string;
   clientName: string;
   ip: string;
+  oneCommand?: boolean;
 }): Promise<void> {
   const pending: PendingDevice = {
     deviceCodeHash: input.deviceCodeHash,
     clientName: input.clientName,
     ip: input.ip,
+    ...(input.oneCommand === true ? { oneCommand: true } : {}),
     createdAt: Date.now(),
     attempts: 0,
   };

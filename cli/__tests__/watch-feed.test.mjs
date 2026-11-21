@@ -2,6 +2,7 @@ import http from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createSidecar } from "../sidecar.mjs";
 import { createWatchFeed, refusalCode, requestModel, WATCH_PATH } from "../watch-feed.mjs";
 import { openFeed } from "../watch.mjs";
@@ -18,6 +19,7 @@ let gateway;
 let gatewayPort;
 let sidecar;
 let port;
+let callerKey;
 let received;
 const subscribers = new Set();
 
@@ -80,6 +82,7 @@ afterEach(async () => {
 
 async function start(options = {}) {
   const secret = ed25519.utils.randomPrivateKey();
+  callerKey = sidecarKey(options.passportSecret ?? b64url(secret));
   sidecar = createSidecar({
     gateway: `http://127.0.0.1:${gatewayPort}`,
     passportId: b64url(ed25519.getPublicKey(secret)),
@@ -99,6 +102,8 @@ function subscribe() {
   const hello = new Promise((r) => (resolveHello = r));
   const feed = openFeed({
     port,
+    // The feed asks for the sidecar's key (review C-03 follow-up), as `watch` sends it.
+    sidecarKey: callerKey,
     onEvent: (event, raw) => {
       events.push(event);
       lines.push(raw);
@@ -121,7 +126,7 @@ function subscribe() {
 async function call({ mode = "ok", headers = {}, model = "claude-sonnet-5-5", path = "/api/v1/anthropic/v1/messages" } = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-test-mode": mode, ...headers },
+    headers: { "content-type": "application/json", "x-test-mode": mode, authorization: `Bearer ${callerKey}`, ...headers },
     body: JSON.stringify({ model, max_tokens: 10, messages: [{ role: "user", content: `say hi ${MARKER}` }] }),
   });
   return { status: response.status, body: await response.text() };
@@ -130,7 +135,9 @@ async function call({ mode = "ok", headers = {}, model = "claude-sonnet-5-5", pa
 /** A raw GET to the feed with headers of our choosing (the guards' attacker shapes). */
 function rawGet(path, headers = {}, method = "GET") {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
+    // With the key unless a test passes its own authorization.
+    const sent = { authorization: `Bearer ${callerKey}`, ...headers };
+    const req = http.request({ host: "127.0.0.1", port, path, method, headers: sent }, (res) => {
       let body = "";
       res.on("data", (c) => {
         body += c;
@@ -300,7 +307,7 @@ describe("the watch feed: one event per call, and what each says", () => {
     await feed.hello;
     const r = await new Promise((resolve) => {
       const req = http.request(
-        { host: "127.0.0.1", port, method: "GET", path: "http://not-a-provider.example/x", headers: { "x-claude-code-session-id": "sess-9" } },
+        { host: "127.0.0.1", port, method: "GET", path: "http://not-a-provider.example/x", headers: { authorization: `Bearer ${callerKey}`, "x-claude-code-session-id": "sess-9" } },
         (res) => {
           res.resume();
           res.on("end", () => resolve(res.statusCode));
@@ -337,7 +344,7 @@ describe("the watch feed: one event per call, and what each says", () => {
         port,
         method: "POST",
         path: "/api/v1/anthropic/v1/messages",
-        headers: { "content-type": "application/json", "content-length": "1000", "x-claude-code-session-id": "gone" },
+        headers: { "content-type": "application/json", "content-length": "1000", authorization: `Bearer ${callerKey}`, "x-claude-code-session-id": "gone" },
       });
       req.on("error", () => resolve());
       req.write('{"model":"claude');
@@ -355,7 +362,7 @@ describe("the watch feed: one event per call, and what each says", () => {
     await start();
     const feed = subscribe();
     await feed.hello;
-    await fetch(`http://127.0.0.1:${port}/api/v1/self`).then((r) => r.text());
+    await fetch(`http://127.0.0.1:${port}/api/v1/self`, { headers: { authorization: `Bearer ${callerKey}` } }).then((r) => r.text());
     await call();
     await feed.until((ev) => calls(ev).length >= 1);
     await new Promise((r) => setTimeout(r, 50));

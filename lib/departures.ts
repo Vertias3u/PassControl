@@ -83,6 +83,8 @@ export const DEPARTURE_VERDICT: Record<
   blocked_budget_pause: { word: "PAUSED", tone: "held" },
   blocked_budget_subagent: { word: "SUB-AGENT CAP", tone: "held" },
   blocked_budget_delegation: { word: "WORKER CAP", tone: "held" },
+  blocked_loop: { word: "LOOP PAUSE", tone: "held" },
+  blocked_session_cap: { word: "SESSION CAP", tone: "held" },
   blocked_delegation_revoked: { word: "WORKER REVOKED", tone: "held" },
   blocked_delegation_unavailable: { word: "WORKER UNCONFIRMED", tone: "held" },
   // Deliberately not a variant of NO FUNDS. That word means PassControl's own

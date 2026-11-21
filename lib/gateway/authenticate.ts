@@ -22,13 +22,18 @@ import {
 } from "@/lib/auth/direct-key";
 import { claimNonce, touchLastSeen, flagPassportSecretExposed } from "@/lib/state/redis";
 import { passportIdIfSecret } from "@/lib/auth/passport-secret-detect";
-import type { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
+import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { serviceClient } from "@/lib/supabase";
 import type { AuthMethod } from "@/lib/log";
 import type { SenderProofObservation } from "@/lib/sender-constraint";
 import { rateLimitFailClosed } from "@/lib/ratelimit";
 import { captureError, captureSecurityEvent } from "@/lib/observability";
 import { err, errMessage } from "@/lib/gateway/responses";
+import {
+  tripwireForSecondaryCredentials,
+  tripwireForUncredentialed,
+  tripwireForUnknownDirectKey,
+} from "@/lib/tripwire/gateway";
 
 // This fires BEFORE a random pc_agent_ credential can cost a Supabase lookup.
 // Unlike the passport challenge limiter, Redis failure closes this edge: its
@@ -54,12 +59,15 @@ export type PassportPrincipal = {
   spentMicrocents: number;
   passportId: string;
   visaJti: string;
+  visaExpiresAt?: number;
   /**
    * Present only on a WORKER's visa (ver 3, Bet D). `passportId` and `agentId` stay
    * the root passport and its agent, so every kill, suspend, denylist and budget check
    * still applies; this names who actually acts and the caps it acts under.
    */
   delegation?: PrincipalDelegation;
+  /** Present only on a mission visa (ver 4, idea 11): the mission and revision it was minted under. */
+  mission?: { id: string; hash: string };
 };
 
 export type PrincipalDelegation = {
@@ -279,9 +287,12 @@ export async function authenticateGatewayRequest(
   // different credential classes.
   const token = extractVisaToken(req.headers, { tokenScheme: options.tokenScheme === true });
   const credential = classifyGatewayCredential(token);
-  if (credential.kind === "missing") return { ok: false, response: err(401, "missing_visa") };
-  if (credential.kind === "invalid") {
-    return { ok: false, response: err(401, "invalid_credential") };
+  if (credential.kind === "missing" || credential.kind === "invalid") {
+    // Idea 12 (red team R2-01/02): a decoy in a credential header this door does not read
+    // (Basic auth, `api-key`) or in a mangled key is still Used.
+    const tripped = await tripwireForUncredentialed(req, serviceClient(), route);
+    if (tripped) return { ok: false, response: tripped };
+    return { ok: false, response: err(401, credential.kind === "missing" ? "missing_visa" : "invalid_credential") };
   }
 
   const db = serviceClient();
@@ -321,6 +332,11 @@ export async function authenticateGatewayRequest(
     try {
       const principal = await authenticateDirectAgentKey(db, credential.token);
       if (!principal) {
+        // Idea 12: an unknown key may be a tripwire decoy. Used suspends the agent it
+        // names before this answers; the answer is the same 401 unless the stop failed
+        // or the registry could not be read (503, closed).
+        const tripped = await tripwireForUnknownDirectKey(req, db, credential.token, route);
+        if (tripped) return { ok: false, response: tripped };
         waitUntil(
           captureSecurityEvent("proxy.invalid_direct_key", {
             route,
@@ -337,6 +353,8 @@ export async function authenticateGatewayRequest(
       // suspended or over-budget agent presenting a valid key was still seen,
       // and that is precisely when an operator wants to know it is still live.
       stampLastSeen(principal.agentId);
+      const decoyBeside = await tripwireForSecondaryCredentials(req, db, principal, credential.token, route);
+      if (decoyBeside) return { ok: false, response: decoyBeside };
       return { ok: true, principal, db, credentialToken: credential.token };
     } catch {
       waitUntil(
@@ -410,6 +428,8 @@ export async function authenticateGatewayRequest(
         };
       }
     }
+    const tripped = await tripwireForUncredentialed(req, db, route);
+    if (tripped) return { ok: false, response: tripped };
     waitUntil(
       captureSecurityEvent("proxy.invalid_visa", {
         route,
@@ -428,32 +448,49 @@ export async function authenticateGatewayRequest(
   if (claims.act && options.acceptDelegated !== true) {
     return { ok: false, response: err(403, "delegated_visa_not_accepted") };
   }
-  return {
-    ok: true,
-    db,
-    credentialToken: credential.token,
-    principal: {
-      kind: "passport",
-      agentId: claims.agid,
-      userId: claims.uid,
-      scopes: claims.scope,
-      budgetTokens: claims.bt ?? null,
-      budgetCents: claims.bc ?? null,
-      spentTokens: Number(claims.st ?? 0),
-      spentMicrocents: Number(claims.sc ?? 0),
-      passportId: claims.sub,
-      visaJti: claims.jti,
-      ...(claims.act && claims.dc
-        ? {
-            delegation: {
-              actor: claims.act.sub,
-              jti: claims.act.dlg,
-              depth: claims.act.dep,
-              chainHash: claims.act.ch,
-              links: claims.dc.map((l) => ({ dlg: l.dlg, cap: l.cap, iat: l.iat, exp: l.exp })),
-            },
-          }
-        : {}),
-    },
+  const principal: PassportPrincipal = {
+    kind: "passport",
+    agentId: claims.agid,
+    userId: claims.uid,
+    scopes: claims.scope,
+    budgetTokens: claims.bt ?? null,
+    budgetCents: claims.bc ?? null,
+    spentTokens: Number(claims.st ?? 0),
+    spentMicrocents: Number(claims.sc ?? 0),
+    passportId: claims.sub,
+    visaJti: claims.jti,
+    visaExpiresAt: claims.exp,
+    ...(claims.mid && claims.mis ? { mission: { id: claims.mid, hash: claims.mis } } : {}),
+    ...(claims.act && claims.dc
+      ? {
+          delegation: {
+            actor: claims.act.sub,
+            jti: claims.act.dlg,
+            depth: claims.act.dep,
+            chainHash: claims.act.ch,
+            links: claims.dc.map((l) => ({ dlg: l.dlg, cap: l.cap, iat: l.iat, exp: l.exp })),
+          },
+        }
+      : {}),
   };
+  // A signed bearer alone cannot identify a presenter whose agent requires
+  // sender proof. On failure the decoy still trips as an unauthenticated canary.
+  const decoyBeside = await tripwireForSecondaryCredentials(
+    req,
+    db,
+    async () => {
+      try {
+        const policy = await readCurrentAgentPolicyAndShadow(db, principal.userId, principal.agentId);
+        const sender = await enforceSenderConstraint(req, credential.token, principal, policy);
+        if (sender.ok) return { kind: "agent", userId: principal.userId, agentId: principal.agentId };
+      } catch {
+        // Unavailable policy/proof state cannot authorize presenter attribution.
+      }
+      return { kind: "unauthenticated" };
+    },
+    credential.token,
+    route
+  );
+  if (decoyBeside) return { ok: false, response: decoyBeside };
+  return { ok: true, db, credentialToken: credential.token, principal };
 }

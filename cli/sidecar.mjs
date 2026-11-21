@@ -9,12 +9,16 @@ import { declaredLineage, declaredSession } from "./declared-session.mjs";
 import { defaultJournalDir, openJournal } from "./journal.mjs";
 import { heldUnderTaint } from "./injection-hold.mjs";
 import { findingsFromHook, gapFromOversizedHook } from "./injection-sidecar.mjs";
+import { plantedDigests } from "./tripwires.mjs";
+import { createTripwireReporter, decoyInHeaders, decoysInHook, TRIPWIRE_PATH } from "./tripwire-sidecar.mjs";
 import { answer, createWatchFeed, hostIsThisListener, isNotACall, isLocalCaller, LOCAL_PREFIX, peekText, providerOf, refusalCode, requestModel } from "./watch-feed.mjs";
 import { createStopGate, HOOK_PATH, SELF_READ_TIMEOUT_MS, selfAnswerState } from "./subscription-gate.mjs";
 import { createToolGate } from "./tool-gate.mjs";
 import { OTLP_LOGS_PATH, readClaudeCodeEvents } from "./otlp-logs.mjs";
 import { CLIENT_EVENTS_PATH, CLIENT_EVENTS_SOURCE, createCallUploader } from "./client-events-upload.mjs";
 import { heldUsageWindow, WINDOW_PATH } from "./usage-window.mjs";
+import { createMemoryCustody } from "./memory-custody-sidecar.mjs";
+import { presentsSidecarKey, sidecarKey } from "./sidecar-token.mjs";
 
 // Hop-by-hop headers plus the ones the sidecar rebuilds itself. `proxy-connection`
 // and friends only appear once something is used as a FORWARD proxy, which is
@@ -45,6 +49,31 @@ const STRIP_REQ = new Set([
 // so no key ever reached a provider — but it had no business leaving the user's
 // machine at all, since not sending the key IS the sidecar.
 const CREDENTIAL_HEADER = /(^|[-_])(api[-_]?key|authorization|auth|token|secret|credentials?)$/i;
+
+/** What a caller without the sidecar's key is told (review C-03). */
+const SIDECAR_KEY_HELP =
+  "This sidecar only forwards calls that present its key. On this machine run `passcontrol env <client>` " +
+  "(or `passcontrol configure claude-code|codex --write`) and use the API key it prints. The old placeholder no longer works.";
+
+// A hook call without the key (review C-03 follow-up). Claude Code treats an HTTP error
+// from a hook as "carry on", so a 401 here would quietly switch the tool gate off for
+// anyone whose settings predate the key. Instead it gets a 2xx answer that stops the
+// session and refuses the tool, and nothing in it is scanned, reported or decided.
+const KEYLESS_HOOK_REASON =
+  "PassControl refused this hook call: it carries no sidecar key. Run `passcontrol configure claude-code --write` " +
+  "(or `passcontrol configure codex --write`) again on this machine, then restart the session.";
+
+export function keylessHookAnswer(head) {
+  const event = /"hook_event_name"\s*:\s*"([A-Za-z]{1,40})"/u.exec(String(head ?? ""))?.[1] ?? "";
+  const out = { continue: false, stopReason: KEYLESS_HOOK_REASON };
+  if (event === "PreToolUse") {
+    out.hookSpecificOutput = { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: KEYLESS_HOOK_REASON };
+  } else {
+    out.decision = "block";
+    out.reason = KEYLESS_HOOK_REASON;
+  }
+  return out;
+}
 
 function isStripped(name) {
   const key = name.toLowerCase();
@@ -158,11 +187,17 @@ export function createSidecar({
   // Subscription mode, Phase 1b: upload the calls Claude Code reports to the
   // gateway's agent page (cli/client-events-upload.mjs). `--no-report-calls` turns it off.
   reportCalls = true,
+  // Idea 12: the digests of the decoys `configure tripwires` planted on this machine.
+  // Read once at start; a re-run of configure takes effect on the next sidecar start.
+  tripwireDigests = plantedDigests(),
 }) {
   // The upstream URL below is built from this, not from the argument: the
   // sidecar forwards a bearer visa on every proxied request, so its destination
   // is part of the credential's security rather than a formatting detail.
   const origin = bareGatewayOrigin(gateway);
+  // Review C-03: what a local caller must present before anything is forwarded with
+  // this run's visa (cli/sidecar-token.mjs). Derived from the passport, never stored.
+  const callerKey = sidecarKey(passportSecret);
   const visas = createVisaClient({
     gateway: origin,
     passportId,
@@ -216,6 +251,7 @@ export function createSidecar({
       })]);
       const answer = await Promise.race([deadline, selfAnswerState(response)]);
       if (answer.state === "open") {
+        memoryCustody.setView(answer.memory);
         readHighVersion = Math.max(readHighVersion, highAtStart);
         readRelayVersion = Math.max(readRelayVersion, relayAtStart);
         if (answer.injection?.mode === "hold" && !reportCalls && !holdOptOutWarned) {
@@ -229,6 +265,29 @@ export function createSidecar({
     }
   }
   const stopGate = createStopGate({ readSelf, dashboardUrl: `${origin}/dashboard` });
+
+  // Idea 13: memory custody (cli/memory-custody-sidecar.mjs). Hashes and kinds only.
+  const MEMORY_CUSTODY_PATH = "/api/v1/memory-custody";
+  const MEMORY_CUSTODY_TIMEOUT_MS = 4_000;
+  async function sendMemoryCustody(payload) {
+    const response = await visas.fetchWithVisa((visa) =>
+      fetch(`${origin}${MEMORY_CUSTODY_PATH}`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${visa}`,
+          "x-passcontrol-run": runId,
+          "x-passcontrol-proof": visas.createProof(visa, "POST", new URL(MEMORY_CUSTODY_PATH, origin)),
+          "accept-encoding": "identity",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(MEMORY_CUSTODY_TIMEOUT_MS),
+      })
+    );
+    return { status: response.status, body: await response.json().catch(() => null) };
+  }
+  const memoryCustody = createMemoryCustody({ send: sendMemoryCustody, onWarn: (m) => warn(m) });
 
   // Phase 2's `ask_owner` tool rules: the gateway asks the owner (their alert
   // destination is in its Vault) and holds each request a few seconds; this asks
@@ -311,6 +370,36 @@ export function createSidecar({
   }
   const injectionSeen = new Set();
   const uploader = reportCalls ? createCallUploader({ send: sendReportedCalls }) : null;
+  // Idea 12. Reports go as this agent, through the same visa path as every upload.
+  async function sendTripwire(body) {
+    const response = await visas.fetchWithVisa((visa) =>
+      fetch(`${origin}${TRIPWIRE_PATH}`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${visa}`,
+          "x-passcontrol-run": runId,
+          "x-passcontrol-proof": visas.createProof(visa, "POST", new URL(TRIPWIRE_PATH, origin)),
+          "accept-encoding": "identity",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+      })
+    );
+    return { status: response.status };
+  }
+  const tripwires = tripwireDigests.size > 0 ? createTripwireReporter({ send: sendTripwire }) : null;
+  const lastTools = [];
+  const TOOL_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
+  function noteTools(input) {
+    const calls = input.hook_event_name === "PostToolBatch" && Array.isArray(input.tool_calls) ? input.tool_calls : [input];
+    for (const c of calls) {
+      if (typeof c?.tool_name === "string" && TOOL_NAME.test(c.tool_name)) lastTools.push(c.tool_name);
+    }
+    while (lastTools.length > 5) lastTools.shift();
+  }
+  const recentTools = () => [...lastTools];
   // Its decisions reach the agent's page with the reported calls (same opt-out).
   const toolGate = createToolGate({
     askOwner,
@@ -444,6 +533,36 @@ export function createSidecar({
     res.end();
   }
 
+  // Idea 13: `passcontrol memory review` asks here, from this machine only.
+  const MEMORY_REVIEW_PATH = "/_passcontrol/memory";
+  async function serveMemoryReview(req, res) {
+    const port = server.address()?.port;
+    req.resume();
+    if (req.method !== "GET") return answer(res, 405, "method_not_allowed", "GET only.");
+    if (!isLocalCaller(req, port)) return answer(res, 403, "memory_refused", "For this machine only.");
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const cwd = url.searchParams.get("cwd");
+    if (!cwd || !cwd.startsWith("/")) return answer(res, 400, "memory_cwd", "Pass the workspace as ?cwd=/absolute/path.");
+    const out = await memoryCustody.review(cwd, url.searchParams.get("client") === "codex" ? "codex" : "claude-code").catch(() => ({ state: "unavailable", items: [] }));
+    const body = JSON.stringify(out);
+    res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+    res.end(body);
+  }
+
+  function refuseKeylessHook(req, res) {
+    // Only the start is kept, for the event name; the rest is drained, never parsed.
+    let head = "";
+    req.on("data", (c) => {
+      if (head.length < HOOK_PEEK_BYTES) head += c.toString("utf8").slice(0, HOOK_PEEK_BYTES - head.length);
+    });
+    req.on("end", () => {
+      const body = JSON.stringify(keylessHookAnswer(head));
+      res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body), "cache-control": "no-store" });
+      res.end(body);
+    });
+    req.on("error", () => res.destroy());
+  }
+
   function serveHook(req, res) {
     const port = server.address()?.port;
     if (req.method !== "POST") {
@@ -500,6 +619,18 @@ export function createSidecar({
       // Bounded by HOOK_BODY_LIMIT; 8 MB of hostile text scans in under half a second
       // (measured 2026-10-31). Only the upload is asynchronous.
       if (input.hook_event_name === "PostToolBatch" || input.hook_event_name === "PostToolUse") {
+        // Idea 12: a planted decoy in what a tool returned to the model is Seen. Digests
+        // only leave; the upload is not awaited and never changes the hook answer.
+        if (tripwires) {
+          try {
+            noteTools(input);
+            const seenDecoys = decoysInHook(input, tripwireDigests);
+            if (seenDecoys.length) tripwires.seen(seenDecoys).catch(() => {});
+            tripwires.heartbeat().catch(() => {});
+          } catch {
+            // Local telemetry must never change the hook answer.
+          }
+        }
         try {
           for (const event of findingsFromHook(input, { seen: injectionSeen })) {
             // A gap holds like a strong finding (1.7.1).
@@ -513,6 +644,14 @@ export function createSidecar({
           // Local telemetry must never change the hook answer.
         }
       }
+      // Idea 13: memory custody sees the event first, so a check that arms the hold has
+      // armed it before the tool gate decides this very tool.
+      const hookParams = new URL(req.url ?? "/", "http://127.0.0.1").searchParams;
+      await memoryCustody.hook(input, {
+        client: hookParams.get("client") === "codex" ? "codex" : "claude-code",
+        // API mode's own hooks (configure writes `mode=api` on its tool hook, `note=only` on its prompt hook).
+        api: hookParams.get("mode") === "api" || hookParams.get("note") === "only",
+      });
       let out;
       try {
         if (input.hook_event_name === "PreToolUse") await freshInjectionFor(input.tool_name);
@@ -531,7 +670,7 @@ export function createSidecar({
           // must not outrun its taint (cloud review 2026-11-03, SC-B). The gateway then
           // decides: no taint there answers `not_ask_owner`, and the tool goes.
           const unconfirmed = stopGate.injectionHoldMode() && heldUnderTaint(input.tool_name) && highVersion > readHighVersion;
-          tool = await toolGate.decide(input, stopGate.toolRules(), hookTimeoutS(req.url), unconfirmed ? "tainted" : stopGate.injection());
+          tool = await toolGate.decide(input, stopGate.toolRules(), hookTimeoutS(req.url), unconfirmed ? "tainted" : stopGate.injection(), memoryCustody.state(input.session_id));
         } catch {
           tool = {};
         }
@@ -543,6 +682,31 @@ export function createSidecar({
       res.end(body);
     });
     req.on("error", () => res.destroy());
+  }
+
+  // Idea 13, API mode: the tool results and memory sections a model request carries.
+  // Bounded: past the wait the call goes on and the hold is armed (fail closed).
+  async function memoryCustodyOfRequest(req, body) {
+    if (!body || memoryCustody.state() === "off") return null;
+    const session = lineageOf(req.headers)?.session;
+    const withhold = memoryCustody.mode() === "withhold";
+    if (body.length > 16 * 1024 * 1024) return withhold ? memoryCustody.fallback(session, null) : null;
+    let parsed;
+    try {
+      parsed = JSON.parse(body.toString("utf8"));
+    } catch {
+      return null; // not a JSON model request: there is no memory in it to cut
+    }
+    if (!session && !withhold) return null;
+    let timer;
+    const result = await Promise.race([
+      memoryCustody.modelRequest(session, parsed).then((b) => ({ done: true, b })),
+      new Promise((resolve) => { timer = setTimeout(() => resolve({ done: false }), 5_000); }),
+    ]).finally(() => clearTimeout(timer));
+    // Withhold mode never forwards what it did not finish checking: on a timeout every memory
+    // section is cut and the session is held (fail closed).
+    const next = result.done ? result.b : withhold ? memoryCustody.fallback(session, parsed) : null;
+    return next ? Buffer.from(JSON.stringify(next)) : null;
   }
 
   const localBaseUrl = () => {
@@ -692,7 +856,16 @@ export function createSidecar({
     // The sidecar's own paths: answered here, never forwarded with a visa.
     if (String(req.url ?? "").startsWith(LOCAL_PREFIX)) {
       const localPath = String(req.url).split("?")[0];
+      // Review C-03 follow-up: the sidecar's own paths ask for the key too. The hook
+      // reports tool output and files approvals with the visa, the receiver reports
+      // calls, and the rest show what the agent did.
+      if (!presentsSidecarKey(req.headers, callerKey)) {
+        if (localPath === HOOK_PATH && req.method === "POST") return void refuseKeylessHook(req, res);
+        req.resume();
+        return answer(res, 401, "sidecar_caller_unauthenticated", SIDECAR_KEY_HELP);
+      }
       if (localPath === HOOK_PATH) return serveHook(req, res);
+      if (localPath === MEMORY_REVIEW_PATH) return void serveMemoryReview(req, res);
       if (localPath === OTLP_LOGS_PATH) return serveOtlpLogs(req, res);
       if (localPath === WINDOW_PATH) return serveWindow(req, res);
       feed.serve(req, res, { port: server.address()?.port });
@@ -712,9 +885,35 @@ export function createSidecar({
 
     let watch = null;
     try {
+      // Idea 12: a planted decoy in a credential header is Used. The sidecar would strip
+      // it and send its own visa, so the gateway would never see it: refuse here with the
+      // answer an unknown key gets, and report it first, so the stop happens before the
+      // answer. A report that fails still refuses; nothing is forwarded either way.
+      // Read from the headers only, so it runs before the body and before the key check
+      // below: a caller without the key who presents a decoy still trips the wire.
+      const decoy = tripwires ? decoyInHeaders(req.headers, tripwireDigests, isStripped) : null;
+      if (decoy) {
+        req.resume();
+        await tripwires.used(decoy, recentTools());
+        feed.record({ outcome: "denied", code: "invalid_credential", status: 401, lineage: lineageOf(req.headers), startedAt });
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_credential" }));
+        return;
+      }
+      // Review C-03: a local caller must present this sidecar's key, or nothing is
+      // forwarded with the visa. Checked before the body is read, so a refused caller
+      // cannot make the sidecar buffer it.
+      if (!presentsSidecarKey(req.headers, callerKey)) {
+        req.resume();
+        feed.record({ outcome: "denied", code: "sidecar_caller_unauthenticated", status: 401, lineage: lineageOf(req.headers), startedAt });
+        answer(res, 401, "sidecar_caller_unauthenticated", SIDECAR_KEY_HELP);
+        return;
+      }
       const body = await readBody(req);
       watch = watchCall(req, verdict.path, body, startedAt);
-      const upstream = await visas.fetchWithVisa((visa) => fetchUpstream(req, verdict.path, body, visa));
+      // Idea 13: in withhold mode the body may come back with pending memory cut out.
+      const sent = (await memoryCustodyOfRequest(req, body)) ?? body;
+      const upstream = await visas.fetchWithVisa((visa) => fetchUpstream(req, verdict.path, sent, visa));
       writeResponse(res, upstream, req.headers, watch);
     } catch (e) {
       upstreamFailed(res, watch, req, verdict.path, e);
@@ -850,13 +1049,17 @@ export function startSidecar(opts) {
   if (ollamaPort != null) {
     ollamaServer.listen(ollamaPort, host, () => {
       step(`Ollama API (local models) on http://${host}:${ollamaPort}: set OLLAMA_HOST=${host}:${ollamaPort}`);
+      // Review C-03: OLLAMA_HOST is host:port only, so an Ollama client cannot send a key,
+      // and this port cannot ask for one. Said out loud rather than left implied.
+      step("  Any program on this machine can use that port, inside this agent's scope and budget.");
     });
   }
   server.listen(port, host, () => {
     step(`PassControl visa sidecar forwarding to ${gateway}`);
     step(`Listening on http://${host}:${port}`);
     step(`Point your agent at: http://${host}:${port}/api/v1/anthropic (or /api/v1/openai)`);
-    step("API key = anything (ignored). Visa is minted + refreshed automatically.");
+    step("API key = this sidecar's key: `passcontrol env <client>` prints it. Other callers are refused.");
+    step("Visa is minted + refreshed automatically.");
     step(
       journal
         ? `Journal: ${journal.path} (receipt ids, times, statuses and declared sessions only; --no-journal turns it off)`

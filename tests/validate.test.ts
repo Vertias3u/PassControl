@@ -18,7 +18,8 @@ import {
 } from "../lib/providers/fallbacks";
 
 // A valid base64url-encoded 32-byte key (43 chars, no padding).
-const VALID_PUBKEY = "A".repeat(43);
+// A real Ed25519 public key (seed 0x07 × 32). 32 zero bytes is a small-order point and is refused.
+const VALID_PUBKEY = "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw";
 
 describe("validateAgentInput", () => {
   it("accepts a well-formed agent", () => {

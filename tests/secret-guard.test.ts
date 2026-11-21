@@ -334,6 +334,16 @@ describe("createSecretWatchStream (a streamed answer, end to end)", () => {
     expect(seen).toEqual([["github", "aws"]]);
   });
 
+  it("finds one in streamed reasoning and in a refusal (reasoning_content, reasoning, refusal)", async () => {
+    for (const field of ["reasoning_content", "reasoning", "refusal"]) {
+      const k = KEYS.anthropic();
+      const chunks = [];
+      for (let i = 0; i < k.length; i += 5) chunks.push(sse({ choices: [{ index: 0, delta: { [field]: k.slice(i, i + 5) } }] }));
+      const { seen } = await run(chunks);
+      expect(seen, field).toEqual([["anthropic"]]);
+    }
+  });
+
   it("reports nothing for an ordinary answer", async () => {
     const { seen } = await run([sse({ type: "content_block_delta", delta: { type: "text_delta", text: "hello world" } })]);
     expect(seen).toEqual([]);

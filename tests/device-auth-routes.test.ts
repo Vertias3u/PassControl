@@ -137,6 +137,16 @@ describe("POST /api/auth/device/start", () => {
     expect(name).not.toMatch(/\s{2,}/u);
   });
 
+  // Review C-01 follow-up: a one-command approval is marked when it starts, so the key
+  // it mints has a fixed 15-minute life (lib/control/auth.ts FIXED_LIFE_MAX_MS). Only
+  // `true` marks it; anything else is an ordinary login.
+  it("records a one-command request, and only an explicit true", async () => {
+    await startRoute(post("https://gw.example/api/auth/device/start", { client_name: "one command - kill off - laptop", one_command: true }));
+    await startRoute(post("https://gw.example/api/auth/device/start", { client_name: "laptop", one_command: "yes" }));
+    await startRoute(post("https://gw.example/api/auth/device/start", { client_name: "laptop" }));
+    expect(h.started.map((s) => (s as { oneCommand?: boolean }).oneCommand)).toEqual([true, false, false]);
+  });
+
   it("caps the client name and falls back rather than storing an empty one", async () => {
     await startRoute(post("https://gw.example/api/auth/device/start", { client_name: "𝕏".repeat(50) }));
     expect((h.started[0] as { clientName: string }).clientName).toBe("unknown device");

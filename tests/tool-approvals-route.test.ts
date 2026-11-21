@@ -297,6 +297,15 @@ describe("held because the agent is tainted", () => {
     h.agentRow.mockResolvedValue({ data: NO_RULES, error: null });
   });
 
+  it.each([null, { injection_guard: { mode: "monitor" } }])("a tripwire independently holds a risky tool under %j", async (policy) => {
+    h.readPolicy.mockResolvedValue({ policy, shadow: null, senderConstraintMode: "off", budget: { known: false }, period: { known: false } });
+    inj.readTaint.mockResolvedValue({ since: T, until: T + 1_800_000, families: [], surface: "proxy", tripwire: true });
+    expect((await post(ask())).status).toBe(200);
+    expect(h.awaitApproval).toHaveBeenCalledOnce();
+    expect(asked().request).toMatchObject({ agentId: AGENT, userId: TENANT, hold: "injection_incomplete" });
+    expect(asked().prompt.offerClear).toBe(true);
+  });
+
   it("asks the owner about a risky tool, says why, and reads the credential's own agent", async () => {
     tainted();
     const res = await post({ ...ask({ tool_input: { command: "git push --force origin main" } }), agent_id: OTHER });

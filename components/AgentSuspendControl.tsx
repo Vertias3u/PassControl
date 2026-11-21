@@ -7,6 +7,7 @@ import { PauseCircle, PlayCircle, RefreshCw } from "lucide-react";
 
 import { observeAgentControl, setAgentSuspended } from "@/app/dashboard/actions-client";
 import type { AgentControlObservation, ControlIntent } from "@/app/dashboard/actions";
+import { stepUpRefusal } from "@/lib/action-result";
 
 /**
  * One suspend/reactivate contract for every surface that offers it (Fleet row,
@@ -23,7 +24,9 @@ import type { AgentControlObservation, ControlIntent } from "@/app/dashboard/act
 export type ControlResult =
   | { phase: "pending"; intent: ControlIntent }
   | { phase: "observed"; intent: ControlIntent; observation: AgentControlObservation; at: string }
-  | { phase: "lost"; intent: ControlIntent; at: string };
+  | { phase: "lost"; intent: ControlIntent; at: string }
+  /** Refused before anything changed: resuming needs the second factor (review C-02). */
+  | { phase: "refused"; intent: ControlIntent; message: string };
 
 export function intentFor(status: string): ControlIntent {
   return status === "suspended" ? "active" : "suspended";
@@ -33,7 +36,9 @@ export async function applyIntent(agentId: string, intent: ControlIntent): Promi
   try {
     const observation = await setAgentSuspended(agentId, intent === "suspended");
     return { phase: "observed", intent, observation, at: new Date().toISOString() };
-  } catch {
+  } catch (error) {
+    const refused = stepUpRefusal(error);
+    if (refused) return { phase: "refused", intent, message: refused };
     return { phase: "lost", intent, at: new Date().toISOString() };
   }
 }
@@ -83,6 +88,13 @@ export function AgentControlResult({
       <button type="button" className="ghost" onClick={onRefresh} data-control="refresh">Refresh status</button>
     </span>
   );
+  if (result.phase === "refused") {
+    return (
+      <p className="m-0 text-xs" role="alert" data-control-result="refused">
+        {result.message} Nothing was changed. <a href="/login/verify">Verify now</a>
+      </p>
+    );
+  }
   if (result.phase === "lost") {
     return (
       <div className="grid gap-1 text-xs" role="alert" data-control-result="lost">

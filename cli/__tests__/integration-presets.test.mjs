@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { sidecarKey } from "../sidecar-token.mjs";
+
+// What `env` prints as the API key: the sidecar's key for the test config's passport.
+const SIDECAR_KEY = sidecarKey("test-passport-secret");
 
 import {
   AGENT_CLI_PRESETS,
@@ -139,10 +143,11 @@ describe("integration presets", () => {
       for (const field of ["Base URL:", "API key:", "Model:"]) {
         expect(out, `${preset} preset omits "${field}"`).toContain(field);
       }
-      // The key field is a placeholder the sidecar ignores. If a real-looking
-      // key ever appears here, the preset is telling users to paste the thing
-      // the sidecar exists to keep out of the client.
-      expect(out).toMatch(/API key:\s+passcontrol$/m);
+      // The key field is the sidecar's own key (review C-03), derived from this
+      // config's passport: it opens the sidecar and nothing else. If a provider key
+      // ever appears here, the preset is telling users to paste the thing the
+      // sidecar exists to keep out of the client.
+      expect(out).toMatch(new RegExp(`API key:\\s+${SIDECAR_KEY}$`, "m"));
     }
   );
 
@@ -158,7 +163,7 @@ describe("integration presets", () => {
     expect(out).toContain("Hermes Agent custom provider");
     expect(out).toContain("provider: custom");
     expect(out).toContain('base_url: "http://127.0.0.1:8788/api/v1/openai/v1"');
-    expect(out).toContain('api_key: "passcontrol"');
+    expect(out).toContain(`api_key: "${SIDECAR_KEY}"`);
     expect(out).not.toContain("OPENAI_BASE_URL");
   });
 

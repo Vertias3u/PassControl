@@ -20,6 +20,25 @@ export type Scope = "read" | "write";
  */
 export const IDLE_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
 
+/**
+ * A key whose deadline was set less than this after its creation is a FIXED-LIFE key,
+ * and authentication never moves its deadline. The CLI's one-command keys are minted
+ * this way (review C-01 follow-up, ONE_COMMAND_KEY_TTL_MS): the CLI revokes them when
+ * the command ends, and if the CLI is killed first, this is what still ends them.
+ * Derived from columns every key already has (`created_at` is NOT NULL since 0008),
+ * so no migration has to reach the live database first.
+ */
+export const FIXED_LIFE_MAX_MS = 60 * 60 * 1000;
+export const ONE_COMMAND_KEY_TTL_MS = 15 * 60 * 1000;
+
+/** True when using this key may push its deadline forward. Unknown creation: as before. */
+export function rollsOnUse(createdAt: string | null | undefined, expiresAt: string | null | undefined): boolean {
+  if (!expiresAt) return false;
+  const created = createdAt ? Date.parse(createdAt) : NaN;
+  if (!Number.isFinite(created)) return true;
+  return Date.parse(expiresAt) - created >= FIXED_LIFE_MAX_MS;
+}
+
 export type AuthResult =
   | { ok: true; userId: string; scope: Scope; keyId: string }
   | { ok: false; status: number; code: string };
@@ -37,7 +56,7 @@ export async function authenticateApiKey(req: Request): Promise<AuthResult> {
   const db = serviceClient();
   const { data, error } = await db
     .from("api_keys")
-    .select("id, user_id, scope, revoked_at, expires_at")
+    .select("id, user_id, scope, revoked_at, created_at, expires_at")
     .eq("key_hash", hash)
     .maybeSingle();
   if (error) return { ok: false, status: 500, code: "auth_lookup_failed" };
@@ -71,7 +90,7 @@ export async function authenticateApiKey(req: Request): Promise<AuthResult> {
     .from("api_keys")
     .update({
       last_used_at: new Date().toISOString(),
-      ...(data.expires_at ? { expires_at: new Date(Date.now() + IDLE_WINDOW_MS).toISOString() } : {}),
+      ...(rollsOnUse(data.created_at, data.expires_at) ? { expires_at: new Date(Date.now() + IDLE_WINDOW_MS).toISOString() } : {}),
     })
     .eq("id", data.id)
     .then(

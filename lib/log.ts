@@ -79,6 +79,10 @@ interface LogEntryBase {
     | "blocked_budget_subagent"
     // Bet D: a WORKER's call. A link of its delegation chain used its cap...
     | "blocked_budget_delegation"
+    // 1.9.0 runaway-agent package: the loop breaker paused this agent's model calls.
+    | "blocked_loop"
+    // 1.9.0: a declared session passed one of its caps (money, calls, minutes).
+    | "blocked_session_cap"
     // ...the owner revoked the delegation, or every delegation before a watermark...
     | "blocked_delegation_revoked"
     // ...or its state could not be vouched for (an unreadable revocation, a lost

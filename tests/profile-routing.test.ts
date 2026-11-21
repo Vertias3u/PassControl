@@ -120,8 +120,17 @@ describe("the canonical route", () => {
   });
 
   // "/u" must not accidentally make the whole app public.
+  // Signed out, /users is not a page, so it is answered with the 404 rewrite
+  // (tests/middleware-signed-out-404.test.ts); what matters here is that it is never
+  // passed through as if "/u" had made it public.
   it("does not make an unrelated path public by prefix", async () => {
     const response = await middleware(request("/users"));
+    expect(response.headers.get("x-middleware-rewrite")).toContain("/no-such-page");
+    expect(response.headers.get("x-middleware-rewrite")).not.toContain("/u/");
+  });
+
+  it("does not make an unrelated gated path public by prefix", async () => {
+    const response = await middleware(request("/dashboard/users"));
     expect(response.headers.get("location")).toContain("/login");
   });
 });
@@ -145,3 +154,4 @@ describe("robots", () => {
     expect(disallow).toContain("/dashboard");
   });
 });
+

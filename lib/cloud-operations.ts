@@ -29,6 +29,12 @@ export const CLOUD_FAILURE_GUIDE: readonly CloudFailureGuideItem[] = [
     action: "Review reconciled spend, then deliberately raise or reset that agent’s budget if appropriate.",
   },
   {
+    title: "Runaway-agent guards",
+    codes: ["blocked_loop", "blocked_session_cap"],
+    meaning: "The owner's loop breaker paused an agent that sent the same request over and over (the pause lifts by itself), or a declared session reached a cap its agent's policy sets for one session.",
+    action: "Look at what the agent was stuck on or doing; raise loop_breaker.repeats or session_caps only if the work was intended.",
+  },
+  {
     title: "Agent suspended",
     codes: ["blocked_suspended"],
     meaning: "This individual agent is suspended and every new call is refused.",

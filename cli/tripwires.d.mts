@@ -1,0 +1,21 @@
+export const TRIPWIRE_PLACEMENTS: Record<"state_backup" | "anthropic_pair", { rel(slug: string): string; content(decoy: string, origin?: string): string }>;
+export const DEFAULT_TRIPWIRE_PLACEMENTS: string[];
+export function tripwirePlacementChoices(): string;
+export function generateDecoy(): string;
+export function decoyDigest(decoy: string): string;
+export function tripwireManifestPath(env?: Record<string, string | undefined>): string;
+export function readTripwireManifest(file?: string): { version: number; agents: Record<string, { placements: { placement: string; path: string; digest: string; plantedAt: string }[] }> };
+export function plantedDigests(file?: string): Set<string>;
+export function slugOf(agentId: string): string;
+export function enclosingRepo(dir: string): string | null;
+export function checkTarget(home: string, rel: string, ownDigest: string | undefined): string;
+export function plantTripwires(input: {
+  home?: string;
+  agentId: string;
+  origin: string;
+  placements?: string[];
+  register(decoys: { placement: string; digest: string }[], replace: boolean): Promise<unknown>;
+  manifestFile?: string;
+  dryRun?: boolean;
+}): Promise<{ planted: { placement: string; path: string }[]; rotated?: boolean; dryRun?: boolean }>;
+export function removeTripwires(input: { agentId: string; retire(): Promise<unknown>; manifestFile?: string }): Promise<{ removed: string[]; kept: string[] }>;

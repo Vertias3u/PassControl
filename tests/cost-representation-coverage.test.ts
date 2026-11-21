@@ -227,7 +227,7 @@ describe("every provider can be priced", () => {
     (provider) => {
       const gate = evaluateGate({
         agentId: "agent",
-        killState: { platformKill: false, tenantKill: false, denylist: [] },
+        killState: { platformKill: false, userKill: false, denylist: [] },
         suspended: false,
         scopes: [{ provider, models: ["*"] }],
         provider,

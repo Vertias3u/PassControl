@@ -10,6 +10,7 @@
 import { revalidatePath } from "next/cache";
 
 import { recordAdminAction } from "@/lib/audit";
+import { mfaAuthorizedUser } from "@/lib/mfa";
 import { clearTaint } from "@/lib/state/taint";
 import { userClient } from "@/lib/supabase/server";
 
@@ -25,10 +26,17 @@ export interface InjectionClearResult {
 
 export async function clearInjectionTaint(agentId: string): Promise<InjectionClearResult> {
   const db = await userClient();
-  const {
-    data: { user },
-  } = await db.auth.getUser();
-  if (!user) return { error: "Sign in again to change this agent." };
+  // Clearing takes a stop OFF, so it is behind the second factor where one is enrolled
+  // (review C-02), as resuming after a tripwire is. The strict gate decodes the signed
+  // aal claim; it never trusts the session cookie's own factor list (lib/mfa.ts).
+  const gate = await mfaAuthorizedUser(db);
+  if (!gate.ok) {
+    if (gate.reason === "unauthenticated") return { error: "Sign in again to change this agent." };
+    return { error: gate.reason === "step_up_required"
+      ? "Complete two-factor verification first."
+      : "Your sign-in could not be verified. Try again." };
+  }
+  const { user } = gate;
   if (!UUID_RE.test(agentId ?? "")) return { error: UNAVAILABLE };
 
   const { data: agent, error } = await db.from("agents").select("id").eq("user_id", user.id).eq("id", agentId).maybeSingle();

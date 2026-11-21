@@ -41,6 +41,7 @@ export interface FailurePresentation {
 
 /** Every reason sdk/verify.ts can return. Kept exhaustive by tests/receipt-view.test.ts. */
 export const ALL_FAILURES = [
+  "claims",
   "malformed",
   "untrusted_issuer",
   "unknown_key",
@@ -55,6 +56,11 @@ export const ALL_FAILURES = [
 ] as const satisfies readonly VerifyFailure[];
 
 const FAILURES: Record<VerifyFailure, FailurePresentation> = {
+  claims: {
+    kind: "forged",
+    title: "This artifact's signed claims contradict each other.",
+    body: "It is signed, but what it says does not hold together: for an ending sent by PassControl on an owner's stop, the thing ended or the stop is missing, or it also claims an agent's credential. Do not rely on it.",
+  },
   bad_signature: {
     kind: "forged",
     title: "This receipt has been altered.",
@@ -436,6 +442,18 @@ const VERDICTS: Record<string, VerdictPresentation> = {
       "The call came from a worker acting under a signed delegation from this agent, and that delegation, or one above it, had used its spending cap.",
     tone: "held",
   },
+  blocked_loop: {
+    label: "Refused — the loop breaker paused the agent",
+    detail:
+      "The agent had sent the same request over and over within a few minutes, so its owner's loop breaker paused its model calls for a while. Nothing was sent.",
+    tone: "held",
+  },
+  blocked_session_cap: {
+    label: "Refused — a session over its cap",
+    detail:
+      "The call came from a session that had reached a cap its agent's owner set for one session: money, calls or minutes. The session was declared by the client.",
+    tone: "held",
+  },
   blocked_delegation_revoked: {
     label: "Refused — the delegation was revoked",
     detail: "The call came from a worker whose delegation from this agent had been revoked by the owner.",
@@ -715,6 +733,7 @@ export function describeCall(
 
 export interface ReceiptAuthenticationPresentation {
   label:
+    | "Ended by PassControl"
     | "Passport verified"
     | "Passport proof verified per request"
     | "Direct Agent Key accepted"
@@ -722,7 +741,7 @@ export interface ReceiptAuthenticationPresentation {
     | "Worker's delegation and proof verified"
     | "Authentication method not recognised";
   detail: string;
-  subjectLabel: "Agent passport" | "Agent identity" | "Worker key" | "Subject";
+  subjectLabel: "Gateway" | "Agent passport" | "Agent identity" | "Worker key" | "Subject";
   subject: string;
   keyId: string | null;
   /** What `keyId` is, said on the page beside it. Null when there is no keyId. */
@@ -735,8 +754,16 @@ export interface ReceiptAuthenticationPresentation {
  * deliberately different words everywhere this artifact is rendered.
  */
 export function describeReceiptAuthentication(
-  claims: Pick<ReceiptClaims, "sub" | "agid" | "auth">
+  claims: Pick<ReceiptClaims, "sub" | "agid" | "auth" | "end">
 ): ReceiptAuthenticationPresentation {
+  if (claims.auth?.kind === "gateway_ending") {
+    const trigger = claims.end ? { kill_switch: "kill switch", session: "session stop", service: "service stop", mission_end: "mission end", budget_pause: "budget pause line" }[claims.end.trg] : "stop";
+    return {
+      label: "Ended by PassControl",
+      detail: `Ended by PassControl on the owner's stop (${trigger}), not a call by the agent. No passport or agent key signed it.`,
+      subjectLabel: "Gateway", subject: claims.sub, keyId: null, keyIdLabel: null,
+    };
+  }
   if (claims.auth?.kind === "passport_proof_per_request") {
     return {
       label: "Passport proof verified per request",

@@ -91,6 +91,8 @@ export interface CurrentPolicyRead {
    * denial path. `percent: null` is a real value: no pause line.
    */
   pause?: { known: true; percent: number | null; switchTo?: PauseSwitch | null } | { known: false };
+  /** Core does not operate missions. Retained for shared gateway callers. */
+  missionOnly?: boolean;
 }
 
 /**

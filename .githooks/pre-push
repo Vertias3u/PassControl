@@ -17,6 +17,13 @@ if [ ! -x node_modules/.bin/tsc ]; then
   exit 0
 fi
 
+# Git exports GIT_DIR (and sometimes GIT_WORK_TREE / GIT_INDEX_FILE) to hooks; from a
+# linked worktree GIT_DIR is an absolute path. The suite creates throwaway repos and
+# runs git inside them, which would then act on THIS repo's worktree instead and fail
+# with "must be run in a work tree" (2026-11-09, pushing from ~/PassControl-site-audit).
+# The push itself is unaffected: git has already read what it needs.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR
+
 echo "pre-push: typecheck…"
 npm run --silent typecheck
 

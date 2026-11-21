@@ -63,7 +63,9 @@ const k = {
 };
 
 // `injection_incomplete` (1.7.1): held because tool output could not be fully checked.
-export type ApprovalHold = "injection_tainted" | "injection_incomplete" | "injection_unknown";
+// `mission_outside` (idea 11): held because the call is outside the agent's owner-approved mission.
+// `memory_custody` (idea 13): held because the agent's memory files have entries waiting for review.
+export type ApprovalHold = "injection_tainted" | "injection_incomplete" | "injection_unknown" | "mission_outside" | "memory_custody";
 
 export interface ApprovalRequest {
   hold?: ApprovalHold;
@@ -307,7 +309,7 @@ function toApproval(id: string, raw: Record<string, unknown> | null): Approval |
   return {
     id,
     state,
-    ...(raw.hold === "injection_tainted" || raw.hold === "injection_incomplete" || raw.hold === "injection_unknown" ? { hold: raw.hold } : {}),
+    ...(raw.hold === "injection_tainted" || raw.hold === "injection_incomplete" || raw.hold === "injection_unknown" || raw.hold === "mission_outside" || raw.hold === "memory_custody" ? { hold: raw.hold } : {}),
     agentId: text("agid"),
     service: text("svc"),
     method: text("method"),

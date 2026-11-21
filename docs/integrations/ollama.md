@@ -24,7 +24,8 @@ passcontrol env generic --provider local
 passcontrol sidecar
 ```
 
-Use the base URL `http://127.0.0.1:8788/api/v1/local` and any API key, which the sidecar replaces.
+Use the base URL `http://127.0.0.1:8788/api/v1/local` and the API key `passcontrol env generic` prints:
+the sidecar's own key. It opens the sidecar on this machine and nothing else.
 
 **Apps that only take `OLLAMA_HOST`** (they speak Ollama's own API):
 
@@ -32,6 +33,10 @@ Use the base URL `http://127.0.0.1:8788/api/v1/local` and any API key, which the
 passcontrol sidecar --ollama-port      # listens on 11435
 export OLLAMA_HOST=127.0.0.1:11435     # `passcontrol env ollama` prints this
 ```
+
+`OLLAMA_HOST` carries no key, so this port cannot ask for one: any program on the machine can use
+it, inside the agent's scope and budget. Turn it on only where that is acceptable; the main port
+(above) refuses callers without the sidecar's key.
 
 `/api/chat` and `/api/generate` are governed calls, with tokens read from Ollama's own counts.
 `/api/tags`, `/api/show` and `/api/version` are admitted as metadata. Ollama's admin API (`pull`,

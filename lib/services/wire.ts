@@ -6,6 +6,7 @@
 // party, and a service's response can carry things an agent has no business
 // reading — `x-oauth-scopes` names everything the TENANT's token can do, which
 // is exactly the ceiling the per-agent rules exist to hide.
+import { redactSecretsInText } from "@/lib/providers/secret-redaction";
 import type { ServiceCatalogEntry } from "@/lib/services/catalog";
 
 // The same bound the LLM route puts on `accept`, and a hard stop on control
@@ -23,11 +24,20 @@ export function filterRequestHeaders(entry: ServiceCatalogEntry, incoming: Heade
   return out;
 }
 
-export function filterResponseHeaders(entry: ServiceCatalogEntry, upstream: Headers): Headers {
+export function filterResponseHeaders(
+  entry: ServiceCatalogEntry,
+  upstream: Headers,
+  secrets: readonly string[] = [],
+  onRedact?: () => void
+): Headers {
   const out = new Headers();
   for (const name of entry.responseHeaders) {
     const value = upstream.get(name);
-    if (value !== null) out.set(name, value);
+    if (value !== null) {
+      const safe = redactSecretsInText(value, secrets);
+      if (safe.redacted) onRedact?.();
+      out.set(name, safe.text);
+    }
   }
   return out;
 }
@@ -105,4 +115,45 @@ export function rewriteLocationHeader(
   if (url.protocol !== "https:") return null;
   if (url.origin === serviceOrigin) return `${gatewayBase}${url.pathname}${url.search}`;
   return value;
+}
+
+// How much of a service's JSON/text answer the route reads whole, so the redactor can
+// see through `\uXXXX` escapes. The same bound the stream redactor puts on one line.
+export const SERVICE_INSPECT_MAX_BYTES = 1024 * 1024;
+
+export type BoundedRead =
+  | { complete: true; bytes: Uint8Array<ArrayBuffer> }
+  | { complete: false; stream: ReadableStream<Uint8Array> };
+
+// Read a body up to `max` bytes. If it ends within the bound, return all of it. If not,
+// return a stream that replays what was read and then the rest, unread, so the caller
+// falls back to streaming and never holds more than `max` (plus one chunk) in memory.
+export async function readBounded(body: ReadableStream<Uint8Array>, max: number): Promise<BoundedRead> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.byteLength;
+    if (total > max) {
+      return {
+        complete: false,
+        stream: new ReadableStream<Uint8Array>({
+          start(controller) { for (const c of chunks) controller.enqueue(c); },
+          async pull(controller) {
+            const next = await reader.read();
+            if (next.done) controller.close();
+            else controller.enqueue(next.value);
+          },
+          cancel(reason) { return reader.cancel(reason); },
+        }),
+      };
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { bytes.set(c, at); at += c.byteLength; }
+  return { complete: true, bytes };
 }

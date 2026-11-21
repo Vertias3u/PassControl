@@ -16,6 +16,7 @@ import {
 import { purgeAgentPolicy } from "./state/redis";
 import { bumpKillGeneration, setTenantKillDurably } from "@/lib/state/killswitch";
 import { deleteKillRecord, saveKillRecord } from "@/lib/state/kill-record";
+import { scheduleCascade } from "@/lib/standing/cascade";
 import { suspendAgent, unsuspendAgent, purgeAgentCaches, stopSession, resumeSession } from "@/lib/state/redis";
 // The scope bounds an elevation is checked against now live with the union that
 // is checked (lib/break-glass.ts), so LIMITS is no longer read directly here.
@@ -527,6 +528,8 @@ export async function setSessionStopped(
   if (stopped) {
     await stopSession(agentId, sessionId);
     durable = await saveKillRecord(userId, stop);
+    // Idea 14: after the stop is in force, end what that session left standing.
+    scheduleCascade({ trigger: "session", userId, agentId, session: sessionId });
   } else {
     durable = await deleteKillRecord(userId, stop);
     // A reload that read the row before the delete must not write it back (A9).
@@ -1063,6 +1066,8 @@ export async function setTenantKill(
 ): Promise<FleetResult<{ affected: number; durable: boolean }>> {
   // Redis and the durable record (0083): a Redis loss no longer lifts it.
   const { durable } = await setTenantKillDurably(userId, on);
+  // Idea 14: after the stop is in force, end what the workspace's agents left standing.
+  if (on) scheduleCascade({ trigger: "kill_switch", userId });
   const { data: agents } = await db.from("agents").select("id").eq("user_id", userId);
   return { ok: true, value: { affected: (agents ?? []).length, durable } };
 }

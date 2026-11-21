@@ -420,6 +420,8 @@ describe("Agent Passport view model", () => {
       sessionAlertCents: null,
       secretGuard: null,
       injectionGuard: null,
+      loopBreakerRepeats: null,
+      sessionCaps: null,
     });
 
     expect(buildAgentPassportView({ ...agentA, policy: null }, []).policy).toMatchObject({
@@ -440,6 +442,8 @@ describe("Agent Passport view model", () => {
       sessionAlertCents: null,
       secretGuard: null,
       injectionGuard: null,
+      loopBreakerRepeats: null,
+      sessionCaps: null,
     });
   });
 

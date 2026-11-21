@@ -159,6 +159,7 @@ const worker = PassControl.fromDelegation({ gateway, chain, workerPrivateKey: wo
 - The worker's receipts name the worker's key and the delegation, never the agent's passport.
   They are receipt version 3, so verifiers older than this release refuse them as too new.
   `verifyReceiptDelegation(claims, chain)` checks that a receipt and a chain belong together.
+- Receipt version 4 records an ending sent by PassControl on the owner's stop, with no passport or agent key; older verifiers refuse it.
 - Revoke one delegation, or every delegation the agent issued before now, with
   `POST /api/control/v1/agents/{id}/delegations/revoke` (`{ "jti": "..." }` or `{ "all": true }`).
   A revocation is permanent. `GET .../delegations` lists the ones the gateway has seen.

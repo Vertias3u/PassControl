@@ -22,6 +22,7 @@
 import { hmac } from "@noble/hashes/hmac";
 import { sha256 } from "@noble/hashes/sha256";
 import { publiclyCommittedDemoValues } from "@/lib/demo/identity";
+import { STREAM_TEXT_KEYS } from "@/lib/stream-text-keys";
 
 export type SecretKind =
   | "anthropic"
@@ -358,12 +359,6 @@ export function secretRefusalMessage(findings: readonly SecretFinding[]): string
     "placeholder instead of refusing."
   );
 }
-
-// Where a streamed answer carries the model's words, per provider shape: Anthropic's
-// `delta.text` / `delta.partial_json` (tool input) / `delta.thinking`, OpenAI chat's
-// `choices[].delta.content` and tool-call `arguments`, and the Responses API's string
-// `delta`. Collected by key, so a shape this list does not name is still read.
-const STREAM_TEXT_KEYS = new Set(["text", "partial_json", "thinking", "content", "arguments", "delta"]);
 
 function streamFragments(event: unknown, out: string[], depth = 0): void {
   if (depth > 8 || event === null || typeof event !== "object") return;

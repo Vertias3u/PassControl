@@ -1,13 +1,14 @@
 // `passcontrol configure claude-code` writes or removes two env keys (and, with
-// --statusline, a status line) in a Claude Code settings file. None of that uses a
-// passport: the sidecar holds the passport, and it is started separately. Requiring
-// a global passport first meant `--remove` could not undo the settings after the
-// CLI config was deleted, which is exactly when someone wants to undo them.
+// --statusline, a status line) in a Claude Code settings file. Previewing and
+// removing use no passport: requiring one meant `--remove` could not undo the
+// settings after the CLI config was deleted, which is exactly when someone wants
+// to undo them. Writing does since review C-03: the token is the sidecar's key,
+// derived from the passport the sidecar runs with.
 // Cursor and Claude Desktop launch `passcontrol mcp`, which does need the global
 // passport, so they keep the requirement.
 // Run as a real process with an empty HOME and XDG_CONFIG_HOME: no config at all.
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,10 +39,36 @@ function run(args: string[], home: string, extraEnv: Record<string, string> = {}
 }
 
 const freshHome = () => mkdtempSync(join(tmpdir(), "pc-configure-cc-"));
+/**
+ * A home with a passport in the global config. Writing Claude Code's settings needs
+ * one since review C-03: the token written is the sidecar's key, derived from it.
+ */
+const passportHome = () => {
+  const home = freshHome();
+  mkdirSync(join(home, ".config", "passcontrol"), { recursive: true });
+  writeFileSync(join(home, ".config", "passcontrol", "config"), `PASSPORT_ID=${"p".repeat(43)}\nPASSPORT_SECRET=${Buffer.alloc(32, 5).toString("base64url")}\n`);
+  return home;
+};
 const projectSettings = (home: string) => join(home, ".claude", "settings.local.json");
 const read = (file: string) => JSON.parse(readFileSync(file, "utf8"));
 
-describe("configure claude-code needs no global passport", () => {
+describe("configure claude-code writes the sidecar's key, so writing needs a passport (review C-03)", () => {
+  it("--write without one refuses, says to log in, and writes nothing", async () => {
+    const home = freshHome();
+    const r = await run(["configure", "claude-code", "--write"], home);
+    expect(r.code).not.toBe(0);
+    expect(`${r.out}${r.err}`).toMatch(/passcontrol login/);
+    expect(existsSync(projectSettings(home))).toBe(false);
+  });
+
+  it("--write with one writes a pcs_ key, not the old placeholder", async () => {
+    const home = passportHome();
+    expect((await run(["configure", "claude-code", "--write"], home)).code).toBe(0);
+    expect(read(projectSettings(home)).env.ANTHROPIC_AUTH_TOKEN).toMatch(/^pcs_[A-Za-z0-9_-]{43}$/);
+  });
+});
+
+describe("configure claude-code needs no global passport to preview or undo", () => {
   it("dry run previews the two keys", async () => {
     const home = freshHome();
     const r = await run(["configure", "claude-code"], home);
@@ -52,7 +79,7 @@ describe("configure claude-code needs no global passport", () => {
   });
 
   it("--write writes the project settings", async () => {
-    const home = freshHome();
+    const home = passportHome();
     const r = await run(["configure", "claude-code", "--write"], home);
     expect(r.err).not.toMatch(/requires a passport/);
     expect(r.code).toBe(0);
@@ -60,7 +87,7 @@ describe("configure claude-code needs no global passport", () => {
   });
 
   it("--write --statusline adds the status line", async () => {
-    const home = freshHome();
+    const home = passportHome();
     const r = await run(["configure", "claude-code", "--write", "--statusline"], home);
     expect(r.code).toBe(0);
     const settings = read(projectSettings(home));
@@ -69,7 +96,7 @@ describe("configure claude-code needs no global passport", () => {
   });
 
   it("--write --global writes under CLAUDE_CONFIG_DIR", async () => {
-    const home = freshHome();
+    const home = passportHome();
     const dir = join(home, "claude-config");
     const r = await run(["configure", "claude-code", "--write", "--global"], home, { CLAUDE_CONFIG_DIR: dir });
     expect(r.code).toBe(0);
@@ -77,12 +104,14 @@ describe("configure claude-code needs no global passport", () => {
   });
 
   it("--remove undoes a write after the CLI config is gone", async () => {
-    const home = freshHome();
+    const home = passportHome();
     expect((await run(["configure", "claude-code", "--write", "--statusline"], home)).code).toBe(0);
     // A setting of the user's own survives the removal.
     const file = projectSettings(home);
     const written = read(file);
     writeFileSync(file, JSON.stringify({ ...written, model: "opus" }));
+    // The CLI config, and the passport in it, are gone before the removal.
+    rmSync(join(home, ".config"), { recursive: true, force: true });
     const r = await run(["configure", "claude-code", "--remove"], home);
     expect(r.err).not.toMatch(/requires a passport/);
     expect(r.code).toBe(0);
@@ -130,7 +159,9 @@ describe("env claude-code needs no global passport", () => {
 // Subscription mode: a Pro/Max login keeps talking to
 // Anthropic directly; PassControl is told about each call and asked before each
 // prompt and tool. It writes the USER settings (Claude Code ignores telemetry in a
-// project's file), never ANTHROPIC_BASE_URL, and needs no passport to write or undo.
+// project's file), never ANTHROPIC_BASE_URL. Previewing and undoing need no passport;
+// writing does since the review C-03 follow-up, because each hook and the logs export
+// carry the sidecar's key, derived from it.
 describe("configure claude-code --subscription", () => {
   const userSettings = (home: string) => join(home, ".claude", "settings.json");
 
@@ -152,7 +183,7 @@ describe("configure claude-code --subscription", () => {
   });
 
   it("writes the user settings with no base URL, and removes them again", async () => {
-    const home = freshHome();
+    const home = passportHome();
     const w = await run(["configure", "claude-code", "--subscription", "--write"], home);
     expect(w.code).toBe(0);
     const s = read(userSettings(home));
@@ -160,16 +191,33 @@ describe("configure claude-code --subscription", () => {
     expect(s.env.ANTHROPIC_BASE_URL).toBeUndefined();
     expect(s.hooks.PreToolUse[0].hooks[0]).toMatchObject({ url: "http://127.0.0.1:8788/_passcontrol/hook?t=600", timeout: 600 });
     expect(s.hooks.UserPromptSubmit[0].hooks[0]).toMatchObject({ url: "http://127.0.0.1:8788/_passcontrol/hook", timeout: 5 });
+    // Each hook and the logs export carry the sidecar's key (review C-03 follow-up).
+    for (const event of ["UserPromptSubmit", "PreToolUse", "PostToolBatch"]) {
+      expect(s.hooks[event][0].hooks[0].headers.Authorization).toMatch(/^Bearer pcs_[A-Za-z0-9_-]{43}$/);
+    }
+    expect(s.env.OTEL_EXPORTER_OTLP_LOGS_HEADERS).toMatch(/^Authorization=Bearer pcs_[A-Za-z0-9_-]{43}$/);
+    // The command output shows only the key's start.
+    expect(w.out).not.toMatch(/pcs_[A-Za-z0-9_-]{43}/);
     expect(s.statusLine.command).toMatch(/statusline --port 8788$/);
     expect(existsSync(projectSettings(home))).toBe(false);
 
+    // Undo works with the CLI config gone.
+    rmSync(join(home, ".config"), { recursive: true, force: true });
     const r = await run(["configure", "claude-code", "--subscription", "--remove"], home);
     expect(r.code).toBe(0);
     expect(read(userSettings(home))).toEqual({});
   });
 
-  it("refuses to take over the user's own log export, writing nothing", async () => {
+  it("--write without a passport refuses, says to log in, and writes nothing", async () => {
     const home = freshHome();
+    const r = await run(["configure", "claude-code", "--subscription", "--write"], home);
+    expect(r.code).not.toBe(0);
+    expect(`${r.out}${r.err}`).toMatch(/passcontrol login/);
+    expect(existsSync(userSettings(home))).toBe(false);
+  });
+
+  it("refuses to take over the user's own log export, writing nothing", async () => {
+    const home = passportHome();
     mkdirSync(join(home, ".claude"), { recursive: true });
     const mine = { env: { OTEL_LOGS_EXPORTER: "otlp", OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "https://otel.example.com/v1/logs" } };
     writeFileSync(userSettings(home), JSON.stringify(mine));
@@ -185,7 +233,7 @@ describe("configure claude-code --agent-note", () => {
   const userSettings = (home: string) => join(home, ".claude", "settings.json");
 
   it("API mode: adds the note-only prompt hook, and says what the note is", async () => {
-    const home = freshHome();
+    const home = passportHome();
     const r = await run(["configure", "claude-code", "--write", "--agent-note"], home);
     expect(r.code).toBe(0);
     expect(read(projectSettings(home)).hooks.UserPromptSubmit[0].hooks[0]).toMatchObject({
@@ -195,19 +243,19 @@ describe("configure claude-code --agent-note", () => {
   });
 
   it("API mode: off by default, and offered", async () => {
-    const home = freshHome();
+    const home = passportHome();
     const r = await run(["configure", "claude-code", "--write"], home);
     // The note stays opt-in; the tool hook is always there (owner, 2026-10-30, "2 yes").
     const hooks = read(projectSettings(home)).hooks;
     expect(hooks.UserPromptSubmit).toBeUndefined();
     expect(hooks.PreToolUse).toEqual([
-      { matcher: "*", hooks: [{ type: "http", url: "http://127.0.0.1:8788/_passcontrol/hook?t=600&mode=api", timeout: 600 }] },
+      { matcher: "*", hooks: [{ type: "http", url: "http://127.0.0.1:8788/_passcontrol/hook?t=600&mode=api", headers: { Authorization: expect.stringMatching(/^Bearer pcs_/) }, timeout: 600 }] },
     ]);
     expect(r.out).toContain("--agent-note");
   });
 
   it("subscription mode: puts the opt-in on the prompt hook", async () => {
-    const home = freshHome();
+    const home = passportHome();
     const r = await run(["configure", "claude-code", "--subscription", "--write", "--agent-note"], home);
     expect(r.code).toBe(0);
     expect(read(userSettings(home)).hooks.UserPromptSubmit[0].hooks[0].url).toBe("http://127.0.0.1:8788/_passcontrol/hook?note=1");

@@ -46,6 +46,7 @@ function writeCache(file, nowMs, line) {
 export async function statuslineText({
   port,
   host = "127.0.0.1",
+  sidecarKey = null,
   cacheFile,
   now = () => Date.now(),
   fetch: fetchImpl = globalThis.fetch,
@@ -61,7 +62,8 @@ export async function statuslineText({
     let response;
     try {
       response = await fetchImpl(`http://${host}:${port}/api/v1/self`, {
-        headers: { accept: "application/json" },
+        // The sidecar's key (review C-03): /api/v1/self is forwarded with the visa.
+        headers: { accept: "application/json", ...(sidecarKey ? { authorization: `Bearer ${sidecarKey}` } : {}) },
         signal: controller.signal,
       });
     } catch {
@@ -139,12 +141,13 @@ export function readStatusInput(stream = process.stdin, waitMs = STDIN_WAIT_MS) 
  * Hands the usage window to the sidecar, for `watch` and `/passcontrol`. Best effort:
  * a sidecar that is not running only means the boards do not show it.
  */
-export async function postUsageWindow({ port, host = "127.0.0.1", window, fetch: fetchImpl = globalThis.fetch, timeoutMs = 500 }) {
+export async function postUsageWindow({ port, host = "127.0.0.1", window, sidecarKey = null, fetch: fetchImpl = globalThis.fetch, timeoutMs = 500 }) {
   if (!window) return;
   try {
     const response = await fetchImpl(`http://${host}:${port}${WINDOW_PATH}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      // The sidecar's own paths ask for its key too (review C-03 follow-up).
+      headers: { "content-type": "application/json", ...(sidecarKey ? { authorization: `Bearer ${sidecarKey}` } : {}) },
       body: JSON.stringify(window),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -158,9 +161,9 @@ export async function postUsageWindow({ port, host = "127.0.0.1", window, fetch:
  * The status line with the usage window, when Claude Code sent one: the budget line
  * may come from the cache, the window is always this run's. Never throws.
  */
-export async function statuslineWithWindow({ input, port, host = "127.0.0.1", fetch: fetchImpl = globalThis.fetch, budgetLine }) {
+export async function statuslineWithWindow({ input, port, host = "127.0.0.1", sidecarKey = null, fetch: fetchImpl = globalThis.fetch, budgetLine }) {
   const window = readUsageWindow(input);
-  const [line] = await Promise.all([budgetLine(), postUsageWindow({ port, host, window, fetch: fetchImpl })]);
+  const [line] = await Promise.all([budgetLine(), postUsageWindow({ port, host, window, sidecarKey, fetch: fetchImpl })]);
   const text = usageWindowText(window, { short: true });
   return text ? `${line} · ${text}` : line;
 }
@@ -206,9 +209,12 @@ export function notInPathText(remoteHost) {
 const row = ([label, value]) => `  ${label.padEnd(11)} ${value}`;
 
 /** The usage window the sidecar holds, as short text, or "". Never throws. */
-async function readSidecarWindow({ host, port, fetch: fetchImpl, signal }) {
+async function readSidecarWindow({ host, port, sidecarKey = null, fetch: fetchImpl, signal }) {
   try {
-    const response = await fetchImpl(`http://${host}:${port}${WINDOW_PATH}`, { headers: { accept: "application/json" }, signal });
+    const response = await fetchImpl(`http://${host}:${port}${WINDOW_PATH}`, {
+      headers: { accept: "application/json", ...(sidecarKey ? { authorization: `Bearer ${sidecarKey}` } : {}) },
+      signal,
+    });
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
       return "";
@@ -228,6 +234,7 @@ async function readSidecarWindow({ host, port, fetch: fetchImpl, signal }) {
 export async function statusPanelText({
   port,
   host = "127.0.0.1",
+  sidecarKey = null,
   gateway,
   session = null,
   subscription = false,
@@ -236,6 +243,7 @@ export async function statusPanelText({
 }) {
   const dashboard = `${String(gateway ?? "").replace(/\/+$/, "")}/dashboard`;
   const headers = { accept: "application/json" };
+  if (sidecarKey) headers.authorization = `Bearer ${sidecarKey}`;
   if (typeof session === "string" && DECLARED_SESSION.test(session)) headers["x-claude-code-session-id"] = session;
 
   const controller = new AbortController();
@@ -293,7 +301,7 @@ export async function statusPanelText({
     if (typeof self?.budget !== "object" || self.budget === null) return "PassControl · unreadable answer";
     const agentId = typeof self.agent_id === "string" && UUID.test(self.agent_id) ? self.agent_id : null;
     const title = `PassControl${agentId ? ` · agent ${agentId.slice(0, 8)}` : ""}${limitReached(self) ? " · LIMIT REACHED" : paused(self) ? " · PAUSED" : ""}`;
-    const window = subscription ? await readSidecarWindow({ host, port, fetch: fetchImpl, signal: controller.signal }) : "";
+    const window = subscription ? await readSidecarWindow({ host, port, sidecarKey, fetch: fetchImpl, signal: controller.signal }) : "";
     return [
       title,
       "",

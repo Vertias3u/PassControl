@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const RAW_KEY = "sk-ant-api03-super-secret-key-material";
-const PASSPORT_ID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+// A real Ed25519 public key: 32 zero bytes is a small-order point and is refused.
+const PASSPORT_ID = "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw";
 const NOW = 1_785_520_000_000;
 
 const mocks = vi.hoisted(() => {

@@ -24,6 +24,8 @@ const h = vi.hoisted(() => ({
   agentsFilters: [] as [string, unknown][],
 }));
 
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/gate", () => ({ resolveCallMission: async () => ({ kind: "none" }) }));
 vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (promise: unknown) => promise }));
 vi.mock("@/lib/auth/visa", async (importOriginal) => ({

@@ -9,6 +9,7 @@
 // Codex app shares, is never opened. A file at that path without the marker is
 // someone else's and is not replaced without --force.
 import fs from "node:fs";
+import { sidecarKey } from "../sidecar-token.mjs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -29,6 +30,8 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 const BASE = "http://127.0.0.1:8788/api/v1/openai";
+// The sidecar's key (review C-03, cli/sidecar-token.mjs) for a fixed test passport.
+const KEY = sidecarKey(Buffer.alloc(32, 4).toString("base64url"));
 
 describe("where the profile goes", () => {
   it("is passcontrol.config.toml in ~/.codex, or in CODEX_HOME when set", () => {
@@ -39,33 +42,36 @@ describe("where the profile goes", () => {
 });
 
 describe("what it says", () => {
-  it("selects a provider at the sidecar's OpenAI address, over the Responses API, with no key", () => {
-    const toml = codexProfileToml({ baseUrl: BASE });
+  it("selects a provider at the sidecar's OpenAI address, over the Responses API, with the sidecar's key", () => {
+    const toml = codexProfileToml({ sidecarKey: KEY, baseUrl: BASE });
     expect(toml.startsWith(CODEX_PROFILE_MARKER)).toBe(true);
     expect(toml).toContain('model_provider = "passcontrol"');
     expect(toml).toContain("[model_providers.passcontrol]");
     expect(toml).toContain(`base_url = "${BASE}"`);
     expect(toml).toContain('wire_api = "responses"');
-    // No key and no key variable: Codex then sends no Authorization header at
-    // all (captured), and the sidecar adds the agent's credential.
-    expect(toml).not.toMatch(/env_key|bearer|api_key|requires_openai_auth/i);
+    // Review C-03: the sidecar's own key as the provider's bearer token (Codex 0.166
+    // sends it as Authorization: Bearer, captured 2026-11-15). Never an OpenAI key,
+    // never an env variable, never OpenAI's own auth.
+    expect(toml).toContain(`experimental_bearer_token = "${KEY}"`);
+    expect(toml).not.toMatch(/env_key|api_key|requires_openai_auth/i);
+    expect(() => codexProfileToml({ baseUrl: BASE })).toThrow(/passcontrol login/);
     expect(toml).toContain("codex --profile passcontrol");
   });
 
   it("leaves the model to Codex's own config unless one is named", () => {
-    expect(codexProfileToml({ baseUrl: BASE })).not.toMatch(/^model\s*=/m);
-    expect(codexProfileToml({ baseUrl: BASE, model: "gpt-5-mini" })).toMatch(/^model = "gpt-5-mini"$/m);
+    expect(codexProfileToml({ sidecarKey: KEY, baseUrl: BASE })).not.toMatch(/^model\s*=/m);
+    expect(codexProfileToml({ sidecarKey: KEY, baseUrl: BASE, model: "gpt-5-mini" })).toMatch(/^model = "gpt-5-mini"$/m);
   });
 
   it("writes values as TOML strings, so a quote cannot end one", () => {
-    const toml = codexProfileToml({ baseUrl: BASE, model: 'x"\nmodel_provider = "openai' });
+    const toml = codexProfileToml({ sidecarKey: KEY, baseUrl: BASE, model: 'x"\nmodel_provider = "openai' });
     expect(toml).toContain('model = "x\\"\\nmodel_provider = \\"openai"');
     expect(toml.match(/^model_provider = /gm)).toHaveLength(1);
   });
 
   it("refuses an address that is not http(s)", () => {
-    expect(() => codexProfileToml({ baseUrl: "file:///etc/passwd" })).toThrow(/http/);
-    expect(() => codexProfileToml({ baseUrl: "not a url" })).toThrow(/http/);
+    expect(() => codexProfileToml({ sidecarKey: KEY, baseUrl: "file:///etc/passwd" })).toThrow(/http/);
+    expect(() => codexProfileToml({ sidecarKey: KEY, baseUrl: "not a url" })).toThrow(/http/);
   });
 });
 
@@ -77,30 +83,30 @@ describe("writing", () => {
     fs.writeFileSync(config, 'model = "gpt-6-sol"\n[desktop]\nappearanceTheme = "dark"\n');
     const before = fs.readFileSync(config);
     const target = path.join(home, "passcontrol.config.toml");
-    expect(writeCodexProfile({ target, baseUrl: BASE })).toEqual({ changed: true, backupPath: null });
-    expect(fs.readFileSync(target, "utf8")).toBe(codexProfileToml({ baseUrl: BASE }));
+    expect(writeCodexProfile({ target, sidecarKey: KEY, baseUrl: BASE })).toEqual({ changed: true, backupPath: null });
+    expect(fs.readFileSync(target, "utf8")).toBe(codexProfileToml({ sidecarKey: KEY, baseUrl: BASE }));
     expect(fs.statSync(target).mode & 0o777).toBe(0o600);
     expect(fs.readFileSync(config)).toEqual(before);
   });
 
   it("creates CODEX_HOME when Codex has never run", () => {
     const target = path.join(dir, "fresh", "passcontrol.config.toml");
-    writeCodexProfile({ target, baseUrl: BASE });
+    writeCodexProfile({ target, sidecarKey: KEY, baseUrl: BASE });
     expect(fs.existsSync(target)).toBe(true);
   });
 
   it("is a no-op when the same profile is already there", () => {
     const target = path.join(dir, "passcontrol.config.toml");
-    writeCodexProfile({ target, baseUrl: BASE });
-    expect(writeCodexProfile({ target, baseUrl: BASE })).toEqual({ changed: false, backupPath: null });
+    writeCodexProfile({ target, sidecarKey: KEY, baseUrl: BASE });
+    expect(writeCodexProfile({ target, sidecarKey: KEY, baseUrl: BASE })).toEqual({ changed: false, backupPath: null });
     expect(fs.existsSync(`${target}.bak`)).toBe(false);
   });
 
   it("rewrites its own profile when the address changes, keeping a backup", () => {
     const target = path.join(dir, "passcontrol.config.toml");
-    writeCodexProfile({ target, baseUrl: BASE });
+    writeCodexProfile({ target, sidecarKey: KEY, baseUrl: BASE });
     const other = "http://127.0.0.1:9000/api/v1/openai";
-    expect(writeCodexProfile({ target, baseUrl: other })).toEqual({ changed: true, backupPath: `${target}.bak` });
+    expect(writeCodexProfile({ target, sidecarKey: KEY, baseUrl: other })).toEqual({ changed: true, backupPath: `${target}.bak` });
     expect(fs.readFileSync(target, "utf8")).toContain(other);
     expect(fs.readFileSync(`${target}.bak`, "utf8")).toContain(BASE);
   });
@@ -108,9 +114,9 @@ describe("writing", () => {
   it("does not replace a profile someone else wrote, unless forced", () => {
     const target = path.join(dir, "passcontrol.config.toml");
     fs.writeFileSync(target, 'model_provider = "mine"\n');
-    expect(() => writeCodexProfile({ target, baseUrl: BASE })).toThrow(/--force/);
+    expect(() => writeCodexProfile({ target, sidecarKey: KEY, baseUrl: BASE })).toThrow(/--force/);
     expect(fs.readFileSync(target, "utf8")).toBe('model_provider = "mine"\n');
-    expect(writeCodexProfile({ target, baseUrl: BASE, force: true }).backupPath).toBe(`${target}.bak`);
+    expect(writeCodexProfile({ target, sidecarKey: KEY, baseUrl: BASE, force: true }).backupPath).toBe(`${target}.bak`);
     expect(fs.readFileSync(`${target}.bak`, "utf8")).toBe('model_provider = "mine"\n');
   });
 });
@@ -118,7 +124,7 @@ describe("writing", () => {
 describe("removing", () => {
   it("removes the profile it wrote", () => {
     const target = path.join(dir, "passcontrol.config.toml");
-    writeCodexProfile({ target, baseUrl: BASE });
+    writeCodexProfile({ target, sidecarKey: KEY, baseUrl: BASE });
     expect(removeCodexProfile({ target })).toEqual({ changed: true });
     expect(fs.existsSync(target)).toBe(false);
   });

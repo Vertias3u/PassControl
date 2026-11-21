@@ -92,7 +92,7 @@ describe("credential-minting Server Actions clear the strict MFA gate", () => {
     expect(functionBody("requireCredentialMfa")).toMatch(/mfaAuthorizedUser\(/);
   });
 
-  it("keeps revocation and the kill switch reachable without a step-up", () => {
+  it("keeps revocation, arming the kill switch and suspending reachable without a step-up", () => {
     // Deliberate asymmetry: making it HARDER to stop a leaking credential than to
     // create one would be the wrong trade. These stay on requireUser().
     //
@@ -100,8 +100,18 @@ describe("credential-minting Server Actions clear the strict MFA gate", () => {
     // it would also forbid the gate on revokeDirectAgentKey, which IS in MUST_GATE.
     // The rule that reconciles them — every credential keeps at least one stop
     // reachable without a step-up — and the evidence for it are directly below.
-    expect(functionBody("setMasterKill")).not.toMatch(/requireCredentialMfa\(/);
-    expect(functionBody("setAgentSuspended")).not.toMatch(/requireCredentialMfa\(/);
+    //
+    // Review C-02 (2026-11-15) narrowed this to the STOP direction. Arming the kill
+    // switch and suspending stay ungated; disarming and resuming take a stop OFF, and
+    // those are behind the step-up, or a password alone could undo every stop the owner
+    // set. The rule above still holds: the stop itself is never behind a step-up.
+    // The gate must sit inside the lift branch and nowhere else in the body.
+    const kill = functionBody("setMasterKill");
+    expect(kill).toMatch(/if \(!on\) await requireCredentialMfa\(/);
+    expect(kill.match(/requireCredentialMfa\(/g)).toHaveLength(1);
+    const suspend = functionBody("setAgentSuspended");
+    expect(suspend).toMatch(/if \(!suspended\) await requireCredentialMfa\(/);
+    expect(suspend.match(/requireCredentialMfa\(/g)).toHaveLength(1);
     expect(functionBody("revokeApiKey")).not.toMatch(/requireCredentialMfa\(/);
   });
 

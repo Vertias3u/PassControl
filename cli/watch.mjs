@@ -56,7 +56,7 @@ const MIN_WIDTH = 40;
  * unreachable, closed, not-feed (an older sidecar, or something else on the port),
  * off (bound off loopback), refused, busy.
  */
-export function openFeed({ port, host = "127.0.0.1", onEvent, onError = () => {} }) {
+export function openFeed({ port, host = "127.0.0.1", sidecarKey = null, onEvent, onError = () => {} }) {
   let done = false;
   let greeted = false;
   let buffer = "";
@@ -67,7 +67,9 @@ export function openFeed({ port, host = "127.0.0.1", onEvent, onError = () => {}
     req?.destroy();
     onError(error);
   };
-  req = http.get({ host, port, path: WATCH_PATH, headers: { accept: "application/x-ndjson" }, agent: false }, (res) => {
+  // The feed shows what the agent did, so the sidecar asks for its key (review C-03 follow-up).
+  const headers = { accept: "application/x-ndjson", ...(sidecarKey ? { authorization: `Bearer ${sidecarKey}` } : {}) };
+  req = http.get({ host, port, path: WATCH_PATH, headers, agent: false }, (res) => {
     res.setEncoding("utf8");
     const type = String(res.headers["content-type"] ?? "");
     if (res.statusCode !== 200 || !type.startsWith("application/x-ndjson")) {
@@ -82,7 +84,7 @@ export function openFeed({ port, host = "127.0.0.1", onEvent, onError = () => {}
         } catch {
           // Not ours.
         }
-        const kind = { watch_off: "off", watch_refused: "refused", watch_busy: "busy" }[code] ?? "not-feed";
+        const kind = { watch_off: "off", watch_refused: "refused", watch_busy: "busy", sidecar_caller_unauthenticated: "keyless" }[code] ?? "not-feed";
         fail({ kind, status: res.statusCode });
       };
       res.on("end", settle);
@@ -473,13 +475,15 @@ export function plainLine(row, { run, formatTime = localTime }) {
 // ── The budget, held in memory ───────────────────────────────────────────────
 
 /** GET /api/v1/self through the sidecar, which holds a warm visa. Never throws, never writes. */
-export async function fetchBudget({ port, host = "127.0.0.1", fetch: fetchImpl = globalThis.fetch, now = Date.now, timeoutMs = BUDGET_TIMEOUT_MS }) {
+export async function fetchBudget({ port, host = "127.0.0.1", sidecarKey = null, fetch: fetchImpl = globalThis.fetch, now = Date.now, timeoutMs = BUDGET_TIMEOUT_MS }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     let response;
     try {
-      response = await fetchImpl(`http://${host}:${port}/api/v1/self`, { headers: { accept: "application/json" }, signal: controller.signal });
+      // The sidecar's key (review C-03): /api/v1/self is forwarded with the visa like any call.
+      const headers = { accept: "application/json", ...(sidecarKey ? { authorization: `Bearer ${sidecarKey}` } : {}) };
+      response = await fetchImpl(`http://${host}:${port}/api/v1/self`, { headers, signal: controller.signal });
     } catch {
       return { kind: "unavailable", reason: controller.signal.aborted ? "no answer from the sidecar" : "sidecar not running" };
     }
@@ -514,6 +518,8 @@ function downMessage(error, port) {
       return "the sidecar refused the feed request";
     case "busy":
       return "too many boards are already watching this sidecar";
+    case "keyless":
+      return "the sidecar asked for its key · it runs with a passport this machine's config does not have (passcontrol login)";
     default:
       return `whatever answers on :${port} serves no watch feed · a sidecar started before \`watch\` existed needs a restart`;
   }
@@ -526,6 +532,7 @@ function downMessage(error, port) {
 export function runWatch({
   port,
   host = "127.0.0.1",
+  sidecarKey = null,
   out = process.stdout,
   input = process.stdin,
   signals = process,
@@ -590,6 +597,7 @@ export function runWatch({
     feed = openFeed({
       port,
       host,
+      sidecarKey,
       onEvent: (event) => {
         if (event.type === "hello") attempt = 0;
         applyEvent(state, event);
@@ -606,7 +614,7 @@ export function runWatch({
 
   async function pollBudget() {
     if (finished) return;
-    state.budget = await fetchBudget({ port, host, fetch: fetchImpl });
+    state.budget = await fetchBudget({ port, host, sidecarKey, fetch: fetchImpl });
     schedule();
     if (!finished) later(pollBudget, budgetEveryMs);
   }

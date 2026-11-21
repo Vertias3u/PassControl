@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // @ts-expect-error plain ESM CLI module
+import { sidecarKey } from "../cli/sidecar-token.mjs";
+// @ts-expect-error plain ESM CLI module
 import { createSidecar } from "../cli/sidecar.mjs";
 // @ts-expect-error plain ESM CLI module
 import { defaultJournalDir, openJournal } from "../cli/journal.mjs";
@@ -81,7 +83,7 @@ async function sidecar(journal: unknown, runId = "run-test-1") {
 const post = (origin: string, headers: Record<string, string> = {}) =>
   fetch(`${origin}/api/v1/anthropic/v1/messages`, {
     method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": "ignored", ...headers },
+    headers: { "content-type": "application/json", "x-api-key": "ignored", authorization: `Bearer ${sidecarKey(SEED)}`, ...headers },
     body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "a secret prompt" }] }),
   }).then(async (r) => ({ status: r.status, text: await r.text() }));
 

@@ -13,7 +13,10 @@ type FailOpenScope =
   | "lockout"
   | "policy_read"
   | "passport_source_observation"
-  | "passport_key_storage_declaration";
+  | "passport_key_storage_declaration"
+  // 1.9.0, the runaway-agent package: accident guards, never the hard limit.
+  | "loop_breaker"
+  | "session_caps";
 
 export interface ObservabilityContext {
   route: string;

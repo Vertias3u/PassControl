@@ -14,10 +14,11 @@ import { SiteLogo, SITE_BRAND_LABEL } from "@/components/SiteBrand";
 // hardcoded probe list matched in middleware, because a person typing /dashbord
 // must never be told they look like an attacker.
 //
-// Note on reach: middleware currently redirects anonymous visitors on unmatched
-// paths to /login before this renders. It is reached today by authenticated
-// users, by misses under the public prefixes (/legal/…, /beta/…, /u/…), and by
-// bogus /api/* paths, which the matcher excludes on purpose.
+// Note on reach: signed-out visitors on an address with no page reach this too.
+// Middleware rewrites them here (signedOutAnswer in middleware.ts) instead of sending
+// them to /login; only /dashboard/… still redirects to sign in. It is also reached by
+// authenticated users, by misses under the public prefixes (/legal/…, /beta/…, /u/…),
+// and by bogus /api/* paths, which the matcher excludes on purpose.
 //
 // No external assets, no client JS, no version string.
 export const metadata: Metadata = {

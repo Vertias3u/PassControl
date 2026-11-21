@@ -146,7 +146,12 @@ export function createStopGate({
       if (answer.state === "open" && answer.self) latest = { self: answer.self, at: now() };
       if (answer.state === "open") {
         injectionEntry = { value: answer.injection, at: now() };
-        rules = { read: answer.toolRules && typeof answer.toolRules === "object" ? answer.toolRules : { state: "none" }, at: now() };
+        rules = {
+          read: answer.toolRules && typeof answer.toolRules === "object" ? answer.toolRules : { state: "none" },
+          at: now(),
+          // Idea 11: the mission's local-tool section, when the agent is on one.
+          ...(answer.mission && typeof answer.mission === "object" ? { mission: answer.mission } : {}),
+        };
       }
       if (["open", "stopped"].includes(answer.state) || (session !== null && answer.state === "session_stopped")) {
         record(session, answer.state);
@@ -284,6 +289,9 @@ export async function selfAnswerState(response) {
     const toolRules = body && typeof body === "object" ? body.tool_rules : undefined;
     const answer = toolRules && typeof toolRules === "object" ? { state: "open", toolRules } : { state: "open" };
     if (body && typeof body === "object" && Object.hasOwn(body, "injection")) answer.injection = body.injection;
+    if (body && typeof body === "object" && body.mission && typeof body.mission === "object") answer.mission = body.mission;
+    // Idea 13: the memory hold (absent when the owner has memory custody off).
+    if (body && typeof body === "object" && Object.hasOwn(body, "memory")) answer.memory = body.memory;
     // The limits and the soft pause, for the agent's note; nothing else from the answer is kept.
     if (body && typeof body === "object" && body.budget && typeof body.budget === "object") {
       const kept = (v) => (v && typeof v === "object" ? v : null);

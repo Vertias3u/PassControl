@@ -71,6 +71,8 @@ function stubGateway(
     receipts?: "on" | "off";
     jws?: string;
     createRefusal?: { status: number; body: unknown };
+    /** "refuse": the gateway cannot lower the key (an older gateway, or a failure). */
+    downgrade?: "refuse";
   } = {}
 ) {
   const seen: Seen[] = [];
@@ -114,6 +116,14 @@ function stubGateway(
       }
       if (/^\/api\/control\/v1\/agents\/[^/]+\/rotate$/u.test(req.url ?? "")) {
         return send(200, { data: { previous_valid_until: "2026-09-01T00:00:00.000Z" } });
+      }
+      // Review C-01: login lowers its key to read before saving it.
+      if (req.url === "/api/control/v1/keys/self/downgrade" && req.method === "POST") {
+        if (opts.downgrade === "refuse") return send(404, { error: { code: "not_found" } });
+        return send(200, { data: { scope: "read", prefix: "pc_kkkkkkkk" } });
+      }
+      if (req.url === "/api/control/v1/keys/self/revoke" && req.method === "POST") {
+        return send(200, { data: { revoked_at: "2026-11-15T00:00:00.000Z", prefix: "pc_kkkkkkkk" } });
       }
       // ── the proof chain ────────────────────────────────────────────────────
       if (req.url === "/api/auth/challenge") {
@@ -240,6 +250,26 @@ async function withGateway<T>(
 }
 
 describe("passcontrol login writes a working config", () => {
+  it("lowers its key to read BEFORE saving it, after the agent is set up (review C-01)", async () => {
+    const stub = stubGateway();
+    await withGateway(stub, (port) => runLogin(port));
+    const urls = stub.seen.map((r) => `${r.method} ${r.url}`);
+    const created = urls.indexOf("POST /api/control/v1/agents");
+    const lowered = urls.indexOf("POST /api/control/v1/keys/self/downgrade");
+    expect(created).toBeGreaterThan(-1);
+    expect(lowered).toBeGreaterThan(created);
+    expect(fs.readFileSync(configFile, "utf8")).toMatch(/^PASSCONTROL_API_KEY=pc_k+$/mu);
+  });
+
+  it("saves no key and revokes it when the key cannot be lowered (review C-01)", async () => {
+    const stub = stubGateway({ downgrade: "refuse" });
+    await withGateway(stub, (port) => runLogin(port));
+    const written = fs.readFileSync(configFile, "utf8");
+    expect(written).toMatch(/^PASSPORT_SECRET=[A-Za-z0-9_-]{43}$/mu);
+    expect(written).not.toMatch(/pc_k{43}/u);
+    expect(stub.seen.map((r) => `${r.method} ${r.url}`)).toContain("POST /api/control/v1/keys/self/revoke");
+  });
+
   it("polls, redeems, and writes every credential key", async () => {
     const stub = stubGateway();
     const { result, opened } = await withGateway(stub, (port) => runLogin(port).then((r) => r));

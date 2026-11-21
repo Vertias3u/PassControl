@@ -46,6 +46,8 @@ const {
 // passport apart from a tenant that holds a demo scope. That module is
 // `server-only`, which Next enforces at build time and vitest cannot resolve
 // at all — same stub tests/site-demo-routes.test.ts already uses.
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/gate", () => ({ resolveCallMission: async () => ({ kind: "none" }) }));
 vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (p: unknown) => p }));
 vi.mock("@/lib/auth/visa", () => ({
@@ -112,6 +114,31 @@ vi.mock("@/lib/state/holds", () => {
   };
 });
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => serviceClientMock() }));
+// Review 2026-11-21, finding 8: the demo keeps the billed path's rules. The final gate as a
+// backstop (stop-checks-route.test.ts has the billed twin) and the period-snapshot question.
+const demoGate = vi.hoisted(() => ({ deniedBy: null as null | string }));
+vi.mock("@/lib/gate", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/gate")>();
+  return {
+    ...real,
+    evaluateGate: (input: Parameters<typeof real.evaluateGate>[0]) => {
+      const out = real.evaluateGate(input);
+      if (demoGate.deniedBy && input.budget?.ok === true && !out.deniedBy) {
+        return { ...out, verdict: "deny" as const, deniedBy: demoGate.deniedBy as NonNullable<typeof out.deniedBy> };
+      }
+      return out;
+    },
+  };
+});
+const hasPeriodSnapshotMock = vi.hoisted(() => vi.fn(async (_agentId: unknown) => false));
+vi.mock("@/lib/state/period-snapshot", () => ({ hasPeriodSnapshot: (agentId: unknown) => hasPeriodSnapshotMock(agentId) }));
+const loopCheckMock = vi.hoisted(() => vi.fn());
+const sessionCheckMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/state/runaway", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/state/runaway")>()),
+  checkLoop: (...a: unknown[]) => loopCheckMock(...a),
+  checkSessionCaps: (...a: unknown[]) => sessionCheckMock(...a),
+}));
 vi.mock("@/lib/crypto/aesgcm", () => ({ seal: async () => "sealed", open: async (v: string) => v }));
 vi.mock("@/lib/log", () => ({
   writeLog: (...args: unknown[]) => writeLogMock(...args),
@@ -323,5 +350,109 @@ describe("keyless demo provider", () => {
       params: Promise.resolve({ provider: "demo", path: ["chat", "completions"] }),
     });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("the demo keeps the billed path's rules (review 2026-11-21, finding 8)", () => {
+  it("re-reads the stops before it answers: a kill armed during the request refuses it", async () => {
+    readKillStateMock
+      .mockResolvedValueOnce({ platformKill: false, userKill: false, denylist: [] })
+      .mockResolvedValue({ platformKill: false, userKill: true, denylist: [] });
+    const res = await callDemo();
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "blocked_suspended" });
+    expect(settleHoldMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "not_dispatched" }));
+    expect(settleHoldMock).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: "complete" }));
+  });
+
+  it("a suspension armed during the request refuses it too", async () => {
+    isSuspendedMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    const res = await callDemo();
+    expect(res.status).toBe(403);
+    expect(settleHoldMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "not_dispatched" }));
+  });
+
+  it.each(["kill", "suspend", "scope", "endpoint", "policy"])(
+    "refuses and releases the hold when only the final gate says %s", async (step) => {
+      demoGate.deniedBy = step;
+      try {
+        const res = await callDemo();
+        expect(res.status).toBe(403);
+        expect(settleHoldMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "not_dispatched" }));
+      } finally {
+        demoGate.deniedBy = null;
+      }
+    }
+  );
+
+  it("an unknown limit consults the last enforced one when Redis holds it, as the billed path does", async () => {
+    hasPeriodSnapshotMock.mockResolvedValueOnce(true);
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null, r: "off", be: null, bs: false, bk: true, bt: null, bc: null }));
+    await callDemo();
+    expect(openHoldMock.mock.calls.at(-1)?.[0]).toMatchObject({ periodLimit: { mode: "unknown" } });
+  });
+
+  it("and forwards unbudgeted when there is none", async () => {
+    hasPeriodSnapshotMock.mockResolvedValueOnce(false);
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null, r: "off", be: null, bs: false, bk: true, bt: null, bc: null }));
+    const res = await callDemo();
+    expect(res.status).toBe(200);
+    const args = openHoldMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(args.periodLimit).toBeUndefined();
+    expect(args.budgetState).toBeUndefined();
+  });
+});
+
+// 1.9.0: the demo shows the real rules, so an owner's loop breaker pauses a demo agent too,
+// before any hold is opened, and costs nothing for an agent that does not set it.
+describe("the demo and the loop breaker (1.9.0)", () => {
+  it("never asks Redis when the policy does not set it", async () => {
+    loopCheckMock.mockReset();
+    const res = await callDemo();
+    expect(res.status).toBe(200);
+    expect(loopCheckMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a paused demo agent with 429 blocked_loop before any hold", async () => {
+    loopCheckMock.mockReset();
+    loopCheckMock.mockResolvedValue({ state: "paused", retryAfterS: 600 });
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { loop_breaker: { repeats: 4 } }, s: null }));
+    const res = await callDemo();
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("600");
+    expect((await res.json()).error).toBe("blocked_loop");
+    expect(loopCheckMock).toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/^[0-9a-f]{64}$/), 4);
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+});
+
+// 1.9.0: per-session caps on the demo too, for a run the demo's adapter declares.
+describe("the demo and per-session caps (1.9.0)", () => {
+  const callRun = () =>
+    POST(demoRequest(undefined, { "x-passcontrol-run": "run-1" }), {
+      params: Promise.resolve({ provider: "demo", path: ["chat", "completions"] }),
+    });
+
+  it("refuses a run past its call cap with 403 blocked_session_cap, before any hold", async () => {
+    sessionCheckMock.mockReset();
+    sessionCheckMock.mockResolvedValue({ ok: false, reason: "calls" });
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { session_caps: { calls: 2 } }, s: null }));
+    const res = await callRun();
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("blocked_session_cap");
+    expect(sessionCheckMock).toHaveBeenCalledWith(expect.any(String), "run-1", expect.objectContaining({ calls: 2 }));
+    expect(openHoldMock).not.toHaveBeenCalled();
+  });
+
+  it("joins a money cap to the demo's hold and answers its refusal as the session's", async () => {
+    sessionCheckMock.mockReset();
+    sessionCheckMock.mockResolvedValue({ ok: true, calls: 1 });
+    getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: { session_caps: { cents: 5 } }, s: null }));
+    openHoldMock.mockResolvedValue({ ok: false, reason: "delegation", link: 1, reserved: 0, reservedMicrocents: 0 });
+    const res = await callRun();
+    expect(res.status).toBe(402);
+    expect((await res.json()).error).toBe("blocked_session_cap");
+    const hold = openHoldMock.mock.calls[0]![0] as { delegation: { links: { jti: string; capMicrocents: number }[] } };
+    expect(hold.delegation.links).toEqual([{ jti: expect.stringMatching(/^ses_[0-9a-f]{40}$/), capMicrocents: 5_000_000 }]);
   });
 });

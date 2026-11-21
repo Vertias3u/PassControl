@@ -1,6 +1,7 @@
 // Arming the per-service kill from the dashboard. A stop, so it needs only a
 // signed-in operator, never a step-up (every credential keeps a stop reachable
-// without one, as the master kill does). Every arm and disarm is audited and
+// without one, as the master kill does). Disarming is a lift and needs the second
+// factor where one is enrolled (review C-02). Every arm and disarm is audited and
 // alerted, and the answer is what Redis OBSERVED afterwards, not what was asked.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,6 +22,8 @@ vi.mock("@/lib/audit", () => ({ recordAdminAction: (...a: unknown[]) => h.audit(
 vi.mock("@/lib/alert", () => ({ dispatchSecurityAlert: (...a: unknown[]) => h.alert(...a) }));
 vi.mock("@/lib/seclog", () => ({ logSecurityEvent: (...a: unknown[]) => h.seclog(...a) }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => ({}) }));
+const cascade = vi.hoisted(() => ({ schedule: vi.fn() }));
+vi.mock("@/lib/standing/cascade", () => ({ scheduleCascade: (s: unknown) => cascade.schedule(s) }));
 vi.mock("@/lib/state/killswitch", () => ({
   setServiceKillDurably: (...a: unknown[]) => h.arm(...a),
   observeServiceKill: (...a: unknown[]) => h.observe(...a),
@@ -64,6 +67,25 @@ describe("setServiceKill", () => {
     expect(h.arm).toHaveBeenCalled();
   });
 
+  // Review C-02 follow-up (found by the commit's security review): taking the stop off
+  // is a lift, like turning the master kill off, so it needs the second factor.
+  it("disarming on a password-only session is refused before anything is written", async () => {
+    const result = await setServiceKill("github", false);
+    expect(result).toEqual({ error: expect.stringMatching(/^Complete two-factor verification/u) });
+    expect(h.arm).not.toHaveBeenCalled();
+    expect(h.audit).not.toHaveBeenCalled();
+  });
+
+  it("disarming fully signed in goes through", async () => {
+    h.gate.mockResolvedValue({ ok: true, user: { id: "tenant-a" } });
+    h.observe.mockResolvedValue(false);
+    expect(await setServiceKill("github", false)).toMatchObject({ requested: false, armed: false, confirmed: true });
+    expect(h.arm).toHaveBeenCalledWith("tenant-a", "github", false);
+    // The gate's user must be the signed-in user.
+    h.gate.mockResolvedValue({ ok: true, user: { id: "tenant-b" } });
+    expect(await setServiceKill("github", false)).toHaveProperty("error");
+  });
+
   it("says it could not confirm when the read-back fails or disagrees", async () => {
     h.observe.mockResolvedValue(null);
     expect(await setServiceKill("github", true)).toEqual({ requested: true, armed: null, confirmed: false, durable: true });
@@ -90,5 +112,17 @@ describe("setServiceKill", () => {
     h.observe.mockResolvedValue(false);
     expect(await observeServiceKillAction("github", false)).toEqual({ requested: false, armed: false, confirmed: true });
     expect(h.arm).not.toHaveBeenCalled();
+  });
+});
+
+// Idea 14, slice 2: putting a service stop on starts the cascade for that service; lifting it never does.
+describe("the service stop and the cascade", () => {
+  it("schedules the cascade for that service on stop only", async () => {
+    cascade.schedule.mockClear();
+    await setServiceKill("github", true);
+    expect(cascade.schedule).toHaveBeenCalledWith(expect.objectContaining({ trigger: "service", service: "github" }));
+    cascade.schedule.mockClear();
+    await setServiceKill("github", false);
+    expect(cascade.schedule).not.toHaveBeenCalled();
   });
 });

@@ -286,7 +286,7 @@ beforeEach(() => {
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   setCachedAgentPolicyMock.mockResolvedValue(undefined);
-  readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
+  readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   writeLogMock.mockResolvedValue(undefined);
   mirrorSpendMock.mockResolvedValue(undefined);
@@ -1628,6 +1628,22 @@ describe("a price-raising request option under a dollar limit", () => {
     expect(await res.json()).toEqual({ error: "unpriced_option", field: "service_tier" });
     expect(openHoldMock).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a 12-hour OpenAI cache write only when a dollar limit applies", async () => {
+    const claims = { ...baseClaims, scope: [{ provider: "openai", models: ["gpt-*"] }] };
+    const body = { prompt_cache_options: { ttl: "12h" } };
+    verifyVisaMock.mockResolvedValue({ ...claims, bc: 500 });
+
+    const res = await send(body);
+    expect(res.status).toBe(402);
+    expect(await res.json()).toEqual({ error: "unpriced_option", field: "prompt_cache_options" });
+    expect(openHoldMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    verifyVisaMock.mockResolvedValue(claims);
+    expect((await send(body)).status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("allows it without a dollar limit, and allows flex under one", async () => {

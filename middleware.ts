@@ -47,6 +47,32 @@ function isPublic(pathname: string): boolean {
 }
 
 /**
+ * The page families that need a session. A signed-out visitor to one of these is sent
+ * to /login, as before. Every other path that is not public has no page at all, and a
+ * signed-out visitor gets the 404 instead of a sign-in form that implied the address
+ * was real. tests/middleware-signed-out-404.test.ts walks the app directory and fails
+ * if a route is neither public nor under one of these prefixes.
+ *
+ * Fail-closed in both directions: a gated page someone forgets to list here answers
+ * signed-out visitors with the 404 (it is never rendered to them), and anything under
+ * /dashboard, real or not, still answers with the same redirect, so the 404 says
+ * nothing about which dashboard routes exist.
+ */
+const GATED_PREFIXES = ["/dashboard"];
+
+/** Where a signed-out request for a page that does not exist is rewritten: a route that only ever answers 404 (app/no-such-page). */
+export const SIGNED_OUT_NOT_FOUND_PATH = "/no-such-page";
+
+export type SignedOutAnswer = "public" | "login" | "not-found";
+
+/** What a signed-out request for this path gets. Exported for the route-walk test. */
+export function signedOutAnswer(pathname: string): SignedOutAnswer {
+  if (isPublic(pathname)) return "public";
+  if (GATED_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"))) return "login";
+  return "not-found";
+}
+
+/**
  * Paths that are definitionally not a page here, answered before the auth gate.
  *
  * WHY THIS IS A COST FIX AND NOT A SECURITY FEATURE. Nothing below was ever
@@ -108,6 +134,8 @@ export function isProbePath(pathname: string): boolean {
 }
 
 
+
+
 export async function middleware(request: NextRequest) {
 
   // One nonce per request. Setting the policy on the REQUEST headers as well as
@@ -150,6 +178,7 @@ export async function middleware(request: NextRequest) {
   if (isProbePath(request.nextUrl.pathname)) {
     return withCsp(new NextResponse(null, { status: 404 }));
   }
+
 
   // ── /@handle, before the auth gate ────────────────────────────────────────
   //
@@ -208,8 +237,21 @@ export async function middleware(request: NextRequest) {
 
   const pathname = request.nextUrl.pathname;
 
-  if (!user && !isPublic(pathname)) {
-    return withCsp(NextResponse.redirect(new URL("/login", request.url)));
+  if (!user) {
+    const answer = signedOutAnswer(pathname);
+    if (answer === "login") {
+      return withCsp(NextResponse.redirect(new URL("/login", request.url)));
+    }
+    if (answer === "not-found") {
+      // A rewrite onto app/no-such-page, which only calls notFound(), so Next renders
+      // app/not-found.tsx with a 404 status and this request's nonce. The requested
+      // address itself is never routed: a page at this path that was missing from
+      // GATED_PREFIXES cannot render here.
+      const url = request.nextUrl.clone();
+      url.pathname = SIGNED_OUT_NOT_FOUND_PATH;
+      url.search = "";
+      return withCsp(NextResponse.rewrite(url, { request: { headers: forwardedHeaders() } }));
+    }
   }
   if (user && (pathname === "/login" || pathname === "/signup")) {
     return withCsp(NextResponse.redirect(new URL("/dashboard", request.url)));

@@ -524,18 +524,45 @@ describe("GET /api/v1/self, the injection guard", () => {
     inj.readTaint.mockResolvedValue(null);
   });
 
-  it("monitor mode: no injection field, and the taint is never read", async () => {
+  it("monitor mode without a tripwire hold: no injection field", async () => {
     withPolicy({ injection_guard: { mode: "monitor" } });
     const body = await (await get()).json();
     expect(body).not.toHaveProperty("injection");
     expect(JSON.stringify(body)).not.toMatch(/injection|taint|monitor/);
-    expect(inj.readTaint).not.toHaveBeenCalled();
+    expect(inj.readTaint).toHaveBeenCalledWith(AGENT, expect.any(Number));
   });
 
   it("off: no injection field", async () => {
     withPolicy(null);
     expect(await (await get()).json()).not.toHaveProperty("injection");
-    expect(inj.readTaint).not.toHaveBeenCalled();
+    expect(inj.readTaint).toHaveBeenCalledWith(AGENT, expect.any(Number));
+  });
+
+  describe.each([null, {}, { injection_guard: { mode: "monitor" } }])("tripwire holds with scanner policy %j", (policy) => {
+    it("reports a live tripwire hold so the sidecar asks about risky tools", async () => {
+      withPolicy(policy);
+      inj.readTaint.mockResolvedValue({ since: T, until: T + 1_800_000, families: [], surface: "proxy", tripwire: true });
+      const res = await get();
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.injection).toEqual({ mode: "hold", readable: true, tainted_until: new Date(T + 1_800_000).toISOString() });
+      expect(JSON.stringify(body)).not.toMatch(/tripwire|families|proxy|since/);
+      expect(inj.readTaint).toHaveBeenCalledWith(AGENT, expect.any(Number));
+    });
+
+    it("keeps injection-only taint private", async () => {
+      withPolicy(policy);
+      inj.readTaint.mockResolvedValue({ since: T, until: T + 1_800_000, families: ["instruction_override"], surface: "proxy" });
+      expect(await (await get()).json()).not.toHaveProperty("injection");
+    });
+
+    it("keeps an unreadable taint silent and still answers", async () => {
+      withPolicy(policy);
+      inj.readTaint.mockRejectedValue(new Error("taint unavailable"));
+      const res = await get();
+      expect(res.status).toBe(200);
+      expect(await res.json()).not.toHaveProperty("injection");
+    });
   });
 
   it("hold, not tainted: says so", async () => {

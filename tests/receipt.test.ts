@@ -224,7 +224,8 @@ describe("receipt versioning", () => {
   it("declares a numeric version a verifier can range-check", () => {
     expect(typeof RECEIPT_VER).toBe("number");
     // 3 since Bet D: a worker's receipt. Direct-key receipts stay at 2 (pinned above).
-    expect(RECEIPT_VER).toBe(3);
+    // 4 since idea 14: a gateway ending on the owner's stop (older verifiers refuse it).
+    expect(RECEIPT_VER).toBe(4);
     expect((buildReceiptClaims(INPUT) as Record<string, unknown>).ver).toBe(1);
   });
 });

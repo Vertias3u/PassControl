@@ -430,6 +430,44 @@ describe.skipIf(!live)("rollover", () => {
 });
 
 describe.skipIf(!live)("N5 — removed and unknown limits", () => {
+  it("admits unknown period metadata without a prior snapshot but refuses an already-spent prior limit", async () => {
+    const fresh = agent();
+    // No period limit has EVER been set for this agent. Start the generation
+    // through the same fenced unknown-period open used for a legacy cache hit.
+    expect(await snapshot(fresh)).toBeNull();
+    const admitted = await openHold({
+      agentId: fresh,
+      attemptId: "legacy-first",
+      estimate: 1,
+      estimateMicrocents: 5000,
+      capTokens: null,
+      capMicrocents: null,
+      budgetState: { epoch: null, established: false },
+      periodLimit: { mode: "unknown" },
+      nowMs: D,
+    });
+    expect(admitted).toMatchObject({ ok: true });
+    expect(admitted.epochToPersist).toBeTruthy();
+    expect(await snapshot(fresh)).toBeNull();
+    expect(await num(`reserved_cost:${fresh}`)).toBe(5000);
+    await settleKnown({ agentId: fresh, attemptId: "legacy-first", tokens: 2, microcents: 1000, nowMs: D });
+    expect(await num(`reserved_cost:${fresh}`)).toBe(0);
+    expect(await num(`spent_cost:${fresh}`)).toBe(1000);
+
+    const limited = agent();
+    const epoch = await establish(limited, 1000);
+    expect((await open(limited, epoch, 1000, { attemptId: "spent" })).ok).toBe(true);
+    await settleKnown({ agentId: limited, attemptId: "spent", tokens: 2, microcents: 1000, nowMs: D });
+    const prior = await snapshot(limited);
+    expect(prior).not.toBeNull();
+    const refused = await open(limited, epoch, 1, { attemptId: "legacy-refused", period: { mode: "unknown" } });
+    expect(refused).toMatchObject({ ok: false, reason: "period" });
+    expect(await snapshot(limited)).toEqual(prior);
+    expect(await num(`reserved_cost:${limited}`)).toBe(0);
+    expect(await num(`spent_cost:${limited}`)).toBe(1000);
+    expect(await redis().exists(`hold:${limited}:legacy-refused`)).toBe(0);
+  });
+
   it("removing the limit deletes the snapshot", async () => {
     const agentId = agent();
     const epoch = await establish(agentId, 1000);

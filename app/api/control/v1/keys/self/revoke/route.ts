@@ -7,7 +7,9 @@ import { recordAdminAction } from "@/lib/audit";
 import { control } from "@/lib/control/handler";
 import { errorResponse, jsonResponse } from "@/lib/control/respond";
 
-const handler = control("write", async ({ userId, keyId, db, requestId }) => {
+// Read since review C-01 (2026-11-15): `passcontrol login` now keeps a read-only key,
+// and giving up a key must never need more authority than holding it.
+const handler = control("read", async ({ userId, keyId, db, requestId }) => {
   const revokedAt = new Date().toISOString();
   const { data, error } = await db
     .from("api_keys")

@@ -12,6 +12,11 @@ const m = vi.hoisted(() => ({
   recordFirst: vi.fn(),
   createLedger: vi.fn(),
 }));
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/mission/store")>()),
+  readActiveMissionForAgent: async () => ({ kind: "none" }),
+}));
 vi.mock("@vercel/functions", () => ({ waitUntil: () => undefined }));
 vi.mock("@/lib/supabase", () => ({ serviceClient: () => m.db }));
 vi.mock("@/lib/state/redis", () => ({ claimNonce: (...a: unknown[]) => m.claimNonce(...a), touchLastSeen: (...a: unknown[]) => m.touchLastSeen(...a), suspendAgent: (...a: unknown[]) => m.suspend(...a), purgeAgentCaches: (...a: unknown[]) => m.purge(...a) }));

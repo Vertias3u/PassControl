@@ -26,6 +26,10 @@ const TABLE: Record<Exclude<ProviderId, "azure" | "local" | "openrouter">, { sou
   anthropic: {
     source: "platform.claude.com/docs/en/about-claude/pricing (Base input, Output)",
     rows: [
+      // Read 2026-11-10: Fable 5.2 and Mythos 5.2 (released 2026-11-09), from
+      // platform.claude.com/docs/en/models/fable-5-2/overview ("$8 / $40") and
+      // .../whats-new-fable-5-2 (Pricing), which names both ids and gives them one price.
+      ["claude-fable-5-2", 8, 40], ["claude-mythos-5-2", 8, 40],
       ["claude-fable-5-1", 10, 50], ["claude-fable-5", 10, 50],
       ["claude-opus-5-5", 4, 20], ["claude-opus-5", 5, 25],
       ["claude-opus-4-8", 5, 25], ["claude-opus-4-7", 5, 25], ["claude-opus-4-6", 5, 25], ["claude-opus-4-5", 5, 25],
@@ -46,6 +50,8 @@ const TABLE: Record<Exclude<ProviderId, "azure" | "local" | "openrouter">, { sou
     // rate where the page gives one.
     source: "developers.openai.com/api/docs/pricing (Standard pricing data)",
     rows: [
+      // Read 2026-11-21 (same page, Standard).
+      ["gpt-6.2-astra", 20, 60], ["gpt-6.2-sol", 5, 15], ["gpt-6.1-terra", 2.5, 7.5],
       ["gpt-6-astra", 25, 75], ["gpt-6-sol", 5, 15], ["gpt-6-luna", 0.25, 0.75],
       // Read 2026-10-07 (same page, Standard).
       ["gpt-6.1-sol", 5, 15],
@@ -108,6 +114,12 @@ const TABLE: Record<Exclude<ProviderId, "azure" | "local" | "openrouter">, { sou
     // at its video output rate.
     source: "ai.google.dev/gemini-api/docs/pricing (Standard, Paid Tier)",
     rows: [
+      // Read 2026-11-21 (aistudio.google.com/docs/pricing). Carbon and Argon at the price
+      // that starts 2026-12-01 ($4 / $20), not the $2 / $10 before it: over, never under.
+      ["gemini-4-carbon", 4, 20], ["gemini-4-argon", 4, 20],
+      ["gemini-4-neon", 3, 15], ["gemini-4-hydrogen", 1.5, 7.5],
+      // Omni 1.2 Flash at its video output rate, like 1.1.
+      ["gemini-omni-1.2-flash", 1.5, 12],
       ["gemini-3.8-flash", 0.75, 3.75], ["gemini-3.7-flash", 0.75, 3.75], ["gemini-3.6-flash", 0.75, 3.75],
       ["gemini-3.5-flash", 1.5, 9], ["gemini-3.5-flash-lite", 0.3, 2.5], ["gemini-3.1-flash-lite", 0.5, 1.5],
       ["gemini-3.1-pro-preview", 4, 18], ["gemini-3.1-pro-preview-customtools", 4, 18],
@@ -143,6 +155,8 @@ describe.each(Object.entries(TABLE) as [ProviderId, (typeof TABLE)[keyof typeof 
 // input", the same rule as the input column above. `null` is a "-" on the page: no
 // cached rate, so cached tokens are charged at the full input rate.
 const OPENAI_CACHED: [id: string, cachedUsd: number | null][] = [
+  // Read 2026-11-21 (same page, Standard).
+  ["gpt-6.2-astra", 0.8], ["gpt-6.2-sol", 0.2], ["gpt-6.1-terra", 0.1],
   ["gpt-6-astra", 2], ["gpt-6-sol", 0.4], ["gpt-6-luna", 0.02], ["gpt-6.1-sol", 0.2],
   ["gpt-5.6-sol", 0.8], ["gpt-5.6-terra", 0.4], ["gpt-5.6-luna", 0.04],
   ["gpt-5.6-cyber", 2.5], ["gpt-5.5-cyber", 1.25],
@@ -185,6 +199,10 @@ describe("openai cached input prices (developers.openai.com/api/docs/pricing, re
 // GPT-5.5 and GPT-5.4 are absent on purpose: their pages say "for the full session".
 type Rates = [input: number, cached: number, write: number, output: number];
 const OPENAI_TIERS: [id: string, short: Rates, long: Rates][] = [
+  // Standard pricing page, read 2026-11-21 (30-minute cache write).
+  ["gpt-6.2-astra", [8, 0.4, 10, 40], [16, 0.8, 20, 60]],
+  ["gpt-6.2-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]],
+  ["gpt-6.1-terra", [1, 0.05, 1.25, 5], [2, 0.1, 2.5, 7.5]],
   ["gpt-6-astra", [10, 1, 12.5, 50], [20, 2, 25, 75]],
   ["gpt-6-sol", [2, 0.2, 2.5, 10], [4, 0.4, 5, 15]],
   // Cached reads at 5% of input, not 10% (its model page).

@@ -75,6 +75,7 @@ async function establish(agentId: string): Promise<string> {
   return first.epochToPersist!;
 }
 const L1 = "jti-0000000000000001";
+const L2 = "jti-0000000000000002";
 const A = "jti-000000000000000a";
 const B = "jti-000000000000000b";
 type Link = { jti: string; capMicrocents: number };
@@ -166,6 +167,18 @@ describe.skipIf(!live)("delegation ledgers: open", () => {
     expect(await ledger(a, L1)).toEqual({ r: "300", s: "0" });
     expect(String(await redis().hget(`sl:${a}:s1:sub`, "r"))).toBe("300");
     expect(await open(a, epoch, 300, [{ jti: L1, capMicrocents: 1000 }], { subLedger: { session: "s1", agent: "sub", capMicrocents: 500 } })).toMatchObject({ ok: false, reason: "subagent" });
+  });
+
+  it("checks a third link (a mission's ledger after a two-link chain) and names the one that refused", async () => {
+    const a = agent();
+    const epoch = await establish(a);
+    const M = "msn_" + "a".repeat(32);
+    for (const j of [L1, L2, M]) await createDelegationLedger(a, j, EXP);
+    const chain = [{ jti: L1, capMicrocents: 10_000 }, { jti: L2, capMicrocents: 10_000 }, { jti: M, capMicrocents: 500 }];
+    expect(await open(a, epoch, 400, chain, { attemptId: "att-3" })).toMatchObject({ ok: true });
+    expect(await ledger(a, M)).toEqual({ r: "400", s: "0" });
+    expect(await open(a, epoch, 400, chain)).toMatchObject({ ok: false, reason: "delegation", link: 3 });
+    expect(await open(a, epoch, 400, [{ jti: L1, capMicrocents: 100 }, ...chain.slice(1)])).toMatchObject({ ok: false, reason: "delegation", link: 1 });
   });
 
   it("creating a ledger never resets one that exists", async () => {

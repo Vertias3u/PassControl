@@ -14,7 +14,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const RAW_PROVIDER_KEY = "sk-proj-provider-secret-material";
 const NOW = 1_785_520_000_000;
-const PASSPORT_ID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+// A real Ed25519 public key: 32 zero bytes is a small-order point and is refused.
+const PASSPORT_ID = "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw";
 const CREDENTIAL_ID = "11111111-2222-4333-8444-555555555555";
 
 const mocks = vi.hoisted(() => {

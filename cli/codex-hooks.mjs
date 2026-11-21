@@ -223,7 +223,7 @@ export function codexHookAnswer(event, out) {
  * failure: a sidecar that is down or slow lets the action go ahead, with a warning
  * for prompts/pre-tool events. Post-tool telemetry always prints nothing.
  */
-export async function runCodexHook({ input, port, fetchImpl = fetch, promptTimeoutMs = PROMPT_RELAY_MS, toolTimeoutMs = TOOL_RELAY_MS, postToolTimeoutMs = POST_TOOL_RELAY_MS }) {
+export async function runCodexHook({ input, port, sidecarKey = null, fetchImpl = fetch, promptTimeoutMs = PROMPT_RELAY_MS, toolTimeoutMs = TOOL_RELAY_MS, postToolTimeoutMs = POST_TOOL_RELAY_MS }) {
   let parsed;
   try {
     parsed = JSON.parse(input);
@@ -232,6 +232,9 @@ export async function runCodexHook({ input, port, fetchImpl = fetch, promptTimeo
   }
   const event = isObject(parsed) ? parsed.hook_event_name : null;
   if (!EVENTS.includes(event)) return "";
+  // The sidecar's own paths ask for its key (review C-03 follow-up). Without one the
+  // sidecar answers with a stop, which codexHookAnswer passes on.
+  const headers = { "content-type": "application/json", ...(sidecarKey ? { authorization: `Bearer ${sidecarKey}` } : {}) };
   const tool = event === "PreToolUse";
   const postTool = event === "PostToolUse";
   // A post-tool hook is telemetry only. Bound the entire operation, including a
@@ -244,8 +247,8 @@ export async function runCodexHook({ input, port, fetchImpl = fetch, promptTimeo
         timer = setTimeout(() => { controller.abort(); resolve(""); }, postToolTimeoutMs);
       });
       const relay = async () => {
-        await fetchImpl(`http://127.0.0.1:${port}${HOOK_PATH}`, {
-          method: "POST", headers: { "content-type": "application/json" }, body: input, signal: controller.signal,
+        await fetchImpl(`http://127.0.0.1:${port}${HOOK_PATH}?client=codex`, {
+          method: "POST", headers, body: input, signal: controller.signal,
         });
         return "";
       };
@@ -261,10 +264,10 @@ export async function runCodexHook({ input, port, fetchImpl = fetch, promptTimeo
   const timer = setTimeout(() => controller.abort(), tool ? toolTimeoutMs : promptTimeoutMs);
   const warn = (why) => JSON.stringify({ systemMessage: `PassControl: ${why}, so this goes ahead unchecked.` });
   try {
-    const url = `http://127.0.0.1:${port}${HOOK_PATH}${tool ? `?t=${CODEX_TOOL_HOOK_TIMEOUT_S}` : ""}`;
+    const url = `http://127.0.0.1:${port}${HOOK_PATH}?client=codex${tool ? `&t=${CODEX_TOOL_HOOK_TIMEOUT_S}` : ""}`;
     const response = await fetchImpl(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: input,
       signal: controller.signal,
     });

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const establishBudgetStateMock = vi.fn();
+// Review 2026-11-21 #1: does Redis hold a last-enforced period limit for this agent?
+const hasPeriodSnapshotMock = vi.fn(async (_agentId: unknown) => false);
 
 const {
   verifyVisaMock,
@@ -110,6 +112,9 @@ vi.mock("@/lib/state/holds", () => {
     establishBudgetState: (...args: unknown[]) => establishBudgetStateMock(...args),
   };
 });
+vi.mock("@/lib/state/period-snapshot", () => ({
+  hasPeriodSnapshot: (agentId: unknown) => hasPeriodSnapshotMock(agentId),
+}));
 // The soft pause (1.6.0, L4). Its readers are mocked as modules, the line itself
 // (pauseLine, pauseMessage) is the real one.
 const { readPauseViewMock, readPauseLiftMock, pausePromptOpenMock, pollTelegramMock } = vi.hoisted(() => ({
@@ -227,7 +232,7 @@ beforeEach(() => {
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   setCachedAgentPolicyMock.mockResolvedValue(undefined);
-  readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
+  readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   writeLogMock.mockResolvedValue(undefined);
   mirrorSpendMock.mockResolvedValue(undefined);
@@ -296,7 +301,7 @@ describe("proxy agent policy", () => {
 
     readKillStateMock.mockResolvedValueOnce({
       platformKill: true,
-      tenantKill: false,
+      userKill: false,
       denylist: [],
     });
     const killed = await revision({});
@@ -939,7 +944,7 @@ describe("policy shadow mode", () => {
   it("records nothing when an earlier gate decided the call", async () => {
     readKillStateMock.mockResolvedValue({
       platformKill: true,
-      tenantKill: false,
+      userKill: false,
       denylist: [],
     });
 
@@ -1171,13 +1176,99 @@ describe("periodic spend limit (K1)", () => {
     expect(openHoldMock.mock.calls.at(-1)?.[0]).toMatchObject({ periodLimit: { mode: "unknown" } });
   });
 
-  it("does not make an unbudgeted agent budgeted because its limit could not be read", async () => {
+  // Review 2026-11-21, finding 1. An agent with no caps whose budget state Postgres never
+  // recorded, during a read that could not say whether it has a period limit: there is no
+  // last-enforced limit to consult unless Redis holds one. Without one it is forwarded as an
+  // unbudgeted call, as before 1.9.0: no epoch is minted, nothing is written to Postgres, and a
+  // database blip can no longer refuse it 503 or mark it budgeted for good.
+  it("forwards an uncapped, never-established agent unbudgeted when its limit is unknown and Redis holds no snapshot", async () => {
+    const fresh = (extra: Record<string, unknown>) =>
+      JSON.stringify({ p: {}, s: null, r: "off", be: null, bs: false, ...extra });
+    hasPeriodSnapshotMock.mockResolvedValueOnce(false);
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(fresh({ bk: true, bt: null, bc: null }));
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(hasPeriodSnapshotMock).toHaveBeenCalledWith(baseClaims.agid);
+    const args = openHoldMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(args.budgetState).toBeUndefined();
+    expect(args.periodLimit).toBeUndefined();
+    expect(establishBudgetStateMock).not.toHaveBeenCalled();
+  });
+
+  it("still consults the last enforced limit when Redis holds one for that agent", async () => {
+    const fresh = (extra: Record<string, unknown>) =>
+      JSON.stringify({ p: {}, s: null, r: "off", be: null, bs: false, ...extra });
+    hasPeriodSnapshotMock.mockResolvedValueOnce(true);
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(fresh({ bk: true, bt: null, bc: null }));
+    await call();
+    expect(openHoldMock.mock.calls.at(-1)?.[0]).toMatchObject({
+      budgetState: { epoch: null, established: false },
+      periodLimit: { mode: "unknown" },
+    });
+  });
+
+  it("never asks Redis when something else already makes the agent budgeted", async () => {
+    hasPeriodSnapshotMock.mockClear();
+    verifyVisaMock.mockResolvedValueOnce(baseClaims);
+    getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ bk: true, bt: 100_000, bc: null }));
+    await call();
+    expect(hasPeriodSnapshotMock).not.toHaveBeenCalled();
+  });
+
+  it("opens a fenced hold for legacy unknown period metadata and admits an agent without an enforced period snapshot at the normal charge", async () => {
+    // A readable legacy cache is not a failed policy read. The real-Lua
+    // companion in holds-period.redis.test.ts pins the no-snapshot admission.
     verifyVisaMock.mockResolvedValueOnce(baseClaims);
     getCachedAgentPolicyMock.mockResolvedValueOnce(cached({ bk: true, bt: null, bc: null }));
-    await call();
-    const args = openHoldMock.mock.calls.at(-1)?.[0];
-    expect(args).not.toHaveProperty("budgetState");
-    expect(args).not.toHaveProperty("periodLimit");
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(openHoldMock).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      capTokens: null,
+      capMicrocents: null,
+      budgetState: { epoch: "epoch-1", established: true },
+      periodLimit: { mode: "unknown" },
+    }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await flushDeferredWork();
+    // The provider reports one input and one output token for gpt-4.1:
+    // $2 + $8 per million tokens = 1,000 microcents for this call.
+    expect(settleHoldMock).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      outcome: "complete", tokens: 2, microcents: 1000,
+    }));
+
+    // Preserve the failed-read intent separately: unreadable sender-constraint
+    // state still refuses passport authentication before any hold or charge,
+    // independently of the policy fail-closed posture.
+    const previous = process.env.POLICY_FAIL_CLOSED;
+    try {
+      for (const setting of ["false", "true"]) {
+        process.env.POLICY_FAIL_CLOSED = setting;
+        openHoldMock.mockClear();
+        settleHoldMock.mockClear();
+        fetchMock.mockClear();
+        const builder = {
+          select: vi.fn(() => builder),
+          eq: vi.fn(() => builder),
+          maybeSingle: vi.fn(async () => ({ data: null, error: { message: "timeout" } })),
+        };
+        serviceClientMock.mockReturnValue({ from: vi.fn(() => builder), rpc: vi.fn() });
+        verifyVisaMock.mockResolvedValueOnce(baseClaims);
+        getCachedAgentPolicyMock.mockResolvedValueOnce(null);
+        const failedRead = await call();
+        expect(builder.maybeSingle).toHaveBeenCalled();
+        expect(failedRead.status).toBe(503);
+        expect(await failedRead.json()).toEqual({ error: "sender_constraint_state_unavailable" });
+        expect(openHoldMock).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+        await flushDeferredWork();
+        expect(settleHoldMock).not.toHaveBeenCalled();
+      }
+    } finally {
+      if (previous === undefined) delete process.env.POLICY_FAIL_CLOSED;
+      else process.env.POLICY_FAIL_CLOSED = previous;
+    }
   });
 
   // F1: under a periodic limit (the default every new dashboard agent gets) a

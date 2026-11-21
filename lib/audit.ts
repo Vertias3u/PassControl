@@ -21,9 +21,24 @@ export const AUDIT_ACTIONS = [
   // One declared session of an agent stopped or resumed (sprint T8). Its own
   // action: logged as agent.suspend, the history would say the whole agent was.
   "agent.session_stop",
+  // Idea 12: tripwire decoys registered, rotated or retired, or the Seen setting changed
+  // (metadata.op says which). Changes what can stop an agent, so it is a privileged act.
+  "agent.tripwires",
   // A worker's delegation revoked: one link, or every delegation before now (Bet D).
   "agent.delegation_revoke",
   "agent.revoke",
+  // Idea 11, mission-bound visas: the owner's signed approval, an owner change to an
+  // active mission (narrowing, or a signed widening), and revocation.
+  "mission.approve",
+  "mission.narrow",
+  "mission.widen",
+  "mission.revoke",
+  // An owner's approval key registered or revoked (behind MFA): it decides who can
+  // turn a draft into authority.
+  "mission.owner_key",
+  // Mission-only cleared by the owner with the approval passkey: the agent gets its
+  // standing authority back.
+  "mission.only_cleared",
   // A new dashboard agent created WITHOUT the default daily spending limit (F1).
   // Its own row, holding the statement the owner ticked, so the trail shows the
   // limit was refused on purpose rather than never offered.
@@ -78,11 +93,17 @@ export const AUDIT_ACTIONS = [
   // The owner ending an injection-guard hold early (Phase 2). Says only whether
   // there was one: never what was found.
   "agent.injection_clear",
+  // Idea 13: the owner's decision on a memory review, and changes to memory custody itself.
+  "agent.memory_review_decide",
+  "agent.memory_custody_set",
   // The owner's yes or no to one service call under an "Ask me first" rule,
   // given in the dashboard. (A Telegram tap leaves the call's own audit row.)
   "approval.decide",
   "apikey.create",
   "apikey.revoke",
+  // A control key lowered to read by its own holder (review C-01: what
+  // `passcontrol login` leaves on disk). Only ever down; write is never granted here.
+  "apikey.downgrade",
   // The workspace's stated key-custody expectation. In the trail because it is
   // a policy statement other people are held to — and NOT because it enforces
   // anything: it gates no call and appears on no receipt. See migration 0051.

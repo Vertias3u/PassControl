@@ -3,8 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // v1 playbook Session 05 / Contract C: a stop control reports what it asked
 // for and what it then OBSERVED — database status and the Redis suspension
 // flag the gateway reads — never an assumption. A transport or partial failure
-// is "could not confirm", not "nothing changed". Both actions stay on
-// requireUser(): a stop must never need a step-up (credential-action-mfa).
+// is "could not confirm", not "nothing changed". A stop stays on requireUser()
+// and never needs a step-up; taking it off (resume, disarm) needs the second
+// factor where one is enrolled (review C-02, credential-action-mfa).
 
 const AGENT = "11111111-1111-4111-8111-111111111111";
 
@@ -64,6 +65,8 @@ beforeEach(() => {
   mocks.fleetSetAgentSuspended.mockResolvedValue({ ok: true, value: { id: AGENT } });
   mocks.setTenantKill.mockResolvedValue({ ok: true, value: { affected: 0, durable: true } });
   mocks.observeKillState.mockResolvedValue({ platform: false, tenant: true });
+  // Fully signed in by default; the step-up tests below say otherwise.
+  mocks.mfaAuthorizedUser.mockResolvedValue({ ok: true, user: { id: "tenant-a" } });
 });
 
 describe("setAgentSuspended reports what it observed", () => {
@@ -116,10 +119,16 @@ describe("setAgentSuspended reports what it observed", () => {
     await expect(setAgentSuspended(AGENT, true)).rejects.toThrow("This agent is unavailable.");
   });
 
-  it("never needs a step-up", async () => {
+  it("suspending never needs a step-up", async () => {
     await setAgentSuspended(AGENT, true);
     await observeAgentControl(AGENT, "suspended");
     expect(mocks.mfaAuthorizedUser).not.toHaveBeenCalled();
+  });
+
+  it("resuming on a password-only session is refused before anything is written (C-02)", async () => {
+    mocks.mfaAuthorizedUser.mockResolvedValueOnce({ ok: false, reason: "step_up_required" });
+    await expect(setAgentSuspended(AGENT, false)).rejects.toThrow(/^Complete two-factor verification/);
+    expect(mocks.fleetSetAgentSuspended).not.toHaveBeenCalled();
   });
 });
 
@@ -167,6 +176,17 @@ describe("the fleet kill switch reports what it observed", () => {
   it("does not confirm a disarm the flag does not show", async () => {
     mocks.observeKillState.mockResolvedValueOnce({ platform: false, tenant: true });
     expect((await setMasterKill(false)).confirmed).toBe(false);
+  });
+
+  it("disarming on a password-only session is refused before anything is written (C-02)", async () => {
+    mocks.mfaAuthorizedUser.mockResolvedValueOnce({ ok: false, reason: "step_up_required" });
+    await expect(setMasterKill(false)).rejects.toThrow(/^Complete two-factor verification/);
+    expect(mocks.setTenantKill).not.toHaveBeenCalled();
+  });
+
+  it("arming never needs a step-up", async () => {
+    await setMasterKill(true);
+    expect(mocks.mfaAuthorizedUser).not.toHaveBeenCalled();
   });
 
   it("re-reads without writing, and never needs a step-up", async () => {

@@ -24,7 +24,7 @@ import { passportIdToPublicKey, verifySignature } from "@/lib/crypto/ed25519";
 import { claimNonce, touchLastSeen } from "@/lib/state/redis";
 import { wrongProofPurpose } from "@/lib/auth/proof-purpose";
 import { serviceClient } from "@/lib/supabase";
-import { mintDelegatedVisa, type ScopeEntry } from "@/lib/auth/visa";
+import { mintDelegatedVisa, scopeIsMintable, type ScopeEntry } from "@/lib/auth/visa";
 import { findAuthenticatablePassport } from "@/lib/auth/passport";
 import { rateLimit } from "@/lib/ratelimit";
 import { captureError, captureSecurityEvent, logFailOpen } from "@/lib/observability";
@@ -184,6 +184,12 @@ async function handlePost(req: Request) {
   });
   if (!verdict.ok) return securityFail(401, "invalid_delegation", { agentId: agent.id, reason: verdict.reason });
   if (verdict.leaf.sub !== workerKey) return securityFail(401, "invalid_delegation", { agentId: agent.id, reason: "leaf_key" });
+  // Review #3: a leaf narrowed from a malformed agent scope verifies here, but its visa
+  // would fail verifyVisa on every call. Refused before anything is recorded.
+  if (!scopeIsMintable(verdict.leaf.scope)) {
+    waitUntil(captureError(new Error("agent scope fails validation at mint"), { route: ROUTE, method: "POST", status: 409, code: "agent_scope_invalid", agentId: agent.id }));
+    return fail(409, "agent_scope_invalid");
+  }
 
   // 8. Revocation, from the record (P2.3: fails closed).
   const links = verdict.links;

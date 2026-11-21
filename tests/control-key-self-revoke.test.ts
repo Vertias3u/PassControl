@@ -177,13 +177,13 @@ describe("POST /api/control/v1/keys/self/revoke", () => {
     expect(auditMock).not.toHaveBeenCalled();
   });
 
-  it("requires write scope and leaves the key active", async () => {
+  it("lets a read-only key revoke itself (review C-01: login keeps a read key)", async () => {
     state.rows[0]!.scope = "read";
 
     const response = await POST(request());
 
-    expect(response.status).toBe(403);
-    expect(state.rows[0]!.revoked_at).toBeNull();
-    expect(auditMock).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(state.rows[0]!.revoked_at).toEqual(expect.any(String));
+    expect(state.rows[1]!.revoked_at).toBeNull();
   });
 });

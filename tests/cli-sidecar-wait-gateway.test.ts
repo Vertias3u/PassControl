@@ -148,6 +148,8 @@ describe("a sidecar whose passport the gateway refuses", () => {
   it.each([
     [401, { error: "unknown_passport" }, /unknown_passport/],
     [403, { error: "agent_not_active" }, /suspended or revoked/],
+    // Review #3: retrying cannot fix a malformed scope row, so it stops at once and says where to look.
+    [409, { error: "agent_scope_invalid" }, /scope list is malformed/],
   ])("exits at once on %s, with the gateway's reason", async (status, body, reason) => {
     const gatewayPort = await freePort();
     await gatewayOn(gatewayPort, (res) => {

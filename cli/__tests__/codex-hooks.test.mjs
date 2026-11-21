@@ -29,6 +29,7 @@ import {
   runCodexHook,
   writeCodexHooks,
 } from "../codex-hooks.mjs";
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createSidecar } from "../sidecar.mjs";
 
 const CLI_ENTRY = fileURLToPath(new URL("../../bin/passcontrol.mjs", import.meta.url));
@@ -209,7 +210,7 @@ describe("runCodexHook: the relay Codex runs", () => {
       const chunks = [];
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
-        seen.push({ url: req.url, method: req.method, host: req.headers.host, body: Buffer.concat(chunks).toString("utf8") });
+        seen.push({ url: req.url, method: req.method, host: req.headers.host, auth: req.headers.authorization, body: Buffer.concat(chunks).toString("utf8") });
         handler(req, res);
       });
     });
@@ -229,14 +230,22 @@ describe("runCodexHook: the relay Codex runs", () => {
     const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s1", tool_name: "Bash", tool_input: { command: "ls" } });
     const out = JSON.parse(await runCodexHook({ input, port }));
     expect(out).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "PassControl: stopped." } });
-    expect(seen[0]).toMatchObject({ method: "POST", url: "/_passcontrol/hook?t=600", host: `127.0.0.1:${port}` });
+    expect(seen[0]).toMatchObject({ method: "POST", url: "/_passcontrol/hook?client=codex&t=600", host: `127.0.0.1:${port}` });
     expect(JSON.parse(seen[0].body).tool_name).toBe("Bash");
+  });
+
+  it("sends the sidecar's key with every relayed hook, the post-tool one included (review C-03)", async () => {
+    const { port, seen } = await sidecar(reply({}));
+    const key = `pcs_${"k".repeat(43)}`;
+    await runCodexHook({ input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash" }), port, sidecarKey: key });
+    await runCodexHook({ input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: "Bash" }), port, sidecarKey: key });
+    expect(seen.map((s) => s.auth)).toEqual([`Bearer ${key}`, `Bearer ${key}`]);
   });
 
   it("asks the prompt hook without a hold", async () => {
     const { port, seen } = await sidecar(reply({}));
     expect(await runCodexHook({ input: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "hi" }), port })).toBe("");
-    expect(seen[0].url).toBe("/_passcontrol/hook");
+    expect(seen[0].url).toBe("/_passcontrol/hook?client=codex");
   });
 
   it("with no sidecar, the action goes ahead with a warning: never a block, never a crash", async () => {
@@ -328,14 +337,17 @@ describe("runCodexHook through the real sidecar", () => {
       passportId: b64url(ed25519.getPublicKey(secret)),
       passportSecret: b64url(secret),
     });
+    // The relay sends the sidecar's key (review C-03 follow-up), as bin/passcontrol.mjs passes it.
+    codexKey = sidecarKey(b64url(secret));
     return listen(sidecar.server);
   }
+  let codexKey = null;
   const FORBIDDEN = ["continue", "stopReason", "suppressOutput", "decision", "reason"];
   const tool = (command) => JSON.stringify({ hook_event_name: "PreToolUse", session_id: "019a0000-0000-7000-8000-000000000001", tool_name: "Bash", tool_input: { command }, cwd: "/repo" });
 
   it("a suspended agent's tool is denied, in Codex's terms", async () => {
     const port = await sidecarWithSelf(() => ({ status: 403, body: { error: "blocked_suspended" } }));
-    const out = JSON.parse(await runCodexHook({ input: tool("ls"), port }));
+    const out = JSON.parse(await runCodexHook({ input: tool("ls"), port, sidecarKey: codexKey }));
     expect(out.hookSpecificOutput).toMatchObject({ hookEventName: "PreToolUse", permissionDecision: "deny" });
     expect(out.hookSpecificOutput.permissionDecisionReason).toMatch(/stopped/);
     for (const key of FORBIDDEN) expect(out).not.toHaveProperty(key);
@@ -343,16 +355,16 @@ describe("runCodexHook through the real sidecar", () => {
 
   it("a suspended agent's prompt is blocked and the turn ends", async () => {
     const port = await sidecarWithSelf(() => ({ status: 403, body: { error: "blocked_suspended" } }));
-    const out = JSON.parse(await runCodexHook({ input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "hi" }), port }));
+    const out = JSON.parse(await runCodexHook({ input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: "s", prompt: "hi" }), port, sidecarKey: codexKey }));
     expect(out).toMatchObject({ continue: false, decision: "block" });
   });
 
   it("a Bash deny rule denies; a command no rule names goes ahead with nothing printed", async () => {
     const document = { rules: [{ tool: "Bash", command: "rm -rf *", effect: "deny" }] };
     const port = await sidecarWithSelf(() => ({ status: 200, body: { agent_id: "a", budget: {}, tool_rules: { state: "ok", document } } }));
-    const denied = JSON.parse(await runCodexHook({ input: tool("rm -rf build"), port }));
+    const denied = JSON.parse(await runCodexHook({ input: tool("rm -rf build"), port, sidecarKey: codexKey }));
     expect(denied.hookSpecificOutput.permissionDecision).toBe("deny");
     for (const key of FORBIDDEN) expect(denied).not.toHaveProperty(key);
-    expect(await runCodexHook({ input: tool("ls"), port })).toBe("");
+    expect(await runCodexHook({ input: tool("ls"), port, sidecarKey: codexKey })).toBe("");
   });
 });

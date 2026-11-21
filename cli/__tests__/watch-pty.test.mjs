@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createSidecar } from "../sidecar.mjs";
 
 // `passcontrol watch` under a REAL pseudo-terminal: the whole CLI, a real sidecar and a
@@ -125,6 +126,14 @@ describe.skipIf(process.platform === "win32" || !hasPython())("passcontrol watch
     cleanup.push(async () => fs.rmSync(driverPath, { force: true }));
     fs.mkdirSync(path.join(home, "home"));
     fs.mkdirSync(path.join(home, "config"));
+    // The same passport the sidecar runs with, as on a real machine: `watch` reads the
+    // budget through the sidecar, which asks for its key (review C-03).
+    fs.mkdirSync(path.join(home, "config", "passcontrol"));
+    fs.writeFileSync(
+      path.join(home, "config", "passcontrol", "config"),
+      `PASSPORT_ID=${Buffer.from(ed25519.getPublicKey(secret)).toString("base64url")}\nPASSPORT_SECRET=${Buffer.from(secret).toString("base64url")}\n`
+    );
+    const configBefore = fs.readFileSync(path.join(home, "config", "passcontrol", "config"), "utf8");
 
     const child = spawn("python3", ["-I", driverPath], {
       env: {
@@ -167,7 +176,7 @@ describe.skipIf(process.platform === "win32" || !hasPython())("passcontrol watch
     const post = (headers) =>
       fetch(`http://127.0.0.1:${port}/api/v1/anthropic/v1/messages`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...headers },
+        headers: { "content-type": "application/json", authorization: `Bearer ${sidecarKey(Buffer.from(secret).toString("base64url"))}`, ...headers },
         body: JSON.stringify({ model: "claude-haiku-5-5", messages: [{ role: "user", content: "hi" }] }),
       }).then((r) => r.text());
     await post({ "x-claude-code-session-id": "sess-pty-1" });
@@ -206,6 +215,8 @@ describe.skipIf(process.platform === "win32" || !hasPython())("passcontrol watch
     // And it wrote nothing anywhere it could: no config, no cache, no journal.
     const files = (dir) => fs.readdirSync(dir, { recursive: true });
     expect(files(path.join(home, "home"))).toEqual([]);
-    expect(files(path.join(home, "config"))).toEqual([]);
+    // Only the config this test wrote before starting it, unchanged.
+    expect(files(path.join(home, "config")).sort()).toEqual(["passcontrol", path.join("passcontrol", "config")]);
+    expect(fs.readFileSync(path.join(home, "config", "passcontrol", "config"), "utf8")).toBe(configBefore);
   }, 60_000);
 });

@@ -1,7 +1,7 @@
 // Anthropic prompt-cache rates, per model, pinned to the pricing page (sprint P1.1, owner
 // 2026-10-08). The table used to derive every cache read as 0.1x of input. The page says
 // otherwise for four models: 0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and
-// Mythos 5.1. A cache-heavy Claude Code session on Opus 5.5 was charged 2x on reads, on
+// Mythos 5.1 (and, since 2026-11-10, Fable 5.2 and Mythos 5.2). A cache-heavy Claude Code session on Opus 5.5 was charged 2x on reads, on
 // Fable 5.1 4x, in every receipt and against every limit.
 //
 // Source: platform.claude.com/docs/en/about-claude/pricing, "Model pricing" table, columns
@@ -20,6 +20,10 @@ const write = (id: string) => costMicrocentsForUsage({ ...NONE, cacheWriteTokens
 
 // [id, 5m cache write $/MTok, cache hit $/MTok]. Haiku 5.5 is tiered and has its own test.
 const PAGE: [string, number, number][] = [
+  // Read 2026-11-10 from .../models/fable-5-2/whats-new-fable-5-2, Pricing: 5m cache
+  // writes $10, cache reads $0.20 (0.025x of the $8 input, as on Fable 5.1).
+  ["claude-fable-5-2", 10, 0.2],
+  ["claude-mythos-5-2", 10, 0.2],
   ["claude-fable-5-1", 12.5, 0.25],
   ["claude-mythos-5-1", 12.5, 0.25],
   ["claude-fable-5", 12.5, 1],
@@ -53,11 +57,15 @@ describe("every Anthropic row charges the page's cache rates", () => {
   });
 });
 
-describe("the four models below 0.1x", () => {
+describe("the models below 0.1x", () => {
   it("Opus 5.5: a 900K-token cached read costs $0.18, not $0.36", () => {
     const cost = costMicrocentsForUsage({ ...NONE, cacheReadTokens: 900_000 }, "claude-opus-5-5", "anthropic");
     expect(cost).toBe(900_000 * 20);
     expect(cost / 100_000_000).toBeCloseTo(0.18, 6);
+  });
+
+  it("Fable 5.2: a cache read is a fortieth of input", () => {
+    expect(read("claude-fable-5-2") * 40).toBe(costMicrocentsForUsage({ ...NONE, inputTokens: 1 }, "claude-fable-5-2", "anthropic"));
   });
 
   it("Fable 5.1: a cache read is a fortieth of input", () => {

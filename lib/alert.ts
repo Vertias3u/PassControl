@@ -34,6 +34,10 @@ const SEVERITY: Record<string, Severity> = {
   // A deliberate hole in the capability model was opened. The whole
   // justification for having break-glass is that nobody can take one quietly.
   "agent.break_glass": "critical",
+  // Idea 12. Used: a decoy was presented as a credential and the agent it names was
+  // suspended (or the stop failed, which matters more). Seen: a decoy was in scanned text.
+  "tripwire.used": "critical",
+  "tripwire.seen": "warning",
 };
 
 export function alertSeverity(event: string): Severity {

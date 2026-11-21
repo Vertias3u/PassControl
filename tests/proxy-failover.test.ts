@@ -44,6 +44,8 @@ const {
 // passport apart from a tenant that holds a demo scope. That module is
 // `server-only`, which Next enforces at build time and vitest cannot resolve
 // at all — same stub tests/site-demo-routes.test.ts already uses.
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/gate", () => ({ resolveCallMission: async () => ({ kind: "none" }) }));
 vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: vi.fn() }));
 vi.mock("@/lib/auth/visa", () => ({
@@ -215,7 +217,7 @@ beforeEach(() => {
   setCachedKeyMock.mockResolvedValue(undefined);
   getCachedAgentPolicyMock.mockResolvedValue(JSON.stringify({ p: {}, s: null }));
   setCachedAgentPolicyMock.mockResolvedValue(undefined);
-  readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
+  readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   writeLogMock.mockResolvedValue(undefined);
   mirrorSpendMock.mockResolvedValue(undefined);
@@ -313,6 +315,32 @@ describe("a fallback is re-checked, never trusted", () => {
     expect(res.status).toBe(200);
   });
 
+  // A request option is judged for the provider it goes to. Groq ignores OpenAI's
+  // `prompt_cache_options`, so the primary passes the check; failing over to OpenAI
+  // would carry a 12-hour cache write (2.5x input) the table counts at 1.25x.
+  it("skips a fallback whose provider would bill a request option above its row, under a dollar limit", async () => {
+    verifyVisaMock.mockResolvedValue({
+      ...baseClaims,
+      bc: 500,
+      scope: [...baseClaims.scope, { provider: "groq", models: ["openai/gpt-oss-20b"] }],
+    });
+    readFallbacksMock.mockResolvedValue([{ provider: "openai", model: "gpt-4o-mini" }]);
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
+
+    const req = new Request("https://gateway.test/api/v1/groq/chat/completions", {
+      method: "POST",
+      headers: { authorization: "Bearer visa", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "openai/gpt-oss-20b",
+        messages: [{ role: "user", content: "hi" }],
+        prompt_cache_options: { ttl: "12h" },
+      }),
+    });
+    await POST(req, { params: Promise.resolve({ provider: "groq", path: ["chat", "completions"] }) });
+
+    expect(forwardedTo()).toEqual(["api.groq.com"]);
+  });
+
   // The security-grade case. A deny rule names a provider AND models, so a
   // fallback that bypassed it would silently defeat a rule the operator wrote.
   it("skips a fallback a policy deny rule forbids", async () => {
@@ -334,22 +362,19 @@ describe("a fallback is re-checked, never trusted", () => {
   // skipped for scope, for a missing key, or by a `qualifies` bug that refused
   // everything — so the identical setup with the switch CLEAR has to fail over.
   it("stops failing over if the kill switch is armed between attempts", async () => {
-    const armAfterFirstRead = () =>
-      readKillStateMock
-        .mockReset()
-        .mockResolvedValueOnce({ platformKill: false, tenantKill: false, denylist: [] })
-        .mockResolvedValue({ platformKill: true, tenantKill: false, denylist: [] });
-
-    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
-    armAfterFirstRead();
+    fetchMock.mockImplementation(async () => {
+      readKillStateMock.mockResolvedValue({ platformKill: true, userKill: false, denylist: [] });
+      return upstream(QUOTA, 429);
+    });
     await callProxy();
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // Control: everything else identical, switch never armed → it does fail over.
     fetchMock.mockClear();
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
     readKillStateMock.mockReset().mockResolvedValue({
       platformKill: false,
-      tenantKill: false,
+      userKill: false,
       denylist: [],
     });
     await callProxy();
@@ -357,12 +382,15 @@ describe("a fallback is re-checked, never trusted", () => {
   });
 
   it("stops failing over if the agent is suspended between attempts", async () => {
-    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
-    isSuspendedMock.mockReset().mockResolvedValueOnce(false).mockResolvedValue(true);
+    fetchMock.mockImplementation(async () => {
+      isSuspendedMock.mockResolvedValue(true);
+      return upstream(QUOTA, 429);
+    });
     await callProxy();
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     fetchMock.mockClear();
+    fetchMock.mockResolvedValue(upstream(QUOTA, 429));
     isSuspendedMock.mockReset().mockResolvedValue(false);
     await callProxy();
     expect(fetchMock).toHaveBeenCalledTimes(2);

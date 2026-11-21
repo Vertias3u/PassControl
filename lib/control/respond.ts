@@ -36,6 +36,7 @@ const MESSAGES: Record<string, string> = {
   payload_too_large: "Request body is too large.",
   not_found: "Resource not found.",
   query_failed: "The request could not be completed. Please try again.",
+  too_many_open_holds: "This agent has too many open holds to rebuild its budget. Resolve open holds and retry.",
   export_unavailable: "The workspace export could not be built. Please try again.",
   auth_lookup_failed: "The request could not be completed. Please try again.",
   account_unavailable: "The account could not be read. Please try again.",

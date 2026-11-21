@@ -192,7 +192,7 @@ beforeEach(() => {
   openHoldMock.mockResolvedValue({ ok: true, reserved: 1, reservedMicrocents: 0 });
   settleHoldMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue("provider-key");
-  readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
+  readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   readPolicyMock.mockResolvedValue({
   policy: {},
@@ -328,7 +328,7 @@ describe("governed OpenAI Responses API", () => {
   it("refuses a killed Responses call before reserve or provider contact", async () => {
     readKillStateMock.mockResolvedValueOnce({
       platformKill: true,
-      tenantKill: false,
+      userKill: false,
       denylist: [],
     });
 

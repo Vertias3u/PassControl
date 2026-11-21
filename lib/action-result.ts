@@ -35,3 +35,15 @@ export function unwrap<T>(result: ActionResult<T>): T {
   // Not a result at all: a wrapper and its action disagree. Loud, not silent.
   throw new Error(GENERIC_ACTION_ERROR);
 }
+
+/**
+ * The step-up refusal's message, when that is what an action threw (review C-02:
+ * taking a stop off needs the second factor where one is enrolled). A refusal means
+ * nothing was applied, so a control must say that, not "may or may not have applied".
+ * Every step-up message in app/dashboard/actions.ts starts with this phrase.
+ */
+export const STEP_UP_PREFIX = "Complete two-factor verification";
+export function stepUpRefusal(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : "";
+  return message.startsWith(STEP_UP_PREFIX) ? message : null;
+}

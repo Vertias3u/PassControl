@@ -63,6 +63,8 @@ const STATUS: Record<LogEntry["status"], { explanation: string }> = {
   blocked_budget_period: { explanation: "The agent's daily or monthly spend limit was used up for the current UTC period, so PassControl refused the attempt before provider forwarding. It clears on its own at the next UTC period boundary; raising the limit clears it sooner." },
   blocked_budget_pause: { explanation: "The agent reached the pause line its owner set, a share of its spend limit, so PassControl paused it before provider forwarding. The limit itself was not reached. Letting it go on from the agent's page lifts the pause for an hour; the limit still applies." },
   blocked_budget_subagent: { explanation: "A sub-agent used the spending cap its agent's policy sets for one sub-agent in one session, so PassControl refused this call before provider forwarding. The agent's main thread and its other sub-agents keep running. The sub-agent and session ids are declared by the coding tool, so a new session or a new sub-agent starts at zero; the agent's own limits still apply to all of it." },
+  blocked_loop: { explanation: "This agent sent the same request over and over within a few minutes, which looks like a loop, so its policy's loop breaker paused its model calls before provider forwarding. The pause lifts by itself; service calls and other agents are not affected." },
+  blocked_session_cap: { explanation: "This call came from a session that reached one of the caps this agent's policy sets for one session (money, calls or minutes), so PassControl refused it before provider forwarding. The agent's other sessions keep running; a new session starts with fresh caps." },
   blocked_budget_delegation: { explanation: "A worker acting under a delegation from this agent reached the spending cap of its delegation, or of a delegation above it, so PassControl refused this call before provider forwarding. The agent itself and its other workers keep running." },
   blocked_delegation_revoked: { explanation: "A worker presented a delegation from this agent that the owner revoked (one delegation, or every delegation issued before a point in time). PassControl refused the call before provider forwarding." },
   blocked_delegation_unavailable: { explanation: "A worker's call was refused because PassControl could not confirm its delegation is still valid: the revocation record could not be read, or the delegation's spending ledger was lost. Delegations fail closed, so nothing was sent." },
@@ -147,6 +149,8 @@ export function nextActionsFor(row: DepartureRow, upstreamStatus: number | null)
     case "blocked_budget_pause":
     case "blocked_budget_subagent":
     case "blocked_budget_delegation":
+    case "blocked_loop":
+    case "blocked_session_cap":
     case "blocked_unpriced_endpoint":
     case "blocked_unpriced_model":
       if (agent) actions.push({ href: `${agent}#agent-operate`, label: "Review this agent's caps" });

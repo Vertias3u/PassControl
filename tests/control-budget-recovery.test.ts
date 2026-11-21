@@ -14,6 +14,7 @@ const {
   resolveHold,
   releaseUndispatched,
   rebuildBudgetState,
+  countOpenHolds,
   purgeAgentPolicy,
 } = vi.hoisted(() => ({
   authMock: vi.fn(),
@@ -22,13 +23,16 @@ const {
   resolveHold: vi.fn(),
   releaseUndispatched: vi.fn(),
   rebuildBudgetState: vi.fn(),
+  countOpenHolds: vi.fn(),
   purgeAgentPolicy: vi.fn(),
 }));
 
 vi.mock("@/lib/control/auth", () => ({ authenticateApiKey: (...a: any[]) => authMock(...a) }));
 vi.mock("@/lib/ratelimit", () => ({ rateLimit: async () => ({ success: true, remaining: 1 }) }));
 vi.mock("@/lib/audit", () => ({ recordAdminAction: (...a: any[]) => auditMock(...a) }));
-vi.mock("@/lib/state/holds", () => ({
+vi.mock("@/lib/state/holds", async (original) => ({
+  ...await original<typeof import("@/lib/state/holds")>(),
+  countOpenHolds: (...a: any[]) => countOpenHolds(...a),
   listOpenHolds: (...a: any[]) => listOpenHolds(...a),
   resolveHold: (...a: any[]) => resolveHold(...a),
   releaseUndispatched: (...a: any[]) => releaseUndispatched(...a),
@@ -170,6 +174,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   authMock.mockResolvedValue({ ok: true, userId: "u1", scope: "write", keyId: "k1" });
   listOpenHolds.mockResolvedValue([]);
+  countOpenHolds.mockResolvedValue(0);
   resolveHold.mockResolvedValue({ applied: true, appliedTokens: 0, appliedMicrocents: 0 });
   releaseUndispatched.mockResolvedValue({ applied: true, appliedTokens: 0, appliedMicrocents: 0 });
   rebuildBudgetState.mockResolvedValue(rebuildResult());
@@ -500,6 +505,51 @@ describe("POST /agents/{id}/holds/{attemptId}/resolve", () => {
 describe("POST /agents/{id}/budget/rebuild", () => {
   const url = `https://x/api/control/v1/agents/${AGENT}/budget/rebuild`;
   const params = { id: AGENT };
+
+  it.each([1000, 1001])("preflights %i open holds before any writes", async (count) => {
+    const fake = fakeDb({ row: { budget_epoch: "old-epoch" } });
+    db.current = fake.client;
+    countOpenHolds.mockResolvedValue(count);
+    rebuildBudgetState.mockResolvedValue(rebuildResult({ openHolds: count }));
+    const res = await rebuildRoute(post(url, {}), ctx(params));
+    expect(res.status).toBe(count === 1000 ? 200 : 409);
+    expect(countOpenHolds).toHaveBeenCalledWith(AGENT);
+    if (count === 1001) {
+      expect((await res.json()).error).toMatchObject({
+        code: "too_many_open_holds",
+        message: expect.stringContaining("Resolve open holds and retry"),
+      });
+      expect(fake.rpcCalls).toEqual([]); // The rebuild RPC writes checkpoints too.
+      expect(fake.updates).toEqual([]);
+      expect(rebuildBudgetState).not.toHaveBeenCalled();
+      expect(purgeAgentPolicy).not.toHaveBeenCalled();
+      expect(auditMock).not.toHaveBeenCalled();
+    } else {
+      expect(fake.updates).toHaveLength(1);
+      expect(rebuildBudgetState).toHaveBeenCalledOnce();
+      expect((await res.json()).data.open_holds).toBe(1000);
+    }
+  });
+
+  it("returns the same 409 for a hold added after preflight, and a retry recovers", async () => {
+    const fake = fakeDb({ row: { budget_epoch: "old-epoch" } });
+    db.current = fake.client;
+    countOpenHolds.mockResolvedValue(1000);
+    const { TooManyOpenHoldsError } = await import("@/lib/state/holds");
+    rebuildBudgetState.mockRejectedValueOnce(new TooManyOpenHoldsError(1000));
+    const res = await rebuildRoute(post(url, {}), ctx(params));
+    expect(res.status).toBe(409);
+    expect((await res.json()).error.code).toBe("too_many_open_holds");
+    expect(fake.updates).toHaveLength(1);
+    expect(purgeAgentPolicy).not.toHaveBeenCalled();
+    expect(auditMock).not.toHaveBeenCalled();
+    const retry = await rebuildRoute(post(url, {}), ctx(params));
+    expect(retry.status).toBe(200);
+    expect(fake.updates).toHaveLength(2);
+    expect(rebuildBudgetState).toHaveBeenLastCalledWith(expect.objectContaining({ epoch: fake.updates[1]!.budget_epoch }));
+    expect(purgeAgentPolicy).toHaveBeenCalledOnce();
+    expect(auditMock).toHaveBeenCalledOnce();
+  });
 
   it("requires write scope — this is the only counter-lowering in the product", async () => {
     authMock.mockResolvedValue({ ok: true, userId: "u1", scope: "read", keyId: "k1" });

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 
 import { OTLP_LOGS_PATH, readClaudeCodeEvents } from "../otlp-logs.mjs";
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createSidecar } from "../sidecar.mjs";
 import { applyEvent, createBoardState, renderBoard } from "../watch.mjs";
 
@@ -151,13 +152,18 @@ async function startSidecar() {
   const port = await listen(sidecar.server);
   const rows = [];
   sidecar.feed.attach({ write: (line) => rows.push(JSON.parse(line)), on: () => {}, writableLength: 0 });
-  return { port, rows: () => rows.filter((r) => r.type === "call") };
+  otlpKeys.set(port, sidecarKey(b64url(secret)));
+  return { port, callerKey: sidecarKey(b64url(secret)), rows: () => rows.filter((r) => r.type === "call") };
 }
+
+// The receiver asks for the sidecar's key (review C-03 follow-up); configure writes it
+// into OTEL_EXPORTER_OTLP_LOGS_HEADERS.
+const otlpKeys = new Map();
 
 const post = (port, body, headers = {}) =>
   fetch(`http://127.0.0.1:${port}${OTLP_LOGS_PATH}`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", authorization: `Bearer ${otlpKeys.get(port)}`, ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 
@@ -173,10 +179,10 @@ describe("the sidecar's telemetry endpoint", () => {
   });
 
   it("does not count twice a session whose calls this sidecar already relays", async () => {
-    const { port, rows } = await startSidecar();
+    const { port, rows, callerKey } = await startSidecar();
     await fetch(`http://127.0.0.1:${port}/api/v1/anthropic/v1/messages`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-claude-code-session-id": SESSION },
+      headers: { "content-type": "application/json", "x-claude-code-session-id": SESSION, authorization: `Bearer ${callerKey}` },
       body: JSON.stringify({ model: "claude-haiku-5-5" }),
     });
     const before = rows().length;

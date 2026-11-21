@@ -49,6 +49,8 @@ const {
 // passport apart from a tenant that holds a demo scope. That module is
 // `server-only`, which Next enforces at build time and vitest cannot resolve
 // at all — same stub tests/site-demo-routes.test.ts already uses.
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/gate", () => ({ resolveCallMission: async () => ({ kind: "none" }) }));
 vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (promise: unknown) => promise }));
 vi.mock("@/lib/auth/visa", async (importOriginal) => ({
@@ -192,6 +194,9 @@ beforeEach(() => {
   delete process.env.PASSCONTROL_TRUST_CF_CONNECTING_IP;
   serviceClientMock.mockReturnValue({
     rpc: vi.fn(async () => ({ data: "provider-key", error: null })),
+    // Idea 12: an unknown pc_agent_ key, or one beside another credential, is looked up in
+    // the tripwire registry. This fixture has no decoys registered.
+    from: vi.fn(() => ({ select: () => ({ in: async () => ({ data: [], error: null }) }) })),
   });
   authenticateDirectAgentKeyMock.mockResolvedValue(directPrincipal);
   verifyVisaMock.mockResolvedValue({

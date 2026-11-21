@@ -9,6 +9,8 @@
 export const runtime = "edge";
 
 import { waitUntil } from "@vercel/functions";
+import { schedulePauseCascade } from "@/lib/standing/cascade";
+import { hasPeriodSnapshot } from "@/lib/state/period-snapshot";
 import { readClientLineage, sessionStoppedMessage, subagentCapMessage } from "@/lib/client-lineage";
 import { verifyVisa } from "@/lib/auth/visa";
 import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
@@ -58,7 +60,11 @@ import {
   subagentAllowlist,
   subagentSessionCapCents,
   sessionAlertCents,
+  loopBreakerRepeats,
+  sessionCaps,
 } from "@/lib/scope";
+import { SESSION_STATE_MESSAGE, loopFingerprint, loopPausedMessage, sessionCapMessage, sessionLedgerJti } from "@/lib/runaway";
+import { checkLoop, checkSessionCaps } from "@/lib/state/runaway";
 import { filterModelListingToScope } from "@/lib/providers/model-listing";
 import {
   POLICY_UNREADABLE,
@@ -126,11 +132,12 @@ import {
 } from "@/lib/providers/endpoint";
 import { rateLimit } from "@/lib/ratelimit";
 import { readBoundedBody } from "@/lib/http/bounded-body";
-import { captureError, captureGuardEvent, captureSecurityEvent, logFailOpen } from "@/lib/observability";
+import { scheduleTripwireSeen } from "@/lib/tripwire/gateway";
+import { captureError as captureUnredactedError, captureGuardEvent, captureSecurityEvent, logFailOpen } from "@/lib/observability";
 import { alertForGatewayStatus, notifyWorkspace } from "@/lib/alerts/workspace";
 import { pollTelegramDecisions } from "@/lib/alerts/approvals";
 import { noteSessionSpend } from "@/lib/alerts/session-spend";
-import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
+import { redactProviderError, redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 import {
   createSecretWatchStream,
   findSecrets,
@@ -160,7 +167,16 @@ import {
   type PassportAuthMethod,
   type VisaScope,
 } from "@/lib/gateway/authenticate";
+import { dispatchStopChecker, passportExpiryRefusal } from "@/lib/gateway/dispatch-stops";
 import { PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S } from "@/lib/gateway/limits";
+import { resolveCallMission, type CallMission } from "@/lib/mission/gate";
+import { MISSION_REQUIRED_MESSAGE } from "@/lib/mission/messages";
+import { missionOnlyOf } from "@/lib/mission/only";
+import { missionModelDecision } from "@/lib/mission/enforce";
+import { recordMissionDecision } from "@/lib/state/mission";
+import { approvalWaitMs, awaitApproval } from "@/lib/approvals/gate";
+import { approvalFingerprint } from "@/lib/approvals/fingerprint";
+import type { ReceiptMissionDecision } from "@/lib/receipt";
 import { unpricedUnderPeriodLimitMessage } from "@/lib/new-agent-spend-limit";
 
 
@@ -720,15 +736,18 @@ export async function GET(req: Request, ctx: Ctx) {
   return observedHandle(req, ctx);
 }
 
+const captureError = captureUnredactedError;
+
 async function observedHandle(req: Request, ctx: Ctx): Promise<Response> {
   let provider: string | undefined;
+  const resolvedSecrets: string[] = [];
   try {
     const params = await ctx.params;
     provider = params.provider;
-    return await handle(req, params);
+    return await handle(req, params, resolvedSecrets);
   } catch (error) {
     waitUntil(
-      captureError(error, {
+      captureError(redactProviderError(error, resolvedSecrets), {
         route: "api.proxy",
         method: req.method,
         status: 500,
@@ -740,7 +759,11 @@ async function observedHandle(req: Request, ctx: Ctx): Promise<Response> {
   }
 }
 
-async function handle(req: Request, params: { provider: string; path: string[] }): Promise<Response> {
+async function handle(req: Request, params: { provider: string; path: string[] }, resolvedSecrets: string[]): Promise<Response> {
+  // Includes earlier failover attempts; every capture in this request uses the
+  // credentials resolved so far, including captures in the outer error handler.
+  const captureError: typeof captureUnredactedError = (error, context) =>
+    captureUnredactedError(redactProviderError(error, resolvedSecrets), context);
   const started = Date.now();
   const { provider: providerRaw, path } = params;
 
@@ -767,6 +790,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // ── 1. Authenticate passport visa or Direct Agent Key ─────────────────────
   // This route accepts a WORKER's visa (Bet D, ver 3): it is the one route that
   // enforces a delegation's revocations and caps, below. No other door opts in.
+  const authenticatedAt = Date.now();
   const authentication = await authenticateGatewayRequest(req, provider, "api.proxy", { acceptDelegated: true });
   if (!authentication.ok) return authentication.response;
   const { principal, db, credentialToken } = authentication;
@@ -910,9 +934,29 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // array is destroyed before Promise.all forms: the budget reservation is never
   // released and the audit row is lost. Never make a governance path depend on a
   // signing path staying well-behaved — belt and braces, one line.
+  // Idea 11: the mission this call runs under, set once it is read (below). Declared
+  // here, before every receipt path, because a refusal can sign before the read.
+  let boundMission: Extract<CallMission, { kind: "bound" }> | null = null;
+  const approvedMissionModels = new Set<string>();
+  // Per ATTEMPT and computed at signing time from the attempt's own provider and
+  // model, so a failover's receipt cannot carry another attempt's decision. The hash
+  // is the revision this request read once; it never changes mid-request.
+  const missionReceipt = (attemptProvider: string, model: string | undefined) => {
+    if (!boundMission) return {};
+    const { record, enforce } = boundMission;
+    let decision: ReceiptMissionDecision;
+    if (!model) decision = "na";
+    else {
+      const inside = missionModelDecision(record.document, attemptProvider, model).state === "inside";
+      decision = enforce
+        ? inside ? "in" : approvedMissionModels.has(`${attemptProvider}\n${model}`) ? "approved" : "out"
+        : inside ? "shadow_in" : "shadow_out";
+    }
+    return { mission: { id: record.id, hash: record.currentHash, decision } };
+  };
   const safeReceipt = (input: Parameters<typeof signReceipt>[0]): string | null => {
     try {
-      return signReceipt(input);
+      return signReceipt({ ...input, ...missionReceipt(input.provider, input.model) });
     } catch {
       return null;
     }
@@ -977,14 +1021,55 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   const delegationLedger = delegation
     ? { links: delegation.links.map((l) => ({ jti: l.dlg, capMicrocents: l.cap })) }
     : undefined;
+  // Idea 11: the agent's mission. Read HERE because its money cap joins the hold
+  // below; ACTED ON only after the kill switch (step 2a), which always wins. An
+  // enforcing mission's cap is one more delegation-shaped ledger in the same atomic
+  // eval as the agent's own budget, under a 128-bit server-made id the agent never
+  // sees; a missing ledger refuses, exactly as a delegation's does.
+  //
+  // Mission-only (R11-01) comes from the same snapshot, at no extra round trip. A flag a
+  // FAILED read could not establish never becomes `between` (lib/mission/only.ts). Here it
+  // is passed as false, because under fail-closed this proxy's own policy step refuses that
+  // unreadable snapshot (403 blocked_policy, tests/proxy-direct-key.test.ts) before
+  // anything is reserved or sent, and that answer is unchanged.
+  const missionReadAt = Date.now();
+  const callMission = await resolveCallMission({
+    db,
+    principal,
+    nowS: Math.floor(Date.now() / 1000),
+    missionOnly: missionOnlyOf(currentPolicySnapshot, policyFailClosed) === true,
+  });
+  boundMission = callMission.kind === "bound" ? callMission : null;
+  const missionLedger =
+    boundMission?.enforce && boundMission.record.ledgerId
+      ? { jti: boundMission.record.ledgerId, capMicrocents: boundMission.record.document.money }
+      : undefined;
+  const holdDelegation =
+    delegationLedger || missionLedger
+      ? { links: [...(delegationLedger?.links ?? []), ...(missionLedger ? [missionLedger] : [])] }
+      : undefined;
+  // The mission's ledger is the LAST link, so a refusal naming that position is the
+  // mission's, even when a delegation's links come first (1.8.0 review R11-05).
+  const missionLink = missionLedger && holdDelegation ? holdDelegation.links.length : null;
+  const refusedByMission = (link: number | undefined) =>
+    missionLink != null && (link === missionLink || (link === undefined && !delegationLedger));
+  // 1.9.0: the per-session caps, from the live policy, for a call that declares a session.
+  // Read here because a money cap is a dollar limit like the others; enforced at step 4g.
+  const liveSessionCaps = lineage ? sessionCaps(currentPolicySnapshot.policy) : null;
+  const sessionMoneyCapped = liveSessionCaps?.cents != null;
   const dollarLimited =
-    capMicrocents != null || livePeriod.mode === "set" || subLedger !== undefined || delegationLedger !== undefined;
+    capMicrocents != null ||
+    livePeriod.mode === "set" ||
+    subLedger !== undefined ||
+    delegationLedger !== undefined ||
+    missionLedger !== undefined ||
+    sessionMoneyCapped;
   // F1: when the periodic limit is the ONLY dollar limit, an unpriced refusal
   // says so and where it is removed. New dashboard agents start with one ($20 a
   // day), so the owner refused here usually never chose it. Any other dollar
   // limit keeps the bare code: removing the period would not admit the call.
   const unpricedReason =
-    livePeriod.mode === "set" && capMicrocents == null && subLedger === undefined && delegationLedger === undefined
+    livePeriod.mode === "set" && capMicrocents == null && subLedger === undefined && delegationLedger === undefined && missionLedger === undefined && !sessionMoneyCapped
       ? unpricedUnderPeriodLimitMessage(livePeriod.kind, livePeriod.capMicrocents / MICROCENTS_PER_CENT)
       : undefined;
   // Candidate 3: the live policy's "session passed $X" threshold, in micro-cents.
@@ -1025,6 +1110,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         notifyWorkspace({ userId, agentId, type: alert, status, model, origin: new URL(req.url).origin, ...(pause ? { pause } : {}) })
       );
     }
+    // A budget pause also cancels the Actions runs this agent left going (idea 14, D3): at most
+    // once per window, off the request's path, shadow unless both switches say Live.
+    if (status === "blocked_budget_pause") schedulePauseCascade(userId, agentId);
     // The refusal says what a heads-up (L8) would have: this period's is spent.
     if ((status === "blocked_budget_pause" || status === "blocked_budget_period") && livePeriod.mode === "set") {
       const kind = livePeriod.kind;
@@ -1117,10 +1205,40 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     return errR(403, "blocked_suspended");
   }
 
+  // ── 2a. The agent's mission (idea 11) ──────────────────────────────────────
+  // After the kill switch, before scope. A stale, ended or unreadable mission is
+  // refused here, before anything is reserved (lib/mission/gate.ts fails closed).
+  if (callMission.kind === "refuse") {
+    logBlocked("blocked_policy", undefined, callMission.status);
+    captureBlocked(callMission.code, callMission.status);
+    return errR(callMission.status, callMission.code, callMission.message);
+  }
+  if (callMission.kind === "between") {
+    // A mission-only agent with no mission in force (R11-01). Refused, not held: a model
+    // call is one LLM turn, and an owner approval per turn is not a way to work
+    // (plans/mission-only-design.md §4). Drafting a mission stays open, so this is
+    // never a dead end.
+    logBlocked("blocked_policy", undefined, 403);
+    captureBlocked("mission_required", 403);
+    return errR(403, "mission_required", MISSION_REQUIRED_MESSAGE);
+  }
+  if (holdDelegation && holdDelegation.links.length > 2) {
+    // The hold carries at most two delegation-shaped ledgers (lib/state/holds.ts).
+    // Dropping one would drop a cap, so a depth-2 worker under a mission is refused.
+    logBlocked("blocked_policy", undefined, 403);
+    captureBlocked("mission_unsupported_delegation_depth", 403);
+    return errR(
+      403,
+      "mission_unsupported_delegation_depth",
+      "This agent is on a mission, and a worker two delegations deep cannot run under one yet. Delegate one level only."
+    );
+  }
+
   // ── 2b. A worker's delegation: revoked, or past the agent's watermark ───────
   // Its own read, NOT the kill switch's: that one fails open by default, and an
   // unreadable revocation for a delegation fails CLOSED (owner decision P2.3). Kill
   // and suspend above already cover the whole tree, since `agid` is the parent.
+  const delegationReadAt = Date.now();
   if (delegation) {
     let revoked: boolean;
     try {
@@ -1146,6 +1264,12 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       return errR(403, "delegation_revoked");
     }
   }
+
+  const checkDispatchStops = dispatchStopChecker({
+    db, principal, credentialToken, session: lineage?.session ?? null,
+    missionOnly: missionOnlyOf(currentPolicySnapshot, policyFailClosed) === true,
+    admissionMission: callMission, authenticatedAt, missionReadAt, delegationReadAt,
+  });
 
   // ── 3. Per-agent request-rate limit (call-volume DoS / abuse guard) ─────────
   //
@@ -1209,6 +1333,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       return err(400, "invalid_body");
     }
   }
+  // ── Idea 12: tripwire Seen. A registered decoy anywhere in what the agent is about to
+  // hand a model (tool output, documents, its own words). Off the call's path, refuses
+  // nothing, changes nothing forwarded; lib/tripwire/gateway.ts.
+  scheduleTripwireSeen(req, db, { userId, agentId }, bodyObj, "proxy_body");
   const model: string = typeof bodyObj?.model === "string" ? bodyObj.model : "";
   const wantsStream = bodyObj?.stream === true;
 
@@ -1291,6 +1419,22 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     captureBlocked("blocked_endpoint", 403);
     return errR(403, "blocked_endpoint");
   }
+  // Detached Responses work outlives this request and cannot be reached by a
+  // later stop. Only an absent, null, or explicitly false flag is clearly off.
+  if (
+    isResponsesEndpoint(provider, upstreamPath) &&
+    bodyObj?.background !== undefined &&
+    bodyObj.background !== null &&
+    bodyObj.background !== false
+  ) {
+    logBlocked("blocked_policy", model, 400);
+    captureBlocked("background_not_supported", 400);
+    return errR(
+      400,
+      "background_not_supported",
+      "Background responses are not supported through PassControl because a stop could not reach them. Send the request without background."
+    );
+  }
   // Embeddings are one JSON document, never a stream, and the response path
   // below reads them that way. A `stream: true` embeddings request is refused as
   // a malformed request — before the policy step, so it spends no hourly quota,
@@ -1326,8 +1470,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // tier, Anthropic fast mode or US-only inference) cannot be held to a dollar
   // limit either (lib/pricing.ts unpricedRequestOption). Refused before policy
   // and hold, unlogged like the hosted-tools refusal above, and named so the
-  // agent's developer knows which field to drop. Every fallback shares this
-  // body and its shape family, so checking it once covers failover too.
+  // agent's developer knows which field to drop. A fallback can be another
+  // provider of the same shape, so each one is checked again for its own provider
+  // (the fallback gate below).
   const pricedAbove = dollarLimited && isProvider(provider) ? unpricedRequestOption(provider, bodyObj) : null;
   if (pricedAbove !== null) {
     return new Response(JSON.stringify({ error: "unpriced_option", field: pricedAbove, ...(unpricedReason ? { message: unpricedReason } : {}) }), {
@@ -1693,6 +1838,69 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     }
   }
 
+  // ── 4f. The loop breaker (1.9.0, lib/runaway.ts) ───────────────────────────
+  // Only for an agent whose live policy sets `loop_breaker`: any other agent costs no
+  // Redis command here. Once per call, not per attempt: a failover is the same request.
+  // Before the hold, so a paused agent reserves nothing and no key is read. Fails OPEN
+  // when Redis cannot answer: an accident guard, and the agent's own limits still hold.
+  // Model discovery (`GET …/models`, `…/models/{id}`) is not a model call: an SDK lists
+  // models on start, and that must neither count against a session nor look like a loop.
+  const modelDiscovery = isModelListing(upstreamPath);
+  const loopRepeats = loopBreakerRepeats(currentPolicySnapshot.policy);
+  if (loopRepeats != null && !modelDiscovery) {
+    const fingerprint = await loopFingerprint({ provider, method: req.method, path: `/${upstreamPath.join("/")}`, body: bodyObj });
+    const loop = fingerprint ? await checkLoop(agentId, fingerprint, loopRepeats) : null;
+    if (fingerprint && loop === null) logFailOpen("loop_breaker");
+    if (loop && loop.state !== "ok") {
+      logBlocked("blocked_loop", model, 429);
+      captureBlocked("blocked_loop", 429);
+      return new Response(JSON.stringify({ error: "blocked_loop", message: loopPausedMessage(loopRepeats, loop.retryAfterS) }), {
+        status: 429,
+        headers: {
+          "content-type": "application/json",
+          "x-passcontrol-receipt-id": receiptId,
+          "retry-after": String(loop.retryAfterS),
+        },
+      });
+    }
+  }
+
+  // ── 4g. Per-session caps (1.9.0, lib/runaway.ts) ───────────────────────────
+  // Only for an agent whose live policy sets `session_caps`, and only for a call that
+  // declares a session: anything else costs no Redis command here. Once per call: calls and
+  // minutes are refused now, before the hold; a money cap becomes one more ledger link on
+  // every attempt's hold (below), so the hold script checks it atomically with the agent's
+  // own. Fails OPEN, joining no link: an accident guard, the agent's own limits still hold.
+  let sessionLedger: { jti: string; capMicrocents: number } | undefined;
+  if (liveSessionCaps && lineage && !modelDiscovery) {
+    const ledgerJti = liveSessionCaps.cents != null ? await sessionLedgerJti(lineage.session) : undefined;
+    const sessionCheck = await checkSessionCaps(agentId, lineage.session, {
+      calls: liveSessionCaps.calls,
+      minutes: liveSessionCaps.minutes,
+      ...(ledgerJti ? { ledgerJti } : {}),
+    });
+    if (sessionCheck === null) logFailOpen("session_caps");
+    else if (!sessionCheck.ok && sessionCheck.reason === "state") {
+      // Its money record was lost while it lives: never remade at zero (lib/state/runaway.ts).
+      logBlocked("blocked_budget_state", model, 503);
+      captureBlocked("session_state_unavailable", 503);
+      return errR(503, "session_state_unavailable", SESSION_STATE_MESSAGE);
+    } else if (!sessionCheck.ok) {
+      logBlocked("blocked_session_cap", model, 403);
+      captureBlocked("blocked_session_cap", 403);
+      return errR(403, "blocked_session_cap", sessionCapMessage(sessionCheck.reason, lineage.session, liveSessionCaps));
+    } else if (ledgerJti && liveSessionCaps.cents != null) {
+      sessionLedger = { jti: ledgerJti, capMicrocents: liveSessionCaps.cents * MICROCENTS_PER_CENT };
+    }
+  }
+  // Every attempt's ledger links: the delegation's, then the mission's, then the session's.
+  // The mission stays at its position (missionLink), and the session's is the last one.
+  const attemptLedgers =
+    holdDelegation || sessionLedger
+      ? { links: [...(holdDelegation?.links ?? []), ...(sessionLedger ? [sessionLedger] : [])] }
+      : undefined;
+  const sessionLink = sessionLedger && attemptLedgers ? attemptLedgers.links.length : null;
+
   // ── 5–9, once per attempt ───────────────────────────────────────────────────
   //
   // Failover turns what was a straight line into a loop, so everything that
@@ -1729,16 +1937,27 @@ async function handle(req: Request, params: { provider: string; path: string[] }
   // round trip and cannot race a concurrent flush.
   // A periodic limit alone makes an agent budgeted: its period is fenced to a
   // generation exactly like the cumulative counters it is derived from, so it
-  // needs the same epoch and presence checks. An UNKNOWN periodic limit does not
-  // on its own — with no cap to protect, "unknown" must not become a new
-  // denial path — but a budgeted agent passes it on, so the script can apply
-  // the last limit it enforced.
-  const budgeted =
+  // needs the same epoch and presence checks. Unknown metadata also passes
+  // through the fenced hold so Lua consults the last enforced snapshot, even
+  // when no other cap makes this agent budgeted. No snapshot means no limit;
+  // an unknown read never deletes an existing snapshot.
+  const budgetedOtherwise =
     capTokens != null ||
     capMicrocents != null ||
     livePeriod.mode === "set" ||
     subLedger !== undefined ||
-    delegationLedger !== undefined;
+    delegationLedger !== undefined ||
+    missionLedger !== undefined ||
+    sessionLedger !== undefined;
+  // Review 2026-11-21, finding 1: "unknown" alone, for an agent whose budget state Postgres
+  // never recorded, is budgeted only if Redis holds a last-enforced limit to consult. Without
+  // one there is nothing to enforce, and the fenced hold would mint an epoch and write it to
+  // the same database that just failed to answer: a 503 for an agent with no limits, or a
+  // permanent "budgeted" mark. One EXISTS, and only on this degraded path.
+  const budgeted =
+    budgetedOtherwise ||
+    (livePeriod.mode === "unknown" &&
+      (currentPolicyGate.budgetState?.established === true || (await hasPeriodSnapshot(agentId))));
   const budgetState = budgeted ? currentPolicyGate.budgetState : undefined;
   const periodLimit: PeriodLimit | undefined = budgeted ? livePeriod : undefined;
 
@@ -1874,6 +2093,81 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const attemptEstimate = attemptUsage.totalTokens;
     const attemptReceiptId = target.receiptId;
     const attemptId = guard.attemptId;
+
+    // ── 4e. The mission's word on THIS attempt's model (idea 11) ──────────────
+    // Per attempt, because a failover target is a model call like any other. A
+    // fallback outside the mission is skipped, never asked about: the owner is asked
+    // about the model the agent chose. Outside an enforcing mission the primary holds
+    // through Ask me first; an approval sends this one call and widens nothing.
+    if (boundMission && attemptModel) {
+      const { record, enforce } = boundMission;
+      const decision = missionModelDecision(record.document, attemptProvider, attemptModel);
+      if (decision.state === "inside") {
+        waitUntil(recordMissionDecision(record.id, "inside", undefined, record.document.expires));
+      } else if (!enforce) {
+        waitUntil(recordMissionDecision(record.id, "shadow_would_hold", "model", record.document.expires));
+      } else {
+        if (!primary) return { kind: "skipped" };
+        const upstreamPath = `/${path.join("/")}`;
+        const preview = `model ${attemptProvider}/${attemptModel}`;
+        let approval: Awaited<ReturnType<typeof awaitApproval>>;
+        try {
+          const fingerprint = await approvalFingerprint({
+            userId,
+            agentId,
+            service: attemptProvider,
+            method: "MISSION_MODEL",
+            upstreamPath,
+            // Bound to this mission revision: an approval cannot outlive a narrowing.
+            search: `?mission=${record.id}&rev=${record.currentHash}&model=${encodeURIComponent(attemptModel)}`,
+            headers: new Headers(),
+            body: null,
+          });
+          approval = await awaitApproval({
+            request: { userId, agentId, service: attemptProvider, method: "POST", path: upstreamPath, preview, fingerprint, hold: "mission_outside" },
+            prompt: {
+              agentName: "This agent",
+              serviceLabel: attemptProvider,
+              method: "POST",
+              path: upstreamPath,
+              preview,
+              dashboardUrl: `${new URL(req.url).origin}/dashboard/approvals`,
+              heldBecause: `Outside this agent's mission: ${decision.detail}. Approving sends this one call; widening the mission is done on the dashboard.`,
+            },
+            waitMs: approvalWaitMs(),
+          });
+        } catch {
+          approval = { state: "unavailable" };
+        }
+        waitUntil(recordMissionDecision(record.id, approval.state === "approved" ? "approved" : "held", "model", record.document.expires));
+        if (approval.state !== "approved") {
+          captureBlocked(`approval_${approval.state}`, 403);
+          if (approval.state === "unavailable") {
+            logBlocked("blocked_policy", attemptModel, 503);
+            return { kind: "response", response: errR(503, "approval_unavailable", "This call needs the owner's approval, which could not be checked. Try again shortly.") };
+          }
+          if (approval.state === "denied") {
+            logBlocked("blocked_policy", attemptModel, 403);
+            return { kind: "response", response: errR(403, "approval_denied", "The owner denied this model for this mission. Do not send it again unchanged.") };
+          }
+          if (approval.state === "full") {
+            logBlocked("blocked_policy", attemptModel, 429);
+            const full = errR(429, "approval_queue_full", "This workspace already has too many requests waiting for the owner's approval. Try again after they answer.");
+            full.headers.set("retry-after", "60");
+            return { kind: "response", response: full };
+          }
+          logBlocked("blocked_policy", attemptModel, 409);
+          const held = errR(
+            409,
+            "approval_pending",
+            `${attemptProvider}/${attemptModel} is outside this agent's mission, so the owner has been asked. Send the same request again in a little while: once they approve, it goes through once.`
+          );
+          held.headers.set("retry-after", "15");
+          return { kind: "response", response: held };
+        }
+        approvedMissionModels.add(`${attemptProvider}\n${attemptModel}`);
+      }
+    }
     const usageProtocol: UsageProtocol = isEmbeddingsEndpoint(attemptProvider, req.method, path)
       ? "embeddings"
       : isResponsesEndpoint(attemptProvider, target.upstreamPath)
@@ -1969,6 +2263,16 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // ── 5. Open the attempt's hold (atomic) ────────────────────────────────────
     // One clock per attempt: it decides the period the hold is judged in, and
     // the ledger window a period seed is read over, so the two cannot disagree.
+    const delegatedHoldExpiry = () => {
+      if (principal.kind !== "passport" || !principal.delegation) return undefined;
+      const refusal = passportExpiryRefusal(principal);
+      if (!refusal) return undefined;
+      captureBlocked(refusal.audit, refusal.status);
+      logBlocked(refusal.audit, undefined, refusal.status);
+      return { kind: "response" as const, response: errR(refusal.status, refusal.code, refusal.message) };
+    };
+    const beforeHold = delegatedHoldExpiry();
+    if (beforeHold) return beforeHold;
     const attemptNowMs = Date.now();
     const holdArgs: Parameters<typeof openHold>[0] = {
       agentId,
@@ -1991,7 +2295,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // Every attempt, failover included: a fallback must not carry the sub-agent past its cap.
       ...(subLedger ? { subLedger } : {}),
       // Every attempt, failover included: a fallback spends against the same chain.
-      ...(delegationLedger ? { delegation: delegationLedger } : {}),
+      // Every attempt, failover included: the mission's cap is spent by the whole job.
+      // Every attempt, failover included: the session's money cap covers the whole session.
+      ...(attemptLedgers ? { delegation: attemptLedgers } : {}),
       nowMs: attemptNowMs,
     };
     let reserve = await openHold(holdArgs);
@@ -2077,6 +2383,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       const seed =
         periodLimit?.mode === "set" ? await readPeriodSeed(periodLimit.kind, attemptNowMs) : null;
       if (seed !== null) {
+        // The ledger read can cross a signed expiry. The first open reserved
+        // nothing; refuse before the retry can create a new reservation.
+        const beforeRetry = delegatedHoldExpiry();
+        if (beforeRetry) return beforeRetry;
         reserve = await openHold({ ...holdArgs, periodSeedMicrocents: seed });
         if (reserve.epochToPersist) {
           const refused = await persistEpoch(reserve.epochToPersist);
@@ -2110,6 +2420,22 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // out of the gate also keeps the gate's budget contract exactly "a cap
     // denied this" rather than widening it to a third meaning — so only
     // `tokens` / `cost` are ever passed in below.
+    if (!reserve.ok && reserve.reason === "delegation_state" && sessionLink != null && reserve.link === sessionLink) {
+      // The session's ledger was made moments ago at step 4g, so a missing one was evicted.
+      // Not an empty budget: retryable, and the next call's step 4g makes it again.
+      if (!primary) return { kind: "skipped" };
+      logBlocked("blocked_budget_state", attemptModel, 503);
+      captureBlocked("session_state_unavailable", 503);
+      return { kind: "response", response: errR(503, "session_state_unavailable", SESSION_STATE_MESSAGE) };
+    }
+    if (!reserve.ok && reserve.reason === "delegation_state" && refusedByMission(reserve.link)) {
+      // The mission's ledger is gone. Never recreated at zero: the job would get its
+      // whole money cap again. Fails closed until the owner approves a new mission.
+      if (!primary) return { kind: "skipped" };
+      logBlocked("blocked_policy", attemptModel, 503);
+      captureBlocked("mission_state_unavailable", 503);
+      return { kind: "response", response: errR(503, "mission_state_unavailable") };
+    }
     if (!reserve.ok && reserve.reason === "delegation_state") {
       // A link's ledger is gone. It is never recreated at zero (lib/state/holds.ts),
       // so this delegation is refused until it expires. Fails closed, like P2.3.
@@ -2172,6 +2498,26 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         logBlocked("blocked_budget_period", attemptModel, 402);
         captureBlocked("blocked_budget_period", 402);
         return { kind: "response", response: periodRefusal(attemptNowMs) };
+      }
+      if (reserve.reason === "delegation" && sessionLink != null && reserve.link === sessionLink && liveSessionCaps && lineage) {
+        logBlocked("blocked_session_cap", attemptModel, 402);
+        captureBlocked("blocked_session_cap", 402);
+        return {
+          kind: "response",
+          response: errR(402, "blocked_session_cap", sessionCapMessage("cents", lineage.session, liveSessionCaps)),
+        };
+      }
+      if (reserve.reason === "delegation" && refusedByMission(reserve.link)) {
+        logBlocked("blocked_budget", attemptModel, 402);
+        captureBlocked("blocked_budget_mission", 402);
+        return {
+          kind: "response",
+          response: errR(
+            402,
+            "blocked_budget_mission",
+            "The most this call could cost, added to what this agent's mission has already spent, would pass the mission's money cap. Raising it is a widening, so only the owner can approve it."
+          ),
+        };
       }
       if (reserve.reason === "delegation" && delegationLedger) {
         logBlocked("blocked_budget_delegation", attemptModel, 402);
@@ -2669,6 +3015,18 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       return terminal(errR(402, "unpriced_model", unpricedReason), settle);
     }
 
+    // Same release + receipt + audit path as the finalGate refusal above.
+    const refuseDispatch = (refusal: NonNullable<Awaited<ReturnType<typeof checkDispatchStops>>["refusal"]>) => {
+      const message = refusal.session && lineage ? sessionStoppedMessage(lineage.session) : refusal.message
+        ?? (refusal.code === "mission_required" ? MISSION_REQUIRED_MESSAGE : undefined);
+      captureBlocked(refusal.audit === "blocked_policy" ? refusal.code : refusal.audit, refusal.status, refusal.session ? "session" : undefined);
+      const response = errR(refusal.status, refusal.code, message);
+      response.headers.set("x-passcontrol-receipt-id", attemptReceiptId);
+      return terminal(response, reconcile(NO_USAGE, refusal.audit, guard.dispatched ? "complete" : "not_dispatched", refusal.status));
+    };
+    const beforeKey = await checkDispatchStops(!primary);
+    if (beforeKey.refusal) return refuseDispatch(beforeKey.refusal);
+
     // ── 6. Resolve provider key (encrypted cache, else Vault RPC) ──────────────
     //
     // The endpoint was resolved just above, AFTER the budget reserve of step 5
@@ -2701,7 +3059,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const cached = await getCachedKey(agentId, attemptProvider, boundCredentialId ?? undefined);
     if (cached) {
       const sealed = boundCredentialId ? unbindCachedKey(cached, boundCredentialId) : cached;
-      if (sealed) providerKey = await open(sealed, keyContext);
+      if (sealed) {
+        providerKey = await open(sealed, keyContext);
+        resolvedSecrets.push(...secretsToRedact(providerKey));
+      }
     }
     if (!providerKey) {
       // The fence for the FILL, read immediately before the authoritative
@@ -2754,6 +3115,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         return terminal(errR(503, "credential_unavailable"), settle);
       }
       providerKey = typeof keyData === "string" ? keyData : null;
+      resolvedSecrets.push(...secretsToRedact(providerKey));
       if (providerKey) {
         // store ciphertext only, and — when bound — the id it belongs to
         const key = providerKey;
@@ -2943,6 +3305,11 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         })
       );
     };
+    const redactHeader = (value: string) => {
+      const out = redactSecretsInText(value, echoSecrets);
+      if (out.redacted) reportReflection();
+      return out.text;
+    };
     const redactText = (text: string) => {
       const out = redactSecretsInText(text, echoSecrets);
       if (out.redacted) reportReflection();
@@ -3024,6 +3391,13 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       return { kind: "response", response: errR(503, "dispatch_unavailable") };
     }
     guard.dispatched = true;
+
+    // The permission read can itself wait. Refresh at the send, after every
+    // asynchronous preparation step. This handler exclusively won permission
+    // and has not fetched: zero usage is known. After the phase transition a
+    // not_dispatched release is forbidden, so reconcile settles known zero.
+    const beforeDispatch = await checkDispatchStops();
+    if (beforeDispatch.refusal) return refuseDispatch(beforeDispatch.refusal);
 
     let upstream: Response;
     try {
@@ -3162,7 +3536,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         new Response(inspectable ? (errorBody === null ? null : redactText(errorBody)) : upstream.body && redactBody(upstream.body), {
           status: upstream.status,
           headers: {
-            "content-type": contentType || "application/json",
+            "content-type": redactHeader(contentType || "application/json"),
             "x-passcontrol-receipt-id": attemptReceiptId,
           },
         });
@@ -3398,12 +3772,9 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // the next call going out, so an operator who arms the switch mid-failover
     // must not have it go out. One Redis round-trip, on a call that has already
     // failed.
-    const [freshKill, freshSuspendRead] = await Promise.all([
-      readKillState(userId),
-      isSuspended(agentId, lineage?.session ?? null),
-    ]);
-    const freshRedisSuspended = withRecordedSessionStop(freshSuspendRead, freshKill, agentId, lineage?.session ?? null);
-    const freshSuspended = freshRedisSuspended !== false || principalSuspended(principal);
+    const fresh = await checkDispatchStops(false, true);
+    const freshKill = fresh.killState;
+    const freshSuspended = fresh.suspended;
     const revocation = evaluateGate({
       agentId,
       killState: freshKill,
@@ -3458,6 +3829,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     // one a fallback must not.
     if (serverSideToolUse(fallback.provider, bodyObj) !== null) return { verdict: "skip" };
     if (fallback.provider === "openrouter" && openrouterModelSelectionField(bodyObj) !== null) return { verdict: "skip" };
+    // And a request option is judged for the provider it would go to: one the
+    // primary ignores (OpenAI's 12-hour `prompt_cache_options` sent to Groq) can
+    // bill above the fallback's row, so under a dollar limit that fallback is skipped.
+    if (dollarLimited && unpricedRequestOption(fallback.provider, bodyObj) !== null) return { verdict: "skip" };
 
     // Same threaded observation, for the same reason: measuring must not charge
     // the counter. shadowVerdict declines to answer rather than reusing a
@@ -3621,6 +3996,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   const authentication = await authenticateGatewayRequest(req, "demo");
   if (!authentication.ok) return authentication.response;
   const { principal, db, credentialToken } = authentication;
+  const demoAuthenticatedAt = Date.now();
   const agentId = principal.agentId;
   const userId = principal.userId;
   const scopes = principal.scopes;
@@ -3938,6 +4314,45 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
       : errR(policy.status, "blocked_policy");
   }
 
+  // 5b. The loop breaker (1.9.0), as on the billed path's step 4f: the demo shows the
+  // real rules. Before the hold, only for an agent whose policy sets it, fails open.
+  const demoLoopRepeats = loopBreakerRepeats(currentPolicySnapshot?.policy ?? null);
+  if (demoLoopRepeats != null) {
+    const fingerprint = await loopFingerprint({ provider: "demo", method: req.method, path: `/${path.join("/")}`, body: bodyObj });
+    const loop = fingerprint ? await checkLoop(agentId, fingerprint, demoLoopRepeats) : null;
+    if (fingerprint && loop === null) logFailOpen("loop_breaker");
+    if (loop && loop.state !== "ok") {
+      logBlocked("blocked_loop", model, 429);
+      return new Response(JSON.stringify({ error: "blocked_loop", message: loopPausedMessage(demoLoopRepeats, loop.retryAfterS) }), {
+        status: 429,
+        headers: { "content-type": "application/json", "x-passcontrol-receipt-id": receiptId, "retry-after": String(loop.retryAfterS) },
+      });
+    }
+  }
+
+  // 5c. Per-session caps (1.9.0), as on the billed path's step 4g, for a session or run the
+  // client declares. Calls and minutes refused now; a money cap rides the hold as a link.
+  const demoSessionCaps = lineage ? sessionCaps(currentPolicySnapshot?.policy ?? null) : null;
+  let demoSessionLedger: { jti: string; capMicrocents: number } | undefined;
+  if (demoSessionCaps && lineage) {
+    const ledgerJti = demoSessionCaps.cents != null ? await sessionLedgerJti(lineage.session) : undefined;
+    const sessionCheck = await checkSessionCaps(agentId, lineage.session, {
+      calls: demoSessionCaps.calls,
+      minutes: demoSessionCaps.minutes,
+      ...(ledgerJti ? { ledgerJti } : {}),
+    });
+    if (sessionCheck === null) logFailOpen("session_caps");
+    else if (!sessionCheck.ok && sessionCheck.reason === "state") {
+      logBlocked("blocked_budget_state", model, 503);
+      return errR(503, "session_state_unavailable", SESSION_STATE_MESSAGE);
+    } else if (!sessionCheck.ok) {
+      logBlocked("blocked_session_cap", model, 403);
+      return errR(403, "blocked_session_cap", sessionCapMessage(sessionCheck.reason, lineage.session, demoSessionCaps));
+    } else if (ledgerJti && demoSessionCaps.cents != null) {
+      demoSessionLedger = { jti: ledgerJti, capMicrocents: demoSessionCaps.cents * MICROCENTS_PER_CENT };
+    }
+  }
+
   // 6. Budget reserve (atomic) — real, so the budget/kill demos are honest.
   const estimatedUsage = estimateTokenUsage(bodyObj);
   const estimate = estimatedUsage.totalTokens;
@@ -3947,8 +4362,16 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
   // it, rather than keeping a second, simpler accounting that could drift from
   // the one under test.
   const attemptId = crypto.randomUUID();
-  // The same budgeted rule as the billed path: a periodic limit alone counts.
-  const demoBudgeted = capTokens != null || capMicrocents != null || livePeriod.mode === "set";
+  // The same budgeted rule as the billed path: a periodic limit alone counts, and an
+  // unknown one counts when there is a last-enforced limit to consult (review 2026-11-21,
+  // findings 1 and 8).
+  const demoBudgeted =
+    capTokens != null ||
+    capMicrocents != null ||
+    livePeriod.mode === "set" ||
+    demoSessionLedger !== undefined ||
+    (livePeriod.mode === "unknown" &&
+      (currentPolicyGate.budgetState?.established === true || (await hasPeriodSnapshot(agentId))));
   const demoBudgetState = demoBudgeted ? currentPolicyGate.budgetState : undefined;
   const demoPeriod: PeriodLimit | undefined = demoBudgeted ? livePeriod : undefined;
   const demoNowMs = Date.now();
@@ -3963,6 +4386,7 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     ...(model ? { model } : {}),
     ...(demoBudgetState ? { budgetState: demoBudgetState } : {}),
     ...(demoPeriod ? { periodLimit: demoPeriod } : {}),
+    ...(demoSessionLedger ? { delegation: { links: [demoSessionLedger] } } : {}),
     nowMs: demoNowMs,
   };
   let reserve = await openHold(demoHoldArgs);
@@ -4041,6 +4465,11 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     // must not refuse a call whose epoch is already durable.
     waitUntil(purgeAgentPolicy(userId, agentId));
   }
+  if (!reserve.ok && reserve.reason === "delegation_state" && demoSessionLedger) {
+    // The session's only link: made at step 5c, so a missing one was evicted. Retryable.
+    logBlocked("blocked_budget_state", model, 503);
+    return errR(503, "session_state_unavailable", SESSION_STATE_MESSAGE);
+  }
   if (!reserve.ok && reserve.reason === "state") {
     logBlocked("blocked_budget_state", model, 503);
     return errR(503, "blocked_budget_state");
@@ -4067,6 +4496,10 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     },
   });
   if (finalGate.deniedBy === "budget") {
+    if (reserve.reason === "delegation" && demoSessionLedger && demoSessionCaps && lineage) {
+      logBlocked("blocked_session_cap", model, 402);
+      return errR(402, "blocked_session_cap", sessionCapMessage("cents", lineage.session, demoSessionCaps));
+    }
     if (reserve.reason === "period" && demoPeriod?.mode === "set") {
       logBlocked("blocked_budget_period", model, 402);
       return new Response(JSON.stringify({ error: "blocked_budget_period" }), {
@@ -4080,6 +4513,39 @@ async function handleDemo(req: Request, path: string[], started: number): Promis
     }
     logBlocked("blocked_budget", model, 402);
     return errR(402, "blocked_budget");
+  }
+  // The final gate is a backstop here too (review 2026-11-21, finding 8; the billed path's
+  // twin is in runAttempt): any denial refuses, and nothing was synthesized, so the hold goes
+  // back in full. Should never fire; if it does an earlier check has drifted, so it is reported.
+  if (finalGate.deniedBy) {
+    const step = finalGate.deniedBy;
+    const status =
+      step === "kill" ? "blocked_killed"
+      : step === "suspend" ? "blocked_suspended"
+      : step === "scope" ? "blocked_scope"
+      : step === "endpoint" ? "blocked_endpoint"
+      : "blocked_policy";
+    waitUntil(releaseUndispatched({ agentId, attemptId }));
+    waitUntil(
+      captureError(new Error(`final gate denied by ${step} after the earlier checks passed`), {
+        route: "api.demo", method: req.method, status: 403, agentId, code: "final_gate_backstop",
+      })
+    );
+    logBlocked(status, model, 403);
+    return errR(403, step === "kill" || step === "suspend" ? "blocked_suspended" : status);
+  }
+  // A stop armed while this request was read or held is read again before anything is
+  // served, as the billed path does at the send (review 2026-11-21, finding 8). The Redis
+  // stops and the visa's expiry: the demo has no mission or delegation rules at admission,
+  // so it gains no new refusal kinds here, only the late stop.
+  const demoStops = await dispatchStopChecker({
+    db, principal, credentialToken, session: null,
+    admissionMission: { kind: "none" }, authenticatedAt: demoAuthenticatedAt, missionReadAt: demoAuthenticatedAt,
+  })(false, true);
+  if (demoStops.refusal) {
+    waitUntil(releaseUndispatched({ agentId, attemptId }));
+    logBlocked(demoStops.refusal.audit, model, demoStops.refusal.status);
+    return errR(demoStops.refusal.status, demoStops.refusal.code);
   }
 
 

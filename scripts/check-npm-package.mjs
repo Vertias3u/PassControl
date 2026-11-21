@@ -90,12 +90,27 @@ const allowed = new Set([
   // PostToolBatch tool output. cli/sidecar.mjs and cli/watch*.mjs import them at load,
   // so a missing file is a sidecar and a `watch` that cannot start.
   "cli/injection-scan.mjs",
+  "cli/tripwire-scan.mjs",
+  // Idea 12: planting decoys (configure tripwires) and the sidecar's digest-only checks.
+  "cli/tripwires.mjs",
+  "cli/tripwire-sidecar.mjs",
   "cli/injection-sidecar.mjs",
   // Phase 2's hold: which tools a tainted agent waits on. The tool gate imports it.
   "cli/injection-hold.mjs",
+  "cli/memory-custody.d.mts",
+  "cli/memory-custody.mjs",
+  "cli/memory-custody-sidecar.d.mts",
+  "cli/memory-custody-sidecar.mjs",
+  "cli/memory-inventory.d.mts",
+  "cli/memory-inventory.mjs",
+  "cli/memory-review.d.mts",
+  "cli/memory-review.mjs",
   // Their types, for the gateway's TypeScript. `cli` is packed whole, so a types file
   // missing here makes `release:cli` refuse the tarball as unexpected.
   "cli/injection-scan.d.mts",
+  "cli/tripwire-scan.d.mts",
+  "cli/tripwires.d.mts",
+  "cli/tripwire-sidecar.d.mts",
   "cli/injection-hold.d.mts",
   // The sidecar's receipt-id journal. cli/sidecar.mjs imports it at load, so a
   // missing file is a sidecar that cannot start.
@@ -126,9 +141,16 @@ const allowed = new Set([
   // agent may reach — the reviewable half of "PassControl is not an open proxy".
   "cli/proxy-policy.mjs",
   "cli/sidecar.mjs",
+  // The sidecar's caller key (review C-03). The sidecar and bin/passcontrol.mjs import
+  // it at load, so a missing file is a CLI that cannot start.
+  "cli/sidecar-token.mjs",
   // bin/passcontrol.mjs imports this on every run, so a missing file is not a
   // degraded update notice — it is an install that cannot start at all.
   "cli/update-check.mjs",
+  // One-command write keys (review C-01), and the stored key lowered once per install.
+  // bin/passcontrol.mjs imports both at load.
+  "cli/write-approval.mjs",
+  "cli/lowered-keys.mjs",
   "cli/update.mjs",
   "cli/visa-client.mjs",
   // `passcontrol watch` (F6). bin/passcontrol.mjs imports watch.mjs at the top and
@@ -148,6 +170,8 @@ const allowed = new Set([
   "cli/tool-rules.mjs",
   // Its types, for the gateway's TypeScript (the `cli/protocols.d.mts` pattern).
   "cli/tool-rules.d.mts",
+  "cli/mission-tools.mjs",
+  "cli/mission-tools.d.mts",
   "sdk/README.md",
   "sdk/control.d.ts",
   "sdk/control.js",

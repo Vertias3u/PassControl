@@ -5,7 +5,8 @@ export const CONTROL_API_PROTOCOL = { minimum: 1, maximum: 1 };
 export const GATEWAY_API_PROTOCOL = { minimum: 1, maximum: 1 };
 // 3 (Bet D, 2026-10-10): a WORKER's receipt, auth.kind "delegated". Moved so a verifier
 // that predates delegation refuses it as too new instead of rendering it as passport-signed.
-export const RECEIPT_PROTOCOL = { minimum: 1, maximum: 3 };
+// 4: an ending sent by the gateway on the owner's stop. Older verifiers must refuse it.
+export const RECEIPT_PROTOCOL = { minimum: 1, maximum: 4 };
 export const AGENT_TOKEN_PROTOCOL = { minimum: 1, maximum: 1 };
 export const WORKSPACE_EXPORT_PROTOCOL = { minimum: 1, maximum: 1 };
 

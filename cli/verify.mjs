@@ -118,8 +118,34 @@ async function verifySigned(
   return { ok: false, reason: "bad_signature" };
 }
 
-export function verifyReceipt(jws, options) {
-  return verifySigned(jws, RECEIPT_TYP, options);
+export async function verifyReceipt(jws, options) {
+  const result = await verifySigned(jws, RECEIPT_TYP, options);
+  if (result.ok && result.claims.ver === 4 && !validGatewayEndingClaims(result.claims)) {
+    return { ok: false, reason: "claims" };
+  }
+  return result;
+}
+
+// v4 changes WHO acted. Reject contradictory identity evidence even when signed.
+// Keep in sync with sdk/verify.ts.
+function validGatewayEndingClaims(c) {
+  const auth = c.auth;
+  const end = c.end;
+  return c.sub === "gateway" &&
+    !["vjti", "act", "passportId", "visaJti", "agentAccessKeyId", "credentialUseId"].some((key) => key in c) &&
+    !!auth && typeof auth === "object" && !Array.isArray(auth) && auth.kind === "gateway_ending" &&
+    !["act", "kid", "use", "dlg", "dep", "ch", "prf"].some((key) => key in auth) &&
+    !!end && !Array.isArray(end) &&
+    typeof end.thg === "string" && end.thg.length > 0 &&
+    typeof end.knd === "string" && end.knd.length > 0 &&
+    ["kill_switch", "session", "service", "mission_end", "budget_pause"].includes(end.trg) &&
+    Number.isSafeInteger(end.sat) && end.sat >= 0;
+}
+
+/** Plain identity wording for the owner-stop receipt, not an agent credential. */
+export function describeGatewayEnding(ending) {
+  const trigger = { kill_switch: "kill switch", session: "session stop", service: "service stop", mission_end: "mission end", budget_pause: "budget pause line" }[ending.trg];
+  return `Ended by PassControl on the owner's stop (${trigger}), not a call by the agent. No passport or agent key signed it.`;
 }
 
 /**
@@ -390,6 +416,7 @@ export async function verifySession(input, options) {
 
 /** Human-readable one-liners. Kept here so the CLI and its tests agree on wording. */
 export const FAILURE_REASONS = {
+  claims: "the receipt carries missing or conflicting gateway ending claims",
   malformed: "not a compact JWS",
   bad_signature: "signature does not verify against the issuer's published key",
   wrong_type: "this artifact is a different type than the one you asked to verify",

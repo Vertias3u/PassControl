@@ -58,7 +58,7 @@ describe("lib/fleet create paths answer 409 with the sentence", () => {
     };
     const result = await createAgent(db as never, "u1", {
       name: "scout",
-      passportPubkey: "A".repeat(43),
+      passportPubkey: "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw", // a real key: 32 zero bytes is small-order
       scopes: [{ provider: "openai", models: ["gpt-5-mini"] }],
     } as never);
     expect(result).toMatchObject({ ok: false, status: 409, code: "account_limit_reached" });

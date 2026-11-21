@@ -30,6 +30,8 @@ const GATEWAY_ALERTS: Partial<Record<string, "refused" | "budget">> = {
   blocked_budget_pause: "budget",
   blocked_budget_subagent: "budget",
   blocked_budget_delegation: "budget",
+  blocked_loop: "refused",
+  blocked_session_cap: "budget",
 };
 
 /**
@@ -49,6 +51,13 @@ const KIND: Record<Exclude<WorkspaceAlertType, "test" | "recap">, AlertKind> = {
   break_glass: "security",
   // A spend notice, so it rides the workspace's "budget" switch.
   session_spend: "budget",
+  tripwire_used: "security",
+  tripwire_seen: "security",
+  // Idea 11: an agent asks for one approval of a whole job. A security event: it is
+  // about who may act, and it rides the switch that rotations and break-glass use.
+  mission_draft: "security",
+  // Idea 13: memory waiting at customs holds the agent, so it rides "security".
+  memory_arrival: "security",
 };
 
 const SEND_TIMEOUT_MS = 3000;
@@ -106,6 +115,11 @@ export async function notifyWorkspace(input: {
   pause?: { reached: string; percent: number };
   /** budget_headsup (1.6.0, L8): what is reached when. */
   headsUp?: HeadsUpAlert;
+  /** tripwire_used / tripwire_seen (idea 12). `unthrottled`: a failed stop is never swallowed. */
+  tripwire?: import("@/lib/alerts/destination").TripwireAlertDetail;
+  unthrottled?: boolean;
+  /** memory_arrival (idea 13): counts and mark kinds only. */
+  memory?: { entries: number; origins: string[]; withheld?: boolean };
 }): Promise<void> {
   try {
     // A session alert is throttled per SESSION, so two sessions crossing within
@@ -118,7 +132,7 @@ export async function notifyWorkspace(input: {
         : input.status === "budget_headsup"
           ? "budget_headsup"
           : input.type;
-    if (!(await claimAlertSlot(input.userId, slot, input.agentId))) return;
+    if (!input.unthrottled && !(await claimAlertSlot(input.userId, slot, input.agentId))) return;
 
     const db = serviceClient();
     // Missing table (before 0078) or no row: no alerts, never an error.
@@ -156,6 +170,8 @@ export async function notifyWorkspace(input: {
     ) {
       return;
     }
+    const anchors: Partial<Record<string, string>> = {
+    };
     const alert = {
       type: input.type,
       agentName: typeof agent?.name === "string" ? agent.name : "an agent",
@@ -163,11 +179,14 @@ export async function notifyWorkspace(input: {
       model: input.model,
       at: new Date(),
       dashboardUrl:
-        agentDashboardUrl(input.origin, input.agentId) + (input.type === "session_spend" ? "#agent-sessions" : ""),
+        agentDashboardUrl(input.origin, input.agentId) +
+        (anchors[input.type] ?? (input.type === "session_spend" ? "#agent-sessions" : input.type === "mission_draft" ? "#agent-mission" : input.type === "memory_arrival" ? "#agent-memory" : input.tripwire ? "#agent-tripwires" : "")),
       ...(input.type === "session_spend"
         ? { session: input.session, spentMicrocents: input.spentMicrocents, thresholdMicrocents: input.thresholdMicrocents }
         : {}),
       ...(input.headsUp ? { headsUp: input.headsUp } : {}),
+      ...(input.tripwire ? { tripwire: input.tripwire } : {}),
+      ...(input.memory ? { memory: input.memory } : {}),
     };
     // The heads-up on Telegram carries "Suspend it now" (L8b); anywhere else, or if
     // that send fails, the ordinary alert.

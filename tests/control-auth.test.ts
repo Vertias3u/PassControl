@@ -120,6 +120,27 @@ describe("authenticateApiKey — idle expiry", () => {
     expect(next, "the new deadline must be further out than the old one").toBeGreaterThan(Date.parse(future));
   });
 
+  // Review C-01 follow-up (the commit's security review): a one-command key is minted
+  // with a deadline minutes after its creation, and using it must never extend that.
+  // Otherwise an agent that kills the CLI before it revokes the key keeps a write key
+  // for the whole idle window.
+  it("never extends a fixed-life key (deadline under an hour after creation)", async () => {
+    const created = new Date(Date.now() - 60_000).toISOString();
+    const deadline = new Date(Date.parse(created) + 15 * 60_000).toISOString();
+    lookup = { data: { id: "k1", user_id: "u1", scope: "write", revoked_at: null, created_at: created, expires_at: deadline }, error: null };
+    expect(await authenticateApiKey(req("Bearer " + VALID))).toMatchObject({ ok: true });
+    expect(updates.filter((u) => "expires_at" in u)).toEqual([]);
+    expect(updates.some((u) => "last_used_at" in u)).toBe(true);
+  });
+
+  it("still rolls a device key minted with the 90-day window", async () => {
+    const created = new Date(Date.now() - 86_400_000).toISOString();
+    const deadline = new Date(Date.parse(created) + 90 * 86_400_000).toISOString();
+    lookup = { data: { id: "k1", user_id: "u1", scope: "read", revoked_at: null, created_at: created, expires_at: deadline }, error: null };
+    await authenticateApiKey(req("Bearer " + VALID));
+    expect(updates.filter((u) => "expires_at" in u)).toHaveLength(1);
+  });
+
   it("does not resurrect an already-expired key by touching it", async () => {
     // The push happens only on the success path. A refused request that still
     // extended the deadline would make the expiry unreachable: every probe

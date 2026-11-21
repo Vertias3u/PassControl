@@ -9,12 +9,13 @@ import { readBoundedBody } from "@/lib/http/bounded-body";
 import { clientIp } from "@/lib/http/client-ip";
 import { waitUntil } from "@vercel/functions";
 import { NextResponse } from "next/server";
-import { base64urlToBytes, bytesToUtf8 } from "@/lib/encoding";
+import { canonicalBase64urlToBytes, base64urlToBytes, bytesToUtf8 } from "@/lib/encoding";
 import { verifySignature, passportIdToPublicKey } from "@/lib/crypto/ed25519";
 import { wrongProofPurpose } from "@/lib/auth/proof-purpose";
 import { claimNonce, redis, touchLastSeen } from "@/lib/state/redis";
 import { serviceClient } from "@/lib/supabase";
-import { mintVisa, type ScopeEntry } from "@/lib/auth/visa";
+import { mintVisa, scopeIsMintable, type ScopeEntry } from "@/lib/auth/visa";
+import { missionInForce, readActiveMissionForAgent } from "@/lib/mission/store";
 import { findAuthenticatablePassport } from "@/lib/auth/passport";
 import { readLiveGrant, unionScopes } from "@/lib/break-glass";
 import { rateLimit } from "@/lib/ratelimit";
@@ -144,7 +145,7 @@ function presentedSignatureStatus(
   if (!publicKey) return "bad_passport_id";
   try {
     return verifySignature(
-      base64urlToBytes(encodedSignature),
+      canonicalBase64urlToBytes(encodedSignature),
       base64urlToBytes(encodedPayload),
       publicKey
     ) ? "valid" : "bad_signature";
@@ -320,6 +321,20 @@ async function handlePost(req: Request) {
   const stored = Array.isArray(agent.allowed_scopes) ? (agent.allowed_scopes as ScopeEntry[]) : [];
   const grant = await readLiveGrant(db, agent.user_id as string, agent.id);
   const scope = unionScopes(stored, grant?.scopes ?? []);
+  // Review #3: a scope verifyVisa would refuse is not signed. The fault is the agent's
+  // stored row, so the code names it; retrying cannot help, so it is a 409, not a 5xx.
+  if (!scopeIsMintable(scope)) {
+    waitUntil(
+      captureError(new Error("agent scope fails validation at mint"), {
+        route: "api.auth.challenge",
+        method: "POST",
+        status: 409,
+        code: "agent_scope_invalid",
+        agentId: agent.id,
+      })
+    );
+    return fail(409, "agent_scope_invalid");
+  }
   if (grant) {
     // Every mint under an elevation is recorded. A grant is taken once; the
     // visas it produces are what actually reach the provider, and an incident
@@ -334,7 +349,20 @@ async function handlePost(req: Request) {
       })
     );
   }
+  // Idea 11: an agent on a mission gets a mission visa (ver 4) carrying the mission's
+  // CURRENT revision. Fails closed: if the mission cannot be read, minting an ordinary
+  // visa would hand a mission-bound agent its standing authority, so nothing is minted.
+  const missionRead = await readActiveMissionForAgent(db as never, agent.user_id as string, agent.id);
+  if (missionRead.kind === "unavailable" || missionRead.kind === "invalid") {
+    return fail(503, "mission_unavailable");
+  }
+  const nowS = Math.floor(Date.now() / 1000);
+  const mission =
+    missionRead.kind === "ok" && missionInForce(missionRead.record, nowS)
+      ? { id: missionRead.record.id, hash: missionRead.record.currentHash }
+      : undefined;
   const { token, expSeconds } = await mintVisa({
+    ...(mission ? { mission } : {}),
     // The key that actually authenticated, not the agent's current one. During
     // a grace window that may be the retired key, and the audit trail should
     // record which key was used — a retired key still in heavy use is exactly

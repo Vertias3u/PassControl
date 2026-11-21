@@ -48,6 +48,7 @@ import { readToolRules } from "@/lib/tool-rules";
 import { AgentPauseControl } from "@/components/AgentPauseControl";
 import { pauseReached } from "@/lib/budget-pause";
 import { readAgentPauseState } from "./pause-data";
+import { StandingThingsSection } from "@/components/StandingThingsSection";
 
 export const dynamic = "force-dynamic";
 
@@ -519,6 +520,8 @@ export default async function AgentPassportPage({
           visaTtlSeconds={visaTtlSeconds()}
         />
         </div>
+        {/* Idea 14: what this agent created that outlives the call (shadow). */}
+        <StandingThingsSection db={db} userId={user.id} agentId={passport.agent.id} agentName={passport.agent.name || "This agent"} agentActive={passport.agent.status === "active"} />
         {/* What Claude Code reported from a Pro/Max login: beside the record, never
             part of it (no receipt, not proxied, cost API-equivalent). */}
         <ReportedCallsPanel read={reported} />

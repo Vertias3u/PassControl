@@ -10,6 +10,8 @@ export type FirstCallStatus =
   | "blocked_budget_pause"
   | "blocked_budget_subagent"
   | "blocked_budget_delegation"
+  | "blocked_loop"
+  | "blocked_session_cap"
   | "blocked_delegation_revoked"
   | "blocked_delegation_unavailable"
   | "blocked_endpoint"
@@ -375,6 +377,18 @@ export function activationDiagnosis(row: FirstCallRow): ActivationDiagnosis {
       return {
         title: "A delegation's cap refused the call",
         detail: "The request came from a worker acting under a delegation from this agent, and that delegation used its spending cap. The agent itself keeps running.",
+        action: "policy",
+      };
+    case "blocked_loop":
+      return {
+        title: "The loop breaker paused the agent",
+        detail: "The agent sent the same request over and over, which looks like a loop, so PassControl paused its model calls for a while. The pause lifts by itself; the repeat count is in the agent's policy.",
+        action: "policy",
+      };
+    case "blocked_session_cap":
+      return {
+        title: "A session cap refused the call",
+        detail: "The request came from a session that reached one of the caps the agent's policy sets for one session: money, calls or minutes. The agent's other sessions keep running, and a new session starts with fresh caps.",
         action: "policy",
       };
     case "blocked_delegation_revoked":

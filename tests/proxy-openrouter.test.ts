@@ -258,7 +258,7 @@ beforeEach(() => {
   openHoldMock.mockResolvedValue({ ok: true, reserved: 1, reservedMicrocents: 0 });
   settleHoldMock.mockResolvedValue(undefined);
   getCachedKeyMock.mockResolvedValue("sk-or-v1-provider-key");
-  readKillStateMock.mockResolvedValue({ platformKill: false, tenantKill: false, denylist: [] });
+  readKillStateMock.mockResolvedValue({ platformKill: false, userKill: false, denylist: [] });
   isSuspendedMock.mockResolvedValue(false);
   readPolicyMock.mockResolvedValue({ policy: {}, shadow: null, budget: { known: false } });
   writeLogMock.mockResolvedValue(undefined);

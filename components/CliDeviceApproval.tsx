@@ -13,12 +13,13 @@
 // suite was green, because nothing asserted on what actually rendered. A stage
 // that is readable from the DOM is a stage that can be checked.
 import { useState, useTransition } from "react";
-import { KeyRound, ShieldAlert } from "lucide-react";
+import { KeyRound } from "lucide-react";
 import { approveCliDevice, denyCliDevice, inspectCliDevice } from "@/app/dashboard/actions-client";
+import { DeviceApprovalNotice } from "@/components/DeviceApprovalNotice";
 
 type Stage =
   | { kind: "entry" }
-  | { kind: "confirm"; code: string; clientName: string; ip: string; requestedAt: string }
+  | { kind: "confirm"; code: string; clientName: string; ip: string; requestedAt: string; oneCommand: boolean; oneCommandMinutes?: number }
   | { kind: "done"; clientName: string }
   | { kind: "denied" };
 
@@ -73,7 +74,7 @@ export function CliDeviceApproval() {
     return (
       <div className="pc-settings-manager" data-state="confirm">
         <div className="pc-settings-form">
-          <h3 className="m-0">Approve this device?</h3>
+          <h3 className="m-0">{stage.oneCommand ? "Approve one command?" : "Approve a new machine login?"}</h3>
 
           <div className="pc-field">
             <span>Device</span>
@@ -92,16 +93,8 @@ export function CliDeviceApproval() {
             </span>
           </div>
 
-          {/* Said plainly. "Allow access" would understate it by a lot. */}
-          <div className="pc-secret-warning">
-            <ShieldAlert className="h-5 w-5 text-destructive" aria-hidden />
-            <div>
-              <strong>Check this code matches your terminal.</strong> Approving mints a
-              write-scoped control-plane key: it can create and revoke agents, rotate passports,
-              change budgets and scopes, and arm the kill switch. It is valid until you revoke it.
-              If you did not just run <span className="mono">passcontrol login</span>, refuse this.
-            </div>
-          </div>
+          {/* Said plainly, and the kind is the server's, not the device name. */}
+          <DeviceApprovalNotice oneCommand={stage.oneCommand} oneCommandMinutes={stage.oneCommandMinutes} />
 
           {error ? (
             <p className="pc-form-error" role="alert">

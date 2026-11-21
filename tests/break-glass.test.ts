@@ -36,6 +36,11 @@ const h = vi.hoisted(() => ({
   grantFilters: [] as [string, unknown][],
 }));
 
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/mission/store")>()),
+  readActiveMissionForAgent: async () => ({ kind: "none" }),
+}));
 vi.mock("@vercel/functions", () => ({ waitUntil: vi.fn() }));
 vi.mock("@/lib/ratelimit", () => ({ rateLimit: (...a: unknown[]) => h.rateLimitMock(...a) }));
 vi.mock("@/lib/state/redis", () => ({
@@ -341,6 +346,28 @@ describe("the visa mint", () => {
 });
 
 // ── 1. Scope, and nothing else ──────────────────────────────────────────────
+// Review #3 (1.9.0): a stored scope row verifyVisa would refuse used to mint anyway, so
+// the agent got a visa that failed on every call, which reads as a broken passport. The
+// challenge now refuses at the door with a code that names the real fault.
+describe("a malformed stored scope", () => {
+  it.each([
+    ["an unknown provider", [{ provider: "not-a-provider", models: ["m-1"] }]],
+    ["an unusable model pattern", [{ provider: "openai", models: [""] }]],
+  ])("is refused at mint with agent_scope_invalid, not signed: %s", async (_label, allowed_scopes) => {
+    h.agentRow = agent({ allowed_scopes });
+    const res = await challenge(request("/api/auth/challenge", signed()));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "agent_scope_invalid" });
+  });
+
+  it("is refused even while a valid grant is live: the union carries the bad row", async () => {
+    h.agentRow = agent({ allowed_scopes: [{ provider: "not-a-provider", models: ["m-1"] }] });
+    h.grantRow = grant();
+    const res = await challenge(request("/api/auth/challenge", signed()));
+    expect(res.status).toBe(409);
+  });
+});
+
 describe("what break-glass does NOT widen", () => {
   const routeSource = readFileSync(
     resolve(process.cwd(), "app/api/v1/[provider]/[...path]/route.ts"),

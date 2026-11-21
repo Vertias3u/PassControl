@@ -18,6 +18,7 @@ export const AGENT_TOKEN_TYP = "passcontrol-agent+jwt";
 export const SUPPORTED_VER = RECEIPT_PROTOCOL.maximum;
 
 export type VerifyFailure =
+  | "claims"
   | "malformed"
   | "untrusted_issuer"
   | "unknown_key"
@@ -63,12 +64,15 @@ export interface ReceiptClaims {
   agid: string;
   vjti?: string;
   auth?:
+    | { kind: "gateway_ending" }
     | { kind: "direct_key"; kid: string; use: string }
     | { kind: "passport_proof_per_request" }
     // ver 3: a WORKER acting under a signed delegation from the agent. `sub` is the
     // root passport; `act` is the worker's key; `ch` commits to the chain
     // (verifyDelegationChain checks a chain you hold against it).
     | { kind: "delegated"; act: string; dlg: string; dep: number; ch: string; prf?: true };
+  /** ver 4: the gateway ended this standing thing on the owner's stop. */
+  end?: { thg: string; knd: string; trg: "kill_switch" | "session" | "service" | "mission_end" | "budget_pause"; sat: number };
   prov: string;
   mdl: string | null;
   mth: string;
@@ -385,9 +389,10 @@ async function verifySigned<T extends { iss?: unknown; ver?: unknown; v?: unknow
 }
 
 /**
- * Verify a signed call receipt.
+ * Verify a signed receipt. Version 4 attests to a gateway ending on the owner's stop;
+ * it carries no agent authentication evidence.
  *
- * What a valid receipt proves: this issuer attests that the named passport or
+ * For an agent call, this issuer attests that the named passport or
  * Direct Agent Key authenticated this call, with this verdict and this cost.
  * `auth.kind === "passport_proof_per_request"` additionally attests that the
  * gateway verified the passport proof for this exact request. A direct receipt
@@ -396,11 +401,31 @@ async function verifySigned<T extends { iss?: unknown; ver?: unknown; v?: unknow
  * anything about the response, and nothing at all by its absence — see
  * lib/receipt.ts for the limits, which are deliberate and documented.
  */
-export function verifyReceipt(
+export async function verifyReceipt(
   jws: string,
   options: VerifyOptions
 ): Promise<VerifyResult<ReceiptClaims>> {
-  return verifySigned<ReceiptClaims>(jws, RECEIPT_TYP, options);
+  const result = await verifySigned<ReceiptClaims>(jws, RECEIPT_TYP, options);
+  if (result.ok && result.claims.ver === 4 && !validGatewayEndingClaims(result.claims)) {
+    return { ok: false, reason: "claims" };
+  }
+  return result;
+}
+
+// v4 changes WHO acted. Reject contradictory identity evidence even when signed.
+// Keep in sync with the standalone CLI verifier.
+function validGatewayEndingClaims(c: Record<string, unknown>): boolean {
+  const auth = c.auth as Record<string, unknown> | null | undefined;
+  const end = c.end as Record<string, unknown> | null | undefined;
+  return c.sub === "gateway" &&
+    !["vjti", "act", "passportId", "visaJti", "agentAccessKeyId", "credentialUseId"].some((key) => key in c) &&
+    !!auth && typeof auth === "object" && !Array.isArray(auth) && auth.kind === "gateway_ending" &&
+    !["act", "kid", "use", "dlg", "dep", "ch", "prf"].some((key) => key in auth) &&
+    !!end && !Array.isArray(end) &&
+    typeof end.thg === "string" && end.thg.length > 0 &&
+    typeof end.knd === "string" && end.knd.length > 0 &&
+    ["kill_switch", "session", "service", "mission_end", "budget_pause"].includes(end.trg as string) &&
+    Number.isSafeInteger(end.sat) && (end.sat as number) >= 0;
 }
 
 // ── Signed spend statements ────────────────────────────────────────────────

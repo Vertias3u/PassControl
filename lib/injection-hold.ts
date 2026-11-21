@@ -35,11 +35,14 @@ export async function injectionHoldReason(policy: unknown, agentId: string, nowM
       return undefined;
     }
   }
-  if (injectionGuardMode(policy) !== "hold") return undefined;
+  const injectionHold = injectionGuardMode(policy) === "hold";
   try {
-    return heldFor(await readTaint(agentId, nowMs));
+    // Tripwire Seen holds are the owner's independent choice. Read the shared key
+    // even with the injection scanner off/Monitor, but ignore injection-only taint there.
+    const taint = await readTaint(agentId, nowMs);
+    return injectionHold || taint?.tripwire ? heldFor(taint) : undefined;
   } catch {
-    return HELD_UNKNOWN;
+    return injectionHold ? HELD_UNKNOWN : undefined;
   }
 }
 

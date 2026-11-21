@@ -14,7 +14,7 @@ import {
 import { logSecurityEvent } from "@/lib/seclog";
 import { dispatchSecurityAlert } from "@/lib/alert";
 import { recordAdminAction } from "@/lib/audit";
-import { IDLE_WINDOW_MS } from "@/lib/control/auth";
+import { IDLE_WINDOW_MS, ONE_COMMAND_KEY_TTL_MS } from "@/lib/control/auth";
 import { ensureProfileRow } from "@/lib/profile/manage";
 import { generateApiKey } from "@/lib/apikeys";
 import { azureEndpointSuggestion, endpointPolicy, normalizeEndpointFor } from "@/lib/providers/endpoint";
@@ -217,6 +217,10 @@ export interface KillObservation {
  * The Redis flag is the whole enforcement: the proxy reads it per call at check 2. */
 async function setMasterKillBody(on: boolean): Promise<KillObservation> {
   const { db, user } = await requireUser();
+  // Arming stays one click: a stop is never behind a step-up. Disarming takes the stop
+  // off, so it needs the second factor where one is enrolled (review C-02); otherwise a
+  // password alone could undo every stop the owner set.
+  if (!on) await requireCredentialMfa(db, user, "Complete two-factor verification before turning the kill switch off.");
   let applied = false;
   let durable: boolean | undefined;
   try {
@@ -304,13 +308,16 @@ async function readOwnAgentStatus(
  * readback rather than thrown: "the database says active but the gateway still
  * refuses" is the answer the operator needs, and an exception says nothing.
  *
- * Stays on requireUser(): a stop is never behind a step-up. */
+ * Suspending stays on requireUser(): a stop is never behind a step-up. Resuming takes
+ * the stop off, so it needs the second factor where one is enrolled (review C-02), as
+ * resuming after a tripwire already did. */
 async function setAgentSuspendedBody(
   agentId: string,
   suspended: boolean
 ): Promise<AgentControlObservation> {
   const auth = await requireUser();
   const { user } = auth;
+  if (!suspended) await requireCredentialMfa(auth.db, user, "Complete two-factor verification before resuming this agent.");
   const requested: ControlIntent = suspended ? "suspended" : "active";
   let applied = false;
   try {
@@ -450,7 +457,8 @@ async function createAgentBody(
  */
 async function requireCredentialMfa(
   db: Awaited<ReturnType<typeof userClient>>,
-  user: Awaited<ReturnType<typeof db.auth.getUser>>["data"]["user"]
+  user: Awaited<ReturnType<typeof db.auth.getUser>>["data"]["user"],
+  stepUpMessage = "Complete two-factor verification before changing credentials."
 ): Promise<void> {
   // The strict helper performs its own network validation; it never trusts a
   // caller-threaded user or the unsigned session.user cookie wrapper.
@@ -461,7 +469,7 @@ async function requireCredentialMfa(
         // Neutral about the verb on purpose: this gate also guards revocation, and
         // telling an operator who just pressed Revoke that they must verify "before
         // creating credentials" reads like they hit the wrong button.
-        ? "Complete two-factor verification before changing credentials."
+        ? stepUpMessage
         : "Your authentication assurance could not be verified. Try again."
     );
   }
@@ -1811,6 +1819,8 @@ async function inspectCliDeviceBody(rawCode: string): Promise<{
   clientName: string;
   ip: string;
   requestedAt: string;
+  oneCommand: boolean;
+  oneCommandMinutes?: number;
 } | null> {
   const { db, user } = await requireUser();
   // Gated for the same reason approveCliDevice is, and it must be the SAME answer
@@ -1823,6 +1833,10 @@ async function inspectCliDeviceBody(rawCode: string): Promise<{
     clientName: found.pending.clientName,
     ip: found.pending.ip,
     requestedAt: new Date(found.pending.createdAt).toISOString(),
+    // The kind the screen shows comes from here, never from clientName, which the
+    // requester chose (review 2026-11-21, finding 5).
+    oneCommand: found.pending.oneCommand === true,
+    ...(found.pending.oneCommand === true ? { oneCommandMinutes: Math.round(ONE_COMMAND_KEY_TTL_MS / 60_000) } : {}),
   };
 }
 
@@ -1850,14 +1864,18 @@ async function approveCliDeviceBody(rawCode: string): Promise<{ clientName: stri
   const minted = await mintApiKeyForUser(
     db,
     user,
-    `CLI on ${found.pending.clientName}`,
+    found.pending.oneCommand ? `CLI ${found.pending.clientName}` : `CLI on ${found.pending.clientName}`,
     "write",
     // A window, because this is the one mint bound to a MACHINE. `passcontrol
     // login` is meant to be run on every laptop, container and CI runner an
     // operator has, and machines are decommissioned far more often than anyone
     // remembers to revoke a key. Rolling, so a machine still in use never loses
     // it — see IDLE_WINDOW_MS in lib/control/auth.ts.
-    new Date(Date.now() + IDLE_WINDOW_MS).toISOString()
+    //
+    // A one-command key (review C-01) instead gets a FIXED 15 minutes: the CLI revokes
+    // it when the command ends, and if the CLI is killed first, authentication never
+    // extends a deadline that close to the key's creation (rollsOnUse).
+    new Date(found.pending.oneCommand ? Date.now() + ONE_COMMAND_KEY_TTL_MS : Date.now() + IDLE_WINDOW_MS).toISOString()
   );
 
   // The token goes into Redis SEALED, never in plaintext, and is keyed by the

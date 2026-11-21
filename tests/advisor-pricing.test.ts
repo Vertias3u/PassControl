@@ -59,6 +59,13 @@ describe("which advisors are accepted", () => {
     expect(serverSideToolUse("anthropic", body())).toBeNull();
   });
 
+  // A Claude Fable 5.2 executor accepts only a Fable 5.2 or Mythos 5.2 advisor
+  // (platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2, read 2026-11-10),
+  // so without their price rows Claude Code on Fable 5.2 with an advisor was refused.
+  it.each(["claude-fable-5-2", "claude-mythos-5-2"])("accepts a %s advisor", (model) => {
+    expect(serverSideToolUse("anthropic", body({ ...ADVISOR, model }))).toBeNull();
+  });
+
   it.each([
     ["a model with no price row", { ...ADVISOR, model: "claude-nova-9" }],
     ["no model at all", { type: "advisor_20260301", name: "advisor" }],

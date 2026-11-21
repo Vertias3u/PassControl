@@ -273,8 +273,15 @@ are separate from signature verification.
   and budget checks; it is not arbitrary API translation. Embeddings never fail over.
 - The injected provider key is removed from what comes back: if an upstream echoes it in
   an error body, a JSON answer or an event stream (even split across chunks), the agent
-  receives `[REDACTED_PROVIDER_KEY]` instead. This covers the exact key, not a key an
-  upstream has transformed.
+  receives `[REDACTED_PROVIDER_KEY]` instead. For keys of 16+ characters this also covers
+  base64 (including inside Basic auth), hex, percent-encoded and reversed copies, and any
+  run of 12+ characters of the key's secret part (a key cut in halves or truncated). A key
+  streamed back a few characters per event is caught too: for Anthropic Messages, OpenAI
+  Chat Completions and OpenAI Responses streams the text is followed the way the client's
+  SDK joins it. Ordinary events are not delayed; an event waits only while the text ends
+  with the first four or more characters of the key. Not followed: Ollama's native
+  (newline-delimited) stream and streamed fields other than text, tool input and thinking,
+  which keep the byte-level check.
 
 Passport scopes are snapshots in visas; scope edits can take up to the configured visa
 TTL to replace those snapshots. Other live controls have their own cache/invalidation
@@ -356,6 +363,8 @@ resolve or pin DNS. Operators must control egress and trust the destination rece
 the provider credential. Upstream redirects are refused, never followed.
 
 ### Receipts, statements, and identity evidence
+
+Receipt versions distinguish passport calls (v1), Direct Agent Key calls (v2), delegated worker calls (v3), and gateway endings on the owner's stop (v4, with no passport or agent key); older verifiers refuse v4.
 
 A signed call receipt records the issuer's decision, authentication method, reported
 usage/cost, and (when read) a digest of client request bytes. It does not include the

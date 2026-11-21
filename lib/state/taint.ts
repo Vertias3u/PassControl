@@ -33,6 +33,8 @@ export interface Taint {
   surface: "proxy" | "sidecar";
   /** 1.7.1: some tool output since `since` could not be fully checked. */
   incomplete?: true;
+  /** Idea 12: a tripwire decoy was Seen in this agent's traffic and the owner chose hold. */
+  tripwire?: true;
 }
 
 function parse(raw: unknown): Taint {
@@ -45,12 +47,13 @@ function parse(raw: unknown): Taint {
     !Array.isArray(t.families) ||
     !t.families.every((f) => INJECTION_FAMILIES.includes(f as InjectionFamily)) ||
     (t.surface !== "proxy" && t.surface !== "sidecar") ||
-    (t.incomplete !== undefined && t.incomplete !== true)
+    (t.incomplete !== undefined && t.incomplete !== true) ||
+    (t.tripwire !== undefined && t.tripwire !== true)
   ) {
     throw new Error("unreadable taint");
   }
   const taint: Taint = { since: t.since, until: t.until, families: t.families as InjectionFamily[], surface: t.surface };
-  return t.incomplete ? { ...taint, incomplete: true } : taint;
+  return { ...taint, ...(t.incomplete ? { incomplete: true as const } : {}), ...(t.tripwire ? { tripwire: true as const } : {}) };
 }
 
 /** The agent's taint, or null. Throws when Redis cannot answer or the value is not ours. */
@@ -64,7 +67,7 @@ export async function readTaint(agentId: string, nowMs: number): Promise<Taint |
 /** Taint (or extend) for TAINT_TTL_S from now. Keeps the start and adds the families. */
 export async function taintAgent(
   agentId: string,
-  found: { families: readonly InjectionFamily[]; surface: "proxy" | "sidecar"; incomplete?: boolean },
+  found: { families: readonly InjectionFamily[]; surface: "proxy" | "sidecar"; incomplete?: boolean; tripwire?: boolean },
   nowMs: number
 ): Promise<Taint> {
   let current: Taint | null = null;
@@ -80,6 +83,7 @@ export async function taintAgent(
     families: INJECTION_FAMILIES.filter((f) => families.has(f)),
     surface: found.surface,
     ...(current?.incomplete || found.incomplete ? { incomplete: true as const } : {}),
+    ...(current?.tripwire || found.tripwire ? { tripwire: true as const } : {}),
   };
   await redis().set(taintKey(agentId), JSON.stringify(taint), { ex: TAINT_TTL_S });
   return taint;

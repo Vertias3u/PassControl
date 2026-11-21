@@ -51,7 +51,8 @@ PassControl generally.
 
 The connector is **not** self-hosting. It is one foreground process — no Docker, no database —
 that keeps the passport in PassControl's local config and mints and refreshes short-lived visas
-against whichever gateway you configured, Cloud included. Hermes receives only a placeholder key:
+against whichever gateway you configured, Cloud included. Hermes receives only the sidecar's key,
+which opens the sidecar on this machine and nothing else:
 
 ```bash
 passcontrol passport import --global --gateway https://YOUR-PASSCONTROL-HOST --id PUBLIC_PASSPORT_ID
@@ -68,10 +69,10 @@ model:
   default: "gpt-5-mini"
   provider: custom
   base_url: "http://127.0.0.1:8788/api/v1/openai/v1"
-  api_key: "passcontrol"
+  api_key: "pcs_…"
 ```
 
-The dummy key is stripped by the connector. The passport private key stays in the trusted local
+That key is stripped by the connector, and the connector refuses calls without it. The passport private key stays in the trusted local
 PassControl profile or OS credential store and is never sent to the gateway; a visa is refreshed automatically; and the real
 provider key stays in the Vault — PassControl Cloud's, or your own if you self-host.
 

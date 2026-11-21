@@ -1,4 +1,5 @@
 "use server";
+import { scheduleCascade } from "@/lib/standing/cascade";
 // Any-API phase 1: the dashboard's two service mutations.
 //
 //   addServiceToken      — store a workspace's GitHub token in Vault
@@ -249,11 +250,25 @@ export async function setServiceKill(service: string, on: boolean): Promise<Serv
   const userId = await signedInUser();
   if (!userId) return { error: "Sign in again to change this." };
   const requested = on === true;
+  // Review C-02: arming is a stop and stays one click; taking the stop off is a lift,
+  // so it needs the second factor where one is enrolled, as the master kill does.
+  if (!requested) {
+    const gate = await mfaAuthorizedUser(await userClient());
+    if (!gate.ok || gate.user.id !== userId) {
+      return {
+        error: !gate.ok && gate.reason === "step_up_required"
+          ? "Complete two-factor verification before taking this stop off."
+          : "Sign in again to change this.",
+      };
+    }
+  }
   let applied = false;
   let durable: boolean | undefined;
   try {
     // Redis and the durable record (0083); `durable: false` is reported, not thrown.
     ({ durable } = await setServiceKillDurably(userId, service, requested));
+    // Idea 14: after the stop is in force, end what agents left standing on this service.
+    if (requested) scheduleCascade({ trigger: "service", userId, service });
     applied = true;
   } catch {
     // Reported through the read-back: "could not confirm", not an exception.

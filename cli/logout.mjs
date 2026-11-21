@@ -12,6 +12,11 @@
 // resolve → look up the agent → decide about the agent → revoke the agent →
 // revoke the control key → blank the file.
 //
+// Since review C-01 (2026-11-15) the key login leaves is READ-only: it can name the
+// agent and revoke itself, but not revoke the agent, so that step answers 403 and
+// logout says to do it in the Control Tower. A key from before that release still
+// has write scope and works as described here.
+//
 // The control key is revoked LAST because it is the credential doing all of the
 // work above; revoking it first turns every remaining step into a 401. The file
 // is blanked last of all, and — this is the part worth stating — it is blanked
@@ -166,8 +171,15 @@ export async function logoutCommand(opts = {}, deps = {}) {
         await control(origin, apiKey, "POST", `/agents/${encodeURIComponent(agent.id)}/revoke`, fetchImpl);
         agentRevoked = true;
         ok(`revoked agent ${agent.name}`);
-      } catch {
-        warnings.push(`Could not revoke agent "${agent.name}" — do it in the Control Tower.`);
+      } catch (error) {
+        // Since review C-01 login keeps a read-only key, which cannot revoke an agent.
+        // Owner's call (2026-11-15): logout clears this machine and points to the
+        // dashboard for the agent, rather than asking the browser for a write key.
+        warnings.push(
+          error?.status === 403
+            ? `This machine's control key is read-only, so revoke agent "${agent.name}" in the Control Tower.`
+            : `Could not revoke agent "${agent.name}" — do it in the Control Tower.`
+        );
       }
     }
   }

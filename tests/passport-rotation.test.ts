@@ -41,6 +41,11 @@ const h = vi.hoisted(() => ({
   filters: [] as [string, unknown][][],
 }));
 
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/mission/store")>()),
+  readActiveMissionForAgent: async () => ({ kind: "none" }),
+}));
 vi.mock("@vercel/functions", () => ({ waitUntil: vi.fn() }));
 vi.mock("@/lib/ratelimit", () => ({ rateLimit: (...a: unknown[]) => h.rateLimitMock(...a) }));
 vi.mock("@/lib/state/redis", () => ({

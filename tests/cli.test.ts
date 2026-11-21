@@ -828,7 +828,12 @@ describe("passcontrol CLI", () => {
     const { stdout } = await runCli(["env", "openhands", "--provider", "anthropic", "--model", "claude-haiku-4-5"]);
     expect(stdout).toContain("passcontrol sidecar");
     expect(stdout).toContain("export LLM_BASE_URL='http://127.0.0.1:8788/api/v1/anthropic'");
-    expect(stdout).toContain("export LLM_API_KEY='passcontrol'");
+    // Review C-03: the API key is the sidecar's own key, derived from the passport.
+    // This test's machine has none, so it says so instead of printing a placeholder
+    // the sidecar would refuse.
+    expect(stdout).toContain("export LLM_API_KEY='run-passcontrol-login-first'");
+    expect(stdout).toMatch(/No passport on this machine yet[\s\S]*passcontrol login/);
+    expect(stdout).not.toContain("LLM_API_KEY='passcontrol'");
     expect(stdout).toContain("export LLM_MODEL='anthropic/claude-haiku-4-5'");
   }, 10000);
 

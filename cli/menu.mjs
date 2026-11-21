@@ -269,6 +269,7 @@ export const HIDDEN = {
   seal: "needs a session and an agent, both named by `sessions`, which is listed under Money",
   statusline: "Claude Code runs it, not a person; `configure claude-code --statusline` installs it",
   "codex-hook": "Codex runs it, not a person; `configure codex --subscription` installs it",
+  memory: "idea 13 research build: `memory review` needs a running sidecar with memory custody on; the decision is on the agent's page",
 };
 
 /** Every top-level command name the menu can reach, flattened. */

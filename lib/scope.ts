@@ -15,7 +15,7 @@ const MAX_PROVIDER_LEN = 50;
 // sides: a scope entry that never matches denies, and a deny rule that trips
 // this makes the whole document malformed, which also denies.
 const MAX_WILDCARDS = 4;
-const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens", "subagent_models", "subagent_session_cap_cents", "session_alert_cents", "secret_guard", "injection_guard"]);
+const POLICY_KEYS = new Set(["deny", "windows", "max_requests_per_hour", "max_output_tokens", "subagent_models", "subagent_session_cap_cents", "session_alert_cents", "secret_guard", "injection_guard", "loop_breaker", "session_caps"]);
 // Exported for the policy editor, which must offer exactly the days the parser
 // accepts. Retyping them there is how the form ends up letting an operator save
 // a window the gateway reads as malformed — the failure mode validateFallbacks
@@ -228,6 +228,23 @@ interface AgentPolicy {
    * actions for the owner (lib/state/taint.ts, lib/injection-hold.ts).
    */
   injectionGuard: InjectionGuardMode | null;
+  /**
+   * `loop_breaker: { repeats }` (1.9.0, lib/runaway.ts): pause the agent's model calls
+   * when one request repeats this many times inside LOOP_WINDOW_S. null = absent, off.
+   */
+  loopBreakerRepeats: number | null;
+  /**
+   * `session_caps: { cents?, calls?, minutes? }` (1.9.0, lib/runaway.ts): what one
+   * DECLARED session of this agent may spend, call and last. null = absent, off.
+   */
+  sessionCaps: SessionCaps | null;
+}
+
+/** Per-session caps (1.9.0). Each null cap is off; at least one is set. */
+export interface SessionCaps {
+  cents: number | null;
+  calls: number | null;
+  minutes: number | null;
 }
 
 export type SecretGuardMode = "block" | "redact";
@@ -245,6 +262,8 @@ export interface AgentPolicyView {
   sessionAlertCents: number | null;
   secretGuard: SecretGuardMode | null;
   injectionGuard: InjectionGuardMode | null;
+  loopBreakerRepeats: number | null;
+  sessionCaps: SessionCaps | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -323,12 +342,18 @@ export const POLICY_LIMITS = {
    * that is not a plausible token count.
    */
   maxOutputTokens: 10_000_000,
+  /** The loop breaker's repeat count (1.9.0). Below 3 a client's own retry would trip it. */
+  loopRepeatsMin: 3,
+  loopRepeatsMax: 100,
+  /** Per-session caps (1.9.0): calls per session, and minutes, at most a day. */
+  sessionCalls: 1_000_000,
+  sessionMinutes: 1440,
 } as const;
 
 function parsePolicy(value: unknown): AgentPolicy | null {
   // Existing rows and pre-policy visas must preserve the legacy path exactly.
   if (value === null) {
-    return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null, subagentModels: null, subagentSessionCapCents: null, sessionAlertCents: null, secretGuard: null, injectionGuard: null };
+    return { deny: [], windows: [], maxRequestsPerHour: null, maxOutputTokens: null, subagentModels: null, subagentSessionCapCents: null, sessionAlertCents: null, secretGuard: null, injectionGuard: null, loopBreakerRepeats: null, sessionCaps: null };
   }
   if (!isRecord(value)) return null;
   if (Object.keys(value).some((key) => !POLICY_KEYS.has(key))) return null;
@@ -492,7 +517,46 @@ function parsePolicy(value: unknown): AgentPolicy | null {
     injectionGuard = guard.mode;
   }
 
-  return { deny, windows, maxRequestsPerHour, maxOutputTokens, subagentModels, subagentSessionCapCents, sessionAlertCents, secretGuard, injectionGuard };
+  // 1.9.0: the loop breaker. An object with exactly one key, like the guards, so a later
+  // version can add a field without a format change. Below 3 a normal retry would trip it.
+  let loopBreakerRepeats: number | null = null;
+  if ("loop_breaker" in value) {
+    const loop = value.loop_breaker;
+    if (
+      !isRecord(loop) ||
+      Object.keys(loop).length !== 1 ||
+      typeof loop.repeats !== "number" ||
+      !Number.isSafeInteger(loop.repeats) ||
+      loop.repeats < POLICY_LIMITS.loopRepeatsMin ||
+      loop.repeats > POLICY_LIMITS.loopRepeatsMax
+    ) {
+      return null;
+    }
+    loopBreakerRepeats = loop.repeats;
+  }
+
+  // 1.9.0: per-session caps. An object of one to three known fields; each a whole number
+  // of at least 1 (a zero cap would refuse a session's first call, which is a stop, not a
+  // cap). Minutes stop at a day: a session's counters idle out after one.
+  let sessionCaps: SessionCaps | null = null;
+  if ("session_caps" in value) {
+    const caps = value.session_caps;
+    if (!isRecord(caps)) return null;
+    const keys = Object.keys(caps);
+    if (keys.length === 0 || keys.some((k) => k !== "cents" && k !== "calls" && k !== "minutes")) return null;
+    const read = (key: "cents" | "calls" | "minutes", max: number): number | null | false => {
+      if (!(key in caps)) return null;
+      const n = caps[key];
+      return typeof n === "number" && Number.isSafeInteger(n) && n >= 1 && n <= max ? n : false;
+    };
+    const cents = read("cents", POLICY_LIMITS.subagentSessionCapCents);
+    const calls = read("calls", POLICY_LIMITS.sessionCalls);
+    const minutes = read("minutes", POLICY_LIMITS.sessionMinutes);
+    if (cents === false || calls === false || minutes === false) return null;
+    sessionCaps = { cents, calls, minutes };
+  }
+
+  return { deny, windows, maxRequestsPerHour, maxOutputTokens, subagentModels, subagentSessionCapCents, sessionAlertCents, secretGuard, injectionGuard, loopBreakerRepeats, sessionCaps };
 }
 
 /**
@@ -546,6 +610,16 @@ export function subagentSessionCapCents(value: unknown): number | null {
   return parsePolicy(value)?.subagentSessionCapCents ?? null;
 }
 
+/** The loop breaker's repeat count (1.9.0), or null when off or the policy is malformed. */
+export function loopBreakerRepeats(value: unknown): number | null {
+  return parsePolicy(value)?.loopBreakerRepeats ?? null;
+}
+
+/** The per-session caps (1.9.0), or null when off or the policy is malformed. */
+export function sessionCaps(value: unknown): SessionCaps | null {
+  return parsePolicy(value)?.sessionCaps ?? null;
+}
+
 /**
  * Would the gateway be able to read this as a policy?
  *
@@ -580,6 +654,8 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
       sessionAlertCents: null,
       secretGuard: null,
       injectionGuard: null,
+      loopBreakerRepeats: null,
+      sessionCaps: null,
     };
   }
   return {
@@ -594,6 +670,8 @@ export function agentPolicyForDisplay(value: unknown): AgentPolicyView {
     sessionAlertCents: policy.sessionAlertCents,
     secretGuard: policy.secretGuard,
     injectionGuard: policy.injectionGuard,
+    loopBreakerRepeats: policy.loopBreakerRepeats,
+    sessionCaps: policy.sessionCaps ? { ...policy.sessionCaps } : null,
   };
 }
 

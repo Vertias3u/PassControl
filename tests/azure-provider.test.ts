@@ -209,7 +209,7 @@ describe("azure is never priced", () => {
 
   const gateInput = (dollarLimited: boolean, path: string[] = ["chat", "completions"], method = "POST") => ({
     agentId: "agent",
-    killState: { platformKill: false, tenantKill: false, denylist: [] },
+    killState: { platformKill: false, userKill: false, denylist: [] },
     suspended: false,
     scopes: [{ provider: "azure", models: ["gpt-*"] }],
     provider: "azure",

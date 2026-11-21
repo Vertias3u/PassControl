@@ -8,8 +8,8 @@
 //
 // A work-visa is useless here for two independent reasons. It is HS256 over
 // VISA_SECRET, so the only party who can verify one is a party who can also
-// FORGE one; and its `aud` is the fixed constant "llm-proxy", because the proxy
-// is its only intended audience. This mints an EdDSA token instead, signed by
+// FORGE one; and its `aud` names only this instance's proxy (`<issuer>/llm-proxy`, or
+// "llm-proxy" where no issuer is configured), its only intended audience. This mints an EdDSA token instead, signed by
 // the deployment's instance key, verifiable OFFLINE by anyone holding the JWKS
 // at /.well-known/jwks.json — no callback here, no shared secret, no account.
 //

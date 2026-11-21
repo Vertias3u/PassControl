@@ -2,6 +2,7 @@ import http from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 
+import { sidecarKey } from "../sidecar-token.mjs";
 import { readUsageWindow, usageWindowText, WINDOW_PATH } from "../usage-window.mjs";
 import { createSidecar } from "../sidecar.mjs";
 import { applyEvent, createBoardState, renderBoard } from "../watch.mjs";
@@ -82,24 +83,28 @@ async function startSidecar() {
     passportSecret: b64url(secret),
   });
   const port = await listen(sidecar.server);
+  windowKeys.set(port, { authorization: `Bearer ${sidecarKey(b64url(secret))}` });
   const events = [];
   sidecar.feed.attach({ write: (line) => events.push(JSON.parse(line)), on: () => {}, writableLength: 0 });
   return { port, sidecar, events };
 }
 
+// The window path asks for the sidecar's key (review C-03 follow-up).
+const windowKeys = new Map();
+const getWindow = (port) => fetch(`http://127.0.0.1:${port}${WINDOW_PATH}`, { headers: windowKeys.get(port) });
 const postWindow = (port, body, headers = {}) =>
   fetch(`http://127.0.0.1:${port}${WINDOW_PATH}`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", ...windowKeys.get(port), ...headers },
     body: JSON.stringify(body),
   });
 
 describe("the sidecar's usage-window endpoint", () => {
   it("holds the latest window, answers it on GET, and tells the boards", async () => {
     const { port, events } = await startSidecar();
-    expect((await fetch(`http://127.0.0.1:${port}${WINDOW_PATH}`)).status).toBe(404);
+    expect((await getWindow(port)).status).toBe(404);
     expect((await postWindow(port, readUsageWindow(STATUS_INPUT))).status).toBe(204);
-    const got = await (await fetch(`http://127.0.0.1:${port}${WINDOW_PATH}`)).json();
+    const got = await (await getWindow(port)).json();
     expect(got).toMatchObject({ fiveHour: { usedPct: 23.5 }, sevenDay: { usedPct: 41.2 } });
     expect(typeof got.at).toBe("number");
     expect(events.filter((e) => e.type === "window")).toHaveLength(1);
@@ -117,7 +122,7 @@ describe("the sidecar's usage-window endpoint", () => {
     const { port } = await startSidecar();
     expect((await postWindow(port, readUsageWindow(STATUS_INPUT), { origin: "https://evil.example" })).status).toBe(403);
     expect((await postWindow(port, { fiveHour: { usedPct: "lots" } })).status).toBe(400);
-    expect((await fetch(`http://127.0.0.1:${port}${WINDOW_PATH}`)).status).toBe(404);
+    expect((await getWindow(port)).status).toBe(404);
   });
 });
 

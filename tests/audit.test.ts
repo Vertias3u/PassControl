@@ -179,15 +179,29 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "agent.pause_lift",
         // The owner ending an injection-guard hold early (Phase 2).
         "agent.injection_clear",
+        // Idea 13: the owner's decision on a memory review, and memory custody settings.
+        "agent.memory_review_decide",
+        "agent.memory_custody_set",
         "approval.decide",
         "agent.suspend",
         // One declared session stopped or resumed (sprint T8).
         "agent.session_stop",
+        // Idea 12: tripwire decoys registered, rotated, retired, or the Seen setting.
+        "agent.tripwires",
         // A worker's delegation revoked, one or all (Bet D).
         "agent.delegation_revoke",
         "agent.revoke",
         // A new agent created without the default daily limit, by choice (F1).
         "agent.spending_limit_removed",
+        // Idea 11: approving a mission turns a draft into authority; widening is the
+        // owner's alone; narrowing and revocation take authority away and are recorded
+        // so the trail shows WHO ended a job early; an approval key decides who can approve.
+        "mission.approve",
+        "mission.narrow",
+        "mission.widen",
+        "mission.revoke",
+        "mission.owner_key",
+        "mission.only_cleared",
         "killswitch.master",
         // Any-API phase 2: one service stopped or resumed for the workspace.
         "killswitch.service",
@@ -213,6 +227,7 @@ describe("buildAuditRecord — admin-action audit row", () => {
         "budget.hold_resolve",
         "budget.rebuild",
         "apikey.create",
+        "apikey.downgrade",
         "apikey.revoke",
         "mfa.enroll",
         "mfa.disable",

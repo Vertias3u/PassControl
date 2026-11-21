@@ -23,6 +23,7 @@ import { redis } from "@/lib/state/redis";
 import { serviceClient } from "@/lib/supabase";
 import { timingSafeEqual } from "@/lib/crypto/constantTime";
 import { runReconcile } from "@/lib/reconcile";
+import { reconcileEndings, type CascadeDb } from "@/lib/standing/cascade";
 
 // Only fold agent_logs rows that have settled for this long, so a row whose
 // created_at (= now() at insert) precedes the cutoff but whose commit lands after
@@ -42,5 +43,8 @@ export async function GET(req: Request) {
   const result = await runReconcile(serviceClient(), redis(), {
     lagSeconds: RECONCILE_LAG_SECONDS,
   });
-  return Response.json({ ok: true, ...result });
+  // Hosted only (idea 14): retry a stop's endings that failed for a reason that may pass
+  // by itself. Core's copy does nothing. Counts only; never a row or a service's answer.
+  const endings = await reconcileEndings(serviceClient() as unknown as CascadeDb);
+  return Response.json({ ok: true, ...result, ...(endings ? { standingEndings: endings } : {}) });
 }

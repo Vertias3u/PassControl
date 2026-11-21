@@ -75,7 +75,7 @@ describe("Codex post-tool hooks", () => {
   it.each([{}, { continue: false, decision: "block", systemMessage: "warn", hookSpecificOutput: { updatedMCPToolOutput: "rewrite" } }, null])("relays once and answers neutrally for %j", async (answer) => {
     const fetchImpl = vi.fn(async () => Response.json(answer));
     expect(await runCodexHook({ input, port: 8788, fetchImpl })).toBe("");
-    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith("http://127.0.0.1:8788/_passcontrol/hook", expect.objectContaining({ body: input, method: "POST" }));
+    expect(fetchImpl).toHaveBeenCalledExactlyOnceWith("http://127.0.0.1:8788/_passcontrol/hook?client=codex", expect.objectContaining({ body: input, method: "POST" }));
     expect(codexHookAnswer("PostToolUse", answer)).toEqual({});
   });
 

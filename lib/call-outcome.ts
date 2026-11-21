@@ -62,6 +62,8 @@ export const CALL_OUTCOME: Record<LogEntry["status"], { category: OutcomeCategor
   blocked_budget_pause: { category: "refused_budget", label: "Paused at its pause line" },
   blocked_budget_subagent: { category: "refused_budget", label: "Blocked by a sub-agent session cap" },
   blocked_budget_delegation: { category: "refused_budget", label: "Blocked by a delegation cap" },
+  blocked_loop: { category: "refused_policy", label: "Paused by the loop breaker" },
+  blocked_session_cap: { category: "refused_budget", label: "Blocked by a session cap" },
   blocked_delegation_revoked: { category: "stopped", label: "Stopped: delegation revoked" },
   blocked_delegation_unavailable: { category: "stopped", label: "Stopped: delegation could not be confirmed" },
   // A configuration answer, not a spend answer: the agent is not out of money,

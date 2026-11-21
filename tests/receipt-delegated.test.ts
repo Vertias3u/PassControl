@@ -28,7 +28,7 @@ const delegation = { actor: "W".repeat(43), jti: "jti-0000000000000002", depth: 
 describe("a worker's receipt", () => {
   it("is ver 3, names the root passport as sub, and the worker in auth", () => {
     const claims = buildReceiptClaims({ ...base, authMethod: "delegated", passportId: "root", visaJti: "visa-1", delegation });
-    expect(RECEIPT_PROTOCOL.maximum).toBe(3);
+    expect(RECEIPT_PROTOCOL.maximum).toBe(4);
     expect(claims).toMatchObject({
       ver: 3,
       sub: "root",
@@ -46,7 +46,7 @@ describe("a worker's receipt", () => {
   it("leaves the other receipts' versions where they were", () => {
     expect(buildReceiptClaims({ ...base, passportId: "root", visaJti: "v" }).ver).toBe(1);
     expect(buildReceiptClaims({ ...base, authMethod: "direct_key", agentAccessKeyId: "k", credentialUseId: "u" }).ver).toBe(2);
-    expect(RECEIPT_VER).toBe(3);
+    expect(RECEIPT_VER).toBe(4);
   });
 
   it("is never rendered as the parent's passport", () => {

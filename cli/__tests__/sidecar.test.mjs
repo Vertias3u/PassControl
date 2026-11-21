@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 import { sha256 } from "@noble/hashes/sha256";
 
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createSidecar } from "../sidecar.mjs";
 
 // The sidecar's whole reason to exist is that the client stops holding the
@@ -19,6 +20,7 @@ let gateway;
 let sidecar;
 let received;
 let passportId;
+let callerKey;
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -48,6 +50,7 @@ beforeEach(async () => {
   const gatewayPort = await listen(gateway);
 
   const secret = ed25519.utils.randomPrivateKey();
+  callerKey = sidecarKey(b64url(secret));
   passportId = b64url(ed25519.getPublicKey(secret));
   sidecar = createSidecar({
     gateway: `http://127.0.0.1:${gatewayPort}`,
@@ -63,13 +66,20 @@ afterEach(async () => {
 });
 
 async function proxy(headers, suffix = "") {
+  // Keep the credential under test intact; authenticate through another header.
+  const auth = Object.keys(headers ?? {}).some((h) => h.toLowerCase() === "authorization")
+    ? { "x-api-key": callerKey }
+    : { authorization: `Bearer ${callerKey}` };
   const port = await listen(sidecar.server);
   await fetch(`http://127.0.0.1:${port}/api/v1/anthropic/v1/messages${suffix}`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", ...auth, ...headers },
     body: "{}",
   });
-  return received.at(-1);
+  const sent = received.at(-1);
+  expect(sent.headers.authorization).toBe("Bearer fake.visa.token");
+  expect(JSON.stringify(sent.headers)).not.toContain(callerKey);
+  return sent;
 }
 
 describe("sidecar credential stripping", () => {
@@ -161,7 +171,7 @@ describe("service URLs in responses (any-API)", () => {
       const port = await listen(sidecar.server);
       const response = await fetch(`http://127.0.0.1:${port}/api/v1/anthropic/v1/messages`, {
         method: "POST", redirect: "manual",
-        headers: { "content-type": "application/json" }, body: '{"secret":"body"}',
+        headers: { "content-type": "application/json", authorization: `Bearer ${callerKey}` }, body: '{"secret":"body"}',
       });
       await response.text();
       expect(stolen.some((hit) => hit.headers.authorization !== undefined)).toBe(false);
@@ -201,7 +211,7 @@ describe("service URLs in responses (any-API)", () => {
     });
     try {
       const port = await listen(svcSidecar.server);
-      const res = await fetch(`http://127.0.0.1:${port}/api/v1/svc/github/repos/acme/web/issues`);
+      const res = await fetch(`http://127.0.0.1:${port}/api/v1/svc/github/repos/acme/web/issues`, { headers: { authorization: `Bearer ${sidecarKey(b64url(secret))}` } });
       expect(res.headers.get("link")).toBe(
         `<http://127.0.0.1:${port}/api/v1/svc/github/repos/acme/web/issues?page=2>; rel="next"`
       );
@@ -229,7 +239,7 @@ describe("a browser or a rebound page is refused, before any visa", () => {
     const port = server.listening ? server.address().port : await listen(server);
     return new Promise((resolve, reject) => {
       const req = http.request(
-        { host: "127.0.0.1", port, method, path, headers: { "content-type": "application/json", host: `127.0.0.1:${port}`, ...headers } },
+        { host: "127.0.0.1", port, method, path, headers: { "content-type": "application/json", host: `127.0.0.1:${port}`, ...(server === sidecar.server ? { authorization: `Bearer ${callerKey}` } : {}), ...headers } },
         (res) => {
           let body = "";
           res.on("data", (c) => (body += c));

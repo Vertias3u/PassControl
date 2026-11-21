@@ -5,6 +5,7 @@ const fakes = vi.hoisted(() => ({ flush: vi.fn(), add: vi.fn(), warn: vi.fn() })
 vi.mock("../visa-client.mjs", () => ({ createVisaClient: () => ({ fetchWithVisa: (fn) => fn("visa"), createProof: () => "proof" }) }));
 vi.mock("../client-events-upload.mjs", async (original) => ({ ...await original(), createCallUploader: () => ({ flush: fakes.flush, add: fakes.add, close() {} }) }));
 vi.mock("../config.mjs", async (original) => ({ ...await original(), warn: fakes.warn }));
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createSidecar } from "../sidecar.mjs";
 import { HOOK_PATH } from "../subscription-gate.mjs";
 
@@ -26,7 +27,7 @@ function setup(reportCalls = true, mode = "hold") {
   vi.spyOn(sidecar.server, "address").mockReturnValue({ port: 8788 });
   async function request(url, body) {
     const req = new EventEmitter();
-    Object.assign(req, { url, method: "POST", headers: { host: "localhost:8788", "content-type": "application/json" }, socket: { remoteAddress: "127.0.0.1" }, resume() {} });
+    Object.assign(req, { url, method: "POST", headers: { authorization: `Bearer ${sidecarKey("secret")}`, host: "localhost:8788", "content-type": "application/json" }, socket: { remoteAddress: "127.0.0.1" }, resume() {} });
     let text = "";
     const res = new Writable({ write(chunk, _encoding, cb) { text += chunk; cb(); } });
     res.writeHead = () => {};

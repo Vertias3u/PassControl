@@ -13,6 +13,12 @@
 //   7 resolve the tenant's token (the one decrypt path)   8 inject + forward
 //   9 redact + audit row + signed receipt
 //
+// The per-service kill shares the kill switch's read posture: if Redis or the kill
+// record cannot be read, it is enforced only when KILL_SWITCH_FAIL_CLOSED="true"
+// (hosted Cloud sets it); the hourly cap (step 6) fails closed on its own.
+// The hourly cap is counted before the body and approval checks on purpose, so
+// pending approval retries are not free.
+//
 // What is deliberately NOT here, each decided in plans/any-api-credentials.md §10:
 //  - no budget hold: a service call spends nothing the dollar cap governs, so it
 //    sits outside that cap and says so (`unp` on the receipt, `unpriced` on the
@@ -37,6 +43,7 @@ import {
   principalSuspended,
   type PassportAuthMethod,
 } from "@/lib/gateway/authenticate";
+import { dispatchStopChecker } from "@/lib/gateway/dispatch-stops";
 import { err, errMessage } from "@/lib/gateway/responses";
 import { PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S } from "@/lib/gateway/limits";
 import { readKillState, withRecordedSessionStop } from "@/lib/state/killswitch";
@@ -50,10 +57,22 @@ import { writeLog } from "@/lib/log";
 import { signReceipt, type OwnerClaim } from "@/lib/receipt";
 import { readCurrentOwner } from "@/lib/owner/current";
 import { captureSecurityEvent } from "@/lib/observability";
+import {
+  answerJson,
+  announceBirth,
+  recordStandingIntent,
+  settleStanding,
+  standingFor,
+} from "@/lib/standing/gateway";
 import { forwardableUpstreamSearch } from "@/lib/providers/endpoint";
 import { readBoundedBody } from "@/lib/http/bounded-body";
+import { scheduleTripwireSeen } from "@/lib/tripwire/gateway";
 import { approvalFingerprint, approvalPreview } from "@/lib/approvals/fingerprint";
 import { approvalWaitMs, awaitApproval, existingApproval } from "@/lib/approvals/gate";
+import { resolveCallMission } from "@/lib/mission/gate";
+import { missionServiceDecision, type MissionDecision } from "@/lib/mission/enforce";
+import { recordMissionDecision } from "@/lib/state/mission";
+import type { ReceiptMission } from "@/lib/receipt";
 import { APPROVAL_PATH_MAX, APPROVAL_PREVIEW_MAX } from "@/lib/state/approvals";
 import { redactSecretsInText, redactingStream, secretsToRedact } from "@/lib/providers/secret-redaction";
 import type { SenderProofObservation } from "@/lib/sender-constraint";
@@ -71,7 +90,9 @@ import {
   filterRequestHeaders,
   filterResponseHeaders,
   rewriteLinkHeader,
+  readBounded,
   rewriteLocationHeader,
+  SERVICE_INSPECT_MAX_BYTES,
 } from "@/lib/services/wire";
 
 interface Ctx {
@@ -120,6 +141,7 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
 
   // ── 1. Authenticate: the same two doors as every LLM call ──────────────────
   // `token` too: Octokit's `auth` option and `gh` send the credential that way.
+  const authenticatedAt = Date.now();
   const authentication = await authenticateGatewayRequest(req, provider, "api.svc", { tokenScheme: true });
   if (!authentication.ok) return authentication.response;
   const { principal, db, credentialToken } = authentication;
@@ -186,6 +208,8 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   // A write's body, exactly as the agent sent it, once read (step 6b). Bound
   // into the receipt by digest; never logged.
   let capturedBody: string | null = null;
+  // The mission this call was decided under (idea 11), for the receipt's `msn`.
+  let missionClaim: ReceiptMission | null = null;
 
   let ownerRead: Promise<OwnerClaim | null> | null = null;
   const currentOwner = () => (ownerRead ??= readCurrentOwner(db, userId).catch(() => null));
@@ -229,6 +253,7 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
             startedAt: started,
             latencyMs: Date.now() - started,
             ...(policyRevision ? { policyRevision } : {}),
+            ...(missionClaim ? { mission: missionClaim } : {}),
             owner: await currentOwner(),
           }),
           agentId,
@@ -296,9 +321,29 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     return governed(err(403, "blocked_suspended"));
   }
 
+  // ── 2b. The agent's mission (idea 11) ───────────────────────────────────────
+  // After the kill switch, which always wins; before the rules, so a stale or ended
+  // mission visa is refused before anything about the call is read. Fails closed
+  // (lib/mission/gate.ts): an unreadable mission is never "no limit".
+  //
+  const missionReadAt = Date.now();
+  const callMission = await resolveCallMission({
+    db,
+    principal,
+    nowS: Math.floor(Date.now() / 1000),
+  });
+  if (callMission.kind === "refuse") {
+    record("blocked_policy", callMission.status);
+    captureBlocked(callMission.code, callMission.status);
+    return governed(errMessage(callMission.status, callMission.code, callMission.message));
+  }
+
   // ── 3. The agent's gateway-wide request limit, shared with its LLM calls ───
   const rl = await rateLimit(`proxy:${agentId}`, PROXY_RATE_LIMIT, PROXY_RATE_WINDOW_S);
   if (!rl.success) {
+    // No audit row and no receipt, the same as the LLM route: the limit exists to
+    // bound what one agent can make this gateway do, and a row plus a signed
+    // receipt per refused call would let a flood buy one database write each.
     captureBlocked("rate_limited", 429);
     return new Response(JSON.stringify({ error: "rate_limited" }), {
       status: 429,
@@ -376,6 +421,33 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     );
   }
 
+  // ── 5b. The mission's word on this call (idea 11) ───────────────────────────
+  // Only for a call the rules ADMIT: a mission intersects the rules, never widens
+  // them. Inside an enforcing mission the call does not wait for an `ask` rule (the
+  // owner answered once, for the job); outside it holds through Ask me first at 6c.
+  // In shadow mode it changes nothing and records what it would have done.
+  let missionOutside: Extract<MissionDecision, { state: "outside" }> | null = null;
+  let missionPreApproved = false;
+  // A mission-only agent between missions (R11-01): everything the rules admit holds, as
+  // the owner's call to make one at a time. No mission, so nothing is recorded against one.
+  const missionBetween = callMission.kind === "between";
+  if (missionBetween) missionOutside = { state: "outside", dimension: "window", detail: "no mission is in force" };
+  if (callMission.kind === "bound") {
+    const { record: mission, enforce } = callMission;
+    const decision = missionServiceDecision(mission.document, service, method, segments);
+    if (decision.state === "inside") {
+      missionPreApproved = enforce;
+      missionClaim = { id: mission.id, hash: mission.currentHash, decision: enforce ? "in" : "shadow_in" };
+      waitUntil(recordMissionDecision(mission.id, "inside", undefined, mission.document.expires));
+    } else if (enforce) {
+      missionOutside = decision;
+      missionClaim = { id: mission.id, hash: mission.currentHash, decision: "out" };
+    } else {
+      missionClaim = { id: mission.id, hash: mission.currentHash, decision: "shadow_out" };
+      waitUntil(recordMissionDecision(mission.id, "shadow_would_hold", decision.dimension, mission.document.expires));
+    }
+  }
+
   // ── 6. The per-service hourly cap: fail CLOSED, it has no second backstop ──
   const cap = await rateLimitFailClosed(
     `svc-cap:${agentId}:${service}`,
@@ -419,6 +491,9 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     }
     capturedBody = bounded.text;
   }
+  // Idea 12: scan every admitted method's request line and headers, plus any body read.
+  // Seen stays off the call's path; lib/tripwire/gateway.ts.
+  scheduleTripwireSeen(req, db, { userId, agentId }, capturedBody, "svc_body");
 
   // What will be forwarded, settled before the approval step so that an
   // approval names exactly it: the client's query MINUS this route's own
@@ -430,6 +505,21 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   } catch {
     record("blocked_endpoint", 400);
     return governed(err(400, "invalid_query"));
+  }
+
+  // ── 5d. Idea 14: does this admitted call create a standing thing? ──────────
+  // (lib/standing/gateway.ts.) Recognised by method, path and parameters, never by
+  // content. D2 (owner, 2026-11-15): a workflow dispatch that does not ask GitHub for
+  // the run's id is refused, because a run the gateway cannot name it cannot cancel.
+  // A creating call PassControl cannot read the way the service will is refused, never
+  // sent unrecorded (commit review of c898c91).
+  const { call: standingCall, refusal: standingRefused } = standingFor(
+    service, method, segments, capturedBody, req.headers.get("content-type") ?? "", search
+  );
+  if (standingRefused) {
+    record("blocked_policy", 400);
+    captureBlocked(standingRefused.code, 400);
+    return governed(errMessage(400, standingRefused.code, standingRefused.message));
   }
   const headers = filterRequestHeaders(entry, req.headers);
 
@@ -460,7 +550,11 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     heldBecause = await injectionHoldReason(policySnapshot.policy, agentId, Date.now());
     askedBefore = !heldBecause && injectionGuardMode(policySnapshot.policy) === "hold";
   }
-  const asks = serviceCallAsks(rules, method, segments) || heldBecause !== undefined;
+  // An `ask` rule is answered by an enforcing mission that contains this call; the
+  // injection guard's hold is NOT (it is about what the agent read, not the job).
+  const ruleAsks = serviceCallAsks(rules, method, segments) && !missionPreApproved;
+  const asks = ruleAsks || heldBecause !== undefined || missionOutside !== null;
+  const missionHeld = missionOutside !== null && heldBecause === undefined;
   if (asks || askedBefore) {
     const forwardedBody = isWrite ? (capturedBody ?? "") : null;
     const preview = approvalPreview(forwardedBody, search);
@@ -506,7 +600,8 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
       userId, agentId, service, method, path: upstreamPath, preview, fingerprint,
       ...(heldBecause === HELD_TAINTED ? { hold: "injection_tainted" as const }
       : heldBecause === HELD_INCOMPLETE ? { hold: "injection_incomplete" as const }
-        : heldBecause === HELD_UNKNOWN ? { hold: "injection_unknown" as const } : {}),
+        : heldBecause === HELD_UNKNOWN ? { hold: "injection_unknown" as const }
+          : missionHeld ? { hold: "mission_outside" as const } : {}),
     };
     const approval = asks ? await awaitApproval({
       request,
@@ -518,9 +613,22 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
         preview,
         dashboardUrl: `${requestUrl.origin}/dashboard/approvals`,
         ...(heldBecause ? { heldBecause, offerClear: heldBecause === HELD_TAINTED || heldBecause === HELD_INCOMPLETE } : {}),
+        ...(missionHeld && missionOutside
+          ? {
+              heldBecause: missionBetween
+                ? "This agent works only on missions, and none is in force. Approving sends this one request; a mission is approved on the dashboard."
+                : `Outside this agent's mission: ${missionOutside.detail}. Approving sends this one request; widening the mission is done on the dashboard.`,
+            }
+          : {}),
       },
       waitMs: approvalWaitMs(),
     }) : tooLarge ? { state: "none" as const } : await existingApproval(request);
+    if (missionOutside && missionClaim && callMission.kind === "bound") {
+      // The receipt says the owner let this one call out of the mission; the mission
+      // itself is unchanged (widening is a signed dashboard action, never a tap).
+      if (approval.state === "approved") missionClaim = { ...missionClaim, decision: "approved" };
+      waitUntil(recordMissionDecision(missionClaim.id, approval.state === "approved" ? "approved" : "held", missionOutside.dimension, callMission.record.document.expires));
+    }
     if (approval.state !== "approved" && approval.state !== "none") {
       // Its own security-event codes, and never the workspace's "refused"
       // alert: the owner was just asked, and a second ping says nothing new.
@@ -558,6 +666,20 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     }
   }
 
+  const readDispatchStops = dispatchStopChecker({
+    db, principal, credentialToken, session: lineage?.session ?? null, service,
+    admissionMission: callMission, authenticatedAt, missionReadAt,
+  });
+  const checkDispatchStops = async () => {
+    const { refusal } = await readDispatchStops();
+    if (!refusal) return null;
+    record(refusal.audit, refusal.status);
+    captureBlocked(refusal.audit === "blocked_policy" ? refusal.code : refusal.audit, refusal.status);
+    return governed(refusal.message ? errMessage(refusal.status, refusal.code, refusal.message) : err(refusal.status, refusal.code));
+  };
+  const beforeKey = await checkDispatchStops();
+  if (beforeKey) return beforeKey;
+
   // ── 7. The tenant's token: get_provider_key, the only decrypt path ─────────
   let token: string | null;
   try {
@@ -585,8 +707,6 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     );
   }
 
-
-  // ── 8. Inject + forward ────────────────────────────────────────────────────
   // Built by the catalog: for Telegram the token is IN this URL, so the URL is
   // a secret from here on — it is never logged, captured or returned. A stored
   // token that cannot be put into a URL safely refuses the call.
@@ -601,6 +721,9 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
       )
     );
   }
+
+
+  // ── 8. Inject + forward ────────────────────────────────────────────────────
   for (const [name, value] of Object.entries(entry.authHeaders(token))) headers.set(name, value);
 
   const secrets = secretsToRedact(token);
@@ -625,6 +748,20 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     return out.text;
   };
 
+  const beforeDispatch = await checkDispatchStops();
+  if (beforeDispatch) return beforeDispatch;
+
+  // Idea 14: written BEFORE the call leaves, so a lost answer still leaves a row. Shadow
+  // mode: a failed write is a reported gap, never a refusal.
+  const standingId = standingCall
+    ? await recordStandingIntent(db, standingCall, {
+        userId,
+        agentId,
+        session: lineage?.session ?? null,
+        missionId: missionClaim?.id ?? null,
+      })
+    : null;
+
   let upstream: Response;
   try {
     upstream = await fetch(targetUrl, {
@@ -640,12 +777,13 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
     });
   } catch {
     // May or may not have reached the service; recorded as dispatched.
+    if (standingId && standingCall) waitUntil(settleStanding(db, standingId, standingCall, { lost: true }));
     record("upstream_error", 502, true);
     return governed(err(502, "upstream_unreachable"));
   }
 
   // ── 9. Answer: allowlisted headers, rewritten URLs, redacted body ──────────
-  const out = filterResponseHeaders(entry, upstream.headers);
+  const out = filterResponseHeaders(entry, upstream.headers, secrets, reportReflection);
   // Only where the service's URLs carry no credential. Telegram's would carry
   // the bot token, so for it both headers are dropped, not rewritten.
   if (entry.rewritesUrls) {
@@ -663,13 +801,43 @@ async function handle(req: Request, serviceRaw: string): Promise<Response> {
   }
   out.set("x-passcontrol-receipt-id", receiptId);
 
-  const body =
-    method === "HEAD" || NULL_BODY_STATUSES.has(upstream.status) || !upstream.body
-      ? null
-      : secrets.length
-        ? upstream.body.pipeThrough(redactingStream(secrets, reportReflection))
-        : upstream.body;
+  let body: BodyInit | null = null;
+  // Idea 14: the (redacted) answer text, read only for a call that may create a standing thing.
+  let standingText: string | null = null;
+  if (method !== "HEAD" && !NULL_BODY_STATUSES.has(upstream.status) && upstream.body) {
+    const contentType = upstream.headers.get("content-type") ?? "";
+    if ((secrets.length || standingId) && /(?:application\/(?:[^;]+\+)?json|text\/(?!event-stream))/i.test(contentType)) {
+      // Non-streamed text needs a decoded JSON-escape view as well as raw byte
+      // matching. Keep original bytes when nothing matches (including non-UTF8).
+      // Bounded: past SERVICE_INSPECT_MAX_BYTES it streams through the byte
+      // redactor as before, so a body that never ends is never held whole.
+      const read = await readBounded(upstream.body, SERVICE_INSPECT_MAX_BYTES);
+      if (!read.complete) {
+        body = read.stream.pipeThrough(redactingStream(secrets, reportReflection));
+      } else {
+        const bytes = read.bytes;
+        try {
+          const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+          const safe = redactSecretsInText(text, secrets);
+          if (safe.redacted) reportReflection();
+          body = safe.redacted ? safe.text : bytes;
+          if (standingId) standingText = safe.text;
+        } catch {
+          body = new Response(bytes).body!.pipeThrough(redactingStream(secrets, reportReflection));
+        }
+      }
+    } else {
+      body = secrets.length ? upstream.body.pipeThrough(redactingStream(secrets, reportReflection)) : upstream.body;
+    }
+  }
 
+  if (standingId && standingCall) {
+    // A body that was not read (streamed, too large, not UTF-8) settles as 'unknown' on a 2xx.
+    const json = NULL_BODY_STATUSES.has(upstream.status) ? null : standingText === null ? undefined : answerJson(standingText);
+    waitUntil(settleStanding(db, standingId, standingCall, { status: upstream.status, json }).then(async birth => {
+      if (birth) await announceBirth({ userId, agentId, origin: new URL(req.url).origin }, birth);
+    }));
+  }
   record(upstream.status < 400 ? "ok" : "upstream_error", upstream.status, true);
   return new Response(body, { status: upstream.status, headers: out });
 }

@@ -5,6 +5,7 @@ import type { KillObservation } from "@/app/dashboard/actions";
 import { CheckCircle2, AlertTriangle, HelpCircle, Loader2, RefreshCw, ShieldOff } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { notDurableMessage, notDurableRetryLabel } from "@/lib/kill-durability";
+import { stepUpRefusal } from "@/lib/action-result";
 
 export type KillSwitchPhase = "disarmed" | "arming" | "armed" | "disarming" | "checking" | "unknown" | "unconfirmed";
 type KillBusy = { kind: "apply"; next: boolean } | { kind: "refresh" } | null;
@@ -77,6 +78,7 @@ export function GlobalKillSwitchBar({
   const [showConfirm, setShowConfirm] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState<{ requested: boolean; lost: boolean } | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [refused, setRefused] = useState<string | null>(null);
   // Plain state, not a React transition. On a production build a transition started
   // on /dashboard never commits (router.refresh and a server action's
   // revalidated tree both stay pending — see tests/agent-operating-surface), so
@@ -108,10 +110,19 @@ export function GlobalKillSwitchBar({
   const apply = async (next: boolean) => {
     setBusy({ kind: "apply", next });
     try {
+      setRefused(null);
       settle(await setMasterKill(next));
-    } catch {
-      setUnconfirmed({ requested: next, lost: true });
-      setAnnouncement("Could not confirm the kill-switch change.");
+    } catch (error) {
+      // Disarming needs the second factor where one is enrolled (review C-02). A refusal
+      // changed nothing, so it is said as that, not as "may or may not have applied".
+      const refused = stepUpRefusal(error);
+      if (refused) {
+        setRefused(refused);
+        setAnnouncement(refused);
+      } else {
+        setUnconfirmed({ requested: next, lost: true });
+        setAnnouncement("Could not confirm the kill-switch change.");
+      }
     } finally {
       setBusy(null);
     }
@@ -192,6 +203,11 @@ export function GlobalKillSwitchBar({
           <button type="button" className="ghost" disabled={pending} onClick={() => void apply(notDurable)} data-control="retry-kill-save">
             {notDurableRetryLabel(notDurable)}
           </button>
+        </p>
+      ) : null}
+      {refused ? (
+        <p role="alert" className="pc-inline-error" data-kill-result="refused">
+          {refused} The kill switch is still armed. <a href="/login/verify">Verify now</a>
         </p>
       ) : null}
       {unconfirmed ? (

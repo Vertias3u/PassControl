@@ -111,6 +111,13 @@
     scroll-behavior: smooth;
     scroll-padding-top: 96px;
   }
+  /* Below 920px the homepage header wraps its links onto a second, 44px row, so it is
+     taller than 96px; anchors and focused elements would land under it (WCAG 2.4.11). */
+  @media (max-width: 920px) {
+    html:has([data-site="home"]) {
+      scroll-padding-top: 132px;
+    }
+  }
   body {
     @apply bg-background text-foreground;
     margin: 0;
@@ -2699,6 +2706,7 @@ input:where([type="radio"], [type="checkbox"]) {
   border-radius: 0;
   accent-color: var(--pc-brand);
 }
+
 
 code, pre { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; }
 .mono { font-family: var(--font-ibm-plex-mono), ui-monospace, monospace; font-size: 12px; }

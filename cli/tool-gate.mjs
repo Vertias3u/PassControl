@@ -27,6 +27,7 @@
 // page: tool name, decision, rule number and wait. Never the command, path or URL.
 import { underTaint } from "./injection-hold.mjs";
 import { evaluateToolRules, parseToolRules } from "./tool-rules.mjs";
+import { evaluateMissionTools, toolItemKey } from "./mission-tools.mjs";
 
 /** The wait ends this long before Claude Code would give up on the hook. */
 export const HOOK_MARGIN_S = 30;
@@ -86,8 +87,9 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
    *                             The rules from the latest trusted /self read, or null.
    * @param {number | null} hookTimeoutS  What the hook's URL says it waits; null when it does not say.
    * @param {"off" | "clear" | "tainted" | "unknown"} injection
+   * @param {"off" | "clear" | "held"} memory  idea 13: unresolved memory arrivals hold the same tools
    */
-  async function decide(input, rulesEntry, hookTimeoutS, injection = "off") {
+  async function decide(input, rulesEntry, hookTimeoutS, injection = "off", memory = "off") {
     if (input?.hook_event_name !== "PreToolUse") return {};
     if (needsRefresh || refreshing) {
       if (!refreshing) {
@@ -114,10 +116,13 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
     }
 
     const original = evaluateToolRules(parsed, input);
-    const hit = injection === "tainted" ? underTaint(original, input.tool_name) : original;
+    const hit = injection === "tainted" || memory === "held" ? underTaint(original, input.tool_name) : original;
     const escalated = hit.reason === "injection_taint";
     // `/self` says only that the agent is tainted, not why: a tell, or output not fully checked (1.7.1).
-    const guardText = "This tool was held by the injection guard: something the agent recently read looked like a prompt injection, or could not be fully checked.";
+    const guardText =
+      injection !== "tainted" && memory === "held"
+        ? "This tool was held by memory custody: the agent's memory files have entries waiting for the owner's review (they arrived with no custody record, or were written while outside content was in its context)."
+        : "This tool was held by the injection guard: something the agent recently read looked like a prompt injection, or could not be fully checked.";
     let warning = {};
     if (injection === "unknown" && (injectionWarnedAt === null || now() - injectionWarnedAt >= WARN_EVERY_MS)) {
       injectionWarnedAt = now();
@@ -129,6 +134,43 @@ export function createToolGate({ askOwner, onDecision = () => {}, now = () => Da
         try { onHold({ tool: String(input.tool_name ?? "").slice(0, 128), outcome }); } catch {}
       }
     }
+    // Idea 11: the agent's mission, local-tool section. A GUARD RAIL, not a boundary
+    // (cli/mission-tools.mjs says why). Only adds friction where the rules above are
+    // not already stricter: a deny stays a deny, an ask_owner still asks the owner.
+    // Outside an enforcing mission the call holds through Claude Code's own prompt;
+    // shadow mode records what it would have held and changes nothing.
+    const mission = rulesEntry?.mission;
+    if (mission && (hit.effect === null || hit.effect === "ask") && !escalated) {
+      // Mission-only (R11-01): between missions nothing is standing authority, so every
+      // tool the rules do not already decide holds here, as the gateway holds services.
+      if (mission.only === true && mission.state === "none") {
+        record(input, "mission_outside", null, 0);
+        return withWarning(
+          verdict(
+            "ask",
+            "PassControl: this agent works only on missions, and none is in force. Confirm it here if you meant it; a mission is approved by the owner. This check is a guard rail on this machine, not a boundary."
+          )
+        );
+      }
+      if (mission.state === "ok" && Array.isArray(mission.tools)) {
+        const judged = evaluateMissionTools(mission.tools, input);
+        if (judged.state === "outside" && mission.mode === "enforce") {
+          record(input, "mission_outside", null, 0);
+          const what = judged.missing.map((item) => toolItemKey(item)).join(", ");
+          return withWarning(
+            verdict(
+              "ask",
+              `PassControl: this is outside this agent's mission (${short(what)}). Confirm it here if you meant it; widening the mission itself needs the owner. This check is a guard rail on this machine, not a boundary.`
+            )
+          );
+        }
+        if (judged.state === "outside") record(input, "mission_would_hold", null, 0);
+      } else if (mission.state === "unknown" && (warnedAt === null || now() - warnedAt >= WARN_EVERY_MS)) {
+        warnedAt = now();
+        warning = { ...warning, systemMessage: "PassControl could not read this agent's mission yet, so this goes ahead. The gateway still enforces it for models and services." };
+      }
+    }
+
     const ruleIndex = escalated ? null : hit.ruleIndex;
     if (hit.effect === null) return withWarning({});
     const rule = escalated ? "injection guard" : `rule ${hit.ruleIndex + 1}`;

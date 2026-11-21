@@ -72,6 +72,7 @@ describe("failure copy", () => {
   // change detector — add a VerifyFailure to the SDK and this goes red until
   // someone writes copy for it.
   const EVERY_REASON: VerifyFailure[] = [
+    "claims",
     "malformed",
     "untrusted_issuer",
     "unknown_key",
@@ -101,6 +102,7 @@ describe("failure copy", () => {
     ["bad_signature", "forged"],
     ["unknown_key", "forged"],
     ["malformed", "forged"],
+    ["claims", "forged"],
     ["wrong_type", "forged"],
     ["jwks_unreachable", "unchecked"],
     ["status_unavailable", "unchecked"],

@@ -96,7 +96,7 @@ function model(provider: ProviderId, id: string, inputUsd: number, outputUsd: nu
 /**
  * An Anthropic model whose cache reads are not the standard 0.1x of input. The page
  * gives these in a footnote, so the rate is listed here rather than derived:
- * 0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and Mythos 5.1.
+ * 0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.2, Mythos 5.2, Fable 5.1 and Mythos 5.1.
  */
 function claudeCacheRead(id: string, inputUsd: number, outputUsd: number, cacheReadUsd: number): Price[] {
   return model("anthropic", id, inputUsd, outputUsd).map((p) => ({ ...p, cacheReadMicrocentsPerToken: mc(cacheReadUsd) }));
@@ -171,6 +171,10 @@ const PRICES: Price[] = [
   // for the cache-read column and the Sonnet 5.5 and Mythos rows. The page does not
   // list the Mythos ids (limited availability); they follow its documented
   // claude-{name}-{major}[-{minor}] scheme.
+  // Fable 5.2 and Mythos 5.2 (released 2026-11-09): one price for both, read 2026-11-10
+  // from .../models/fable-5-2/whats-new-fable-5-2 (Pricing), which names both ids.
+  ...claudeCacheRead("claude-fable-5-2", 8, 40, 0.2),
+  ...claudeCacheRead("claude-mythos-5-2", 8, 40, 0.2),
   ...claudeCacheRead("claude-fable-5-1", 10, 50, 0.25),
   ...claudeCacheRead("claude-mythos-5-1", 10, 50, 0.25),
   ...model("anthropic", "claude-fable-5", 10, 50),
@@ -200,12 +204,18 @@ const PRICES: Price[] = [
   // one, like the input rate); a row without one lists "-" there.
   // GPT-6 and GPT-5.6: [input, cached input, cache write, output], short then long
   // context, read 2026-10-07; their model pages bill >272K "for the full request".
+  // developers.openai.com/api/docs/pricing, Standard tier, read 2026-11-21.
+  // These rows use the 30-minute cache-write column.
+  ...tiered("openai", "gpt-6.2-astra", [8, 0.4, 10, 40], [16, 0.8, 20, 60]),
+  ...tiered("openai", "gpt-6.2-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]),
+  ...tiered("openai", "gpt-6.1-terra", [1, 0.05, 1.25, 5], [2, 0.1, 2.5, 7.5]),
   ...tiered("openai", "gpt-6-astra", [10, 1, 12.5, 50], [20, 2, 25, 75]),
   ...tiered("openai", "gpt-6-sol", [2, 0.2, 2.5, 10], [4, 0.4, 5, 15]),
   // GPT-6.1 Sol: cached reads at 5% of input (its model page), not 10%.
   ...tiered("openai", "gpt-6.1-sol", [2, 0.1, 2.5, 10], [4, 0.2, 5, 15]),
   ...tiered("openai", "gpt-6-luna", [0.1, 0.01, 0.125, 0.5], [0.2, 0.02, 0.25, 0.75]),
-  // GPT-5.6 Sol is promotional "at least through November 21, 2026".
+  // GPT-5.6 Sol is promotional "until November 30, 2026" (model page and pricing page,
+  // re-read 2026-11-15: rates unchanged; the post-promotion price is not published).
   ...tiered("openai", "gpt-5.6-sol", [4, 0.4, 5, 20], [8, 0.8, 10, 30]),
   ...tiered("openai", "gpt-5.6-terra", [2, 0.2, 2.5, 12], [4, 0.4, 5, 18]),
   ...tiered("openai", "gpt-5.6-luna", [0.2, 0.02, 0.25, 1.2], [0.4, 0.04, 0.5, 1.8]),
@@ -296,6 +306,14 @@ const PRICES: Price[] = [
   // Gemini — ai.google.dev/gemini-api/docs/pricing, Standard, paid tier.
   // 3.6 / 3.7 / 3.8 Flash are promotional "through December 31, 2026", then
   // $1.50 in / $7.50 out; tests/pricing-table.test.ts goes red before that date.
+  // Gemini 4, read 2026-11-21 (aistudio.google.com/docs/pricing; one input rate for every
+  // modality, no long-prompt tier). Carbon and Argon are $2 / $10 "to Nov 30, 2026" and
+  // $4 / $20 "starting December 1, 2026"; the rows use the later price from now, so for
+  // those days the table over-counts, never under (owner, 2026-11-21).
+  { provider: "gemini", pattern: "gemini-4-carbon", inputMicrocentsPerToken: mc(4), outputMicrocentsPerToken: mc(20) },
+  { provider: "gemini", pattern: "gemini-4-argon", inputMicrocentsPerToken: mc(4), outputMicrocentsPerToken: mc(20) },
+  { provider: "gemini", pattern: "gemini-4-neon", inputMicrocentsPerToken: mc(3), outputMicrocentsPerToken: mc(15) },
+  { provider: "gemini", pattern: "gemini-4-hydrogen", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(7.5) },
   { provider: "gemini", pattern: "gemini-3.8-flash", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
   { provider: "gemini", pattern: "gemini-3.7-flash", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
   { provider: "gemini", pattern: "gemini-3.6-flash", inputMicrocentsPerToken: mc(0.75), outputMicrocentsPerToken: mc(3.75) },
@@ -306,6 +324,10 @@ const PRICES: Price[] = [
   { provider: "gemini", pattern: "gemini-3.1-pro-preview-customtools", inputMicrocentsPerToken: mc(4), outputMicrocentsPerToken: mc(18) },
   { provider: "gemini", pattern: "gemini-3-flash-preview", inputMicrocentsPerToken: mc(1), outputMicrocentsPerToken: mc(3) },
   // Omni's output is $9 for text and $17.50 for video; the higher is used.
+  // Omni 1.2 Flash (read 2026-11-21): $9 text, $12 video. From 2026-12-03 Google routes
+  // 1.1 requests to 1.2 and bills them at 1.2's rates; 1.1 keeps its higher row (over,
+  // never under) until it is retired.
+  { provider: "gemini", pattern: "gemini-omni-1.2-flash", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(12) },
   { provider: "gemini", pattern: "gemini-omni-1.1-flash", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(17.5) },
   { provider: "gemini", pattern: "gemini-omni-flash-preview", inputMicrocentsPerToken: mc(1.5), outputMicrocentsPerToken: mc(17.5) },
   { provider: "gemini", pattern: "gemini-2.5-pro", inputMicrocentsPerToken: mc(2.5), outputMicrocentsPerToken: mc(15) },
@@ -439,8 +461,51 @@ export function hasListedPrice(model: string, provider: ProviderId): boolean {
 const TABLE_SERVICE_TIERS: ReadonlySet<string> = new Set(["auto", "default", "standard", "standard_only", "flex"]);
 
 /**
+ * A cache option the table does not price: anything that is not an object, or whose
+ * `ttl` is present and is not the 30-minute default (a 12-hour write bills 2.5x input,
+ * the rows hold and settle 1.25x).
+ */
+function unpricedCacheTtl(options: unknown): boolean {
+  if (typeof options !== "object" || options === null || Array.isArray(options)) return true;
+  return Object.hasOwn(options, "ttl") && (options as Record<string, unknown>).ttl !== "30m";
+}
+
+/**
+ * Whether a request carries a `prompt_cache_breakpoint` the table does not price,
+ * anywhere in its body: Responses `input`, Chat Completions `messages`, `tools`, the
+ * top level. The whole body is walked: the proxy already caps it at 4 MB
+ * (MAX_BODY_BYTES), so a node count would add no bound, only refuse long honest
+ * sessions. Depth is bounded so a deeply nested body cannot exhaust the stack (64
+ * leaves room for nested tool schemas), and one too deep to finish checking is refused.
+ */
+function hasUnpricedOpenAICacheBreakpoint(body: unknown): boolean {
+  const maxDepth = 64;
+
+  function visit(value: unknown, depth: number): boolean {
+    if (depth > maxDepth) return true;
+    if (typeof value !== "object" || value === null) return false;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (visit(item, depth + 1)) return true;
+      }
+      return false;
+    }
+    const fields = value as Record<string, unknown>;
+    for (const field in fields) {
+      if (!Object.hasOwn(fields, field)) continue;
+      const child = fields[field];
+      if (field === "prompt_cache_breakpoint" && unpricedCacheTtl(child)) return true;
+      if (visit(child, depth + 1)) return true;
+    }
+    return false;
+  }
+
+  return visit(body, 0);
+}
+
+/**
  * The request field that would make this call cost more than its table row, or
- * null. Under a dollar limit the proxy refuses such a request (409
+ * null. Under a dollar limit the proxy refuses such a request (402
  * `unpriced_option`), for the reason an unpriced model is refused.
  *
  * Known gap, stated rather than guessed at: an OpenAI project whose default
@@ -455,10 +520,16 @@ export function unpricedRequestOption(provider: ProviderId, body: unknown): stri
   if (set(b.service_tier) && !(typeof b.service_tier === "string" && TABLE_SERVICE_TIERS.has(b.service_tier))) {
     return "service_tier";
   }
-  if (provider === "openai" && Array.isArray(b.tools)) {
+  if (provider === "openai") {
+    // developers.openai.com/api/docs/guides/prompt-caching: 12h writes cost
+    // 2.5x input, while the table prices 30m writes at 1.25x.
+    if (Object.hasOwn(b, "prompt_cache_options") && unpricedCacheTtl(b.prompt_cache_options)) {
+      return "prompt_cache_options";
+    }
+    if (hasUnpricedOpenAICacheBreakpoint(b)) return "prompt_cache_breakpoint";
     // A reused code interpreter or shell container: its memory tier, which sets
     // its price, is not in the request (lib/providers/openai-containers.ts).
-    if (openaiUnknownContainer(b)) return "container";
+    if (Array.isArray(b.tools) && openaiUnknownContainer(b)) return "container";
   }
   if (provider === "anthropic") {
     // platform.claude.com pricing: fast mode on Opus 5.5 / 5 / 4.8 at 2x;

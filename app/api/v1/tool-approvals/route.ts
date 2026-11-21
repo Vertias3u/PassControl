@@ -45,6 +45,7 @@ import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { isSuspended } from "@/lib/state/redis";
 import { HELD_INCOMPLETE, HELD_TAINTED, HELD_UNKNOWN, injectionHoldReason } from "@/lib/injection-hold";
 import { injectionGuardMode } from "@/lib/scope";
+import { HELD_MEMORY, HELD_MEMORY_UNKNOWN, memoryHoldReason } from "@/lib/memory-custody/hold";
 
 const TOOL_APPROVAL_RATE_LIMIT = Number(process.env.TOOL_APPROVAL_RATE_LIMIT ?? "30");
 const RATE_WINDOW_S = 60;
@@ -168,6 +169,15 @@ export async function POST(req: Request): Promise<Response> {
     heldBecause = await injectionHoldReason(policy.policy, agentId, Date.now());
     askedBefore = !heldBecause && injectionGuardMode(policy.policy) === "hold";
   }
+  // Idea 13: unresolved memory arrivals hold the same tools, from the gateway's own ledger
+  // (lib/memory-custody/hold.ts), never from the request. No TTL: it lasts until the owner decides.
+  if (rules.ok && !askOwnerAnyCase && verdict.effect !== "deny" && heldUnderTaint(toolName) && heldBecause === undefined) {
+    const memoryReason = await memoryHoldReason(db, userId, agentId);
+    if (memoryReason) {
+      heldBecause = memoryReason;
+      askedBefore = false;
+    }
+  }
   const asks = askOwnerAnyCase || heldBecause !== undefined;
   const notAsked = () => errMessage(409, "not_ask_owner", "This agent's tool rules do not put this tool call to its owner.");
   if (!asks && !askedBefore) return notAsked();
@@ -183,7 +193,8 @@ export async function POST(req: Request): Promise<Response> {
     userId, agentId, service: "claude-code", method: "TOOL", path: toolName, preview, fingerprint,
     ...(heldBecause === HELD_TAINTED ? { hold: "injection_tainted" as const }
       : heldBecause === HELD_INCOMPLETE ? { hold: "injection_incomplete" as const }
-      : heldBecause === HELD_UNKNOWN ? { hold: "injection_unknown" as const } : {}),
+      : heldBecause === HELD_UNKNOWN ? { hold: "injection_unknown" as const }
+      : heldBecause === HELD_MEMORY || heldBecause === HELD_MEMORY_UNKNOWN ? { hold: "memory_custody" as const } : {}),
   };
   const approval = !asks ? await existingApproval(request) : await awaitApproval({
     request,

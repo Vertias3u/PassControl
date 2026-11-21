@@ -46,6 +46,8 @@ const {
 // passport apart from a tenant that holds a demo scope. That module is
 // `server-only`, which Next enforces at build time and vitest cannot resolve
 // at all — same stub tests/site-demo-routes.test.ts already uses.
+// Idea 11: these tests are about other behaviour; the agent has no mission.
+vi.mock("@/lib/mission/gate", () => ({ resolveCallMission: async () => ({ kind: "none" }) }));
 vi.mock("server-only", () => ({}));
 vi.mock("@vercel/functions", () => ({ waitUntil: (p: unknown) => p }));
 vi.mock("@/lib/auth/visa", () => ({

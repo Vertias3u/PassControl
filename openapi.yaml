@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PassControl Control-Plane API
-  version: "1.7.2"
+  version: "1.9.0"
   description: >
     Developer API for managing a PassControl agent fleet. Authenticated with a
     `pc_` API key (Authorization: Bearer). All access is tenant-isolated to the
@@ -261,7 +261,8 @@ paths:
         so this endpoint cannot be used to enumerate or reach another key. Backs
         `passcontrol logout`. A 404 and a 409 both mean the key cannot be used
         again — missing and already-revoked are conflated on purpose so another
-        tenant's key stays indistinguishable from absence.
+        tenant's key stays indistinguishable from absence. A read-scoped key may
+        revoke itself.
       parameters:
         - { $ref: "#/components/parameters/IdempotencyKey" }
       responses:
@@ -278,6 +279,35 @@ paths:
                       revoked_at: { type: string, format: date-time }
                       prefix: { type: string, example: "pc_a1b2c3d4" }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /keys/self/downgrade:
+    post:
+      summary: Make the API key making this request read-only
+      operationId: downgradeOwnApiKey
+      description: >
+        Lowers the control key that authenticated this request to read scope, and
+        only that key. Like self-revocation it takes no key id, and there is no
+        route back up: write scope is only minted in Settings or by a
+        browser-approved `passcontrol login`. Login calls this before it saves its
+        key next to the agent's passport, so an agent that reads that file can
+        look but not act. Idempotent for a key that is already read-only.
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200":
+          description: The key is read-only.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      scope: { type: string, enum: [read] }
+                      prefix: { type: string, example: "pc_a1b2c3d4" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 

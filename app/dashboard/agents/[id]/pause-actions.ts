@@ -5,13 +5,15 @@
 // The lift is a Redis key per agent with a TTL (lib/state/pause.ts), so the tenant
 // boundary is HERE: the agent is found through the caller's own session (RLS) and an
 // explicit user_id filter, and nothing is written for an agent that is not theirs.
-// Behind the same gate as resuming a suspended agent (a signed-in owner), because it
-// is the same kind of act: letting one's own agent go on. It can never let the agent
+// Behind the same gate as resuming a suspended agent (a signed-in owner, and the second
+// factor where one is enrolled: review C-02), because it is the same kind of act:
+// letting one's own agent go on. It can never let the agent
 // spend past a limit: a lift skips only the pause check, never the hard budget.
 import { revalidatePath } from "next/cache";
 
 import { liftSeconds } from "@/lib/budget-pause";
 import { recordAdminAction } from "@/lib/audit";
+import { mfaAuthorizedUser } from "@/lib/mfa";
 import { endPauseLift, liftPause } from "@/lib/state/pause";
 import { userClient } from "@/lib/supabase/server";
 
@@ -32,6 +34,16 @@ export async function setAgentPauseLift(agentId: string, lift: boolean): Promise
   } = await db.auth.getUser();
   if (!user) return { error: "Sign in again to change this agent." };
   if (!UUID_RE.test(agentId ?? "")) return { error: UNAVAILABLE };
+  // Lifting the pause takes a stop off, so it is behind the second factor where one is
+  // enrolled (review C-02). "Keep paused" (lift false) puts the stop back and stays ungated.
+  if (lift) {
+    const gate = await mfaAuthorizedUser(db);
+    if (!gate.ok || gate.user.id !== user.id) {
+      return { error: !gate.ok && gate.reason === "step_up_required"
+        ? "Complete two-factor verification first."
+        : "Your sign-in could not be verified. Try again." };
+    }
+  }
 
   const { data: agent, error } = await db
     .from("agents")

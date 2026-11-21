@@ -15,6 +15,14 @@ export function base64urlToBytes(b64url: string): Uint8Array {
   return out;
 }
 
+/** Decode only the unique, unpadded base64url spelling of these bytes. */
+export function canonicalBase64urlToBytes(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]*$/.test(value)) throw new Error("Invalid base64url encoding");
+  const bytes = base64urlToBytes(value);
+  if (bytesToBase64url(bytes) !== value) throw new Error("Noncanonical base64url encoding");
+  return bytes;
+}
+
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 

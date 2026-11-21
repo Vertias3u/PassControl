@@ -2,6 +2,7 @@ import http from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createStopGate, GATE_HOOK_TIMEOUT_S, HOOK_PATH, SELF_READ_TIMEOUT_MS, selfAnswerState } from "../subscription-gate.mjs";
 import { createSidecar } from "../sidecar.mjs";
 
@@ -396,13 +397,19 @@ async function sidecarWithSelf(selfAnswer, { challengeDelayMs = 0 } = {}) {
     passportSecret: b64url(secret),
   });
   const port = await listen(sidecar.server);
+  hookKeys.set(port, sidecarKey(b64url(secret)));
   return { port, seen };
 }
+
+// Each sidecar's key by port: the hook asks for it (review C-03 follow-up), and
+// configure writes it into Claude Code's hook headers.
+const hookKeys = new Map();
+const keyed = (port) => ({ authorization: `Bearer ${hookKeys.get(port)}` });
 
 function postHook(port, body, headers = {}, query = "") {
   return fetch(`http://127.0.0.1:${port}${HOOK_PATH}${query}`, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", ...keyed(port), ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -496,7 +503,7 @@ describe("the sidecar's hook endpoint", () => {
     expect((await postHook(port, input("PreToolUse"), { origin: "https://evil.example" })).status).toBe(403);
     const rebound = await new Promise((resolve) => {
       const req = http.request(
-        { host: "127.0.0.1", port, path: HOOK_PATH, method: "POST", headers: { host: `evil.example:${port}`, "content-type": "application/json" } },
+        { host: "127.0.0.1", port, path: HOOK_PATH, method: "POST", headers: { host: `evil.example:${port}`, "content-type": "application/json", ...keyed(port) } },
         (res) => {
           res.resume();
           resolve(res.statusCode);
@@ -510,8 +517,8 @@ describe("the sidecar's hook endpoint", () => {
 
   it("answers POST only, and refuses a body that is not a JSON object", async () => {
     const { port } = await sidecarWithSelf(() => ({ status: 200, body: { budget: {} } }));
-    expect((await fetch(`http://127.0.0.1:${port}${HOOK_PATH}`)).status).toBe(405);
-    const bad = await fetch(`http://127.0.0.1:${port}${HOOK_PATH}`, { method: "POST", body: "[1,2]" });
+    expect((await fetch(`http://127.0.0.1:${port}${HOOK_PATH}`, { headers: keyed(port) })).status).toBe(405);
+    const bad = await fetch(`http://127.0.0.1:${port}${HOOK_PATH}`, { method: "POST", headers: keyed(port), body: "[1,2]" });
     expect(bad.status).toBe(400);
   });
 

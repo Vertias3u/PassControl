@@ -1,4 +1,6 @@
 import Stops.Theorems
+import Stops.Service
+import Stops.Dispatch
 /- Which axioms each headline theorem rests on. Allowed: propext,
    Classical.choice, Quot.sound. `lake build` prints these. -/
 #print axioms Stops.admits_iff_all_clear
@@ -29,3 +31,82 @@ import Stops.Theorems
 #print axioms Stops.successful_read_ignores_posture
 #print axioms Stops.policy_unreadable_open_admits
 #print axioms Stops.policy_unreadable_closed_refuses
+-- The service proxy (Stops/Service.lean)
+#print axioms Stops.Svc.key_read_iff
+#print axioms Stops.Svc.sent_iff
+#print axioms Stops.Svc.sent_needs_key
+#print axioms Stops.Svc.refusal_before_key
+#print axioms Stops.Svc.refusal_after_key
+#print axioms Stops.Svc.refused_by_refuses
+#print axioms Stops.Svc.sent_iff_not_refused
+#print axioms Stops.Svc.revocation_refuses_iff
+#print axioms Stops.Svc.revoked_never_reaches_key
+#print axioms Stops.Svc.service_kill_denies
+#print axioms Stops.Svc.service_flag_in_redis_is_seen
+#print axioms Stops.Svc.service_stop_in_record_is_seen
+#print axioms Stops.Svc.service_kill_names_its_service
+#print axioms Stops.Svc.other_service_kill_is_not_this_one
+#print axioms Stops.Svc.service_flag_ignores_posture
+#print axioms Stops.Svc.service_kill_redis_failed_open
+#print axioms Stops.Svc.service_kill_redis_failed_closed
+#print axioms Stops.Svc.service_kill_record_failed_open
+#print axioms Stops.Svc.service_kill_record_failed_closed
+#print axioms Stops.Svc.unreadable_rules_never_reach_key
+#print axioms Stops.Svc.unreadable_cap_never_reaches_key
+#print axioms Stops.Svc.only_step_two_reads_posture
+#print axioms Stops.Svc.unadmitted_rules_never_reach_key
+#print axioms Stops.Svc.exhausted_cap_never_reaches_key
+#print axioms Stops.Svc.never_list_never_reaches_key
+#print axioms Stops.Svc.asked_call_needs_approval
+#print axioms Stops.Svc.door_does_not_change_checks
+#print axioms Stops.Svc.direct_key_revocation_is_no_weaker
+#print axioms Stops.Svc.doors_agree_at_revocation
+#print axioms Stops.Svc.suspended_direct_key_never_reaches_key
+#print axioms Stops.Svc.every_stop_holds_on_both_doors
+#print axioms Stops.Svc.no_token_is_not_sent
+-- One request as a trace in time (Stops/Dispatch.lean)
+#print axioms Stops.Dispatch.exec_inv
+#print axioms Stops.Dispatch.the_trace_is_a_timeline
+#print axioms Stops.Dispatch.clock_never_runs_back
+#print axioms Stops.Dispatch.fresh_read_before_every_send
+#print axioms Stops.Dispatch.a_trace_never_starts_with_a_send
+#print axioms Stops.Dispatch.no_send_after_a_stop
+#print axioms Stops.Dispatch.posture_kill_switch
+#print axioms Stops.Dispatch.posture_suspend
+#print axioms Stops.Dispatch.posture_authority
+#print axioms Stops.Dispatch.posture_expiry
+#print axioms Stops.Dispatch.kill_posture_is_the_proved_one
+#print axioms Stops.Dispatch.fail_closed_send_means_clear_redis_read
+#print axioms Stops.Dispatch.fail_open_send_despite_stop_means_unreadable
+#print axioms Stops.Dispatch.authority_stop_blocks_send_under_both_postures
+#print axioms Stops.Dispatch.the_only_windows
+#print axioms Stops.Dispatch.a_played_request_is_a_run
+#print axioms Stops.Dispatch.window_fast_first_attempt_is_open
+#print axioms Stops.Dispatch.slow_first_attempt_is_reread
+#print axioms Stops.Dispatch.failover_window_is_open_between_its_read_and_its_send
+#print axioms Stops.Dispatch.failover_window_is_open_for_mission_and_direct_key
+#print axioms Stops.Dispatch.slow_failover_is_reread
+#print axioms Stops.Dispatch.redis_stop_has_no_failover_window
+#print axioms Stops.Dispatch.the_window_is_measured_to_the_start_of_the_last_check
+#print axioms Stops.Dispatch.expiry_has_no_window
+#print axioms Stops.Dispatch.the_code_rereads_every_stop
+#print axioms Stops.Dispatch.B5_05_expiry_during_upload_opens_no_hold
+#print axioms Stops.Dispatch.B5_05_expiry_during_upload_ordinary_visa_releases_its_hold
+#print axioms Stops.Dispatch.expiry_shortly_after_admission_is_refused
+#print axioms Stops.Dispatch.expiry_has_no_failover_window
+#print axioms Stops.Dispatch.expiry_stops_the_failover_at_qualification
+#print axioms Stops.Dispatch.B5_05_was_open_before_the_fix
+#print axioms Stops.Dispatch.only_expiry_can_be_left_out
+#print axioms Stops.Dispatch.refusal_after_hold_closes_it
+#print axioms Stops.Dispatch.refused_read_goes_to_refusal
+#print axioms Stops.Dispatch.recheck_refusal_finishes
+#print axioms Stops.Dispatch.B2_01_tenant_stop_during_slow_upload
+#print axioms Stops.Dispatch.B2_02_service_stop_during_approval_wait
+#print axioms Stops.Dispatch.B2_03_delegation_revoked_before_failover
+#print axioms Stops.Dispatch.B2_04_mission_ended_before_failover
+#print axioms Stops.Dispatch.B2_05_direct_key_revoked_before_failover
+#print axioms Stops.Dispatch.stop_during_permission_is_caught_at_the_send
+#print axioms Stops.Dispatch.quiet_requests_are_sent
+#print axioms Stops.Dispatch.unreadable_kill_switch_fail_open_sends
+#print axioms Stops.Dispatch.unreadable_kill_switch_fail_closed_refuses
+#print axioms Stops.Dispatch.unreadable_direct_key_refuses_under_both

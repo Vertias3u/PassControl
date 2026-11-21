@@ -67,7 +67,14 @@ export const HOLD_TOMBSTONE_TTL_S = 900;
  * sum being complete, and an agent with this many abandoned attempts has a
  * problem a rebuild is not the answer to.
  */
-const REBUILD_HOLD_SCAN_LIMIT = 1000;
+export const REBUILD_HOLD_SCAN_LIMIT = 1000;
+
+export class TooManyOpenHoldsError extends Error {
+  constructor(limit: number) {
+    super(`budget rebuild refused: too many open holds (more than ${limit}); no counters written`);
+    this.name = "TooManyOpenHoldsError";
+  }
+}
 
 const k = {
   reserved: (agid: string) => `reserved:${agid}`,
@@ -228,6 +235,8 @@ export interface OpenHoldResult {
    * `epochToPersist` first, exactly as for a denial.
    */
   needsPeriodSeed?: boolean;
+  /** On a `delegation` or `delegation_state` refusal: which of `delegation.links` (1-based). */
+  link?: number;
   reserved?: number;
   reservedMicrocents?: number;
   /** True when this exact attempt id had already opened — a transport replay. */
@@ -575,12 +584,14 @@ end
 for i = 1, dlN do
   local key = KEYS[dlBase + i]
   local cap = tonumber(ARGV[22 + i])
+  -- The second element names the refusing link (1-based), so a mission's cap after a
+  -- delegation's is not reported as the delegation's (1.8.0 review R11-05).
   if redis.call('EXISTS', key) == 0 then
-    return {-8, 0, 0, epochOut}
+    return {-8, i, 0, epochOut}
   end
   local cur = redis.call('HMGET', key, 'r', 's')
   if cap == 0 or (tonumber(cur[2] or '0') + tonumber(cur[1] or '0') + costEstimate) > cap then
-    return {-9, 0, 0, epochOut}
+    return {-9, i, 0, epochOut}
   end
 end
 -- ── THE SUB-AGENT'S LEDGER (C(b)) ──────────────────────────────────────────
@@ -1040,7 +1051,9 @@ export async function openHold(params: {
   const keys = periodKeys(nowMs);
   const period = params.periodLimit ?? { mode: "skip" as const };
   const dlLinks = params.delegation?.links ?? [];
-  if (dlLinks.length > 2) throw new Error("a delegation chain has at most two links");
+  // A delegation chain has at most two links; an enforcing mission's ledger rides after
+  // them as a third (idea 11), so a depth-2 worker on a mission brings three. Four is a bug.
+  if (dlLinks.length > 3) throw new Error("a hold carries at most three ledger links");
 
   const res = await redis().eval(
     OPEN_LUA,
@@ -1103,8 +1116,12 @@ export async function openHold(params: {
   if (code === -5) return denied("period");
   if (code === -6) return denied("subagent");
   if (code === -7) return denied("subagent_ledgers");
-  if (code === -8) return denied("delegation_state");
-  if (code === -9) return denied("delegation");
+  // -8/-9 carry the refusing link's 1-based position in `delegation.links`.
+  if (code === -8 || code === -9) {
+    const out = denied(code === -8 ? "delegation_state" : "delegation");
+    const link = Number(reserved);
+    return Number.isInteger(link) && link >= 1 && link <= dlLinks.length ? { ...out, link } : out;
+  }
   // Not a denial: nothing was decided and nothing reserved. The epoch still
   // rides out, because a first call may have minted one on this very reply.
   if (code === -4) {
@@ -1322,8 +1339,13 @@ export interface OpenHoldRecord {
  * twice — which is exactly why the old reservation rebuild raced concurrent
  * reserves. This is a report, never an input to a counter.
  */
-export async function listOpenHolds(agentId: string, limit = 200): Promise<OpenHoldRecord[]> {
-  const ids = (await redis().zrange<string[]>(k.holds(agentId), 0, limit - 1)) ?? [];
+export async function listOpenHolds(agentId: string, limit = 200, requireComplete = false): Promise<OpenHoldRecord[]> {
+  // Recovery must detect a cut-short index read before computing any seed.
+  // Inspect the raw IDs, including missing tombstones that hydration omits.
+  const ids = (await redis().zrange<string[]>(k.holds(agentId), 0, requireComplete ? limit : limit - 1)) ?? [];
+  if (requireComplete && ids.length > limit) {
+    throw new TooManyOpenHoldsError(limit);
+  }
   const now = Date.now();
   const out: OpenHoldRecord[] = [];
   for (const attemptId of ids) {
@@ -1512,7 +1534,7 @@ export interface RebuildResult {
   openHolds: number;
   /** True when the counter was absent and this rebuild seeded it. */
   seededReserved: boolean;
-  /** More open holds than one read returns; the computed sums are partial. */
+  /** Successful rebuilds are complete; retained for response compatibility. */
   truncated: boolean;
 }
 
@@ -1562,7 +1584,7 @@ export async function rebuildBudgetState(params: {
   nowMs?: number;
 }): Promise<RebuildResult> {
   const keys = periodKeys(params.nowMs ?? Date.now());
-  const open = await listOpenHolds(params.agentId, REBUILD_HOLD_SCAN_LIMIT);
+  const open = await listOpenHolds(params.agentId, REBUILD_HOLD_SCAN_LIMIT, true);
   const computedReservedTokens = open.reduce((sum, h) => sum + h.estimateTokens, 0);
   const computedReservedMicrocents = open.reduce((sum, h) => sum + h.estimateMicrocents, 0);
 
@@ -1599,11 +1621,7 @@ export async function rebuildBudgetState(params: {
     computedReservedMicrocents,
     openHolds: open.length,
     seededReserved: seeded !== 0,
-    // Reported rather than paged over. A rebuild is a recovery action, and an
-    // operator told "1000 open holds" when there are 1200 would seed a counter
-    // too LOW and never know. It only affects the seed branch, and the seed only
-    // fires when the counter was lost outright.
-    truncated: open.length >= REBUILD_HOLD_SCAN_LIMIT,
+    truncated: false,
   };
 }
 

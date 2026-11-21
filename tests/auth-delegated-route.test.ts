@@ -157,6 +157,16 @@ describe("POST /api/auth/delegated: the exchange", () => {
     expect(await res.json()).toEqual({ error: "invalid_delegation" });
   });
 
+  // Review #3 (1.9.0): a chain narrowed from a malformed agent scope verifies, but the
+  // visa it would mint fails verifyVisa on every call. Refused at the door instead.
+  it("refuses with agent_scope_invalid when the agent's own scope is malformed", async () => {
+    m.find.mockResolvedValue({ ok: true, agent: { ...AGENT, allowed_scopes: [{ provider: "not-a-provider", models: ["m-*"] }] } });
+    const res = await post({ ...challenge(worker.priv, worker.id), chain: [link1({ scope: [{ provider: "not-a-provider", models: ["m-1"] }] })] });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "agent_scope_invalid" });
+    expect(m.recordFirst).not.toHaveBeenCalled();
+  });
+
   it("refuses a revoked link, and fails CLOSED when the record cannot be read", async () => {
     m.readRecord.mockResolvedValueOnce({ watermarkSeconds: null, revoked: ["jti-0000000000000001"] });
     const revoked = await post({ ...challenge(worker.priv, worker.id), chain: [link1()] });

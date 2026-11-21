@@ -3,6 +3,7 @@ import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519";
 
+import { sidecarKey } from "../sidecar-token.mjs";
 import { createSidecar, startSidecar } from "../sidecar.mjs";
 
 // These drive the REAL sidecar over REAL sockets using the proxy wire protocol a
@@ -92,10 +93,12 @@ function connect(port, target, { payload } = {}) {
 }
 
 /** An absolute-form request line — what a proxy client sends for a plain-HTTP URL. */
+let callerKey;
+
 function proxyRequest(port, absoluteUrl, { method = "POST", headers = {}, body = "{}" } = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "127.0.0.1", port, method, path: absoluteUrl, headers: { "content-type": "application/json", ...headers } },
+      { host: "127.0.0.1", port, method, path: absoluteUrl, headers: { "content-type": "application/json", authorization: `Bearer ${callerKey}`, ...headers } },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
@@ -130,6 +133,7 @@ beforeEach(async () => {
   echoPort = await listen(echo);
 
   const secret = ed25519.utils.randomPrivateKey();
+  callerKey = sidecarKey(b64url(secret));
   sidecar = createSidecar({
     gateway: `http://127.0.0.1:${gatewayPort}`,
     passportId: b64url(ed25519.getPublicKey(secret)),
@@ -218,6 +222,7 @@ describe("absolute-form proxy requests", () => {
     const sent = received.at(-1);
     expect(sent.url).toBe("/api/v1/anthropic/v1/messages");
     expect(sent.headers.authorization).toBe("Bearer fake.visa.token");
+    expect(JSON.stringify(sent.headers)).not.toContain(callerKey);
     const leaked = Object.entries(sent.headers).filter(([, v]) => String(v).includes(LEAK));
     expect(leaked, "the client's raw provider key left the machine").toEqual([]);
   });
@@ -228,6 +233,8 @@ describe("absolute-form proxy requests", () => {
     });
 
     const sent = received.at(-1);
+    expect(sent.headers.authorization).toBe("Bearer fake.visa.token");
+    expect(JSON.stringify(sent.headers)).not.toContain(callerKey);
     expect(sent.headers["proxy-connection"]).toBeUndefined();
     expect(sent.headers["proxy-authorization"]).toBeUndefined();
   });

@@ -767,18 +767,22 @@ describe("failover re-checks the stops before it touches a second key", () => {
     let wentOn = 0;
     for (let seed = 1; seed <= FAILOVERS; seed++) {
       const r = rng(seed * 7919);
-      // The state the SECOND read finds. The first read, at the top of the request, is clear.
+      // Stops are armed when primary returns; all reads before its dispatch are clear.
       const fresh = randomStopState(r);
       const primaryStatus = r.pick([429, 500, 503]);
       const label = `seed ${seed}: ${JSON.stringify({ fresh, primaryStatus })}`;
       resetHarness();
       setEnv(fresh.env);
       readFallbacksMock.mockResolvedValue([FALLBACK]);
-      readKillStateMock.mockResolvedValueOnce(CLEAR).mockImplementation(killReadAnswer(fresh));
-      isSuspendedMock.mockResolvedValueOnce(false).mockResolvedValue(suspendAnswer(fresh.suspendRead));
+      readKillStateMock.mockResolvedValue(CLEAR);
+      isSuspendedMock.mockResolvedValue(false);
       fetchMock
         .mockReset()
-        .mockImplementationOnce(async () => upstream(primaryStatus === 429 ? QUOTA_BODY : "{}", primaryStatus))
+        .mockImplementationOnce(async () => {
+          readKillStateMock.mockImplementation(killReadAnswer(fresh));
+          isSuspendedMock.mockResolvedValue(suspendAnswer(fresh.suspendRead));
+          return upstream(primaryStatus === 429 ? QUOTA_BODY : "{}", primaryStatus);
+        })
         .mockImplementation(async () => upstream(OK_BODY, 200));
 
       const fallbackInput = gateInputFor(fresh, {

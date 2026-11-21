@@ -218,10 +218,11 @@ the statement either way.
 
 Statements version on **`v`**. Receipts version on **`ver`**. They are separate number lines
 that advance independently.
+Receipt version 4 records a gateway ending on the owner's stop, with no passport or agent key; older receipt verifiers refuse it.
 
 This trips implementations that share one verifier between both artifact types. Gating a
 statement on the receipt's maximum would let a statement claiming `v: 2` through a verifier
-that only understands statement v1, because the receipt line is already at 2. Gate each
+that only understands statement v1, because the receipt line is already at 4. Gate each
 artifact on its own claim.
 
 A verifier for version 1 must refuse `v` greater than 1.

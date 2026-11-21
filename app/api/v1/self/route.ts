@@ -33,12 +33,12 @@
 // agent can therefore read its own tool rules: they are guard rails, not a secret
 // (a deliberate choice, recorded 2026-10-12). Never the policy, never the service rules.
 //
-// And one narrowing of that rule (owner, 2026-10-30): `injection` appears only when the
-// owner put the agent's injection guard in `hold` mode. The sidecar cannot hold Claude
+// And one narrowing of that rule (owner, 2026-10-30): `injection` appears when the
+// owner's injection guard is in `hold` mode or a live tripwire hold applies. The sidecar cannot hold Claude
 // Code's tools for a taint it cannot see, and a hold is visible to the agent anyway. It
 // says until when the agent is tainted, never what was found: naming the pattern would
-// teach an attacker which wording got through. Monitor mode and off add nothing, so an
-// agent cannot learn it is watched. A policy that is refused or unreadable reports only a
+// teach an attacker which wording got through. Without a tripwire hold, Monitor mode and off add
+// nothing, so an agent cannot learn it is watched. A policy that is refused or unreadable reports only a
 // live taint (B2's "held on a live taint"; see injectionView), and nothing otherwise.
 export const runtime = "edge";
 
@@ -64,6 +64,8 @@ import { readPauseLiftEnd } from "@/lib/state/pause";
 import { readCurrentAgentPolicyAndShadow } from "@/lib/state/policy";
 import { isSuspended, readBudgetSnapshot } from "@/lib/state/redis";
 import { readToolRules } from "@/lib/tool-rules";
+import { missionInForce, readActiveMissionForAgent } from "@/lib/mission/store";
+import { memoryHoldView } from "@/lib/memory-custody/hold";
 
 const SELF_RATE_LIMIT = Number(process.env.SELF_RATE_LIMIT ?? "60");
 const SELF_RATE_WINDOW_S = 60;
@@ -156,7 +158,29 @@ export async function GET(req: Request): Promise<Response> {
 
   const wantsToolRules = new URL(req.url).searchParams.get("include") === "tool_rules";
   const toolRules = wantsToolRules ? await readToolRules(db, agentId, userId) : undefined;
+  // Idea 11: the mission's local-tool section, for the sidecar's guard rail. Only the
+  // tools and the mode: the sidecar enforces nothing else, and the rest of the
+  // mission is the gateway's to enforce.
+  //
+  // Mission-only (R11-01): such an agent is told so on every /self, marked `only`, and
+  // between missions reads `state: "none"`, so it and the guard rail know why things hold.
+  const missionOnly = policy.missionOnly === true;
+  let missionTools: Record<string, unknown> | undefined;
+  if (wantsToolRules || missionOnly) {
+    const read = await readActiveMissionForAgent(db as never, userId, agentId);
+    const only = missionOnly ? { only: true } : {};
+    if (read.kind === "ok" && missionInForce(read.record, Math.floor(nowMs / 1000))) {
+      missionTools = { state: "ok", id: read.record.id, mode: read.record.mode, tools: read.record.document.tools, expires: read.record.document.expires, ...only };
+    } else if (read.kind === "unavailable" || read.kind === "invalid") {
+      missionTools = { state: "unknown", ...only };
+    } else if (missionOnly) {
+      missionTools = { state: "none", only: true };
+    }
+  }
   const injection = await injectionView(policy.policy, agentId, nowMs);
+  // Idea 13: the memory hold rides the sidecar's own read (`include=tool_rules`), and only
+  // when the owner turned memory custody on: off adds nothing, as for the injection guard.
+  const memory = wantsToolRules ? await memoryHoldView(db, userId, agentId) : null;
 
   return new Response(
     JSON.stringify({
@@ -169,13 +193,15 @@ export async function GET(req: Request): Promise<Response> {
       pause,
       as_of: new Date(nowMs).toISOString(),
       ...(toolRules ? { tool_rules: toolRules } : {}),
+      ...(missionTools ? { mission: missionTools } : {}),
       ...(injection ? { injection } : {}),
+      ...(memory ? { memory } : {}),
     }),
     { status: 200, headers: { "content-type": "application/json", "cache-control": "no-store" } }
   );
 }
 
-/** The hold's state for the sidecar, or null outside hold mode (see the header). */
+/** The hold's state for the sidecar, including an independent live tripwire hold. */
 async function injectionView(
   policy: unknown,
   agentId: string,
@@ -190,11 +216,13 @@ async function injectionView(
     const taint = await readTaint(agentId, nowMs).catch(() => null);
     return taint ? { mode: "hold", readable: true, tainted_until: new Date(taint.until).toISOString() } : null;
   }
-  if (injectionGuardMode(policy) !== "hold") return null;
+  const injectionHold = injectionGuardMode(policy) === "hold";
   try {
     const taint = await readTaint(agentId, nowMs);
+    if (!injectionHold && !taint?.tripwire) return null;
     return { mode: "hold", readable: true, tainted_until: taint ? new Date(taint.until).toISOString() : null };
   } catch {
+    if (!injectionHold) return null;
     // The sidecar goes on with a warning (its declared posture); /self still answers.
     return { mode: "hold", readable: false, tainted_until: null };
   }
