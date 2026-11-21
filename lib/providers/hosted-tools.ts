@@ -163,6 +163,7 @@ export interface AdvisorIteration {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  longCacheWriteTokens?: number;
 }
 
 /** What a provider reported its hosted tools did. */
@@ -434,7 +435,8 @@ export function hostedToolUseCost(
   provider: string,
   use: HostedToolUse | undefined,
   plan: HostedToolPlan | null,
-  durationMs: number
+  durationMs: number,
+  longCacheWriteRequested = false
 ): number {
   if (!use) return 0;
   if (provider === "openai") {
@@ -470,7 +472,7 @@ export function hostedToolUseCost(
   // naming no model is priced at the tool's.
   const advisor = (use.advisor ?? []).reduce((sum, it) => {
     const model = it.model ?? plan?.advisor?.model;
-    return model ? sum + costMicrocentsForUsage(it, model, "anthropic") : sum;
+    return model ? sum + costMicrocentsForUsage(it, model, "anthropic", undefined, longCacheWriteRequested) : sum;
   }, 0);
   return searches + code + advisor;
 }
@@ -493,9 +495,10 @@ export function totalWithHostedTools(
   tokenMicrocents: number,
   use: HostedToolUse | undefined,
   plan: HostedToolPlan | null,
-  durationMs: number
+  durationMs: number,
+  longCacheWriteRequested = false
 ): number {
-  const computed = tokenMicrocents + hostedToolUseCost(provider, use, plan, durationMs);
+  const computed = tokenMicrocents + hostedToolUseCost(provider, use, plan, durationMs, longCacheWriteRequested);
   return Math.max(computed, use?.reportedMicrocents ?? 0);
 }
 

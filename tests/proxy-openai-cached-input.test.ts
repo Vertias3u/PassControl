@@ -323,25 +323,25 @@ describe("a call with no cache report", () => {
 // stays at the long-context rates.
 describe("a gpt-6-sol Responses call under 272K input, standard tier", () => {
   const SOL = { input: 16_235, cached: 15_872, output: 1_059 };
-  const solResponse = (service_tier: string | undefined) => ({
+  const solResponse = (service_tier: string | undefined, writes = 0, breakdown?: Record<string, number>) => ({
     id: "resp_2",
     status: "completed",
     ...(service_tier ? { service_tier } : {}),
     output: [],
     usage: {
       input_tokens: SOL.input,
-      input_tokens_details: { cache_write_tokens: 0, cached_tokens: SOL.cached },
+      input_tokens_details: { cache_write_tokens: writes, cached_tokens: SOL.cached, cache_write_tokens_details: breakdown },
       output_tokens: SOL.output,
       output_tokens_details: { reasoning_tokens: 0 },
       total_tokens: SOL.input + SOL.output,
     },
   });
-  const solCall = async () =>
+  const solCall = async (extraBody: Record<string, unknown> = {}) =>
     POST(
       new Request("https://gateway.test/api/v1/openai/v1/responses", {
         method: "POST",
         headers: { authorization: "Bearer visa", "content-type": "application/json" },
-        body: JSON.stringify({ model: "gpt-6-sol", max_output_tokens: 2048, stream: true, input: "hi" }),
+        body: JSON.stringify({ model: "gpt-6-sol", max_output_tokens: 2048, stream: true, input: "hi", ...extraBody }),
       }),
       { params: Promise.resolve({ provider: "openai", path: ["v1", "responses"] }) }
     );
@@ -364,6 +364,19 @@ describe("a gpt-6-sol Responses call under 272K input, standard tier", () => {
     await drain(await solCall());
     await flushDeferred();
     expect(writeLogMock.mock.calls[0]?.[0]?.costMicrocents).toBe(363 * 500 + SOL.cached * 40 + SOL.output * 1_500);
+  });
+
+  it.each([
+    ["reported breakdown", { ttl_30m_tokens: 0, ttl_12h_tokens: 120 }, {}],
+    ["request TTL", undefined, { prompt_cache_options: { ttl: "12h" } }],
+    ["request breakpoint TTL", undefined, { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi", prompt_cache_breakpoint: { ttl: "12h" } }] }] }],
+  ] as const)("logs and settles OpenAI 12h writes from the %s", async (_source, breakdown, body) => {
+    fetchMock.mockResolvedValue(sse([{ type: "response.completed", response: solResponse("default", 120, breakdown) }], false));
+    await drain(await solCall(body));
+    await flushDeferred();
+    const expected = 243 * 200 + SOL.cached * 20 + SOL.output * 1_000 + 120 * 500;
+    expect(writeLogMock.mock.calls[0]?.[0]?.costMicrocents).toBe(expected);
+    expect(settleHoldMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "complete", microcents: expected }));
   });
 });
 

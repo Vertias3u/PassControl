@@ -89,6 +89,7 @@ function anthropicAdvisorIterations(iterations: unknown): AdvisorIteration[] | n
       outputTokens: output,
       cacheReadTokens: token(r.cache_read_input_tokens) ?? 0,
       cacheWriteTokens: token(r.cache_creation_input_tokens) ?? 0,
+      ...withLongCacheWrites(anthropicLongCacheWrites(r)),
     });
   }
   return out;
@@ -193,6 +194,8 @@ export interface Usage {
   cacheReadTokens: number;
   /** Prompt tokens written INTO the provider's cache. Billed at a premium. */
   cacheWriteTokens: number;
+  /** Validated long-lived portion of the reported write total. Zero is explicit. */
+  longCacheWriteTokens?: number;
   /**
    * Hosted tools the provider ran inside the call, as it reported them. Present
    * only when a response reported some, so every call without one is unchanged.
@@ -282,6 +285,25 @@ function cacheWriteSubset(details: unknown, input: number | null, cached: number
   return n !== null && n <= input - cached ? n : null;
 }
 
+function longCacheWriteSubset(details: unknown, total: number | null, shortKey: string, longKey: string): number | null {
+  if (total === null || typeof details !== "object" || details === null) return null;
+  const fields = details as Record<string, unknown>;
+  const short = token(fields[shortKey]);
+  const long = token(fields[longKey]);
+  return short !== null && long !== null && short <= total && long <= total - short ? long : null;
+}
+
+function openAILongCacheWrites(details: { cache_write_tokens_details?: unknown } | undefined, total: number | null): number | null {
+  return longCacheWriteSubset(details?.cache_write_tokens_details, total, "ttl_30m_tokens", "ttl_12h_tokens");
+}
+
+function anthropicLongCacheWrites(usage: { cache_creation?: unknown; cache_creation_input_tokens?: unknown } | undefined): number | null {
+  return longCacheWriteSubset(usage?.cache_creation, token(usage?.cache_creation_input_tokens), "ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens");
+}
+
+const withLongCacheWrites = (long: number | null): { longCacheWriteTokens?: number } =>
+  long === null ? {} : { longCacheWriteTokens: long };
+
 /** A reported service tier: a short string, or null. */
 function serviceTierOf(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 && value.length <= 32 ? value : null;
@@ -364,6 +386,7 @@ class Tally {
   cachedInput = 0;
   /** Cache writes and service tier, re-read from every usage report like cachedInput. */
   cacheWriteInput: number | null = null;
+  longCacheWrite: number | null = null;
   serviceTier: string | null = null;
   /**
    * Did a usage event actually ARRIVE — as opposed to the tally simply still
@@ -442,6 +465,7 @@ class Tally {
       if (u) {
         this.cachedInput = cachedSubset(u?.input_tokens_details, input);
         this.cacheWriteInput = cacheWriteSubset(u?.input_tokens_details, input, this.cachedInput);
+        if (provider === "openai") this.longCacheWrite = openAILongCacheWrites(u?.input_tokens_details, this.cacheWriteInput);
         this.serviceTier = serviceTierOf(obj?.response?.service_tier);
       }
       // Terminal events carry the whole response, tool-call items included.
@@ -527,6 +551,7 @@ class Tally {
         if (output !== null) this.output = output;
         if (cacheRead !== null) this.cacheRead = cacheRead;
         if (cacheWrite !== null) this.cacheWrite = cacheWrite;
+        this.longCacheWrite = anthropicLongCacheWrites(u);
         const tools = anthropicServerToolUse(u);
         if (tools) this.hostedTools = tools;
         // message_start only, NOT message_delta. message_start is where the
@@ -549,10 +574,13 @@ class Tally {
           const record = u as Record<string, unknown>;
           const input = token(u?.input_tokens);
           const cacheRead = optionalToken(record, "cache_read_input_tokens");
-          const cacheWrite = optionalToken(record, "cache_creation_input_tokens");
+          const cacheWrite = token(u.cache_creation_input_tokens);
           if (input !== null && input > this.input) this.input = input;
           if (cacheRead !== null && cacheRead > this.cacheRead) this.cacheRead = cacheRead;
-          if (cacheWrite !== null && cacheWrite > this.cacheWrite) this.cacheWrite = cacheWrite;
+          if (cacheWrite !== null && (cacheWrite > this.cacheWrite || (cacheWrite === this.cacheWrite && u.cache_creation != null))) {
+            this.cacheWrite = cacheWrite;
+            this.longCacheWrite = anthropicLongCacheWrites(u);
+          }
           const tools = anthropicServerToolUse(u);
           if (tools) this.hostedTools = tools;
         }
@@ -653,6 +681,7 @@ export function createUsageTransform(
           ...(tally.reportedMicrocents !== null ? { reportedMicrocents: tally.reportedMicrocents } : {}),
           ...withCachedInput(tally.cachedInput),
           ...withTierAndWrites(tally.cacheWriteInput, tally.serviceTier),
+          ...withLongCacheWrites(tally.longCacheWrite),
         },
         end,
         sawUsage: tally.sawUsage,
@@ -799,19 +828,18 @@ export function usageFromJson(
     const { input, output } = responsesTokens(provider, body?.usage);
     const sawUsage = body?.usage != null;
     const hostedTools = responsesHostedTools(provider, body);
+    const details = body?.usage?.input_tokens_details;
+    const cached = cachedSubset(details, input);
+    const written = cacheWriteSubset(details, input, cached);
     return {
       inputTokens: input ?? 0,
       outputTokens: output ?? token(body?.usage?.output_tokens) ?? 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       ...(hostedTools ? { hostedTools } : {}),
-      ...withCachedInput(cachedSubset(body?.usage?.input_tokens_details, input)),
-      ...(body?.usage != null
-        ? withTierAndWrites(
-            cacheWriteSubset(body.usage.input_tokens_details, input, cachedSubset(body.usage.input_tokens_details, input)),
-            serviceTierOf(body?.service_tier)
-          )
-        : {}),
+      ...withCachedInput(cached),
+      ...(sawUsage ? withTierAndWrites(written, serviceTierOf(body?.service_tier)) : {}),
+      ...(provider === "openai" ? withLongCacheWrites(openAILongCacheWrites(details, written)) : {}),
       sawUsage,
       complete: input !== null && output !== null && body?.status === "completed",
     };
@@ -891,6 +919,7 @@ export function usageFromJson(
     outputTokens: output ?? 0,
     cacheReadTokens: cacheRead ?? 0,
     cacheWriteTokens: cacheWrite ?? 0,
+    ...withLongCacheWrites(anthropicLongCacheWrites(body?.usage)),
     ...(hostedTools ? { hostedTools } : {}),
     sawUsage,
     complete: input !== null && output !== null && cacheRead !== null && cacheWrite !== null,

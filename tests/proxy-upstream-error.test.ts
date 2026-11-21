@@ -286,6 +286,59 @@ describe("proxy upstream-error reservation release", () => {
     expect(await res.json()).toEqual({ error: "upstream_unreachable" });
     expectChargedAsUnknown(502);
   });
+
+  // 1.9.1 item 2. On Vercel's edge a response that has not BEGUN 25 s after the
+  // request arrived is cut, and a cut function never settles: the hold stays open
+  // for a human, with no audit row and no receipt. So the gateway gives up first,
+  // counted from arrival, and settles the attempt like any dispatched call that got
+  // no answer: the estimate is charged, because the provider may still bill it.
+  it("gives up on a provider that has not answered by the deadline, and settles", async () => {
+    vi.stubEnv("UPSTREAM_FIRST_BYTE_DEADLINE_MS", "60");
+    let seen: AbortSignal | undefined;
+    fetchMock.mockImplementation((_url: string, init: RequestInit) => {
+      seen = init.signal ?? undefined;
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason ?? new Error("aborted")));
+      });
+    });
+    try {
+      const res = await callProxy();
+      expect(seen?.aborted).toBe(true);
+      expect(res.status).toBe(504);
+      expect((await res.json()).error).toBe("upstream_timeout");
+      expectChargedAsUnknown(504);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("never cuts a response that began before the deadline, however long it streams", async () => {
+    vi.stubEnv("UPSTREAM_FIRST_BYTE_DEADLINE_MS", "60");
+    let seen: AbortSignal | undefined;
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      seen = init.signal ?? undefined;
+      const body = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          await new Promise((r) => setTimeout(r, 150));
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({
+            id: "x", model: "gpt-4o-mini", choices: [{ message: { content: "late but fine" } }],
+            usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+          })));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+    });
+    try {
+      const res = await callProxy();
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("late but fine");
+      expect(seen?.aborted).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 // ── Provider credit exhaustion ───────────────────────────────────────────────

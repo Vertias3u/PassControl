@@ -82,6 +82,7 @@ import {
   holdMicrocents,
   isPricedEndpoint,
   MICROCENTS_PER_CENT,
+  requestsLongCacheWrite,
   unpricedRequestOption,
 } from "@/lib/pricing";
 import {
@@ -173,6 +174,7 @@ import { resolveCallMission, type CallMission } from "@/lib/mission/gate";
 import { MISSION_REQUIRED_MESSAGE } from "@/lib/mission/messages";
 import { missionOnlyOf } from "@/lib/mission/only";
 import { missionModelDecision } from "@/lib/mission/enforce";
+import { UPSTREAM_TIMEOUT_MESSAGE, upstreamFirstByteDeadlineMs } from "@/lib/providers/upstream-deadline";
 import { recordMissionDecision } from "@/lib/state/mission";
 import { approvalWaitMs, awaitApproval } from "@/lib/approvals/gate";
 import { approvalFingerprint } from "@/lib/approvals/fingerprint";
@@ -2581,9 +2583,10 @@ async function handle(req: Request, params: { provider: string; path: string[] }
       // total. Every one of those three used to receive a bare zero and present
       // it as "this call was free".
       const priced = isPricedEndpoint(custom);
+      const longCacheWriteRequested = priced && requestsLongCacheWrite(attemptProvider, cappedBody);
       // Hosted tools the provider reported, on top of their tokens (already in
       // `usage`). The call's wall time bounds any code execution inside it.
-      const tokenCost = costMicrocentsForUsage(usage, attemptModel, attemptProvider, custom);
+      const tokenCost = costMicrocentsForUsage(usage, attemptModel, attemptProvider, custom, longCacheWriteRequested);
       // OpenRouter's charge is the cost it reports (lib/providers/openrouter.ts):
       // only it knows which endpoint served the call. A call that reported none is
       // `usage_unknown`, which keeps whatever was held.
@@ -2591,7 +2594,7 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         ? tokenCost
         : attemptProvider === "openrouter"
           ? (usage.reportedMicrocents ?? 0)
-          : totalWithHostedTools(attemptProvider, tokenCost, usage.hostedTools, toolPlan, Date.now() - attemptNowMs);
+          : totalWithHostedTools(attemptProvider, tokenCost, usage.hostedTools, toolPlan, Date.now() - attemptNowMs, longCacheWriteRequested);
 
       // Every token the provider processed for this call, which is what a token
       // budget is a limit on. Anthropic reports a cached prompt across three
@@ -3399,13 +3402,35 @@ async function handle(req: Request, params: { provider: string; path: string[] }
     const beforeDispatch = await checkDispatchStops();
     if (beforeDispatch.refusal) return refuseDispatch(beforeDispatch.refusal);
 
+    // The first-byte deadline (lib/providers/upstream-deadline.ts), counted from the
+    // request's arrival. Past it before the send, nothing goes out: known zero. Else
+    // the provider gets what is left, and the timer is cleared the moment it begins
+    // answering, so a response that started in time is never cut here.
+    const deadlineMs = upstreamFirstByteDeadlineMs();
+    const leftMs = deadlineMs === null ? null : started + deadlineMs - Date.now();
+    if (leftMs !== null && leftMs <= 0) {
+      return terminal(
+        errR(504, "upstream_timeout", UPSTREAM_TIMEOUT_MESSAGE),
+        reconcile(NO_USAGE, "upstream_error", "complete", 504)
+      );
+    }
+    const upstreamAbort = new AbortController();
+    const forwardAbort = () => upstreamAbort.abort(req.signal.reason);
+    if (req.signal.aborted) forwardAbort();
+    else req.signal.addEventListener("abort", forwardAbort, { once: true });
+    let timedOut = false;
+    const deadlineTimer = leftMs === null ? undefined : setTimeout(() => {
+      timedOut = true;
+      upstreamAbort.abort(new DOMException("upstream first-byte deadline", "TimeoutError"));
+    }, leftMs);
+
     let upstream: Response;
     try {
       upstream = await fetch(targetUrl, {
         method: req.method,
         headers: fwdHeaders,
         body: req.method === "GET" ? undefined : forwardBody,
-        signal: req.signal,
+        signal: upstreamAbort.signal,
         // THE CREDENTIAL DOES NOT FOLLOW REDIRECTS. Left at the `follow`
         // default, the destination stops being ours: the Fetch algorithm
         // deletes only `Authorization`, `Cookie` and `Proxy-Authorization`
@@ -3427,6 +3452,16 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         redirect: "manual",
       });
     } catch (error) {
+      clearTimeout(deadlineTimer);
+      // Dispatched, no answer by the deadline: the provider may still bill it, so
+      // the estimate is charged like any unanswered call. Not retryable: the clock
+      // that ran out is this request's, and a fallback would start with none.
+      if (timedOut && !req.signal.aborted) {
+        return terminal(
+          errR(504, "upstream_timeout", UPSTREAM_TIMEOUT_MESSAGE),
+          reconcile(NO_USAGE, "usage_unknown", "usage_unknown", 504)
+        );
+      }
       waitUntil(
         captureError(error, {
           route: "api.proxy",
@@ -3456,6 +3491,8 @@ async function handle(req: Request, params: { provider: string; path: string[] }
         settle,
       };
     }
+
+    clearTimeout(deadlineTimer);
 
     // With `redirect: "manual"` a 3xx arrives here as an ordinary response
     // instead of being followed. It is refused, not passed through: a bare 3xx

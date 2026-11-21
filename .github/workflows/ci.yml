@@ -54,9 +54,9 @@ jobs:
           # to fix a non-problem. Leave it.
           - 8079:80
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -122,14 +122,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
 
-      - uses: supabase/setup-cli@v1
+      - uses: supabase/setup-cli@v3
         with:
           version: 2.107.0
 
@@ -159,9 +159,9 @@ jobs:
     env:
       DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: supabase/setup-cli@v1
+      - uses: supabase/setup-cli@v3
         with:
           # Pinned (not "latest") — resolving the latest release hits an external
           # API that has timed out transiently; a fixed version is reproducible.

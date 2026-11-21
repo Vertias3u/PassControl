@@ -463,7 +463,7 @@ const TABLE_SERVICE_TIERS: ReadonlySet<string> = new Set(["auto", "default", "st
 /**
  * A cache option the table does not price: anything that is not an object, or whose
  * `ttl` is present and is not the 30-minute default (a 12-hour write bills 2.5x input,
- * the rows hold and settle 1.25x).
+ * the rows hold at 1.25x).
  */
 function unpricedCacheTtl(options: unknown): boolean {
   if (typeof options !== "object" || options === null || Array.isArray(options)) return true;
@@ -605,6 +605,24 @@ export function cacheWriteHoldMultiplier(body: unknown): 1 | 1.25 | 2 {
   return found;
 }
 
+export function requestsLongCacheWrite(provider: ProviderId, body: unknown): boolean {
+  if (provider === "anthropic") return cacheWriteHoldMultiplier(body) === 2;
+  if (provider !== "openai" || !body || typeof body !== "object") return false;
+
+  const is12h = (option: unknown) => !!option && typeof option === "object" && (option as { ttl?: unknown }).ttl === "12h";
+  if (is12h((body as Record<string, unknown>).prompt_cache_options)) return true;
+  const pending: unknown[] = [body];
+  while (pending.length) {
+    const value = pending.pop();
+    if (!value || typeof value !== "object") continue;
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "prompt_cache_breakpoint" && is12h(child)) return true;
+      if (child && typeof child === "object") pending.push(child);
+    }
+  }
+  return false;
+}
+
 /**
  * The hold for a call (P5.1, owner 2026-10-08): `costMicrocents`, except that an
  * Anthropic request asking for caching holds its input at the cache-WRITE rate.
@@ -661,6 +679,14 @@ const LONG_CONTEXT_ABOVE = 272_000;
  */
 const STANDARD_RESPONSE_TIERS: ReadonlySet<string> = new Set(["default", "flex"]);
 
+function writeSubset(value: number | undefined, total: number): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= total ? value : null;
+}
+
+function longWrites(value: number | undefined, written: number, requested: boolean): number {
+  return writeSubset(value, written) ?? (requested ? written : 0);
+}
+
 /**
  * A tiered model's settlement (`tiered`), or null to settle at the row. The tier is
  * chosen by the reported input, cached tokens included. The cache-write count is
@@ -669,15 +695,17 @@ const STANDARD_RESPONSE_TIERS: ReadonlySet<string> = new Set(["default", "flex"]
  */
 function tieredCost(
   p: Price,
-  usage: { inputTokens: number; outputTokens: number; cacheWriteInputTokens?: number; serviceTier?: string },
-  cached: number
+  usage: { inputTokens: number; outputTokens: number; cacheWriteInputTokens?: number; longCacheWriteTokens?: number; serviceTier?: string },
+  cached: number,
+  longCacheWriteRequested: boolean
 ): number | null {
   if (!p.settle || typeof usage.serviceTier !== "string" || !STANDARD_RESPONSE_TIERS.has(usage.serviceTier)) return null;
   const r = usage.inputTokens > LONG_CONTEXT_ABOVE ? p.settle.long : p.settle.short;
   const uncached = usage.inputTokens - cached;
-  const w = usage.cacheWriteInputTokens;
-  const written = typeof w === "number" && Number.isSafeInteger(w) && w >= 0 && w <= uncached ? w : null;
-  const input = written === null ? uncached * r.cacheWrite : (uncached - written) * r.input + written * r.cacheWrite;
+  const reported = writeSubset(usage.cacheWriteInputTokens, uncached);
+  const written = reported ?? uncached;
+  const long = longWrites(reported === null ? undefined : usage.longCacheWriteTokens, written, longCacheWriteRequested);
+  const input = (uncached - written) * r.input + (written - long) * r.cacheWrite + long * Math.ceil(r.input * 2.5);
   return input + cached * r.cachedInput + usage.outputTokens * r.output;
 }
 
@@ -687,14 +715,16 @@ function tieredCost(
  */
 function claudePromptTierCost(
   t: NonNullable<Price["promptTiers"]>,
-  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; longCacheWriteTokens?: number },
+  longCacheWriteRequested: boolean
 ): number {
   const prompt = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
   const r = prompt > t.above ? t.long : t.short;
+  const long = longWrites(usage.longCacheWriteTokens, usage.cacheWriteTokens, longCacheWriteRequested);
   return (
     usage.inputTokens * r.input +
     usage.cacheReadTokens * r.cachedInput +
-    usage.cacheWriteTokens * r.cacheWrite +
+    (usage.cacheWriteTokens - long) * r.cacheWrite + long * (r.input * 2) +
     usage.outputTokens * r.output
   );
 }
@@ -714,14 +744,8 @@ function cachedInputRate(p: Price): number {
  * pre-flight estimate is derived from the request body and cannot know what the
  * provider will serve from cache.
  *
- * Known gap, deliberately not guessed at: a cache write made with the opt-in
- * 1-hour TTL costs 2x rather than 1.25x, and Anthropic reports only the combined
- * `cache_creation_input_tokens` unless the newer `usage.cache_creation` breakdown
- * is present. Charging every write at 1.25x is therefore exact for the default
- * TTL and under-charges a 1-hour writer by 0.75x on the write portion alone.
- * Pricing every write at 2x instead would overcharge the common case by 60%,
- * which is the larger error. Closing it properly means parsing
- * `usage.cache_creation` into two buckets.
+ * A reported split takes precedence over the request. Without one, a request
+ * that opts into the longer TTL is charged that rate for all writes.
  */
 export function costMicrocentsForUsage(
   usage: {
@@ -737,22 +761,24 @@ export function costMicrocentsForUsage(
     cachedInputTokens?: number;
     /** Of `inputTokens`, how many were written to OpenAI's cache, where reported (Responses). */
     cacheWriteInputTokens?: number;
+    longCacheWriteTokens?: number;
     /** The service tier the RESPONSE says the call ran on. */
     serviceTier?: string;
   },
   model: string,
   provider?: ProviderId,
-  endpointBaseUrl?: string | null
+  endpointBaseUrl?: string | null,
+  longCacheWriteRequested = false
 ): number {
   // Unpriced rather than mispriced — see isPricedEndpoint. The tokens are still
   // counted and logged; only the money is unknown.
   if (!isPricedEndpoint(endpointBaseUrl)) return 0;
   const p = priceFor(model, provider);
   if (!p) return 0;
-  if (p.promptTiers) return claudePromptTierCost(p.promptTiers, usage);
+  if (p.promptTiers) return claudePromptTierCost(p.promptTiers, usage, longCacheWriteRequested);
   const reported = usage.cachedInputTokens ?? 0;
   const cached = reported > 0 && reported <= usage.inputTokens ? reported : 0;
-  const tier = tieredCost(p, usage, cached);
+  const tier = tieredCost(p, usage, cached, longCacheWriteRequested);
   // The Anthropic cache fields are 0 for every tiered (OpenAI) row; kept in the sum
   // so the two paths cannot disagree if that ever changes.
   if (tier !== null) {
@@ -762,12 +788,29 @@ export function costMicrocentsForUsage(
       usage.cacheWriteTokens * CACHE_WRITE_RATE(p.inputMicrocentsPerToken)
     );
   }
+  const uncached = usage.inputTokens - cached;
+  const rate = p.inputMicrocentsPerToken;
+  let inputCost = uncached * rate;
+  if (p.provider === "openai") {
+    const reportedWrites = writeSubset(usage.cacheWriteInputTokens, uncached);
+    const split = reportedWrites === null ? null : writeSubset(usage.longCacheWriteTokens, reportedWrites);
+    if (split !== null || longCacheWriteRequested) {
+      const written = reportedWrites ?? uncached;
+      const long = split ?? written;
+      // Short-lived writes keep today's rate on this path (the brief: nothing else changes);
+      // only the long-lived ones move, and over rather than under: the long-context rate.
+      inputCost += long * (Math.ceil((p.settle?.long.input ?? rate) * 2.5) - rate);
+    }
+  }
+  const long = p.provider === "anthropic"
+    ? longWrites(usage.longCacheWriteTokens, usage.cacheWriteTokens, longCacheWriteRequested)
+    : 0;
   return (
-    (usage.inputTokens - cached) * p.inputMicrocentsPerToken +
+    inputCost +
     cached * cachedInputRate(p) +
     usage.outputTokens * p.outputMicrocentsPerToken +
     usage.cacheReadTokens * cacheReadRate(p) +
-    usage.cacheWriteTokens * CACHE_WRITE_RATE(p.inputMicrocentsPerToken)
+    (usage.cacheWriteTokens - long) * CACHE_WRITE_RATE(rate) + long * (rate * 2)
   );
 }
 

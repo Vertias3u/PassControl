@@ -212,22 +212,48 @@ describe("cost", () => {
   // stays in the conversation, so one hostile result slowed every later call.
   const BEGIN = ["-----BEGIN ", "PRIVATE KEY-----"].join("");
   const END = ["-----END ", "PRIVATE KEY-----"].join("");
+  //
+  // Both bugs were SUPER-LINEAR, and that is what these pin. A stopwatch limit could not
+  // tell them from a busy machine: under the pre-push suite the fixed redactor took
+  // 1,609 and 1,677 ms against a 1,500 ms limit (2026-11-21) and blocked a release push.
+  // A ratio can: load slows both sizes alike, so 8x the input costs about 8x the time
+  // when the scan is linear, and far more when it is not. Checked against the pre-fix
+  // code (8c91b99~1): the repeated-key test measured 47x there.
+  const median = (run: () => unknown) => {
+    const t: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const s = performance.now();
+      run();
+      t.push(performance.now() - s);
+    }
+    return t.sort((a, b) => a - b)[1] ?? Number.POSITIVE_INFINITY;
+  };
+  const growth = (build: (n: number) => () => unknown, small: number) => {
+    const a = build(small);
+    const b = build(small * 8);
+    a();
+    return median(b) / Math.max(median(a), 1);
+  };
+  const LINEAR_8X = 14;
+  // The header bug was NOT super-linear: each bare header read a fixed 16 KB ahead, a big
+  // constant per header, so a ratio cannot see it (it passed against 8c91b99~1). It keeps
+  // a time limit, set far from both ends: the fixed scan measured 81-99 ms here
+  // (2026-11-21), the old one 4,651-7,100 ms. 2 s is 20x the first and under half the second.
   it("scans 1.1 MB of private-key headers with no END quickly", () => {
     const text = `${BEGIN}\n`.repeat(39_286);
     const started = performance.now();
     const found = findSecrets(prompt(text));
-    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(performance.now() - started).toBeLessThan(2_000);
     expect(found).toHaveLength(39_286);
   });
-  it("scans 2.1 MB of one real-looking key repeated quickly, through the redactor too", () => {
+  it("scans one real-looking key repeated in time linear in its count, through the redactor too", () => {
     const key = KEYS.aws();
-    const text = `${key} `.repeat(100_000);
-    let started = performance.now();
-    expect(findSecrets(prompt(text))).toHaveLength(100_000);
-    expect(performance.now() - started).toBeLessThan(1_000);
-    started = performance.now();
-    expect(redactSecrets(prompt(text), "k").findings).toHaveLength(100_000);
-    expect(performance.now() - started).toBeLessThan(1_500);
+    expect(findSecrets(prompt(`${key} `.repeat(100_000)))).toHaveLength(100_000);
+    expect(redactSecrets(prompt(`${key} `.repeat(100_000)), "k").findings).toHaveLength(100_000);
+    const find = growth((n) => { const body = prompt(`${key} `.repeat(n)); return () => findSecrets(body); }, 6_250);
+    expect(find, `find: 8x the keys cost ${find.toFixed(1)}x the time`).toBeLessThan(LINEAR_8X);
+    const redact = growth((n) => { const body = prompt(`${key} `.repeat(n)); return () => redactSecrets(body, "k"); }, 6_250);
+    expect(redact, `redact: 8x the keys cost ${redact.toFixed(1)}x the time`).toBeLessThan(LINEAR_8X);
   });
   it("many keys of several kinds, interleaved, quickly", () => {
     const keys = [KEYS.aws(), KEYS.github(), KEYS.google(), KEYS.telegram(), KEYS.passcontrol_control()];
